@@ -1,8 +1,22 @@
+[package]
+name = "rsleigh"
+version = "0.1.0"
+edition = "2021"
+
 [workspace]
-members = [
-    "sleigh-rs",
-    "sleigh2rust",
-    "pcode-ir",
-    "test-harness",
-]
+members = ["pcode-ir", "test-harness"]
 resolver = "2"
+
+[dependencies]
+nom = "7"
+thiserror = "1"
+tracing = "0.1.40"
+quote = "1"
+bitvec = "1"
+proc-macro2 = "1"
+indexmap = "1.9"
+ethnum = "1"
+
+[features]
+thread = []
+no_overflow_inline = []

@@ -2,9 +2,9 @@ use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
 
 use super::{ConstructorStruct, Disassembler};
-use crate::builder::formater::*;
-use crate::builder::helper::PatternByte;
-use crate::builder::ToLiteral;
+use crate::codegen::builder::formater::*;
+use crate::codegen::builder::helper::PatternByte;
+use crate::codegen::builder::ToLiteral;
 
 pub struct TableEnum {
     //enum declaration ident
@@ -17,14 +17,14 @@ pub struct TableEnum {
     pub display_fun: Ident,
     //constructors are mapped from the sleigh_rs constructors by index
     pub constructors: Vec<ConstructorStruct>,
-    pub table_id: sleigh_rs::TableId,
+    pub table_id: crate::TableId,
 }
 
 impl TableEnum {
     pub fn new(
-        sleigh: &sleigh_rs::Sleigh,
-        table: &sleigh_rs::table::Table,
-        table_id: sleigh_rs::TableId,
+        sleigh: &crate::Sleigh,
+        table: &crate::table::Table,
+        table_id: crate::TableId,
     ) -> Self {
         let constructors = table
             .constructors()
@@ -35,7 +35,7 @@ impl TableEnum {
                     sleigh,
                     table_id,
                     constructor,
-                    sleigh_rs::table::ConstructorId(index),
+                    crate::table::ConstructorId(index),
                     &from_sleigh(table.name()),
                     index,
                 )

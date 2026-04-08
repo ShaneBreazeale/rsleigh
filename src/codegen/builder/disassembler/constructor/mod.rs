@@ -4,8 +4,8 @@ use std::cell::RefCell;
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote, ToTokens};
 
-use crate::builder::formater::from_sleigh;
-use crate::builder::{DisassemblyGenerator, DISPLAY_WORK_TYPE, ToLiteral};
+use crate::codegen::builder::formater::from_sleigh;
+use crate::codegen::builder::{DisassemblyGenerator, DISPLAY_WORK_TYPE, ToLiteral};
 
 use super::Disassembler;
 
@@ -19,8 +19,8 @@ mod pattern;
 pub use pattern::*;
 
 pub struct ConstructorStruct {
-    pub constructor_id: sleigh_rs::table::ConstructorId,
-    pub table_id: sleigh_rs::TableId,
+    pub constructor_id: crate::table::ConstructorId,
+    pub table_id: crate::TableId,
     //struct name
     pub struct_name: Ident,
     //variant name in the enum
@@ -29,8 +29,8 @@ pub struct ConstructorStruct {
     pub display_fun: Ident,
     pub disassembly_fun: Ident,
     pub parser_fun: Ident,
-    pub table_fields: IndexMap<sleigh_rs::TableId, Ident>,
-    pub ass_fields: IndexMap<sleigh_rs::TokenFieldId, Ident>,
+    pub table_fields: IndexMap<crate::TableId, Ident>,
+    pub ass_fields: IndexMap<crate::TokenFieldId, Ident>,
     //TODO instead of having calc fields, have a constructor phase 1/2, with
     //the display/execution values in phase2 and values required by the
     //disassembly in phase1
@@ -40,10 +40,10 @@ pub struct ConstructorStruct {
 }
 impl ConstructorStruct {
     pub fn new(
-        sleigh: &sleigh_rs::Sleigh,
-        table_id: sleigh_rs::TableId,
-        constructor: &sleigh_rs::table::Constructor,
-        constructor_id: sleigh_rs::table::ConstructorId,
+        sleigh: &crate::Sleigh,
+        table_id: crate::TableId,
+        constructor: &crate::table::Constructor,
+        constructor_id: crate::table::ConstructorId,
         table_name: &str,
         number: usize,
     ) -> Self {
@@ -64,7 +64,7 @@ impl ConstructorStruct {
 
         //include on the enum all the required fields from the display
         for display in constructor.display.elements() {
-            use sleigh_rs::display::DisplayElement::*;
+            use crate::display::DisplayElement::*;
             match display {
                 Context(_) | InstStart(_) | InstNext(_) | Varnode(_)
                 | Literal(_) | Space => (),
@@ -87,16 +87,16 @@ impl ConstructorStruct {
             .blocks()
             .iter()
             .flat_map(|block| match block {
-                sleigh_rs::pattern::Block::And { pre, pos, .. } => {
+                crate::pattern::Block::And { pre, pos, .. } => {
                     pre.iter().chain(pos.iter())
                 }
-                sleigh_rs::pattern::Block::Or { pos, .. } => {
+                crate::pattern::Block::Or { pos, .. } => {
                     pos.iter().chain([/*LOL*/].iter())
                 }
             })
             .chain(constructor.pattern.disassembly_pos_match())
         {
-            use sleigh_rs::disassembly;
+            use crate::disassembly;
             match field {
                 disassembly::Assertation::GlobalSet(
                     disassembly::GlobalSet { .. },
@@ -106,7 +106,7 @@ impl ConstructorStruct {
                 ) => {
                     fn collect_token_fields(
                         expr: &disassembly::Expr,
-                        out: &mut Vec<sleigh_rs::TokenFieldId>,
+                        out: &mut Vec<crate::TokenFieldId>,
                     ) {
                         match expr {
                             disassembly::Expr::Value(element) => match element {
@@ -182,7 +182,7 @@ impl ConstructorStruct {
         let display_struct = &disassembler.display.name;
         let register_enum = &disassembler.registers.name;
 
-        use sleigh_rs::display::DisplayElement as DisplayScope;
+        use crate::display::DisplayElement as DisplayScope;
         let mut disassembly = DisassemblyDisplay {
             constructor: self,
             display_param: &display_param,
@@ -204,7 +204,7 @@ impl ConstructorStruct {
             .enumerate()
             .map(|(i, var)| {
                 disassembly
-                    .new_variable(&sleigh_rs::disassembly::VariableId(i), var)
+                    .new_variable(&crate::disassembly::VariableId(i), var)
             })
             .collect();
         disassembly_body.extend(disassembly.to_token_stream());

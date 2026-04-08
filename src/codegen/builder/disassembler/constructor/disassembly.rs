@@ -3,10 +3,10 @@ use std::cell::RefCell;
 
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote, ToTokens};
-use sleigh_rs::disassembly::{Assertation, GlobalSet, Variable, VariableId};
+use crate::disassembly::{Assertation, GlobalSet, Variable, VariableId};
 
-use crate::builder::formater::from_sleigh;
-use crate::builder::{Disassembler, DisassemblyGenerator, ToLiteral, WorkType};
+use crate::codegen::builder::formater::from_sleigh;
+use crate::codegen::builder::{Disassembler, DisassemblyGenerator, ToLiteral, WorkType};
 
 use super::ConstructorStruct;
 
@@ -33,7 +33,7 @@ impl DisassemblyDisplay<'_> {
         quote! {#DISASSEMBLY_WORK_TYPE::try_from(#inst_next).unwrap()}
     }
     //get var name on that contains the this assembly field value
-    fn ass_field(&self, ass: sleigh_rs::TokenFieldId) -> TokenStream {
+    fn ass_field(&self, ass: crate::TokenFieldId) -> TokenStream {
         //can't create new ass fields during disassembly, all
         //fields used need to be declared on the pattern
         let field = self.constructor.ass_fields.get(&ass).unwrap();
@@ -46,7 +46,7 @@ impl DisassemblyDisplay<'_> {
         quote! {#DISASSEMBLY_WORK_TYPE::try_from(#field).unwrap()}
     }
 
-    fn context_field(&self, context: &sleigh_rs::ContextId) -> TokenStream {
+    fn context_field(&self, context: &crate::ContextId) -> TokenStream {
         let read_call = self
             .disassembler
             .context
@@ -54,9 +54,9 @@ impl DisassemblyDisplay<'_> {
         quote! { #DISASSEMBLY_WORK_TYPE::try_from(#read_call).unwrap()}
     }
     //get var name on that contains the this assembly field value
-    fn table_field(&self, table: &sleigh_rs::TableId) -> Option<TokenStream> {
+    fn table_field(&self, table: &crate::TableId) -> Option<TokenStream> {
         let field = self.constructor.table_fields.get(table).unwrap();
-        use sleigh_rs::execution::ExportLen;
+        use crate::execution::ExportLen;
         let table = self.disassembler.sleigh.table(*table);
         match table.export {
             Some(ExportLen::Const(_len)) => {
@@ -85,10 +85,10 @@ impl ToTokens for DisassemblyDisplay<'_> {
             .blocks()
             .iter()
             .flat_map(|block| match block {
-                sleigh_rs::pattern::Block::And { pre, pos, .. } => {
+                crate::pattern::Block::And { pre, pos, .. } => {
                     pre.iter().chain(pos.iter())
                 }
-                sleigh_rs::pattern::Block::Or { pos, .. } => {
+                crate::pattern::Block::Or { pos, .. } => {
                     pos.iter().chain([/*LOL*/].iter())
                 }
             })
@@ -100,7 +100,7 @@ impl ToTokens for DisassemblyDisplay<'_> {
 impl<'a> DisassemblyGenerator for DisassemblyDisplay<'a> {
     fn global_set(&self, global_set: &GlobalSet) -> TokenStream {
         let addr_type = &self.disassembler.addr_type;
-        use sleigh_rs::disassembly::AddrScope::*;
+        use crate::disassembly::AddrScope::*;
         let address = match &global_set.address {
             Integer(value) => {
                 let value = value.unsuffixed();
@@ -141,8 +141,8 @@ impl<'a> DisassemblyGenerator for DisassemblyDisplay<'a> {
         }
     }
 
-    fn value(&self, value: &sleigh_rs::disassembly::ReadScope) -> TokenStream {
-        use sleigh_rs::disassembly::ReadScope;
+    fn value(&self, value: &crate::disassembly::ReadScope) -> TokenStream {
+        use crate::disassembly::ReadScope;
         match value {
             ReadScope::Integer(value) => {
                 value.signed_super().suffixed().into_token_stream()
@@ -159,7 +159,7 @@ impl<'a> DisassemblyGenerator for DisassemblyDisplay<'a> {
 
     fn set_context(
         &self,
-        _context: &sleigh_rs::ContextId,
+        _context: &crate::ContextId,
         _value: TokenStream,
     ) -> TokenStream {
         //TODO what if we modify the context and the result is used in the
@@ -197,8 +197,8 @@ pub struct DisassemblyPattern<'a> {
     pub context_instance: &'a Ident,
     pub tokens: &'a Ident,
     pub inst_start: &'a Ident,
-    pub root_tables: &'a IndexMap<sleigh_rs::TableId, Ident>,
-    pub root_token_fields: &'a IndexMap<sleigh_rs::TokenFieldId, Ident>,
+    pub root_tables: &'a IndexMap<crate::TableId, Ident>,
+    pub root_token_fields: &'a IndexMap<crate::TokenFieldId, Ident>,
     pub vars: &'a mut IndexMap<VariableId, Ident>,
 }
 
@@ -208,25 +208,25 @@ impl DisassemblyPattern<'_> {
         quote! {#DISASSEMBLY_WORK_TYPE::try_from(#inst_start).unwrap()}
     }
     //get var name on that contains the this assembly field value
-    fn ass_field(&self, ass: &sleigh_rs::TokenFieldId) -> TokenStream {
+    fn ass_field(&self, ass: &crate::TokenFieldId) -> TokenStream {
         let tokens = self.tokens;
         let token_field_new =
             &self.disassembler.token_field_function(*ass).read;
         quote! { #DISASSEMBLY_WORK_TYPE::try_from(#token_field_new(#tokens)).unwrap() }
     }
     //get var name on that contains the this context value
-    fn context_field(&self, context: &sleigh_rs::ContextId) -> TokenStream {
+    fn context_field(&self, context: &crate::ContextId) -> TokenStream {
         let read_call = self
             .disassembler
             .context
             .read_call(*context, self.context_instance);
         quote! { #DISASSEMBLY_WORK_TYPE::try_from(#read_call).unwrap()}
     }
-    fn can_execute(&self, expr: &sleigh_rs::disassembly::Expr) -> bool {
-        use sleigh_rs::disassembly::ExprElement::*;
-        use sleigh_rs::disassembly::ReadScope::*;
+    fn can_execute(&self, expr: &crate::disassembly::Expr) -> bool {
+        use crate::disassembly::ExprElement::*;
+        use crate::disassembly::ReadScope::*;
         match expr {
-            sleigh_rs::disassembly::Expr::Value(element) => match element {
+            crate::disassembly::Expr::Value(element) => match element {
                 Value { value, location: _ } => match value {
                     Integer(_) | Context(_) | InstStart(_) | Local(_)
                     | TokenField(_) => true,
@@ -234,7 +234,7 @@ impl DisassemblyPattern<'_> {
                 },
                 Op(_, _, inner) => self.can_execute(inner),
             },
-            sleigh_rs::disassembly::Expr::Op(_, _, left, right) => {
+            crate::disassembly::Expr::Op(_, _, left, right) => {
                 self.can_execute(left) && self.can_execute(right)
             }
         }
@@ -249,7 +249,7 @@ impl DisassemblyGenerator for DisassemblyPattern<'_> {
     ) -> TokenStream {
         let mut tokens = TokenStream::new();
         for ass in assertations {
-            use sleigh_rs::disassembly::Assertation::*;
+            use crate::disassembly::Assertation::*;
             match ass {
                 GlobalSet(_) => (),
                 Assignment(ass) => {
@@ -267,8 +267,8 @@ impl DisassemblyGenerator for DisassemblyPattern<'_> {
         unreachable!()
     }
 
-    fn value(&self, value: &sleigh_rs::disassembly::ReadScope) -> TokenStream {
-        use sleigh_rs::disassembly::ReadScope;
+    fn value(&self, value: &crate::disassembly::ReadScope) -> TokenStream {
+        use crate::disassembly::ReadScope;
         match value {
             ReadScope::Integer(value) => {
                 value.signed_super().suffixed().into_token_stream()
@@ -285,7 +285,7 @@ impl DisassemblyGenerator for DisassemblyPattern<'_> {
 
     fn set_context(
         &self,
-        context: &sleigh_rs::ContextId,
+        context: &crate::ContextId,
         value: TokenStream,
     ) -> TokenStream {
         let write = self.disassembler.context.write_call(

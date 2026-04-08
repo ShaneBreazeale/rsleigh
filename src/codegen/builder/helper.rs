@@ -4,7 +4,7 @@ use proc_macro2::{Ident, TokenStream};
 
 use quote::{format_ident, quote, ToTokens};
 
-use sleigh_rs::{pattern::BitConstraint, Endian};
+use crate::{pattern::BitConstraint, Endian};
 
 use super::{ToLiteral, WorkType};
 

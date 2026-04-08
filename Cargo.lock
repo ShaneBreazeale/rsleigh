@@ -111,24 +111,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
-name = "sleigh-rs"
-version = "0.1.5"
-dependencies = [
- "nom",
- "thiserror",
- "tracing",
-]
-
-[[package]]
-name = "sleigh2rust"
-version = "0.1.6"
+name = "rsleigh"
+version = "0.1.0"
 dependencies = [
  "bitvec",
  "ethnum",
  "indexmap",
+ "nom",
  "proc-macro2",
  "quote",
- "sleigh-rs",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -153,7 +146,7 @@ name = "test-harness"
 version = "0.1.0"
 dependencies = [
  "pcode-ir",
- "sleigh2rust",
+ "rsleigh",
 ]
 
 [[package]]

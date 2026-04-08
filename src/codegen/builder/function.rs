@@ -7,12 +7,12 @@
 //use super::{from_sleigh, snake_case, SLEIGH_IDENT};
 //
 //pub struct Functions {
-//    macros: IndexMap<*const sleigh_rs::PcodeMacro, PcodeMacro>,
-//    functions: IndexMap<*const sleigh_rs::UserFunction, UserFunction>,
+//    macros: IndexMap<*const crate::PcodeMacro, PcodeMacro>,
+//    functions: IndexMap<*const crate::UserFunction, UserFunction>,
 //}
 //
 //impl Functions {
-//    pub fn new(sleigh: &sleigh_rs::Sleigh) -> Self {
+//    pub fn new(sleigh: &crate::Sleigh) -> Self {
 //        let macros = sleigh
 //            .pcode_macros()
 //            .map(PcodeMacro::new)
@@ -30,10 +30,10 @@
 //const MACRO_PREFIX: [&str; 2] = [SLEIGH_IDENT, "macro"];
 //struct PcodeMacro {
 //    ident: Ident,
-//    sleigh: Rc<sleigh_rs::PcodeMacro>,
+//    sleigh: Rc<crate::PcodeMacro>,
 //}
 //impl PcodeMacro {
-//    pub fn new(sleigh: Rc<sleigh_rs::PcodeMacro>) -> Self {
+//    pub fn new(sleigh: Rc<crate::PcodeMacro>) -> Self {
 //        let ident = MACRO_PREFIX.into_iter().chain(from_sleigh(&sleigh.name));
 //        let ident = format_ident!("{}", &snake_case(ident));
 //        Self { ident, sleigh }
@@ -43,10 +43,10 @@
 //const USER_FUNCTION_PREFIX: [&str; 3] = [SLEIGH_IDENT, "user", "function"];
 //struct UserFunction {
 //    ident: Ident,
-//    sleigh: Rc<sleigh_rs::UserFunction>,
+//    sleigh: Rc<crate::UserFunction>,
 //}
 //impl UserFunction {
-//    pub fn new(sleigh: Rc<sleigh_rs::UserFunction>) -> Self {
+//    pub fn new(sleigh: Rc<crate::UserFunction>) -> Self {
 //        let ident = USER_FUNCTION_PREFIX
 //            .into_iter()
 //            .chain(from_sleigh(&sleigh.name));
@@ -123,7 +123,7 @@
 //            .unwrap_or(quote! {todo!("Return");});
 //        let entry_statements = execution.entry_block.statements.borrow();
 //        let entry_statements = entry_statements.iter().map(|st| {
-//            use sleigh_rs::parser::semantic::execution::Statement::*;
+//            use crate::parser::semantic::execution::Statement::*;
 //            match st {
 //                Delayslot(x) => quote! {todo!("delayslot({})", #x);},
 //                Export(_) => quote! {todo!("export");},

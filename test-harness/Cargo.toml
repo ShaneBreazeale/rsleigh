@@ -7,4 +7,4 @@ edition = "2021"
 pcode-ir = { path = "../pcode-ir" }
 
 [build-dependencies]
-sleigh2rust = { path = "../sleigh2rust" }
+rsleigh = { path = ".." }

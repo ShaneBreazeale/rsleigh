@@ -29,11 +29,11 @@ pub struct Disassembler {
     pub inst_work_type: WorkType,
     pub context: ContextMemory,
     //make sure sleigh is not droped, so the inner references are not dropped
-    pub sleigh: sleigh_rs::Sleigh,
+    pub sleigh: crate::Sleigh,
 }
 
 impl Disassembler {
-    pub fn new(sleigh: sleigh_rs::Sleigh, debug: bool) -> Self {
+    pub fn new(sleigh: crate::Sleigh, debug: bool) -> Self {
         let registers =
             RegistersEnum::from_all(format_ident!("Register"), &sleigh);
         //TODO make sleigh to include all the meanings on the struct?
@@ -50,7 +50,7 @@ impl Disassembler {
             .iter()
             .enumerate()
             .map(|(i, table)| {
-                let table_id = sleigh_rs::TableId(i);
+                let table_id = crate::TableId(i);
                 TableEnum::new(&sleigh, table, table_id)
             })
             .collect();
@@ -71,19 +71,19 @@ impl Disassembler {
         }
     }
 
-    pub fn table_struct(&self, table: sleigh_rs::TableId) -> &TableEnum {
+    pub fn table_struct(&self, table: crate::TableId) -> &TableEnum {
         &self.tables[table.0]
     }
 
     pub fn token_field_function(
         &self,
-        id: sleigh_rs::TokenFieldId,
+        id: crate::TokenFieldId,
     ) -> &TokenFieldFunction {
         self.token_field_functions.read_function(&self.sleigh, id)
     }
 }
 
-use crate::GeneratedModule;
+use crate::codegen::GeneratedModule;
 
 impl Disassembler {
     /// Split the generated code into multiple files for faster compilation.

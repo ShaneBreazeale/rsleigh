@@ -1,7 +1,7 @@
 use proc_macro2::{Ident, TokenStream};
 
 use quote::{format_ident, quote, ToTokens};
-use sleigh_rs::NumberUnsigned;
+use crate::NumberUnsigned;
 
 use super::formater::from_sleigh;
 use super::helper::{bitrange_from_value, rotation_and_mask_from_range};
@@ -20,7 +20,7 @@ pub struct ContextMemory {
 pub struct ContextFunctions {
     pub read: Ident,
     pub write: Ident,
-    pub context: sleigh_rs::ContextId,
+    pub context: crate::ContextId,
 }
 
 #[derive(Debug, Clone)]
@@ -32,18 +32,18 @@ pub struct GlobalSet {
 
 //TODO for now only allow the context to be a single varnode
 impl ContextMemory {
-    fn contexts(sleigh: &sleigh_rs::Sleigh) -> Vec<ContextFunctions> {
+    fn contexts(sleigh: &crate::Sleigh) -> Vec<ContextFunctions> {
         sleigh
             .contexts()
             .iter()
             .enumerate()
             .map(|(i, context)| {
-                ContextFunctions::new(sleigh_rs::ContextId(i), context)
+                ContextFunctions::new(crate::ContextId(i), context)
             })
             .collect()
     }
 
-    pub fn new(sleigh: &sleigh_rs::Sleigh, name: Ident) -> Self {
+    pub fn new(sleigh: &crate::Sleigh, name: Ident) -> Self {
         let context_bytes = (sleigh.context_memory().memory_bits + 7) / 8;
         let contexts = Self::contexts(sleigh);
         let globalset = GlobalSet {
@@ -61,14 +61,14 @@ impl ContextMemory {
 
     pub fn context_functions(
         &self,
-        context: sleigh_rs::ContextId,
+        context: crate::ContextId,
     ) -> &ContextFunctions {
         &self.contexts[context.0]
     }
 
     pub fn read_call(
         &self,
-        context: sleigh_rs::ContextId,
+        context: crate::ContextId,
         instance: &Ident,
     ) -> TokenStream {
         let read_fun = &self.context_functions(context).read;
@@ -79,7 +79,7 @@ impl ContextMemory {
         &self,
         disassembler: &Disassembler,
         instance: &Ident,
-        context_id: sleigh_rs::ContextId,
+        context_id: crate::ContextId,
         value: impl ToTokens,
     ) -> TokenStream {
         let context = disassembler.sleigh.context(context_id);
@@ -103,7 +103,7 @@ impl ContextMemory {
         &self,
         disassembler: &Disassembler,
         instance: &Ident,
-        id: sleigh_rs::ContextId,
+        id: crate::ContextId,
     ) -> TokenStream {
         let read = &self.context_functions(id).read;
         let context = disassembler.sleigh.context(id);
@@ -154,8 +154,8 @@ impl ContextMemory {
 
 impl ContextFunctions {
     fn new(
-        id: sleigh_rs::ContextId,
-        context: &sleigh_rs::varnode::Context,
+        id: crate::ContextId,
+        context: &crate::varnode::Context,
     ) -> Self {
         Self {
             read: format_ident!("read_{}", from_sleigh(context.name())),

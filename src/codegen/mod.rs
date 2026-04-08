@@ -4,12 +4,12 @@ use quote::ToTokens;
 
 use proc_macro2::TokenStream;
 
-use sleigh_rs::{file_to_sleigh, SleighError};
+use crate::{file_to_sleigh, SleighError};
 
 mod builder;
 use builder::Disassembler;
 
-pub(crate) use sleigh_rs::{DisassemblyType, NonZeroTypeU, NumberSuperSigned};
+pub(crate) use crate::{DisassemblyType, NonZeroTypeU, NumberSuperSigned};
 pub(crate) const DISASSEMBLY_ALLOW_OVERFLOW: bool = true;
 
 fn disassembler(

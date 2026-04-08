@@ -4,7 +4,7 @@ use quote::{format_ident, quote};
 use super::{Disassembler, WorkType};
 
 pub const DISPLAY_WORK_TYPE: WorkType =
-    WorkType::new_int_bits(sleigh_rs::NumberSigned::BITS, false);
+    WorkType::new_int_bits(crate::NumberSigned::BITS, false);
 #[derive(Debug, Clone)]
 pub struct DisplayElement {
     pub name: Ident,

@@ -6,7 +6,7 @@ use crate::{NonZeroTypeU, NumberSuperSigned};
 
 #[derive(Debug, Clone)]
 pub struct VarMeaning {
-    id: sleigh_rs::AttachVarnodeId,
+    id: crate::AttachVarnodeId,
     pub display_func: Ident,
     pub value_func: Ident,
     pub index_type: WorkType,
@@ -14,9 +14,9 @@ pub struct VarMeaning {
 }
 impl VarMeaning {
     pub fn new(
-        sleigh: &sleigh_rs::Sleigh,
-        id: sleigh_rs::AttachVarnodeId,
-        attach: &sleigh_rs::meaning::AttachVarnode,
+        sleigh: &crate::Sleigh,
+        id: crate::AttachVarnodeId,
+        attach: &crate::meaning::AttachVarnode,
         fun_count: usize,
     ) -> Self {
         let index_max = attach
@@ -87,14 +87,14 @@ impl VarMeaning {
 
 #[derive(Debug, Clone)]
 pub struct NameMeaning {
-    id: sleigh_rs::AttachLiteralId,
+    id: crate::AttachLiteralId,
     pub display_func: Ident,
     pub index_type: WorkType,
 }
 impl NameMeaning {
     pub fn new(
-        id: sleigh_rs::AttachLiteralId,
-        attach: &sleigh_rs::meaning::AttachLiteral,
+        id: crate::AttachLiteralId,
+        attach: &crate::meaning::AttachLiteral,
         fun_count: usize,
     ) -> Self {
         let index_max = attach
@@ -139,7 +139,7 @@ impl NameMeaning {
 }
 #[derive(Debug, Clone)]
 pub struct ValueMeaning {
-    id: sleigh_rs::AttachNumberId,
+    id: crate::AttachNumberId,
     pub display_func: Ident,
     pub value_func: Ident,
     pub index_type: WorkType,
@@ -147,8 +147,8 @@ pub struct ValueMeaning {
 }
 impl ValueMeaning {
     pub fn new(
-        id: sleigh_rs::AttachNumberId,
-        attach: &sleigh_rs::meaning::AttachNumber,
+        id: crate::AttachNumberId,
+        attach: &crate::meaning::AttachNumber,
         fun_count: usize,
     ) -> Self {
         let index_max = attach
@@ -241,7 +241,7 @@ pub struct Meanings {
 }
 
 impl Meanings {
-    pub fn new(sleigh: &sleigh_rs::Sleigh) -> Self {
+    pub fn new(sleigh: &crate::Sleigh) -> Self {
         let mut counter = 0usize;
         let mut counter_value = || {
             let value = counter;
@@ -255,7 +255,7 @@ impl Meanings {
             .map(|(i, var)| {
                 VarMeaning::new(
                     sleigh,
-                    sleigh_rs::AttachVarnodeId(i),
+                    crate::AttachVarnodeId(i),
                     var,
                     counter_value(),
                 )
@@ -267,7 +267,7 @@ impl Meanings {
             .enumerate()
             .map(|(i, var)| {
                 NameMeaning::new(
-                    sleigh_rs::AttachLiteralId(i),
+                    crate::AttachLiteralId(i),
                     var,
                     counter_value(),
                 )
@@ -279,7 +279,7 @@ impl Meanings {
             .enumerate()
             .map(|(i, var)| {
                 ValueMeaning::new(
-                    sleigh_rs::AttachNumberId(i),
+                    crate::AttachNumberId(i),
                     var,
                     counter_value(),
                 )
@@ -295,9 +295,9 @@ impl Meanings {
         &self,
         len_bits: u32,
         value: impl ToTokens,
-        meaning: sleigh_rs::meaning::Meaning,
+        meaning: crate::meaning::Meaning,
     ) -> TokenStream {
-        use sleigh_rs::meaning::Meaning;
+        use crate::meaning::Meaning;
         match meaning {
             Meaning::NoAttach(print_fmt) => {
                 let hex = print_fmt.base.is_hex();
@@ -305,7 +305,7 @@ impl Meanings {
                     quote! { DisplayElement::Number(#hex, false, #value as #DISPLAY_WORK_TYPE) }
                 } else {
                     let final_type = WorkType::new_int_bits(len_bits, true);
-                    let value = crate::builder::helper::sign_from_value(
+                    let value = crate::codegen::builder::helper::sign_from_value(
                         len_bits, final_type, value,
                     );
                     quote! { DisplayElement::Number(#hex, #value.is_negative(), #value.abs() as #DISPLAY_WORK_TYPE) }
@@ -333,13 +333,13 @@ impl Meanings {
         &self,
         len_bits: u32,
         value: impl ToTokens,
-        meaning: sleigh_rs::meaning::Meaning,
+        meaning: crate::meaning::Meaning,
     ) -> TokenStream {
-        use sleigh_rs::meaning::Meaning;
+        use crate::meaning::Meaning;
         match meaning {
             Meaning::NoAttach(print_fmt) if print_fmt.signed => {
                 let final_type = WorkType::new_int_bits(len_bits, true);
-                crate::builder::helper::sign_from_value(
+                crate::codegen::builder::helper::sign_from_value(
                     len_bits, final_type, value,
                 )
             }

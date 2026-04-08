@@ -6,16 +6,16 @@ use std::cell::RefCell;
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
 
-use sleigh_rs::execution::{
+use crate::execution::{
     Assignment, AssignmentOp, AssignmentWrite, AssignmentWriteVariable, Binary,
     Block, BlockId, Build, BranchCall, CpuBranch, Execution, Export, Expr,
     ExprBinaryOp, ExprElement, ExprNumber, ExprUnaryOp, ExprValue, LocalGoto,
     Statement, Unary, UserCall, VariableId,
 };
-use sleigh_rs::space::SpaceType;
+use crate::space::SpaceType;
 
 use super::ConstructorStruct;
-use crate::builder::Disassembler;
+use crate::codegen::builder::Disassembler;
 
 pub struct ExecutionGenerator<'a> {
     pub disassembler: &'a Disassembler,
@@ -55,7 +55,7 @@ impl<'a> ExecutionGenerator<'a> {
     }
 
     /// Emit a varnode expression for a register-space varnode.
-    fn varnode_expr(&self, varnode_id: sleigh_rs::VarnodeId) -> TokenStream {
+    fn varnode_expr(&self, varnode_id: crate::VarnodeId) -> TokenStream {
         let v = self.disassembler.sleigh.varnode(varnode_id);
         let offset = v.address;
         let size = v.len_bytes.get() as u32;
@@ -65,7 +65,7 @@ impl<'a> ExecutionGenerator<'a> {
         }
     }
 
-    fn space_id_expr(&self, space_id: sleigh_rs::SpaceId) -> TokenStream {
+    fn space_id_expr(&self, space_id: crate::SpaceId) -> TokenStream {
         match self.disassembler.sleigh.space(space_id).space_type {
             SpaceType::Register => quote! { pcode_ir::AddressSpaceId::Register },
             _ => quote! { pcode_ir::AddressSpaceId::Ram },
@@ -107,7 +107,7 @@ impl<'a> ExecutionGenerator<'a> {
             let size_bytes = Self::bytes_from_bits(var.len_bits.get());
             let var_name = format_ident!(
                 "v_{}",
-                crate::builder::formater::from_sleigh(var.name())
+                crate::codegen::builder::formater::from_sleigh(var.name())
             );
             self.vars.borrow_mut().insert(var_id, var_name.clone());
             let offset = self.unique_counter.get();
@@ -355,7 +355,7 @@ impl<'a> ExecutionGenerator<'a> {
                 (out, code)
             }
             ExprElement::Reference(reference) => {
-                use sleigh_rs::execution::ReferencedValue;
+                use crate::execution::ReferencedValue;
                 let sz = Self::bytes_from_bits(reference.len_bits.get()) as u32;
                 match &reference.value {
                     ReferencedValue::InstStart(_) => {

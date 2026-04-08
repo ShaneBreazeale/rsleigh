@@ -12,16 +12,16 @@ pub struct RegistersEnum {
 }
 
 impl RegistersEnum {
-    pub fn from_all(name: Ident, sleigh: &sleigh_rs::Sleigh) -> Self {
+    pub fn from_all(name: Ident, sleigh: &crate::Sleigh) -> Self {
         Self::from_iterator(name, sleigh.varnodes().iter())
     }
 
     //enum from only the Registers that can be printed
     #[allow(dead_code)]
-    pub fn from_printable(name: Ident, sleigh: &sleigh_rs::Sleigh) -> Self {
-        use sleigh_rs::display::DisplayElement::*;
-        use sleigh_rs::token::TokenFieldAttach;
-        use sleigh_rs::varnode::ContextAttach;
+    pub fn from_printable(name: Ident, sleigh: &crate::Sleigh) -> Self {
+        use crate::display::DisplayElement::*;
+        use crate::token::TokenFieldAttach;
+        use crate::varnode::ContextAttach;
         let mut vars = HashSet::new();
         let add_varnodes = |vars: &mut HashSet<_>, id| {
             for (_i, var) in sleigh.attach_varnode(id).0.iter() {
@@ -66,7 +66,7 @@ impl RegistersEnum {
 
     pub fn from_iterator<'a>(
         name: Ident,
-        registers: impl Iterator<Item = &'a sleigh_rs::varnode::Varnode>,
+        registers: impl Iterator<Item = &'a crate::varnode::Varnode>,
     ) -> Self {
         let registers = registers
             .map(|varnode| format_ident!("{}", from_sleigh(varnode.name())))
@@ -78,13 +78,13 @@ impl RegistersEnum {
     }
     pub fn registers(
         &self,
-    ) -> impl Iterator<Item = (&Ident, sleigh_rs::VarnodeId)> {
+    ) -> impl Iterator<Item = (&Ident, crate::VarnodeId)> {
         self.registers
             .iter()
             .enumerate()
-            .map(|(i, name)| (name, unsafe { sleigh_rs::VarnodeId::from_raw(i) }))
+            .map(|(i, name)| (name, unsafe { crate::VarnodeId::from_raw(i) }))
     }
-    pub fn register(&self, id: sleigh_rs::VarnodeId) -> &Ident {
+    pub fn register(&self, id: crate::VarnodeId) -> &Ident {
         &self.registers[id.to_raw()]
     }
     pub fn to_tokens(

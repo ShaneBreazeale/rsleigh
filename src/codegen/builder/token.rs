@@ -2,10 +2,10 @@ use std::collections::HashMap;
 
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
-use sleigh_rs::{Endian, FieldBits, NumberNonZeroUnsigned};
+use crate::{Endian, FieldBits, NumberNonZeroUnsigned};
 
-use crate::builder::helper::bytes_from_value;
-use crate::builder::WorkType;
+use crate::codegen::builder::helper::bytes_from_value;
+use crate::codegen::builder::WorkType;
 
 use super::helper::{bitrange_from_value, from_endian_bytes};
 use super::{Disassembler, ToLiteral};
@@ -20,7 +20,7 @@ struct TokenFieldKey {
 pub struct TokenFieldFunction {
     pub read: Ident,
     pub read_type: WorkType,
-    pub ids: Vec<sleigh_rs::TokenFieldId>,
+    pub ids: Vec<crate::TokenFieldId>,
 }
 
 pub struct TokenFieldFunctions {
@@ -30,12 +30,12 @@ pub struct TokenFieldFunctions {
 }
 
 impl TokenFieldFunctions {
-    pub fn new<'a>(sleigh: &sleigh_rs::Sleigh) -> Self {
+    pub fn new<'a>(sleigh: &crate::Sleigh) -> Self {
         let token_fields = sleigh
             .token_fields()
             .iter()
             .enumerate()
-            .map(|(i, field)| (sleigh_rs::TokenFieldId(i), field));
+            .map(|(i, field)| (crate::TokenFieldId(i), field));
         let mut count = 0usize;
         let mut functions = HashMap::new();
         for (id, token_field) in token_fields {
@@ -64,8 +64,8 @@ impl TokenFieldFunctions {
 
     pub fn read_function(
         &self,
-        sleigh: &sleigh_rs::Sleigh,
-        id: sleigh_rs::TokenFieldId,
+        sleigh: &crate::Sleigh,
+        id: crate::TokenFieldId,
     ) -> &TokenFieldFunction {
         let token_field = sleigh.token_field(id);
         let token = sleigh.token(token_field.token);

@@ -6,7 +6,7 @@ fn main() {
     println!("cargo::rerun-if-changed={}", slaspec.display());
 
     eprintln!("Generating x86-64 disassembler...");
-    let tokens = sleigh2rust::generate_disassembler(slaspec)
+    let tokens = rsleigh::codegen::generate_disassembler(slaspec)
         .expect("failed to generate disassembler");
 
     let out_dir = std::env::var("OUT_DIR").unwrap();

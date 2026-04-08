@@ -1,13 +1,13 @@
 use indexmap::IndexMap;
 
-use crate::builder::formater::from_sleigh;
-use crate::builder::{
+use crate::codegen::builder::formater::from_sleigh;
+use crate::codegen::builder::{
     Disassembler, DisassemblyGenerator, ToLiteral, DISASSEMBLY_WORK_TYPE,
 };
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote, ToTokens};
-use sleigh_rs::disassembly::{self, Assertation, GlobalSet};
-use sleigh_rs::pattern::{
+use crate::disassembly::{self, Assertation, GlobalSet};
+use crate::pattern::{
     ConstraintValue, ProducedTable, ProducedTokenField, Verification,
 };
 
@@ -49,7 +49,7 @@ pub fn root_pattern_function(
         .enumerate()
         .map(|(i, var)| {
             disassembly
-                .new_variable(&sleigh_rs::disassembly::VariableId(i), var)
+                .new_variable(&crate::disassembly::VariableId(i), var)
         })
         .collect();
 
@@ -119,11 +119,11 @@ pub fn root_pattern_function(
 
 fn sub_pattern_closure(
     constructor: &ConstructorStruct,
-    pattern: &sleigh_rs::pattern::Pattern,
+    pattern: &crate::pattern::Pattern,
     inst_start: &Ident,
     disassembly_vars: &mut IndexMap<disassembly::VariableId, Ident>,
-    root_tables: &IndexMap<sleigh_rs::TableId, Ident>,
-    root_token_fields: &IndexMap<sleigh_rs::TokenFieldId, Ident>,
+    root_tables: &IndexMap<crate::TableId, Ident>,
+    root_token_fields: &IndexMap<crate::TokenFieldId, Ident>,
     disassembler: &Disassembler,
 ) -> TokenStream {
     let tokens_current = format_ident!("tokens");
@@ -189,20 +189,20 @@ fn body_block(
     constructor: &ConstructorStruct,
     block_index: usize,
     part_of_flat: bool,
-    block: &sleigh_rs::pattern::Block,
+    block: &crate::pattern::Block,
     pattern_len: &Ident,
     inst_start: &Ident,
     context_param: &Ident,
     tokens: &Ident,
-    root_tables: &IndexMap<sleigh_rs::TableId, Ident>,
-    root_token_fields: &IndexMap<sleigh_rs::TokenFieldId, Ident>,
+    root_tables: &IndexMap<crate::TableId, Ident>,
+    root_token_fields: &IndexMap<crate::TokenFieldId, Ident>,
     disassembly_vars: &mut IndexMap<disassembly::VariableId, Ident>,
-    produced_tables: &mut IndexMap<sleigh_rs::TableId, Ident>,
-    produced_fields: &mut IndexMap<sleigh_rs::TokenFieldId, Ident>,
+    produced_tables: &mut IndexMap<crate::TableId, Ident>,
+    produced_fields: &mut IndexMap<crate::TokenFieldId, Ident>,
     disassembler: &Disassembler,
 ) -> TokenStream {
     match block {
-        sleigh_rs::pattern::Block::And {
+        crate::pattern::Block::And {
             len,
             token_fields,
             tables,
@@ -232,7 +232,7 @@ fn body_block(
             produced_fields,
             disassembler,
         ),
-        sleigh_rs::pattern::Block::Or {
+        crate::pattern::Block::Or {
             len,
             token_fields,
             tables,
@@ -304,7 +304,7 @@ fn body_block_and(
     constructor: &ConstructorStruct,
     block_index: usize,
     part_of_flat: bool,
-    len: &sleigh_rs::pattern::PatternLen,
+    len: &crate::pattern::PatternLen,
     sleigh_token_fields: &[ProducedTokenField],
     sleigh_tables: &[ProducedTable],
     verifications: &[Verification],
@@ -314,11 +314,11 @@ fn body_block_and(
     inst_start: &Ident,
     context: &Ident,
     tokens: &Ident,
-    root_tables: &IndexMap<sleigh_rs::TableId, Ident>,
-    root_token_fields: &IndexMap<sleigh_rs::TokenFieldId, Ident>,
+    root_tables: &IndexMap<crate::TableId, Ident>,
+    root_token_fields: &IndexMap<crate::TokenFieldId, Ident>,
     disassembly_vars: &mut IndexMap<disassembly::VariableId, Ident>,
-    produced_tables: &mut IndexMap<sleigh_rs::TableId, Ident>,
-    produced_token_fields: &mut IndexMap<sleigh_rs::TokenFieldId, Ident>,
+    produced_tables: &mut IndexMap<crate::TableId, Ident>,
+    produced_token_fields: &mut IndexMap<crate::TokenFieldId, Ident>,
     disassembler: &Disassembler,
 ) -> TokenStream {
     let block_len = format_ident!("block_{}_len", block_index);
@@ -370,7 +370,7 @@ fn body_block_and(
 
 fn body_block_and_pre(
     _constructor: &ConstructorStruct,
-    _len: &sleigh_rs::pattern::PatternLen,
+    _len: &crate::pattern::PatternLen,
     part_of_flat: bool,
     _sleigh_token_fields: &[ProducedTokenField],
     _sleigh_tables: &[ProducedTable],
@@ -378,8 +378,8 @@ fn body_block_and_pre(
     pre: &[Assertation],
     _block_len: &Ident,
     inst_start: &Ident,
-    root_tables: &IndexMap<sleigh_rs::TableId, Ident>,
-    root_token_fields: &IndexMap<sleigh_rs::TokenFieldId, Ident>,
+    root_tables: &IndexMap<crate::TableId, Ident>,
+    root_token_fields: &IndexMap<crate::TokenFieldId, Ident>,
     vars: &mut IndexMap<disassembly::VariableId, Ident>,
     tokens: &Ident,
     context_instance: &Ident,
@@ -390,19 +390,19 @@ fn body_block_and_pre(
         // simple eq verifications can be ignored if part of the flat pattern
         Verification::TokenFieldCheck {
             field: _,
-            op: sleigh_rs::pattern::CmpOp::Eq,
+            op: crate::pattern::CmpOp::Eq,
             value,
         }
         | Verification::ContextCheck {
             context: _,
-            op: sleigh_rs::pattern::CmpOp::Eq,
+            op: crate::pattern::CmpOp::Eq,
             value,
         } if part_of_flat
             && matches!(
                 value.expr(),
-                sleigh_rs::disassembly::Expr::Value(
-                    sleigh_rs::disassembly::ExprElement::Value {
-                        value: sleigh_rs::disassembly::ReadScope::Integer(_),
+                crate::disassembly::Expr::Value(
+                    crate::disassembly::ExprElement::Value {
+                        value: crate::disassembly::ReadScope::Integer(_),
                         location: _,
                     }
                 )
@@ -464,20 +464,20 @@ fn body_block_and_pre(
 
 fn body_block_and_pos(
     constructor: &ConstructorStruct,
-    _len: &sleigh_rs::pattern::PatternLen,
+    _len: &crate::pattern::PatternLen,
     sleigh_token_fields: &[ProducedTokenField],
     _sleigh_tables: &[ProducedTable],
     verifications: &[Verification],
     pos: &[Assertation],
     block_len: &Ident,
     inst_start: &Ident,
-    root_tables: &IndexMap<sleigh_rs::TableId, Ident>,
-    root_token_fields: &IndexMap<sleigh_rs::TokenFieldId, Ident>,
+    root_tables: &IndexMap<crate::TableId, Ident>,
+    root_token_fields: &IndexMap<crate::TokenFieldId, Ident>,
     vars: &mut IndexMap<disassembly::VariableId, Ident>,
     tokens: &Ident,
     context_instance: &Ident,
-    produced_tables: &mut IndexMap<sleigh_rs::TableId, Ident>,
-    produced_token_fields: &mut IndexMap<sleigh_rs::TokenFieldId, Ident>,
+    produced_tables: &mut IndexMap<crate::TableId, Ident>,
+    produced_token_fields: &mut IndexMap<crate::TokenFieldId, Ident>,
     disassembler: &Disassembler,
 ) -> TokenStream {
     //verify all the values and build all the tables
@@ -618,15 +618,15 @@ fn body_block_and_pos(
 
 fn block_or_closure(
     constructor: &ConstructorStruct,
-    _len: &sleigh_rs::pattern::PatternLen,
+    _len: &crate::pattern::PatternLen,
     sleigh_token_fields: &[ProducedTokenField],
     sleigh_tables: &[ProducedTable],
     branches: &[Verification],
     _block_len: &Ident,
     inst_start: &Ident,
     vars: &mut IndexMap<disassembly::VariableId, Ident>,
-    root_tables: &IndexMap<sleigh_rs::TableId, Ident>,
-    root_token_fields: &IndexMap<sleigh_rs::TokenFieldId, Ident>,
+    root_tables: &IndexMap<crate::TableId, Ident>,
+    root_token_fields: &IndexMap<crate::TokenFieldId, Ident>,
     disassembler: &Disassembler,
 ) -> TokenStream {
     let tokens_param = format_ident!("tokens_param");
@@ -831,24 +831,24 @@ fn produced_table(
     }
 }
 
-fn pattern_cmp_token(value: &sleigh_rs::pattern::CmpOp) -> TokenStream {
+fn pattern_cmp_token(value: &crate::pattern::CmpOp) -> TokenStream {
     match value {
-        sleigh_rs::pattern::CmpOp::Eq => quote!(==),
-        sleigh_rs::pattern::CmpOp::Ne => quote!(!=),
-        sleigh_rs::pattern::CmpOp::Lt => quote!(<),
-        sleigh_rs::pattern::CmpOp::Gt => quote!(>),
-        sleigh_rs::pattern::CmpOp::Le => quote!(<=),
-        sleigh_rs::pattern::CmpOp::Ge => quote!(>=),
+        crate::pattern::CmpOp::Eq => quote!(==),
+        crate::pattern::CmpOp::Ne => quote!(!=),
+        crate::pattern::CmpOp::Lt => quote!(<),
+        crate::pattern::CmpOp::Gt => quote!(>),
+        crate::pattern::CmpOp::Le => quote!(<=),
+        crate::pattern::CmpOp::Ge => quote!(>=),
     }
 }
-fn pattern_cmp_token_neg(value: &sleigh_rs::pattern::CmpOp) -> TokenStream {
+fn pattern_cmp_token_neg(value: &crate::pattern::CmpOp) -> TokenStream {
     match value {
-        sleigh_rs::pattern::CmpOp::Eq => quote!(!=),
-        sleigh_rs::pattern::CmpOp::Ne => quote!(==),
-        sleigh_rs::pattern::CmpOp::Lt => quote!(>=),
-        sleigh_rs::pattern::CmpOp::Gt => quote!(<=),
-        sleigh_rs::pattern::CmpOp::Le => quote!(>),
-        sleigh_rs::pattern::CmpOp::Ge => quote!(<),
+        crate::pattern::CmpOp::Eq => quote!(!=),
+        crate::pattern::CmpOp::Ne => quote!(==),
+        crate::pattern::CmpOp::Lt => quote!(>=),
+        crate::pattern::CmpOp::Gt => quote!(<=),
+        crate::pattern::CmpOp::Le => quote!(>),
+        crate::pattern::CmpOp::Ge => quote!(<),
     }
 }
 
@@ -857,7 +857,7 @@ fn call_parser(
     context_instance: &Ident,
     tokens: &Ident,
     inst_start: &Ident,
-    table: sleigh_rs::TableId,
+    table: crate::TableId,
 ) -> TokenStream {
     let table = disassembler.table_struct(table);
     let table_enum = &table.name;
@@ -876,15 +876,15 @@ struct BlockParserValuesDisassembly<'a> {
     tokens: &'a Ident,
     context_instance: &'a Ident,
     inst_start: &'a Ident,
-    produced_fields: &'a IndexMap<sleigh_rs::TokenFieldId, Ident>,
+    produced_fields: &'a IndexMap<crate::TokenFieldId, Ident>,
 }
 //Block parser only use Disassembly for the pattern value, so only value is used
 impl DisassemblyGenerator for BlockParserValuesDisassembly<'_> {
     fn global_set(&self, _global_set: &GlobalSet) -> TokenStream {
         unreachable!()
     }
-    fn value(&self, value: &sleigh_rs::disassembly::ReadScope) -> TokenStream {
-        use sleigh_rs::disassembly::*;
+    fn value(&self, value: &crate::disassembly::ReadScope) -> TokenStream {
+        use crate::disassembly::*;
         match value {
             ReadScope::Integer(value) => {
                 value.signed_super().suffixed().into_token_stream()
@@ -922,7 +922,7 @@ impl DisassemblyGenerator for BlockParserValuesDisassembly<'_> {
     }
     fn set_context(
         &self,
-        _context: &sleigh_rs::ContextId,
+        _context: &crate::ContextId,
         _value: TokenStream,
     ) -> TokenStream {
         unreachable!()
@@ -945,7 +945,7 @@ fn value_disassembly(
     tokens: &Ident,
     context_instance: &Ident,
     inst_start: &Ident,
-    produced_fields: &IndexMap<sleigh_rs::TokenFieldId, Ident>,
+    produced_fields: &IndexMap<crate::TokenFieldId, Ident>,
 ) -> TokenStream {
     BlockParserValuesDisassembly {
         disassembler,
@@ -960,13 +960,13 @@ fn value_disassembly(
 fn verification(
     inverted: bool,
     field: TokenStream,
-    op: &sleigh_rs::pattern::CmpOp,
+    op: &crate::pattern::CmpOp,
     value: &ConstraintValue,
     disassembler: &Disassembler,
     tokens: &Ident,
     context_instance: &Ident,
     inst_start: &Ident,
-    produced_fields: &IndexMap<sleigh_rs::TokenFieldId, Ident>,
+    produced_fields: &IndexMap<crate::TokenFieldId, Ident>,
 ) -> TokenStream {
     let cons_op = if inverted {
         pattern_cmp_token_neg(op)
@@ -999,14 +999,14 @@ fn verification(
 
 fn field_verification(
     inverted: bool,
-    field: sleigh_rs::TokenFieldId,
-    op: &sleigh_rs::pattern::CmpOp,
+    field: crate::TokenFieldId,
+    op: &crate::pattern::CmpOp,
     value: &ConstraintValue,
     disassembler: &Disassembler,
     tokens: &Ident,
     context_instance: &Ident,
     inst_start: &Ident,
-    produced_fields: &IndexMap<sleigh_rs::TokenFieldId, Ident>,
+    produced_fields: &IndexMap<crate::TokenFieldId, Ident>,
 ) -> TokenStream {
     let token_field_new = &disassembler.token_field_function(field).read;
     let field = quote! {#token_field_new(#tokens)};
@@ -1025,14 +1025,14 @@ fn field_verification(
 
 fn context_verification(
     inverted: bool,
-    context: sleigh_rs::ContextId,
-    op: &sleigh_rs::pattern::CmpOp,
+    context: crate::ContextId,
+    op: &crate::pattern::CmpOp,
     value: &ConstraintValue,
     disassembler: &Disassembler,
     tokens: &Ident,
     context_instance: &Ident,
     inst_start: &Ident,
-    produced_fields: &IndexMap<sleigh_rs::TokenFieldId, Ident>,
+    produced_fields: &IndexMap<crate::TokenFieldId, Ident>,
 ) -> TokenStream {
     let field = disassembler.context.read_call(context, context_instance);
     verification(

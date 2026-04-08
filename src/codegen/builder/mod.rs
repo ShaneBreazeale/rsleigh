@@ -1,4 +1,4 @@
-use sleigh_rs::Number;
+use crate::Number;
 
 use ethnum::u256;
 

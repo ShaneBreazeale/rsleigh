@@ -2,14 +2,14 @@ use proc_macro2::TokenStream;
 
 use quote::{quote, ToTokens};
 
-use sleigh_rs::disassembly::{
+use crate::disassembly::{
     Assertation, Assignment, Expr, ExprElement, GlobalSet, Op, OpUnary,
     ReadScope, Variable, VariableId,
 };
-use sleigh_rs::Span;
+use crate::Span;
 
 fn disassembly_op(x: impl ToTokens, op: &Op, y: impl ToTokens) -> TokenStream {
-    match (crate::DISASSEMBLY_ALLOW_OVERFLOW, op) {
+    match (crate::codegen::DISASSEMBLY_ALLOW_OVERFLOW, op) {
         (true, Op::Add) => quote! {#x.wrapping_add(#y)},
         (true, Op::Sub) => quote! {#x.wrapping_sub(#y)},
         (true, Op::Mul) => quote! {#x.wrapping_mul(#y)},
@@ -43,7 +43,7 @@ pub trait DisassemblyGenerator {
     fn value(&self, value: &ReadScope) -> TokenStream;
     fn set_context(
         &self,
-        id: &sleigh_rs::ContextId,
+        id: &crate::ContextId,
         value: TokenStream,
     ) -> TokenStream;
     fn new_variable(
@@ -80,7 +80,7 @@ pub trait DisassemblyGenerator {
         quote! { #var_name = #value; }
     }
     fn assignment(&self, ass: &Assignment) -> TokenStream {
-        use sleigh_rs::disassembly::WriteScope::*;
+        use crate::disassembly::WriteScope::*;
         let value = self.expr(&ass.right);
         match &ass.left {
             Context(context) => self.set_context(context, value),
@@ -93,7 +93,7 @@ pub trait DisassemblyGenerator {
     ) -> TokenStream {
         assertations
             .map(|ass| {
-                use sleigh_rs::disassembly::Assertation::*;
+                use crate::disassembly::Assertation::*;
                 match ass {
                     GlobalSet(global) => self.global_set(global),
                     Assignment(ass) => self.assignment(ass),
