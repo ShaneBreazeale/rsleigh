@@ -1,0 +1,7 @@
+# Optimize for the M4's multiple cores
+[profile.dev]
+# Use multiple codegen units for parallel LLVM compilation
+codegen-units = 16
+# Skip debug info for the generated decoder (saves compilation time)
+[profile.dev.package.test-harness]
+debug = 0

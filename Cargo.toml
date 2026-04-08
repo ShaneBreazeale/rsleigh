@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "sleigh-rs",
+    "sleigh2rust",
+    "pcode-ir",
+    "test-harness",
+]
+resolver = "2"

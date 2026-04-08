@@ -1,0 +1,10 @@
+[package]
+name = "pcode-ir"
+version = "0.1.0"
+edition = "2021"
+description = "P-code intermediate representation types for SLEIGH-generated decoders"
+license = "MIT"
+
+# Zero runtime dependencies by design.
+# The generated code should only depend on pcode-ir.
+[dependencies]
