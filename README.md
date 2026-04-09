@@ -44,6 +44,7 @@ rsleigh reads the same `.slaspec` files that ship with Ghidra (Apache 2.0) and g
 | `generated/mips-*` | Generated MIPS32 crates (shared, subtables, 2 instruction batches, root) |
 | `generated/arm32-*` | Generated ARM32 crates (shared, subtables, 2 instruction batches, root) |
 | `test-harness` | Golden P-code tests + at-scale corpus validation (301 instructions) |
+| `rsleigh-api` | Spectra integration API — unified `Decoder` across all architectures |
 
 ## Status
 
@@ -58,12 +59,16 @@ rsleigh reads the same `.slaspec` files that ship with Ghidra (Apache 2.0) and g
 - [x] Parallel crate compilation — instruction batches compile concurrently
 - [x] 301 validated instructions across 5 architectures (golden + capstone corpus)
 - [x] Ghidra comparison — matches or beats Ghidra 12.0.4 P-code op counts
+- [x] Spectra integration API — `Decoder::new(arch).decode(bytes, addr)` returns optimized P-code
+- [x] Panic-free generated code — all runtime decode paths use bounds-checked access, no `.unwrap()` on input
+- [x] CI — GitHub Actions runs `make test` on push/PR
 - [ ] Additional architectures (PowerPC, SPARC, etc.)
 
 ## Guarantees
 
 - Generated decoders are standalone Rust crates with no JVM or native C++ runtime dependency.
-- The generated lifting surface is `parse_instruction(bytes, addr) -> (length, display, Vec<PcodeOp>)`.
+- The generated lifting surface is `parse_instruction(bytes, addr) -> Option<(length, display, Vec<PcodeOp>)>`.
+- Generated runtime code contains zero `.unwrap()` calls — truncated or invalid input returns `None` instead of panicking.
 - Validation currently focuses on decode length, mnemonic agreement, and structural P-code sanity across curated golden cases plus corpus samples in `test-harness`.
 - `pcode-ir` stays zero-dependency and `no_std`.
 
@@ -111,7 +116,18 @@ cargo run -p rsleigh-generate -- aarch64
 cargo run -p rsleigh-generate -- riscv
 ```
 
-The generator parses x86-64, AARCH64, and RISC-V `.slaspec` files and writes ~72 MB of Rust source across 27 crates. Instruction batch crates compile in parallel, achieving ~500% CPU utilization on Apple Silicon.
+The generator parses `.slaspec` files for all 5 architectures and writes generated Rust source across parallel-compilable crates.
+
+### Using the API
+
+```rust
+use rsleigh_api::{Decoder, Architecture};
+
+let mut dec = Decoder::new(Architecture::X86_64);
+let inst = dec.decode(&[0x48, 0x89, 0xd8], 0x1000).unwrap();
+println!("{} ({} bytes, {} ops)", inst.disassembly, inst.len, inst.ops.len());
+// MOV RAX,RBX (3 bytes, 1 ops)
+```
 
 Requires Rust 1.70+.
 

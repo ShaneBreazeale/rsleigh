@@ -351,13 +351,13 @@ impl<'a> ExecutionGenerator<'a> {
                         quote! { #v }
                     }
                     ReadScope::InstStart(_) => {
-                        quote! { i128::try_from(#inst_start).unwrap() }
+                        quote! { i128::from(#inst_start) }
                     }
                     ReadScope::InstNext(_) => {
-                        quote! { i128::try_from(#inst_next).unwrap() }
+                        quote! { i128::from(#inst_next) }
                     }
                     ReadScope::TokenField(tf) => match self.constructor.ass_fields.get(tf) {
-                        Some(n) => quote! { i128::try_from(self.#n).unwrap() },
+                        Some(n) => quote! { i128::from(self.#n) },
                         None => quote! { 0i128 },
                     },
                     ReadScope::Context(_) => quote! { 0i128 },

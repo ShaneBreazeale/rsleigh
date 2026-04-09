@@ -26,11 +26,11 @@ pub struct DisassemblyDisplay<'a> {
 impl DisassemblyDisplay<'_> {
     fn inst_start(&self) -> TokenStream {
         let inst_start = &self.inst_start;
-        quote! {#DISASSEMBLY_WORK_TYPE::try_from(#inst_start).unwrap()}
+        quote! {#DISASSEMBLY_WORK_TYPE::from(#inst_start)}
     }
     fn inst_next(&self) -> TokenStream {
         let inst_next = &self.inst_next;
-        quote! {#DISASSEMBLY_WORK_TYPE::try_from(#inst_next).unwrap()}
+        quote! {#DISASSEMBLY_WORK_TYPE::from(#inst_next)}
     }
     //get var name on that contains the this assembly field value
     fn ass_field(&self, ass: crate::TokenFieldId) -> TokenStream {
@@ -43,7 +43,7 @@ impl DisassemblyDisplay<'_> {
             quote! {self.#field},
             token_field.meaning(),
         );
-        quote! {#DISASSEMBLY_WORK_TYPE::try_from(#field).unwrap()}
+        quote! {#DISASSEMBLY_WORK_TYPE::from(#field)}
     }
 
     fn context_field(&self, context: &crate::ContextId) -> TokenStream {
@@ -51,7 +51,7 @@ impl DisassemblyDisplay<'_> {
             .disassembler
             .context
             .read_call(*context, self.context_param);
-        quote! { #DISASSEMBLY_WORK_TYPE::try_from(#read_call).unwrap()}
+        quote! { #DISASSEMBLY_WORK_TYPE::from(#read_call)}
     }
     //get var name on that contains the this assembly field value
     fn table_field(&self, table: &crate::TableId) -> Option<TokenStream> {
@@ -106,7 +106,7 @@ impl<'a> DisassemblyGenerator for DisassemblyDisplay<'a> {
             }
             Local(var) => {
                 let name = self.var_name(var);
-                quote! { Some(#addr_type::try_from(#name).unwrap()) }
+                quote! { #addr_type::try_from(#name).ok() }
             }
             Table(table) => {
                 //TODO is None required?
@@ -191,13 +191,13 @@ pub struct DisassemblyPattern<'a> {
 impl DisassemblyPattern<'_> {
     fn inst_start(&self) -> TokenStream {
         let inst_start = &self.inst_start;
-        quote! {#DISASSEMBLY_WORK_TYPE::try_from(#inst_start).unwrap()}
+        quote! {#DISASSEMBLY_WORK_TYPE::from(#inst_start)}
     }
     //get var name on that contains the this assembly field value
     fn ass_field(&self, ass: &crate::TokenFieldId) -> TokenStream {
         let tokens = self.tokens;
         let token_field_new = &self.disassembler.token_field_function(*ass).read;
-        quote! { #DISASSEMBLY_WORK_TYPE::try_from(#token_field_new(#tokens)).unwrap() }
+        quote! { #DISASSEMBLY_WORK_TYPE::from(#token_field_new(#tokens)) }
     }
     //get var name on that contains the this context value
     fn context_field(&self, context: &crate::ContextId) -> TokenStream {
@@ -205,7 +205,7 @@ impl DisassemblyPattern<'_> {
             .disassembler
             .context
             .read_call(*context, self.context_instance);
-        quote! { #DISASSEMBLY_WORK_TYPE::try_from(#read_call).unwrap()}
+        quote! { #DISASSEMBLY_WORK_TYPE::from(#read_call)}
     }
     fn can_execute(&self, expr: &crate::disassembly::Expr) -> bool {
         use crate::disassembly::ExprElement::*;

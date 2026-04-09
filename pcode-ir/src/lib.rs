@@ -7,6 +7,7 @@
 
 extern crate alloc;
 use alloc::collections::BTreeMap;
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -77,6 +78,32 @@ impl Varnode {
             space: AddressSpaceId::Const,
             offset: value,
             size,
+        }
+    }
+}
+
+/// A decoded and lifted instruction.
+#[derive(Debug, Clone)]
+pub struct Instruction {
+    /// Number of bytes consumed by this instruction.
+    pub len: u64,
+    /// Human-readable disassembly (e.g. "MOV RAX,RBX").
+    pub disassembly: String,
+    /// P-code operations (peephole-optimized).
+    pub ops: Vec<PcodeOp>,
+}
+
+/// Decode error returned when an instruction cannot be parsed.
+#[derive(Debug, Clone)]
+pub enum DecodeError {
+    /// The byte sequence does not match any known instruction encoding.
+    UnknownInstruction,
+}
+
+impl core::fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            DecodeError::UnknownInstruction => write!(f, "unknown instruction encoding"),
         }
     }
 }

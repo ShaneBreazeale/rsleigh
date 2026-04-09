@@ -31,13 +31,20 @@ pub fn generate_debug_disassembler(
 pub enum GeneratedModuleKind {
     Shared,
     TableBatch,
+    /// A self-contained table (constructors + enum in one module).
     TableEnum,
+    /// The enum half of a split table — references types from TableBatch modules
+    /// and must be placed in a crate that depends on the batch crates.
+    SplitTableEnum,
     Root,
 }
 
 pub struct GeneratedModule {
     /// Semantic role of the generated module.
     pub kind: GeneratedModuleKind,
+    /// True if this module belongs to the instruction table (table 0).
+    /// Only meaningful for TableBatch and SplitTableEnum kinds.
+    pub is_instruction_table: bool,
     /// Filename (without path), e.g. "shared.rs", "table_0.rs", "root.rs"
     pub filename: String,
     /// The generated Rust source code as a TokenStream. For "root.rs" this

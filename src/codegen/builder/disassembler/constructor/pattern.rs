@@ -111,10 +111,10 @@ pub fn root_pattern_function(
                                         quote! { #v }
                                     }
                                     ReadScope::InstStart(_) => {
-                                        quote! { i128::try_from(#inst_start).unwrap() }
+                                        quote! { i128::from(#inst_start) }
                                     }
                                     ReadScope::InstNext(_) => {
-                                        quote! { i128::try_from(#inst_next).unwrap() }
+                                        quote! { i128::from(#inst_next) }
                                     }
                                     ReadScope::TokenField(tf) => {
                                         let tf_name =
@@ -122,7 +122,7 @@ pub fn root_pattern_function(
                                                 let ass = disassembler.sleigh.token_field(*tf);
                                                 format_ident!("{}", from_sleigh(ass.name()))
                                             });
-                                        quote! { i128::try_from(#tf_name).unwrap() }
+                                        quote! { i128::from(#tf_name) }
                                     }
                                     ReadScope::Context(_) => {
                                         quote! { 0i128 } // TODO
@@ -400,7 +400,7 @@ fn body_block(
                 ) = #block_name(#tokens, &mut #context_param)?;
                 #disassembly
                 #pattern_len += #block_len;
-                #tokens = &#tokens[usize::try_from(#block_len).unwrap()..];
+                #tokens = #tokens.get(usize::try_from(#block_len).ok()?..)?;
             }
         }
     }
@@ -470,7 +470,7 @@ fn body_block_and(
         #code_pre
         #code_pos
         #pattern_len += #block_len;
-        #tokens = &#tokens[usize::try_from(#block_len).unwrap()..];
+        #tokens = #tokens.get(usize::try_from(#block_len).ok()?..)?;
     }
 }
 
@@ -969,7 +969,7 @@ impl DisassemblyGenerator for BlockParserValuesDisassembly<'_> {
                     .disassembler
                     .context
                     .read_call(*context, self.context_instance);
-                quote! { #DISASSEMBLY_WORK_TYPE::try_from(#read_call).unwrap()}
+                quote! { #DISASSEMBLY_WORK_TYPE::from(#read_call)}
             }
             ReadScope::TokenField(ass) => {
                 let token_field_value =
@@ -986,7 +986,7 @@ impl DisassemblyGenerator for BlockParserValuesDisassembly<'_> {
                     token_field_value,
                     token_field.meaning(),
                 );
-                quote! {#DISASSEMBLY_WORK_TYPE::try_from(#token_field_value).unwrap()}
+                quote! {#DISASSEMBLY_WORK_TYPE::from(#token_field_value)}
             }
             ReadScope::InstStart(_) => self.inst_start.to_token_stream(),
             ReadScope::InstNext(_) | ReadScope::Local(_) => unreachable!(),
@@ -1060,7 +1060,7 @@ fn verification(
                 inst_start,
                 produced_fields,
             );
-            quote! { #DISASSEMBLY_WORK_TYPE::try_from(#field).unwrap() #cons_op #value }
+            quote! { #DISASSEMBLY_WORK_TYPE::from(#field) #cons_op #value }
         }
     }
 }

@@ -1,0 +1,13 @@
+[package]
+name = "rsleigh-api"
+version = "0.1.0"
+edition = "2021"
+description = "Spectra integration API for rsleigh — decode instructions and emit P-code"
+
+[dependencies]
+pcode-ir = { path = "../pcode-ir" }
+x86-root = { path = "../generated/x86-root" }
+aarch64-root = { path = "../generated/aarch64-root" }
+riscv-root = { path = "../generated/riscv-root" }
+mips-root = { path = "../generated/mips-root" }
+arm32-root = { path = "../generated/arm32-root" }

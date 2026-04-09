@@ -107,6 +107,7 @@ impl Disassembler {
         self.context.to_tokens(&mut shared, self);
         modules.push(GeneratedModule {
             kind: GeneratedModuleKind::Shared,
+            is_instruction_table: false,
             filename: "shared.rs".into(),
             code: shared,
             raw_code: None,
@@ -122,6 +123,7 @@ impl Disassembler {
         let mut table_enum_file = vec![0usize; self.tables.len()];
 
         for (i, table) in self.tables.iter().enumerate() {
+            let is_instruction_table = i == 0;
             if table.constructors.len() > max_constructors_per_file {
                 // Large table: split constructor structs across files, enum in its own file
                 let (constructor_batches, enum_tokens) =
@@ -133,6 +135,7 @@ impl Disassembler {
                     tokens.extend(batch);
                     modules.push(GeneratedModule {
                         kind: GeneratedModuleKind::TableBatch,
+                        is_instruction_table,
                         filename: format!("table_{}.rs", file_idx),
                         code: tokens,
                         raw_code: None,
@@ -146,7 +149,8 @@ impl Disassembler {
                 tokens.extend(enum_tokens);
                 table_enum_file[i] = file_idx;
                 modules.push(GeneratedModule {
-                    kind: GeneratedModuleKind::TableEnum,
+                    kind: GeneratedModuleKind::SplitTableEnum,
+                    is_instruction_table,
                     filename: format!("table_{}.rs", file_idx),
                     code: tokens,
                     raw_code: None,
@@ -160,6 +164,7 @@ impl Disassembler {
                 table_enum_file[i] = file_idx;
                 modules.push(GeneratedModule {
                     kind: GeneratedModuleKind::TableEnum,
+                    is_instruction_table: false,
                     filename: format!("table_{}.rs", file_idx),
                     code: tokens,
                     raw_code: None,
@@ -230,6 +235,7 @@ impl Disassembler {
 
         modules.push(GeneratedModule {
             kind: GeneratedModuleKind::Root,
+            is_instruction_table: false,
             filename: "root.rs".into(),
             code: TokenStream::new(),
             raw_code: Some(root),

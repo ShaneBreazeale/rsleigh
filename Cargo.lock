@@ -327,6 +327,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsleigh-api"
+version = "0.1.0"
+dependencies = [
+ "aarch64-root",
+ "arm32-root",
+ "mips-root",
+ "pcode-ir",
+ "riscv-root",
+ "x86-root",
+]
+
+[[package]]
 name = "rsleigh-generate"
 version = "0.1.0"
 dependencies = [

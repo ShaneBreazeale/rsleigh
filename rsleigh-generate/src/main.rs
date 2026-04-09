@@ -74,12 +74,30 @@ fn generate_arch(
 
     let mut instr_files = Vec::new();
     let mut subtable_files = Vec::new();
+    let mut split_enum_files = Vec::new();
 
     for m in &modules {
         match m.kind {
             GeneratedModuleKind::Shared | GeneratedModuleKind::Root => {}
-            GeneratedModuleKind::TableBatch => instr_files.push(m),
+            GeneratedModuleKind::TableBatch => {
+                if m.is_instruction_table {
+                    // Instruction constructors go to instr batch crates
+                    instr_files.push(m);
+                } else {
+                    // Non-instruction large table constructors stay in subtables
+                    subtable_files.push(m);
+                }
+            }
             GeneratedModuleKind::TableEnum => subtable_files.push(m),
+            GeneratedModuleKind::SplitTableEnum => {
+                if m.is_instruction_table {
+                    // Instruction table enum goes to root (depends on batch crates)
+                    split_enum_files.push(m);
+                } else {
+                    // Non-instruction split enums stay with their constructors in subtables
+                    subtable_files.push(m);
+                }
+            }
         }
     }
 
@@ -96,7 +114,7 @@ fn generate_arch(
     let shared = modules.iter().find(|m| m.filename == "shared.rs").unwrap();
     write_module(&shared_dir.join("shared.rs"), shared);
 
-    // Write subtables
+    // Write subtables (self-contained table modules only)
     let subtable_dir = out_dir.join(format!("{prefix}-subtables/out"));
     std::fs::create_dir_all(&subtable_dir).unwrap();
     {
@@ -179,6 +197,13 @@ fn generate_arch(
     };
 
     let mut root_code = String::new();
+    // Split table enums reference types from batch crates — place them in root
+    // which depends on all batch crates.
+    for m in &split_enum_files {
+        let code = strip_super_import(&get_code(m));
+        root_code.push_str(&code);
+        root_code.push('\n');
+    }
     root_code.push_str(&recursive_code);
     root_code.push('\n');
     root_code.push_str(&parse_fn);

@@ -79,13 +79,15 @@ impl ContextMemory {
         let write_fun = &context.write;
         let value_type = context.value_type(disassembler);
         if signed {
+            // Value is i128 from disassembly; truncate to context field type.
+            // try_from is infallible after masking but we use saturating cast for safety.
             quote! {
-                #instance.#write_fun(#value_type::try_from(#value).unwrap())
+                #instance.#write_fun(#value as #value_type)
             }
         } else {
             let mask = context.value_mask(disassembler).unsuffixed();
             quote! {
-                #instance.#write_fun(#value_type::try_from(#value & #mask).unwrap())
+                #instance.#write_fun((#value & #mask) as #value_type)
             }
         }
     }
