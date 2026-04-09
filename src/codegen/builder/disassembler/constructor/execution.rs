@@ -375,9 +375,10 @@ impl<'a> ExecutionGenerator<'a> {
             Export::Reference { addr, memory } => {
                 let (vn, code) = self.lower_expr(addr, execution);
                 let sp = self.space_id_expr(memory.space);
-                let size = memory.len_bytes.get() as u32;
+                // len_bytes is actually in bits despite the name
+                let size = Self::bytes_from_bits(memory.len_bytes.get()) as u32;
                 let mut tokens = code;
-                // For reference exports, the export is the memory location itself
+                // Reference export: the address varnode's offset becomes the export's offset
                 tokens.extend(quote! {
                     export_varnode = Some(pcode_ir::Varnode { space: #sp, offset: #vn.offset, size: #size });
                 });
@@ -650,7 +651,8 @@ impl<'a> ExecutionGenerator<'a> {
 
         match &op.op {
             Unary::Dereference(mem) => {
-                let out = self.fresh_unique(mem.len_bytes.get());
+                // len_bytes is actually in bits despite the name
+                let out = self.fresh_unique(Self::bytes_from_bits(mem.len_bytes.get()));
                 let sp = self.space_id_expr(mem.space);
                 let o = out.clone();
                 code.extend(quote! { ops.push(pcode_ir::PcodeOp::Load { out: #o, space: #sp, ptr: #inp }); });
