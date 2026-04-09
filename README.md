@@ -27,8 +27,9 @@ rsleigh reads the same `.slaspec` files that ship with Ghidra (Apache 2.0) and g
 |---|---|---|---|---|
 | x86-64 | 5700+ | full | 33 MB | ~3.5 min |
 | AARCH64 | 3500+ | NEON + SVE | 34 MB | ~11 sec |
-| RISC-V (RV64) | 500+ | F/D/B/K/P/Q/V/C | 5 MB | ~2.6 sec |
+| ARM32 (ARMv7) | 1200+ | Thumb | 9 MB | ~4.3 sec |
 | MIPS32 (BE) | 900+ | FPU + DSP + MIPS16 + microMIPS | 8 MB | ~3.2 sec |
+| RISC-V (RV64) | 500+ | F/D/B/K/P/Q/V/C | 5 MB | ~2.6 sec |
 
 ## Workspace
 
@@ -41,20 +42,21 @@ rsleigh reads the same `.slaspec` files that ship with Ghidra (Apache 2.0) and g
 | `generated/aarch64-*` | Generated AARCH64 crates (shared, subtables, 4 instruction batches, root) |
 | `generated/riscv-*` | Generated RISC-V crates (shared, subtables, 2 instruction batches, root) |
 | `generated/mips-*` | Generated MIPS32 crates (shared, subtables, 2 instruction batches, root) |
-| `test-harness` | Golden P-code tests + at-scale corpus validation |
+| `generated/arm32-*` | Generated ARM32 crates (shared, subtables, 2 instruction batches, root) |
+| `test-harness` | Golden P-code tests + at-scale corpus validation (301 instructions) |
 
 ## Status
 
-- [x] SLEIGH parser — x86-64, AARCH64 (NEON + SVE), RISC-V (RV64), MIPS32
+- [x] SLEIGH parser — x86-64, AARCH64 (NEON + SVE), ARM32 (Thumb), MIPS32 (MIPS16 + microMIPS), RISC-V (RV64)
 - [x] Instruction decoding — pattern matching and disassembly
 - [x] P-code emission — `lift()` generates `Vec<PcodeOp>` per instruction
 - [x] Export propagation — register, memory reference, and branch target exports
 - [x] Disassembly variable resolution (branch targets, relocations)
 - [x] Peephole optimizer — identity Subpiece, Copy forwarding, DCE, output sinking (matches/beats Ghidra)
 - [x] Parallel crate compilation — instruction batches compile concurrently
-- [x] 238 validated instructions across 4 architectures (golden + capstone corpus)
+- [x] 301 validated instructions across 5 architectures (golden + capstone corpus)
 - [x] Ghidra comparison — matches or beats Ghidra 12.0.4 P-code op counts
-- [ ] Additional architectures (PowerPC, ARM32, etc.)
+- [ ] Additional architectures (PowerPC, SPARC, etc.)
 
 ### Example output (matches Ghidra)
 
