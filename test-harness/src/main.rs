@@ -610,12 +610,34 @@ mod tests {
 
     fn test_aarch64_corpus() {
         run_corpus("aarch64", corpus::AARCH64_CORPUS, arm::decode, &[
-            ("mov", &["mov", "orr", "movz"]),
+            ("mov", &["mov", "orr", "movz", "movn"]),
+            ("movz", &["movz", "mov"]),
             ("b.eq", &["b.eq", "b."]),
+            ("b.ne", &["b.ne", "b."]),
+            ("b.lt", &["b.lt", "b."]),
+            ("b.gt", &["b.gt", "b."]),
             ("eor", &["eor"]),
+            ("eon", &["eon"]),
+            ("bic", &["bic"]),
             ("brk", &["brk"]),
             ("sxtw", &["sxtw", "sbfm"]),
+            ("uxtb", &["uxtb", "ubfm", "and"]),
+            ("uxth", &["uxth", "ubfm", "and"]),
             ("rbit", &["rbit"]),
+            ("rev32", &["rev32", "rev"]),
+            ("clz", &["clz"]),
+            ("cls", &["cls"]),
+            ("cinc", &["cinc", "csinc"]),
+            ("csel", &["csel"]),
+            ("ands", &["ands", "tst"]),
+            ("adds", &["adds"]),
+            ("subs", &["subs", "cmp"]),
+            ("dmb", &["dmb"]),
+            ("isb", &["isb"]),
+            ("ldrsb", &["ldrsb"]),
+            ("ldrsh", &["ldrsh"]),
+            ("ldursw", &["ldrsw", "ldursw"]),
+            ("sdiv", &["sdiv"]),
         ]);
     }
 
