@@ -40,6 +40,22 @@ mod arm {
     }
 }
 
+mod arm32 {
+    use super::*;
+
+    pub fn decode(bytes: &[u8], addr: u64) -> (u64, String, Vec<PcodeOp>) {
+        let mut ctx = arm32_root::ContextMemory::default();
+        let mut gs = arm32_root::GlobalSet::new(arm32_root::ContextMemory::default());
+        let addr32 = addr as u32;
+        let (inst_next, display, mut pcode) =
+            arm32_root::parse_instruction(bytes, &mut ctx, addr32, &mut gs)
+                .expect("failed to decode");
+        pcode_ir::optimize(&mut pcode);
+        let disasm: Vec<String> = display.iter().map(|d| format!("{}", d)).collect();
+        ((inst_next - addr32) as u64, disasm.join(""), pcode)
+    }
+}
+
 mod mips {
     use super::*;
 
@@ -241,6 +257,7 @@ mod tests {
         test_aarch64_corpus();
         test_riscv_corpus();
         test_mips_corpus();
+        test_arm32_corpus();
         eprintln!("all tests passed");
     }
 
@@ -599,6 +616,15 @@ mod tests {
             ("brk", &["brk"]),
             ("sxtw", &["sxtw", "sbfm"]),
             ("rbit", &["rbit"]),
+        ]);
+    }
+
+    fn test_arm32_corpus() {
+        run_corpus("arm32", corpus::ARM32_CORPUS, arm32::decode, &[
+            ("mov", &["mov", "cpy"]),
+            ("bx", &["bx"]),
+            ("beq", &["beq"]),
+            ("nop", &["nop"]),
         ]);
     }
 

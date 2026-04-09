@@ -1,0 +1,10 @@
+[package]
+name = "arm32-root"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+pcode-ir = { path = "../../pcode-ir" }
+arm32-shared = { path = "../arm32-shared" }
+arm32-subtables = { path = "../arm32-subtables" }
+arm32-instr-00 = { path = "../arm32-instr-00" }
+arm32-instr-01 = { path = "../arm32-instr-01" }

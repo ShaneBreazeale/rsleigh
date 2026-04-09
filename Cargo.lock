@@ -67,6 +67,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "arm32-instr-00"
+version = "0.1.0"
+dependencies = [
+ "arm32-shared",
+ "arm32-subtables",
+ "pcode-ir",
+]
+
+[[package]]
+name = "arm32-instr-01"
+version = "0.1.0"
+dependencies = [
+ "arm32-shared",
+ "arm32-subtables",
+ "pcode-ir",
+]
+
+[[package]]
+name = "arm32-root"
+version = "0.1.0"
+dependencies = [
+ "arm32-instr-00",
+ "arm32-instr-01",
+ "arm32-shared",
+ "arm32-subtables",
+ "pcode-ir",
+]
+
+[[package]]
+name = "arm32-shared"
+version = "0.1.0"
+dependencies = [
+ "pcode-ir",
+]
+
+[[package]]
+name = "arm32-subtables"
+version = "0.1.0"
+dependencies = [
+ "arm32-shared",
+ "pcode-ir",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -305,6 +349,7 @@ name = "test-harness"
 version = "0.1.0"
 dependencies = [
  "aarch64-root",
+ "arm32-root",
  "mips-root",
  "pcode-ir",
  "riscv-root",

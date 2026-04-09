@@ -36,6 +36,11 @@ members = [
     "generated/mips-instr-00",
     "generated/mips-instr-01",
     "generated/mips-root",
+    "generated/arm32-shared",
+    "generated/arm32-subtables",
+    "generated/arm32-instr-00",
+    "generated/arm32-instr-01",
+    "generated/arm32-root",
 ]
 resolver = "2"
 

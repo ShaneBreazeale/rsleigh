@@ -5,7 +5,7 @@ fn main() {
     let archs: Vec<&str> = if args.len() > 1 {
         args[1..].iter().map(|s| s.as_str()).collect()
     } else {
-        vec!["x86-64", "aarch64", "riscv", "mips"]
+        vec!["x86-64", "aarch64", "riscv", "mips", "arm32"]
     };
 
     for arch in &archs {
@@ -28,6 +28,13 @@ fn main() {
                 "mips32",
                 Path::new("slaspec/MIPS/mips32be.slaspec"),
                 "mips",
+                200,
+                2,
+            ),
+            "arm32" | "arm" => generate_arch(
+                "arm32",
+                Path::new("slaspec/ARM/ARM7_le_base.slaspec"),
+                "arm32",
                 200,
                 2,
             ),

@@ -9,3 +9,4 @@ x86-root = { path = "../generated/x86-root" }
 aarch64-root = { path = "../generated/aarch64-root" }
 riscv-root = { path = "../generated/riscv-root" }
 mips-root = { path = "../generated/mips-root" }
+arm32-root = { path = "../generated/arm32-root" }
