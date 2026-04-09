@@ -512,19 +512,31 @@ impl<'a> ExecutionGenerator<'a> {
             }
             Export::Reference { addr, memory } => {
                 let (vn, code) = self.lower_expr(addr, execution);
-                let sp = self.space_id_expr(memory.space);
+                let space_type = self.disassembler.sleigh.space(memory.space).space_type;
                 // len_bytes is actually in bits despite the name
                 let size_bytes = Self::bytes_from_bits(memory.len_bytes.get());
                 let size = size_bytes as u32;
-                let out = self.fresh_unique(size_bytes);
-                let o = out.clone();
                 let mut tokens = code;
-                // Reference export: Load the value (for reading), store ref info (for writing/branching)
-                tokens.extend(quote! {
-                    ops.push(pcode_ir::PcodeOp::Load { out: #o, space: #sp, ptr: #vn });
-                    export_varnode = Some(#out);
-                    export_ref = Some((#sp, #vn, #size));
-                });
+
+                match space_type {
+                    SpaceType::Register => {
+                        // Register-space reference (e.g. `export ZF`): just export the
+                        // register varnode directly — no Load needed
+                        tokens.extend(quote! {
+                            export_varnode = Some(pcode_ir::Varnode::register(#vn.offset, #size));
+                        });
+                    }
+                    _ => {
+                        // RAM/other space reference (e.g. `export *[ram]:8 addr`):
+                        // For value reads, a Load is needed; for branches, use address directly.
+                        // Set export_ref so parent can decide.
+                        let sp = self.space_id_expr(memory.space);
+                        tokens.extend(quote! {
+                            export_varnode = Some(pcode_ir::Varnode { space: #sp, offset: #vn.offset, size: #size });
+                            export_ref = Some((#sp, #vn, #size));
+                        });
+                    }
+                }
                 tokens
             }
             Export::Table { table_id, .. } => {
@@ -734,9 +746,21 @@ impl<'a> ExecutionGenerator<'a> {
                             quote! { #var_name },
                             quote! {
                                 let #var_name = {
-                                    let (s_ops, s_exp, _s_ref) = self.#field.lift(#is, #in_);
+                                    let (s_ops, s_exp, s_ref) = self.#field.lift(#is, #in_);
                                     ops.extend(s_ops);
-                                    s_exp.unwrap_or(pcode_ir::Varnode::constant(0, #sz))
+                                    if let Some((ref_space, ref_ptr, ref_size)) = s_ref {
+                                        // RAM reference export: Load the value
+                                        let loaded = pcode_ir::Varnode::unique(
+                                            unique_base + (ops.len() as u64 + 0x8000),
+                                            ref_size,
+                                        );
+                                        ops.push(pcode_ir::PcodeOp::Load {
+                                            out: loaded.clone(), space: ref_space, ptr: ref_ptr,
+                                        });
+                                        loaded
+                                    } else {
+                                        s_exp.unwrap_or(pcode_ir::Varnode::constant(0, #sz))
+                                    }
                                 };
                             },
                         )
