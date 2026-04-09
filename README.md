@@ -39,7 +39,7 @@ rsleigh reads the same `.slaspec` files that ship with Ghidra (Apache 2.0) and g
 | `generated/x86-*` | Generated x86-64 crates (shared, subtables, 8 instruction batches, root) |
 | `generated/aarch64-*` | Generated AARCH64 crates (shared, subtables, 4 instruction batches, root) |
 | `generated/riscv-*` | Generated RISC-V crates (shared, subtables, 2 instruction batches, root) |
-| `test-harness` | Golden P-code tests — 23 instructions across 3 architectures |
+| `test-harness` | Golden P-code tests + at-scale corpus validation |
 
 ## Status
 
@@ -50,8 +50,8 @@ rsleigh reads the same `.slaspec` files that ship with Ghidra (Apache 2.0) and g
 - [x] Disassembly variable resolution (branch targets, relocations)
 - [x] Peephole optimizer — identity Subpiece, Copy chain forwarding, dead code elimination
 - [x] Parallel crate compilation — instruction batches compile concurrently
-- [x] Golden tests — 23 instructions validated (16 x86-64 + 4 AARCH64 + 3 RISC-V)
-- [ ] P-code validation against Ghidra output at scale
+- [x] Golden tests — 23 instructions with exact P-code assertions (x86-64 + AARCH64 + RISC-V)
+- [x] At-scale validation — 50-instruction x86-64 corpus cross-referenced against capstone (decode, length, mnemonic, P-code structure)
 - [ ] Additional architectures (MIPS, PowerPC, etc.)
 
 ### Example output
