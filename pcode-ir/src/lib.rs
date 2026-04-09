@@ -56,6 +56,23 @@ impl Varnode {
     }
 }
 
+/// Offset all Unique-space varnode offsets in an op by the given amount.
+/// Used to avoid unique offset collisions when combining P-code from multiple subtables.
+pub fn offset_unique_varnodes(op: &mut PcodeOp, offset: u64) {
+    // Offset outputs
+    if let Some(out) = get_output_mut(op) {
+        if out.space == AddressSpaceId::Unique {
+            out.offset += offset;
+        }
+    }
+    // Offset inputs
+    visit_reads_mut(op, &mut |v| {
+        if v.space == AddressSpaceId::Unique {
+            v.offset += offset;
+        }
+    });
+}
+
 /// Peephole-optimize a P-code op sequence:
 /// - Remove identity `Subpiece { lsb: 0 }` where input.size == out.size
 /// - Forward-substitute `Copy` chains (A=B, C=A → C=B) when the

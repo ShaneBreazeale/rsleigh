@@ -195,13 +195,27 @@ impl<'a> ExecutionGenerator<'a> {
         }
         // Pre-lift all subtable fields once and cache results.
         // Referenced tables get their ops/exports cached; unreferenced ones just get ops.
+        // Pre-lift all subtable fields, then remap unique offsets so no two subtables
+        // collide. Each subtable gets its unique varnodes shifted by (idx+1) * 0x10000.
         let subtable_cache: TokenStream = self.constructor.table_fields.iter()
-            .map(|(_, field)| {
+            .enumerate()
+            .map(|(idx, (_, field))| {
                 let cache_ops = format_ident!("{}_ops", field);
                 let cache_exp = format_ident!("{}_exp", field);
                 let cache_ref = format_ident!("{}_ref", field);
+                let offset = ((idx as u64) + 1) * 0x10000;
                 quote! {
-                    let (#cache_ops, #cache_exp, #cache_ref) = self.#field.lift(#inst_start, #inst_next);
+                    let (mut #cache_ops, mut #cache_exp, mut #cache_ref) = self.#field.lift(#inst_start, #inst_next);
+                    // Remap unique offsets to avoid collision with other subtables
+                    for op in #cache_ops.iter_mut() {
+                        pcode_ir::offset_unique_varnodes(op, #offset);
+                    }
+                    if let Some(ref mut v) = #cache_exp {
+                        if v.space == pcode_ir::AddressSpaceId::Unique { v.offset += #offset; }
+                    }
+                    if let Some((_, ref mut v, _)) = #cache_ref {
+                        if v.space == pcode_ir::AddressSpaceId::Unique { v.offset += #offset; }
+                    }
                 }
             })
             .collect();
@@ -214,6 +228,8 @@ impl<'a> ExecutionGenerator<'a> {
             })
             .collect();
 
+        let num_fields = self.constructor.table_fields.len() as u64;
+
         // Recompute disassembly variables in lift using the correct inst_next
         let dis_recompute = self.gen_dis_recompute(execution);
 
@@ -224,7 +240,9 @@ impl<'a> ExecutionGenerator<'a> {
                 #inst_next: #addr_type,
             ) -> (Vec<pcode_ir::PcodeOp>, Option<pcode_ir::Varnode>, Option<(pcode_ir::AddressSpaceId, pcode_ir::Varnode, u32)>) {
                 let mut ops: Vec<pcode_ir::PcodeOp> = Vec::new();
-                let unique_base: u64 = (#inst_start as u64) << 16;
+                // Offset unique_base past subtable ranges to avoid collision
+                // Subtables use offsets (1..N)*0x10000, parent uses N*0x10000+
+                let unique_base: u64 = (#inst_start as u64).wrapping_shl(16) + #num_fields as u64 * 0x10000;
                 let mut export_varnode: Option<pcode_ir::Varnode> = None;
                 let mut export_ref: Option<(pcode_ir::AddressSpaceId, pcode_ir::Varnode, u32)> = None;
                 // Lift all subtables once and cache results
