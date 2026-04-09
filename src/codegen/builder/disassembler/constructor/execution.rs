@@ -85,18 +85,54 @@ impl<'a> ExecutionGenerator<'a> {
         let var_decls = self.gen_variable_decls(execution);
         let block_code = self.gen_blocks(execution);
 
-        // Check which subtables are explicitly built
-        let mut built_tables = std::collections::HashSet::new();
-        for block in execution.blocks().iter() {
-            for stmt in block.statements.iter() {
-                if let Statement::Build(b) = stmt {
-                    built_tables.insert(b.table);
+        // Collect all tables referenced in the execution (Build, expressions, assignments)
+        // These will be lifted explicitly — no implicit build needed
+        let mut referenced_tables = std::collections::HashSet::new();
+        fn collect_table_refs(
+            stmt: &Statement,
+            out: &mut std::collections::HashSet<crate::TableId>,
+        ) {
+            match stmt {
+                Statement::Build(b) => { out.insert(b.table); }
+                Statement::Assignment(a) => {
+                    collect_expr_tables(&a.right, out);
+                    if let AssignmentWrite::TableExport { table_id, .. } = &a.var {
+                        out.insert(*table_id);
+                    }
+                }
+                Statement::Export(e) => {
+                    if let Export::Table { table_id, .. } = e {
+                        out.insert(*table_id);
+                    }
+                }
+                Statement::CpuBranch(b) => { collect_expr_tables(&b.dst, out); }
+                _ => {}
+            }
+        }
+        fn collect_expr_tables(
+            expr: &Expr,
+            out: &mut std::collections::HashSet<crate::TableId>,
+        ) {
+            match expr {
+                Expr::Value(elem) => {
+                    if let ExprElement::Value { value: ExprValue::Table(tid), .. } = elem {
+                        out.insert(*tid);
+                    }
+                }
+                Expr::Op(op) => {
+                    collect_expr_tables(&op.left, out);
+                    collect_expr_tables(&op.right, out);
                 }
             }
         }
-        // Emit implicit builds for subtable fields not explicitly built
+        for block in execution.blocks().iter() {
+            for stmt in block.statements.iter() {
+                collect_table_refs(stmt, &mut referenced_tables);
+            }
+        }
+        // Emit implicit builds only for subtable fields NOT referenced in execution
         let implicit_builds: TokenStream = self.constructor.table_fields.iter()
-            .filter(|(tid, _)| !built_tables.contains(tid))
+            .filter(|(tid, _)| !referenced_tables.contains(tid))
             .map(|(_, field)| {
                 quote! {
                     {
