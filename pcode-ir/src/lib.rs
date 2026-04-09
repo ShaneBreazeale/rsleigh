@@ -6,10 +6,12 @@
 #![no_std]
 
 extern crate alloc;
+use alloc::collections::BTreeMap;
+use alloc::vec;
 use alloc::vec::Vec;
 
 /// Identifies an address space in the P-code model.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AddressSpaceId {
     /// CPU registers (offset = Ghidra register offset).
     Register,
@@ -22,7 +24,7 @@ pub enum AddressSpaceId {
 }
 
 /// A triple (space, offset, size) identifying a storage location or constant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Varnode {
     pub space: AddressSpaceId,
     pub offset: u64,
@@ -172,6 +174,7 @@ fn optimize_once(ops: &mut Vec<PcodeOp>) {
 
     // Pass 1a: redundant IntAnd — if IntAnd{out1, x, mask} followed by IntAnd{out2, out1, mask}
     // with same mask and out1 used only once, remove the second
+    let mut unique_analysis = analyze_unique_outputs(ops);
     let mut i = 0;
     while i + 1 < ops.len() {
         let collapse = if let PcodeOp::IntAnd {
@@ -188,8 +191,11 @@ fn optimize_once(ops: &mut Vec<PcodeOp>) {
                 } = &ops[i + 1]
                 {
                     if *in2 == *out1 && *mask2 == *mask1 {
-                        let total_reads: usize =
-                            ops[i + 1..].iter().map(|op| count_reads(op, out1)).sum();
+                        let total_reads = unique_analysis
+                            .get(i)
+                            .and_then(|entry| entry.as_ref())
+                            .map(|entry| entry.future_reads)
+                            .unwrap_or(0);
                         if total_reads == 1 {
                             Some(*out2)
                         } else {
@@ -214,6 +220,7 @@ fn optimize_once(ops: &mut Vec<PcodeOp>) {
                 *out = new_out;
             }
             ops.remove(i + 1);
+            unique_analysis = analyze_unique_outputs(ops);
             continue;
         }
         i += 1;
@@ -234,37 +241,23 @@ fn optimize_once(ops: &mut Vec<PcodeOp>) {
     // Pass 2: forward-substitute single-use Copy chains
     // If ops[i] is Copy { out: A, input: B } and A is Unique,
     // and exactly one later op reads A, replace that read with B.
+    unique_analysis = analyze_unique_outputs(ops);
     let mut i = 0;
     while i < ops.len() {
         if let PcodeOp::Copy { out, input } = &ops[i] {
             if out.space == AddressSpaceId::Unique {
                 let target = *out;
                 let replacement = *input;
-                // Count uses of target after this op
-                let uses: usize = ops[i + 1..].iter().map(|op| count_reads(op, &target)).sum();
-                if uses == 1 {
-                    // Check that target is not written to between here and its use
-                    let mut rewritten = false;
-                    for op in ops[i + 1..].iter() {
-                        if writes_to(op, &target) {
-                            rewritten = true;
-                            break;
-                        }
-                        if count_reads(op, &target) > 0 {
-                            break;
-                        }
-                    }
-                    if rewritten {
-                        i += 1;
-                        continue;
-                    }
+                let entry = unique_analysis.get(i).and_then(|entry| entry.as_ref());
+                if let Some(UniqueOutputInfo {
+                    future_reads: 1,
+                    next_access: Some(NextAccess::Read(read_idx)),
+                }) = entry
+                {
                     // Replace the read and remove this Copy
-                    for op in ops[i + 1..].iter_mut() {
-                        if replace_reads(op, &target, &replacement) {
-                            break;
-                        }
-                    }
+                    replace_reads(&mut ops[*read_idx], &target, &replacement);
                     ops.remove(i);
+                    unique_analysis = analyze_unique_outputs(ops);
                     continue; // don't increment i
                 }
             }
@@ -273,29 +266,18 @@ fn optimize_once(ops: &mut Vec<PcodeOp>) {
     }
 
     // Pass 2b: remove writes to Unique varnodes that are overwritten before any read.
+    unique_analysis = analyze_unique_outputs(ops);
     let mut i = 0;
     while i < ops.len() {
-        let target = match get_output(&ops[i]) {
-            Some(out) if out.space == AddressSpaceId::Unique => out,
-            _ => {
-                i += 1;
-                continue;
-            }
-        };
-
-        let mut overwritten = false;
-        for op in ops.iter().skip(i + 1) {
-            if count_reads(op, &target) > 0 {
-                break;
-            }
-            if writes_to(op, &target) {
-                overwritten = true;
-                break;
-            }
-        }
-
-        if overwritten {
+        if matches!(
+            unique_analysis.get(i).and_then(|entry| entry.as_ref()),
+            Some(UniqueOutputInfo {
+                next_access: Some(NextAccess::Write),
+                ..
+            })
+        ) {
             ops.remove(i);
+            unique_analysis = analyze_unique_outputs(ops);
             continue;
         }
 
@@ -304,74 +286,19 @@ fn optimize_once(ops: &mut Vec<PcodeOp>) {
 
     // Pass 3: dead code elimination
     // Remove ops that write to a Unique varnode that is never read afterwards.
+    unique_analysis = analyze_unique_outputs(ops);
     let mut i = 0;
     while i < ops.len() {
-        let target = match &ops[i] {
-            PcodeOp::Copy { out, .. }
-            | PcodeOp::Load { out, .. }
-            | PcodeOp::Subpiece { out, .. }
-            | PcodeOp::IntAdd { out, .. }
-            | PcodeOp::IntSub { out, .. }
-            | PcodeOp::IntMult { out, .. }
-            | PcodeOp::IntDiv { out, .. }
-            | PcodeOp::IntNeg { out, .. }
-            | PcodeOp::IntNot { out, .. }
-            | PcodeOp::IntAnd { out, .. }
-            | PcodeOp::IntOr { out, .. }
-            | PcodeOp::IntXor { out, .. }
-            | PcodeOp::IntZext { out, .. }
-            | PcodeOp::IntSext { out, .. }
-            | PcodeOp::IntEq { out, .. }
-            | PcodeOp::IntNotEq { out, .. }
-            | PcodeOp::IntLess { out, .. }
-            | PcodeOp::IntLessEq { out, .. }
-            | PcodeOp::IntSLess { out, .. }
-            | PcodeOp::IntSLessEq { out, .. }
-            | PcodeOp::IntLsl { out, .. }
-            | PcodeOp::IntLsr { out, .. }
-            | PcodeOp::IntAsr { out, .. }
-            | PcodeOp::IntSDiv { out, .. }
-            | PcodeOp::IntRem { out, .. }
-            | PcodeOp::IntSRem { out, .. }
-            | PcodeOp::IntCarry { out, .. }
-            | PcodeOp::IntSCarry { out, .. }
-            | PcodeOp::IntSBorrow { out, .. }
-            | PcodeOp::BoolAnd { out, .. }
-            | PcodeOp::BoolOr { out, .. }
-            | PcodeOp::BoolXor { out, .. }
-            | PcodeOp::BoolNot { out, .. }
-            | PcodeOp::FloatAdd { out, .. }
-            | PcodeOp::FloatSub { out, .. }
-            | PcodeOp::FloatMult { out, .. }
-            | PcodeOp::FloatDiv { out, .. }
-            | PcodeOp::FloatNeg { out, .. }
-            | PcodeOp::FloatAbs { out, .. }
-            | PcodeOp::FloatSqrt { out, .. }
-            | PcodeOp::FloatNan { out, .. }
-            | PcodeOp::FloatEq { out, .. }
-            | PcodeOp::FloatNotEq { out, .. }
-            | PcodeOp::FloatLess { out, .. }
-            | PcodeOp::FloatLessEq { out, .. }
-            | PcodeOp::Int2Float { out, .. }
-            | PcodeOp::Float2Float { out, .. }
-            | PcodeOp::Trunc { out, .. }
-            | PcodeOp::FloatCeil { out, .. }
-            | PcodeOp::FloatFloor { out, .. }
-            | PcodeOp::FloatRound { out, .. }
-            | PcodeOp::Popcount { out, .. }
-            | PcodeOp::Lzcount { out, .. }
-                if out.space == AddressSpaceId::Unique =>
-            {
-                Some(*out)
-            }
-            _ => None,
-        };
-        if let Some(target) = target {
-            let reads: usize = ops[i + 1..].iter().map(|op| count_reads(op, &target)).sum();
-            if reads == 0 {
-                ops.remove(i);
-                continue;
-            }
+        if matches!(
+            unique_analysis.get(i).and_then(|entry| entry.as_ref()),
+            Some(UniqueOutputInfo {
+                future_reads: 0,
+                ..
+            })
+        ) {
+            ops.remove(i);
+            unique_analysis = analyze_unique_outputs(ops);
+            continue;
         }
         i += 1;
     }
@@ -380,38 +307,31 @@ fn optimize_once(ops: &mut Vec<PcodeOp>) {
     // If ops[i] writes to Unique(X) and some later ops[j] is Copy { out: dest, input: Unique(X) },
     // and Unique(X) is read exactly once (by that Copy), and dest is not written or read between
     // i and j, rewrite ops[i] to output directly to dest and remove the Copy.
+    unique_analysis = analyze_unique_outputs(ops);
     let mut i = 0;
     while i < ops.len() {
-        let should_sink = if let Some(out) = get_output(&ops[i]) {
-            if out.space == AddressSpaceId::Unique {
-                // Count total reads of this unique after definition
-                let total_reads: usize = ops[i + 1..].iter().map(|op| count_reads(op, &out)).sum();
-                if total_reads == 1 {
-                    // Find the single Copy that reads it
-                    let mut copy_idx = None;
-                    let mut dest = None;
-                    for j in (i + 1)..ops.len() {
-                        if let PcodeOp::Copy {
-                            out: copy_dest,
-                            input: copy_src,
-                        } = &ops[j]
-                        {
-                            if *copy_src == out {
-                                copy_idx = Some(j);
-                                dest = Some(*copy_dest);
-                                break;
-                            }
-                        }
-                    }
-                    // Verify dest is not read or written between i and j
-                    if let (Some(j), Some(d)) = (copy_idx, dest) {
-                        let safe = (i + 1..j).all(|k| {
-                            !writes_to(&ops[k], &out)
-                                && count_reads(&ops[k], &d) == 0
-                                && !writes_to(&ops[k], &d)
-                        });
+        let should_sink = match (
+            get_output(&ops[i]),
+            unique_analysis.get(i).and_then(|entry| entry.as_ref()),
+        ) {
+            (
+                Some(out),
+                Some(UniqueOutputInfo {
+                    future_reads: 1,
+                    next_access: Some(NextAccess::Read(copy_idx)),
+                }),
+            ) if out.space == AddressSpaceId::Unique => {
+                if let PcodeOp::Copy {
+                    out: copy_dest,
+                    input: copy_src,
+                } = &ops[*copy_idx]
+                {
+                    if *copy_src == out {
+                        let d = *copy_dest;
+                        let safe = (i + 1..*copy_idx)
+                            .all(|k| count_reads(&ops[k], &d) == 0 && !writes_to(&ops[k], &d));
                         if safe {
-                            Some((j, d))
+                            Some((*copy_idx, d))
                         } else {
                             None
                         }
@@ -421,11 +341,8 @@ fn optimize_once(ops: &mut Vec<PcodeOp>) {
                 } else {
                     None
                 }
-            } else {
-                None
             }
-        } else {
-            None
+            _ => None,
         };
 
         if let Some((copy_idx, new_dest)) = should_sink {
@@ -433,10 +350,49 @@ fn optimize_once(ops: &mut Vec<PcodeOp>) {
                 *out = new_dest;
             }
             ops.remove(copy_idx);
+            unique_analysis = analyze_unique_outputs(ops);
             continue;
         }
         i += 1;
     }
+}
+
+#[derive(Clone, Copy)]
+struct UniqueOutputInfo {
+    future_reads: usize,
+    next_access: Option<NextAccess>,
+}
+
+#[derive(Clone, Copy)]
+enum NextAccess {
+    Read(usize),
+    Write,
+}
+
+fn analyze_unique_outputs(ops: &[PcodeOp]) -> Vec<Option<UniqueOutputInfo>> {
+    let mut future_reads = BTreeMap::<Varnode, usize>::new();
+    let mut next_access = BTreeMap::<Varnode, NextAccess>::new();
+    let mut result = vec![None; ops.len()];
+
+    for (idx, op) in ops.iter().enumerate().rev() {
+        if let Some(out) = get_output(op).filter(|out| out.space == AddressSpaceId::Unique) {
+            result[idx] = Some(UniqueOutputInfo {
+                future_reads: future_reads.get(&out).copied().unwrap_or(0),
+                next_access: next_access.get(&out).copied(),
+            });
+            future_reads.remove(&out);
+            next_access.insert(out, NextAccess::Write);
+        }
+
+        visit_reads(op, &mut |v| {
+            if v.space == AddressSpaceId::Unique {
+                *future_reads.entry(*v).or_insert(0) += 1;
+                next_access.insert(*v, NextAccess::Read(idx));
+            }
+        });
+    }
+
+    result
 }
 
 fn get_output(op: &PcodeOp) -> Option<Varnode> {

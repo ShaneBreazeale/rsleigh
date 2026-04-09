@@ -53,6 +53,8 @@ rsleigh reads the same `.slaspec` files that ship with Ghidra (Apache 2.0) and g
 - [x] Export propagation — register, memory reference, and branch target exports
 - [x] Disassembly variable resolution (branch targets, relocations)
 - [x] Peephole optimizer — identity Subpiece, Copy forwarding, DCE, output sinking (matches/beats Ghidra)
+- [x] Lift-path allocation tuning — generated decoders pre-reserve P-code capacity from subtable caches and local op estimates
+- [x] Optimizer pass tuning — unique-varnode use analysis avoids repeated whole-slice scans in hot peephole passes
 - [x] Parallel crate compilation — instruction batches compile concurrently
 - [x] 301 validated instructions across 5 architectures (golden + capstone corpus)
 - [x] Ghidra comparison — matches or beats Ghidra 12.0.4 P-code op counts

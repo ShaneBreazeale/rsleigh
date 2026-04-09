@@ -156,6 +156,7 @@ impl<'a> ExecutionGenerator<'a> {
         let inst_next = self.inst_next;
         let var_decls = self.gen_variable_decls(execution);
         let block_code = self.gen_blocks(execution);
+        let local_op_estimate = self.estimate_execution_ops(execution);
 
         // Collect all tables referenced in the execution (Build, expressions, assignments)
         // These will be lifted explicitly — no implicit build needed
@@ -234,6 +235,16 @@ impl<'a> ExecutionGenerator<'a> {
             })
             .collect();
 
+        let subtable_cached_capacity: TokenStream = self
+            .constructor
+            .table_fields
+            .iter()
+            .map(|(_, field)| {
+                let cache_ops = format_ident!("{}_ops", field);
+                quote! { + #cache_ops.len() }
+            })
+            .collect();
+
         // Extend ops from all subtable caches
         let subtable_ops_extend: TokenStream = self
             .constructor
@@ -256,7 +267,6 @@ impl<'a> ExecutionGenerator<'a> {
                 #inst_start: #addr_type,
                 #inst_next: #addr_type,
             ) -> (Vec<pcode_ir::PcodeOp>, Option<pcode_ir::Varnode>, Option<(pcode_ir::AddressSpaceId, pcode_ir::Varnode, u32)>) {
-                let mut ops: Vec<pcode_ir::PcodeOp> = Vec::new();
                 // Offset unique_base past subtable ranges to avoid collision
                 // Subtables use offsets (1..N)*0x10000, parent uses N*0x10000+
                 let unique_base: u64 = (#inst_start as u64).wrapping_shl(16) + #num_fields as u64 * 0x10000;
@@ -264,6 +274,9 @@ impl<'a> ExecutionGenerator<'a> {
                 let mut export_ref: Option<(pcode_ir::AddressSpaceId, pcode_ir::Varnode, u32)> = None;
                 // Lift all subtables once and cache results
                 #subtable_cache
+                let cached_ops_capacity: usize = 0usize #subtable_cached_capacity;
+                let mut ops: Vec<pcode_ir::PcodeOp> =
+                    Vec::with_capacity(cached_ops_capacity + #local_op_estimate);
                 #subtable_ops_extend
                 #dis_recompute
                 #var_decls
@@ -384,6 +397,94 @@ impl<'a> ExecutionGenerator<'a> {
             });
         }
         tokens
+    }
+
+    fn estimate_execution_ops(&self, execution: &Execution) -> usize {
+        execution
+            .blocks()
+            .iter()
+            .map(|block| {
+                block
+                    .statements
+                    .iter()
+                    .map(|stmt| self.estimate_statement_ops(stmt))
+                    .sum::<usize>()
+            })
+            .sum()
+    }
+
+    fn estimate_statement_ops(&self, stmt: &Statement) -> usize {
+        match stmt {
+            Statement::Assignment(a) => match &a.var {
+                AssignmentWrite::Variable { .. } => self.estimate_expr_ops(&a.right) + 1,
+                AssignmentWrite::Memory { addr, .. } => {
+                    self.estimate_expr_ops(&a.right) + self.estimate_expr_ops(addr) + 1
+                }
+                AssignmentWrite::TableExport { .. } => self.estimate_expr_ops(&a.right) + 1,
+            },
+            Statement::CpuBranch(b) => {
+                self.estimate_expr_ops(&b.dst)
+                    + b.cond
+                        .as_ref()
+                        .map(|expr| self.estimate_expr_ops(expr))
+                        .unwrap_or(0)
+                    + 1
+            }
+            Statement::LocalGoto(g) => {
+                g.cond
+                    .as_ref()
+                    .map(|expr| self.estimate_expr_ops(expr))
+                    .unwrap_or(0)
+                    + 1
+            }
+            Statement::Build(_) => 0,
+            Statement::UserCall(call) => {
+                call.params
+                    .iter()
+                    .map(|expr| self.estimate_expr_ops(expr))
+                    .sum::<usize>()
+                    + 1
+            }
+            Statement::Export(export) => match export {
+                Export::Value(expr) => self.estimate_expr_ops(expr),
+                Export::Reference { addr, .. } => self.estimate_expr_ops(addr),
+                Export::Table { .. } | Export::AttachVarnode { .. } => 0,
+            },
+            Statement::Declare(_) | Statement::Delayslot(_) => 0,
+        }
+    }
+
+    fn estimate_expr_ops(&self, expr: &Expr) -> usize {
+        match expr {
+            Expr::Value(element) => self.estimate_element_ops(element),
+            Expr::Op(binary_op) => {
+                self.estimate_expr_ops(&binary_op.left)
+                    + self.estimate_expr_ops(&binary_op.right)
+                    + 1
+            }
+        }
+    }
+
+    fn estimate_element_ops(&self, element: &ExprElement) -> usize {
+        match element {
+            ExprElement::Value { value, .. } => self.estimate_value_ops(value),
+            ExprElement::Op(unary_op) => self.estimate_expr_ops(&unary_op.input) + 1,
+            ExprElement::UserCall(call) => {
+                call.params
+                    .iter()
+                    .map(|expr| self.estimate_expr_ops(expr))
+                    .sum::<usize>()
+                    + 1
+            }
+            ExprElement::Reference(_) | ExprElement::New(_) | ExprElement::CPool(_) => 0,
+        }
+    }
+
+    fn estimate_value_ops(&self, value: &ExprValue) -> usize {
+        match value {
+            ExprValue::Table(_) => 1,
+            _ => 0,
+        }
     }
 
     fn gen_blocks(&self, execution: &Execution) -> TokenStream {
