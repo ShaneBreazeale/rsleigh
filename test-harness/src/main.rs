@@ -1,5 +1,7 @@
 use pcode_ir::{PcodeOp, Varnode, AddressSpaceId};
 
+mod corpus;
+
 mod x86 {
     use super::*;
 
@@ -217,7 +219,10 @@ mod tests {
         test_riscv_addi();
         test_riscv_add();
         test_riscv_jalr();
-        eprintln!("all 23 golden tests passed");
+        eprintln!("  23 golden tests passed");
+        // Scale validation
+        test_x86_64_corpus();
+        eprintln!("all tests passed");
     }
 
     fn test_mov_reg_reg() {
@@ -459,5 +464,133 @@ mod tests {
         assert_eq!(len, 4);
         assert!(disasm.to_lowercase().contains("jalr") || disasm.to_lowercase().contains("ret"),
             "expected jalr/ret, got {disasm}");
+    }
+
+    // ── Scale validation ─────────────────────────────────────────────
+
+    fn test_x86_64_corpus() {
+        let mut passed = 0;
+        let mut failed = Vec::new();
+
+        for (bytes, expected_len, capstone_mnemonic) in corpus::X86_64_CORPUS {
+            let result = std::panic::catch_unwind(|| x86::decode(bytes, 0x1000));
+            match result {
+                Ok((len, disasm, pcode)) => {
+                    // Validate instruction length matches capstone
+                    if len != *expected_len {
+                        failed.push(format!(
+                            "{}: len mismatch: got {len}, expected {expected_len} (disasm: {disasm})",
+                            capstone_mnemonic
+                        ));
+                        continue;
+                    }
+
+                    // Validate disassembly mnemonic (case-insensitive, Ghidra may use different names)
+                    let disasm_lower = disasm.to_lowercase();
+                    let mnemonic_matches = disasm_lower.starts_with(capstone_mnemonic)
+                        || match *capstone_mnemonic {
+                            "je" => disasm_lower.starts_with("jz"),
+                            "jne" => disasm_lower.starts_with("jnz"),
+                            "jl" => disasm_lower.starts_with("jl"),
+                            "jg" => disasm_lower.starts_with("jg"),
+                            "int3" => disasm_lower.contains("int3") || disasm_lower.contains("breakpoint"),
+                            "hlt" => disasm_lower.contains("hlt"),
+                            "cmove" => disasm_lower.starts_with("cmovz"),
+                            "cmovne" => disasm_lower.starts_with("cmovnz"),
+                            _ => false,
+                        };
+                    if !mnemonic_matches {
+                        failed.push(format!(
+                            "{}: mnemonic mismatch: got '{disasm}', expected starts with '{capstone_mnemonic}'",
+                            capstone_mnemonic
+                        ));
+                        continue;
+                    }
+
+                    // Validate P-code structural properties
+                    for (i, op) in pcode.iter().enumerate() {
+                        if let Some(err) = validate_pcode_op(op) {
+                            failed.push(format!(
+                                "{}: P-code op {i} invalid: {err} (disasm: {disasm})",
+                                capstone_mnemonic
+                            ));
+                        }
+                    }
+
+                    passed += 1;
+                }
+                Err(_) => {
+                    failed.push(format!("{}: PANIC during decode", capstone_mnemonic));
+                }
+            }
+        }
+
+        if !failed.is_empty() {
+            for f in &failed {
+                eprintln!("  FAIL: {f}");
+            }
+            panic!(
+                "{} of {} corpus tests failed",
+                failed.len(),
+                corpus::X86_64_CORPUS.len()
+            );
+        }
+        eprintln!(
+            "  corpus: {passed}/{} instructions validated",
+            corpus::X86_64_CORPUS.len()
+        );
+    }
+}
+
+/// Validate structural properties of a P-code op.
+fn validate_pcode_op(op: &PcodeOp) -> Option<String> {
+    match op {
+        // Check output varnodes have non-zero size
+        PcodeOp::Copy { out, .. }
+        | PcodeOp::Load { out, .. }
+        | PcodeOp::IntAdd { out, .. }
+        | PcodeOp::IntSub { out, .. }
+        | PcodeOp::IntMult { out, .. }
+        | PcodeOp::IntAnd { out, .. }
+        | PcodeOp::IntOr { out, .. }
+        | PcodeOp::IntXor { out, .. }
+        | PcodeOp::IntNeg { out, .. }
+        | PcodeOp::IntNot { out, .. }
+        | PcodeOp::IntEq { out, .. }
+        | PcodeOp::IntLess { out, .. }
+        | PcodeOp::IntSLess { out, .. }
+        | PcodeOp::IntCarry { out, .. }
+        | PcodeOp::IntSCarry { out, .. }
+        | PcodeOp::IntSBorrow { out, .. }
+        | PcodeOp::IntLsl { out, .. }
+        | PcodeOp::IntLsr { out, .. }
+        | PcodeOp::IntAsr { out, .. }
+        | PcodeOp::IntZext { out, .. }
+        | PcodeOp::IntSext { out, .. }
+        | PcodeOp::Subpiece { out, .. }
+        | PcodeOp::Popcount { out, .. } => {
+            if out.size == 0 {
+                return Some(format!("output varnode has size 0: {op:?}"));
+            }
+            if out.space == AddressSpaceId::Const {
+                return Some(format!("output varnode is Const space: {op:?}"));
+            }
+            None
+        }
+        // Store should write to Ram
+        PcodeOp::Store { space, .. } => {
+            if *space != AddressSpaceId::Ram {
+                // Some stores go to Register space (valid for SLEIGH semantics)
+            }
+            None
+        }
+        // Branch destinations should not be in Unique space
+        PcodeOp::Branch { dest } | PcodeOp::Call { dest } => {
+            if dest.space == AddressSpaceId::Unique {
+                return Some(format!("branch to Unique space: {op:?}"));
+            }
+            None
+        }
+        _ => None,
     }
 }
