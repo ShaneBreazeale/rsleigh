@@ -112,6 +112,55 @@ pub fn optimize(ops: &mut Vec<PcodeOp>) {
         }
         i += 1;
     }
+
+    // Pass 3: dead code elimination
+    // Remove ops that write to a Unique varnode that is never read afterwards.
+    let mut i = 0;
+    while i < ops.len() {
+        let target = match &ops[i] {
+            PcodeOp::Copy { out, .. } | PcodeOp::Load { out, .. }
+            | PcodeOp::Subpiece { out, .. }
+            | PcodeOp::IntAdd { out, .. } | PcodeOp::IntSub { out, .. }
+            | PcodeOp::IntMult { out, .. } | PcodeOp::IntDiv { out, .. }
+            | PcodeOp::IntNeg { out, .. } | PcodeOp::IntNot { out, .. }
+            | PcodeOp::IntAnd { out, .. } | PcodeOp::IntOr { out, .. }
+            | PcodeOp::IntXor { out, .. }
+            | PcodeOp::IntZext { out, .. } | PcodeOp::IntSext { out, .. }
+            | PcodeOp::IntEq { out, .. } | PcodeOp::IntNotEq { out, .. }
+            | PcodeOp::IntLess { out, .. } | PcodeOp::IntLessEq { out, .. }
+            | PcodeOp::IntSLess { out, .. } | PcodeOp::IntSLessEq { out, .. }
+            | PcodeOp::IntLsl { out, .. } | PcodeOp::IntLsr { out, .. }
+            | PcodeOp::IntAsr { out, .. }
+            | PcodeOp::IntSDiv { out, .. } | PcodeOp::IntRem { out, .. }
+            | PcodeOp::IntSRem { out, .. }
+            | PcodeOp::IntCarry { out, .. } | PcodeOp::IntSCarry { out, .. }
+            | PcodeOp::IntSBorrow { out, .. }
+            | PcodeOp::BoolAnd { out, .. } | PcodeOp::BoolOr { out, .. }
+            | PcodeOp::BoolXor { out, .. } | PcodeOp::BoolNot { out, .. }
+            | PcodeOp::FloatAdd { out, .. } | PcodeOp::FloatSub { out, .. }
+            | PcodeOp::FloatMult { out, .. } | PcodeOp::FloatDiv { out, .. }
+            | PcodeOp::FloatNeg { out, .. } | PcodeOp::FloatAbs { out, .. }
+            | PcodeOp::FloatSqrt { out, .. } | PcodeOp::FloatNan { out, .. }
+            | PcodeOp::FloatEq { out, .. } | PcodeOp::FloatNotEq { out, .. }
+            | PcodeOp::FloatLess { out, .. } | PcodeOp::FloatLessEq { out, .. }
+            | PcodeOp::Int2Float { out, .. } | PcodeOp::Float2Float { out, .. }
+            | PcodeOp::Trunc { out, .. } | PcodeOp::FloatCeil { out, .. }
+            | PcodeOp::FloatFloor { out, .. } | PcodeOp::FloatRound { out, .. }
+            | PcodeOp::Popcount { out, .. } | PcodeOp::Lzcount { out, .. }
+                if out.space == AddressSpaceId::Unique => Some(*out),
+            _ => None,
+        };
+        if let Some(target) = target {
+            let reads: usize = ops[i+1..].iter()
+                .map(|op| count_reads(op, &target))
+                .sum();
+            if reads == 0 {
+                ops.remove(i);
+                continue;
+            }
+        }
+        i += 1;
+    }
 }
 
 fn writes_to(op: &PcodeOp, target: &Varnode) -> bool {
