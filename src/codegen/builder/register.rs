@@ -104,7 +104,7 @@ impl RegistersEnum {
                 #(#elements_names),*
             }
             impl #name {
-                fn as_str(&self) -> &'static str {
+                pub fn as_str(&self) -> &'static str {
                     match self {
                         #(Self::#elements_names2 => #elements_display,)*
                     }

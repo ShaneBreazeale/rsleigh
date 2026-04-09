@@ -7,14 +7,14 @@
     clippy::all
 )]
 mod x86_64 {
-    include!(concat!(env!("OUT_DIR"), "/x86_64.rs"));
+    include!(concat!(env!("OUT_DIR"), "/x86_64/root.rs"));
 }
 
 use x86_64::*;
 
 fn main() {
     let mut context = ContextMemory::default();
-    let mut global_set = GlobalSet::new();
+    let mut global_set = GlobalSet::new(ContextMemory::default());
 
     let tests: &[(&[u8], &str)] = &[
         (&[0x48, 0x89, 0xc7], "MOV rdi, rax"),

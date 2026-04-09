@@ -188,13 +188,13 @@ impl Disassembler {
 
         // Shared module
         root.push_str(&format!(
-            "{allow}\npub mod shared {{ include!(\"{out_dir}/shared.rs\"); }}\npub use shared::*;\n"
+            "{allow}\npub mod shared {{ include!(\"{out_dir}/shared.rs\"); }}\npub use self::shared::*;\n"
         ));
 
         // Table modules
         for i in 0..num_table_files {
             root.push_str(&format!(
-                "{allow}\npub mod table_{i} {{ include!(\"{out_dir}/table_{i}.rs\"); }}\npub use table_{i}::*;\n"
+                "{allow}\npub mod table_{i} {{ include!(\"{out_dir}/table_{i}.rs\"); }}\npub use self::table_{i}::*;\n"
             ));
         }
 

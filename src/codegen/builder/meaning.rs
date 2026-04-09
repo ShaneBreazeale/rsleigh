@@ -63,7 +63,7 @@ impl VarMeaning {
         });
         let registers_enum = disassembler.registers.name();
         tokens.extend(quote! {
-            fn #value_func<T>(num: T) -> #registers_enum
+            pub fn #value_func<T>(num: T) -> #registers_enum
             where
                 #index_type: TryFrom<T>,
                 <#index_type as TryFrom<T>>::Error: core::fmt::Debug,
@@ -73,7 +73,7 @@ impl VarMeaning {
                     _ => unreachable!("Invalid Attach Value"),
                 }
             }
-            fn #display_func<T>(num: T) -> #display_element
+            pub fn #display_func<T>(num: T) -> #display_element
             where
                 #index_type: TryFrom<T>,
                 <#index_type as TryFrom<T>>::Error: core::fmt::Debug,
@@ -124,7 +124,7 @@ impl NameMeaning {
         let display_func = &self.display_func;
         let index_type = &self.index_type;
         tokens.extend(quote! {
-            fn #display_func<T>(num: T) -> #display_element
+            pub fn #display_func<T>(num: T) -> #display_element
             where
                 #param_type: TryFrom<T>,
                 <#param_type as TryFrom<T>>::Error: core::fmt::Debug,
@@ -211,7 +211,7 @@ impl ValueMeaning {
             }
         };
         tokens.extend(quote! {
-            fn #value_func<T>(num: T) -> #value_type
+            pub fn #value_func<T>(num: T) -> #value_type
             where
                 #param_type: TryFrom<T>,
                 <#param_type as TryFrom<T>>::Error: core::fmt::Debug,
@@ -221,7 +221,7 @@ impl ValueMeaning {
                     _ => unreachable!("Invalid Attach Value"),
                 }
             }
-            fn #display_func<T>(hex: bool, num: T) -> #display_element
+            pub fn #display_func<T>(hex: bool, num: T) -> #display_element
             where
                 #param_type: TryFrom<T>,
                 <#param_type as TryFrom<T>>::Error: core::fmt::Debug,

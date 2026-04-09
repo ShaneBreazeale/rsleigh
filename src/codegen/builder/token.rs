@@ -144,7 +144,7 @@ impl TokenFieldFunctions {
             };
             tokens.extend(quote! {
                 #[doc = #doc]
-                fn #read(#tokens_param: &[u8]) -> #read_type {
+                pub fn #read(#tokens_param: &[u8]) -> #read_type {
                     #body
                 }
             });

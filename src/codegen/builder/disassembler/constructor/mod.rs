@@ -324,7 +324,7 @@ impl ConstructorStruct {
         let globalset_struct = &disassembler.context.globalset.name;
         let addr_type = &disassembler.addr_type;
         quote! {
-            fn #display_fun(
+            pub fn #display_fun(
                 &self,
                 #display_param: &mut Vec<#display_struct>,
                 #context_param: &#context_struct,
@@ -362,7 +362,7 @@ impl ConstructorStruct {
                 let addr_type = &disassembler.addr_type;
                 // No execution → empty lift
                 quote! {
-                    fn lift(
+                    pub fn lift(
                         &self,
                         #inst_start: #addr_type,
                         #inst_next: #addr_type,
@@ -423,9 +423,9 @@ impl ConstructorStruct {
         tokens.extend(quote! {
             #[doc = #doc]
             #[derive(Clone, Debug)]
-            struct #struct_name {
-                #(#ass_fields,)*
-                #(#table_fields,)*
+            pub struct #struct_name {
+                #(pub #ass_fields,)*
+                #(pub #table_fields,)*
             }
             impl #struct_name {
                 #display_impl

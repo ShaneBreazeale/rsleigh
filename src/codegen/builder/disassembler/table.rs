@@ -145,11 +145,11 @@ impl TableEnum {
         let globalset_struct = &disassembler.context.globalset.name;
         tokens.extend(quote! {
             #[derive(Clone, Debug)]
-            enum #enum_name {
+            pub enum #enum_name {
                 #(#constructor_enum_name_1(#constructor_struct)),*
             }
             impl #enum_name {
-                fn #display_fun(
+                pub fn #display_fun(
                     &self,
                     display: &mut Vec<#display_struct_name>,
                     context: &#context_struct,
@@ -163,7 +163,7 @@ impl TableEnum {
                           )),*
                     }
                 }
-                fn lift(
+                pub fn lift(
                     &self,
                     inst_start: #addr_type,
                     inst_next: #addr_type,
@@ -172,7 +172,7 @@ impl TableEnum {
                         #(Self::#variant_lift_names(x) => x.lift(inst_start, inst_next)),*
                     }
                 }
-                fn #parse_fun(
+                pub fn #parse_fun(
                     tokens_param: &[u8],
                     context_param: &mut #context_struct,
                     inst_start: #addr_type,
@@ -284,11 +284,11 @@ impl TableEnum {
         }
         tokens.extend(quote! {
             #[derive(Clone, Debug)]
-            enum #enum_name {
+            pub enum #enum_name {
                 #(#constructor_enum_name_1(#constructor_struct)),*
             }
             impl #enum_name {
-                fn #display_fun(
+                pub fn #display_fun(
                     &self,
                     display: &mut Vec<#display_struct_name>,
                     context: &#context_struct,
@@ -306,7 +306,7 @@ impl TableEnum {
                           )),*
                     }
                 }
-                fn lift(
+                pub fn lift(
                     &self,
                     inst_start: #addr_type,
                     inst_next: #addr_type,
@@ -315,7 +315,7 @@ impl TableEnum {
                         #(Self::#variant_lift_names(x) => x.lift(inst_start, inst_next)),*
                     }
                 }
-                fn #parse_fun(
+                pub fn #parse_fun(
                     tokens_param: &[u8],
                     context_param: &mut #context_struct,
                     inst_start: #addr_type,

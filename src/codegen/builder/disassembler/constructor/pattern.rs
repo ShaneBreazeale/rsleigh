@@ -92,7 +92,7 @@ pub fn root_pattern_function(
     let token_fields = constructor_struct.ass_fields.values();
     let fields = table_fields.chain(token_fields);
     quote! {
-        fn #parse_fun(
+        pub fn #parse_fun(
             mut #tokens_current: &[u8],
             context: &mut #context_memory,
             #inst_start: #addr_type,

@@ -8,7 +8,7 @@ use quote::{format_ident, quote};
 
 use crate::execution::{
     Assignment, AssignmentOp, AssignmentWrite, AssignmentWriteVariable, Binary,
-    Block, BlockId, Build, BranchCall, CpuBranch, Execution, Export, Expr,
+    Block, Build, BranchCall, CpuBranch, Execution, Export, Expr,
     ExprBinaryOp, ExprElement, ExprNumber, ExprUnaryOp, ExprValue, LocalGoto,
     Statement, Unary, UserCall, VariableId,
 };
@@ -86,7 +86,7 @@ impl<'a> ExecutionGenerator<'a> {
         let block_code = self.gen_blocks(execution);
 
         quote! {
-            fn lift(
+            pub fn lift(
                 &self,
                 #inst_start: #addr_type,
                 #inst_next: #addr_type,
@@ -122,14 +122,8 @@ impl<'a> ExecutionGenerator<'a> {
 
     fn gen_blocks(&self, execution: &Execution) -> TokenStream {
         let mut tokens = TokenStream::new();
-        for (i, block) in execution.blocks().iter().enumerate() {
-            let block_code = self.gen_block(block, execution);
-            if block.name.is_some() {
-                let label = format_ident!("block_{}", i);
-                tokens.extend(quote! { #label: { #block_code } });
-            } else {
-                tokens.extend(block_code);
-            }
+        for block in execution.blocks().iter() {
+            tokens.extend(self.gen_block(block, execution));
         }
         tokens
     }
