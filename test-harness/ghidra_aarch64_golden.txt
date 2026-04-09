@@ -1,0 +1,18 @@
+=== AARCH64 Ghidra 12.0.4 vs rsleigh comparison ===
+
+Instruction    | Ghidra | rsleigh | Verdict
+---------------|--------|---------|--------
+add x0,x0,x1  |   7    |    7    | EXACT
+sub x0,x0,x1  |   1    |    1    | EXACT
+mov x0,x1      |   1    |    1    | EXACT
+and x0,x0,x1  |   1    |    1    | EXACT
+orr x0,x0,x1  |   1    |    1    | EXACT
+eor x0,x0,x1  |   1    |    1    | EXACT
+cmp x0,x1      |   9    |    9    | EXACT
+mul x0,x0,x1  |   1    |    1    | EXACT
+ldr x0,[x0]    |   2    |    1    | rsleigh better
+str x0,[x0]    |   2    |    1    | rsleigh better
+ret             |   2    |    2    | EXACT
+
+All register offsets match: x0=0x4000, x1=0x4008, x30=0x40f0, pc=0x0
+All flag offsets match: C=0x105, V=0x106, N=0x107, Z=0x108

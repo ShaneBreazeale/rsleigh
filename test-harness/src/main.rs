@@ -150,6 +150,29 @@ fn main() {
         println!();
     }
 
+    // Deep AARCH64 comparison vs Ghidra
+    let arm_deep: &[(&[u8], &str)] = &[
+        (&[0x00, 0x00, 0x01, 0x8b], "add x0,x0,x1"),
+        (&[0x00, 0x00, 0x01, 0xcb], "sub x0,x0,x1"),
+        (&[0xe0, 0x03, 0x01, 0xaa], "mov x0,x1"),
+        (&[0x00, 0x00, 0x01, 0x8a], "and x0,x0,x1"),
+        (&[0x00, 0x00, 0x01, 0xaa], "orr x0,x0,x1"),
+        (&[0x00, 0x00, 0x01, 0xca], "eor x0,x0,x1"),
+        (&[0x1f, 0x00, 0x01, 0xeb], "cmp x0,x1"),
+        (&[0x00, 0x7c, 0x01, 0x9b], "mul x0,x0,x1"),
+        (&[0x00, 0x00, 0x40, 0xf9], "ldr x0,[x0]"),
+        (&[0x00, 0x00, 0x00, 0xf9], "str x0,[x0]"),
+        (&[0xc0, 0x03, 0x5f, 0xd6], "ret"),
+    ];
+    println!("=== aarch64 deep comparison ===\n");
+    for (bytes, name) in arm_deep {
+        let (len, disasm, pcode) = arm::decode(bytes, 0x0);
+        println!("{name}:");
+        println!("  decoded: {disasm}, len={len}, ops={}", pcode.len());
+        for op in &pcode { println!("    {op:?}"); }
+        println!();
+    }
+
     println!("=== aarch64 ===\n");
     for (bytes, name) in arm_tests {
         match std::panic::catch_unwind(|| arm::decode(bytes, 0x1000)) {
