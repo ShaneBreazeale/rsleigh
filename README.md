@@ -33,16 +33,20 @@ rsleigh reads the same `.slaspec` files that ship with Ghidra (Apache 2.0) and g
 
 Work in progress. Current state:
 
-- [x] SLEIGH parser — parses x86-64 `.slaspec` (4500+ constructors)
+- [x] SLEIGH parser — parses x86-64 `.slaspec` (5700+ constructors)
 - [x] Instruction decoding — pattern matching and disassembly
-- [ ] P-code emission — `lift()` function generating `Vec<PcodeOp>` per instruction
-- [ ] ARM64 support (NEON instructions need work)
+- [x] P-code emission — `lift()` function generating `Vec<PcodeOp>` per instruction
+- [x] Split-module codegen for faster compilation
+- [ ] P-code semantic validation against Ghidra golden output
+- [ ] ARM64 support
 
 ## Building
 
 ```
 cargo build
 ```
+
+The test-harness parses the full x86-64 `.slaspec` and generates ~24 MB of Rust code. First build takes several minutes; incremental rebuilds are faster.
 
 Requires Rust 1.70+.
 
