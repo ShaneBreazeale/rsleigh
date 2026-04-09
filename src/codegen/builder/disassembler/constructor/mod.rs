@@ -381,7 +381,7 @@ impl ConstructorStruct {
                 let builds: TokenStream = self.table_fields.values().map(|field| {
                     quote! {
                         {
-                            let (s_ops, _) = self.#field.lift(#inst_start, #inst_next);
+                            let (s_ops, _, _) = self.#field.lift(#inst_start, #inst_next);
                             ops.extend(s_ops);
                         }
                     }
@@ -391,10 +391,10 @@ impl ConstructorStruct {
                         &self,
                         #inst_start: #addr_type,
                         #inst_next: #addr_type,
-                    ) -> (Vec<pcode_ir::PcodeOp>, Option<pcode_ir::Varnode>) {
+                    ) -> (Vec<pcode_ir::PcodeOp>, Option<pcode_ir::Varnode>, Option<(pcode_ir::AddressSpaceId, pcode_ir::Varnode, u32)>) {
                         let mut ops = Vec::new();
                         #builds
-                        (ops, None)
+                        (ops, None, None)
                     }
                 }
             }

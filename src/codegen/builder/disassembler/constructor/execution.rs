@@ -100,26 +100,123 @@ impl<'a> ExecutionGenerator<'a> {
             .map(|(_, field)| {
                 quote! {
                     {
-                        let (s_ops, _) = self.#field.lift(#inst_start, #inst_next);
+                        let (s_ops, _, _) = self.#field.lift(#inst_start, #inst_next);
                         ops.extend(s_ops);
                     }
                 }
             })
             .collect();
 
+        // Recompute disassembly variables in lift using the correct inst_next
+        let dis_recompute = self.gen_dis_recompute(execution);
+
         quote! {
             pub fn lift(
                 &self,
                 #inst_start: #addr_type,
                 #inst_next: #addr_type,
-            ) -> (Vec<pcode_ir::PcodeOp>, Option<pcode_ir::Varnode>) {
+            ) -> (Vec<pcode_ir::PcodeOp>, Option<pcode_ir::Varnode>, Option<(pcode_ir::AddressSpaceId, pcode_ir::Varnode, u32)>) {
                 let mut ops: Vec<pcode_ir::PcodeOp> = Vec::new();
                 let unique_base: u64 = (#inst_start as u64) << 16;
                 let mut export_varnode: Option<pcode_ir::Varnode> = None;
+                let mut export_ref: Option<(pcode_ir::AddressSpaceId, pcode_ir::Varnode, u32)> = None;
+                #dis_recompute
                 #var_decls
                 #implicit_builds
                 #block_code
-                (ops, export_varnode)
+                (ops, export_varnode, export_ref)
+            }
+        }
+    }
+
+    /// Recompute disassembly variables using the correct inst_next from lift params.
+    /// This fixes the off-by-one issue where parse computes inst_next from the
+    /// subtable's local pattern_len instead of the full instruction length.
+    fn gen_dis_recompute(&self, _execution: &Execution) -> TokenStream {
+        let constructor = self.disassembler.sleigh
+            .table(self.constructor.table_id)
+            .constructor(self.constructor.constructor_id);
+        let inst_start = self.inst_start;
+        let inst_next = self.inst_next;
+        let mut tokens = TokenStream::new();
+
+        // Declare mutable locals for all disassembly variables
+        for (_var_id, name) in &self.constructor.dis_fields {
+            tokens.extend(quote! { let mut #name: i128 = self.#name; });
+        }
+
+        // Re-run post-match assertions with correct inst_next
+        for ass in constructor.pattern.disassembly_pos_match() {
+            use crate::disassembly::Assertation;
+            if let Assertation::Assignment(assignment) = ass {
+                // Check if this assignment uses inst_next
+                if Self::expr_uses_inst_next(&assignment.right) {
+                    let value = self.gen_dis_expr_for_lift(&assignment.right);
+                    if let crate::disassembly::WriteScope::Local(var_id) = &assignment.left {
+                        if let Some(name) = self.constructor.dis_fields.get(var_id) {
+                            tokens.extend(quote! { #name = #value; });
+                        }
+                    }
+                }
+            }
+        }
+        tokens
+    }
+
+    fn expr_uses_inst_next(expr: &crate::disassembly::Expr) -> bool {
+        use crate::disassembly::{Expr, ExprElement, ReadScope};
+        match expr {
+            Expr::Value(element) => match element {
+                ExprElement::Value { value: ReadScope::InstNext(_), .. } => true,
+                ExprElement::Op(_, _, inner) => Self::expr_uses_inst_next(inner),
+                _ => false,
+            },
+            Expr::Op(_, _, left, right) => {
+                Self::expr_uses_inst_next(left) || Self::expr_uses_inst_next(right)
+            }
+        }
+    }
+
+    fn gen_dis_expr_for_lift(&self, expr: &crate::disassembly::Expr) -> TokenStream {
+        use crate::disassembly::{Expr, ExprElement, ReadScope};
+        let inst_start = self.inst_start;
+        let inst_next = self.inst_next;
+        match expr {
+            Expr::Value(element) => match element {
+                ExprElement::Value { value, .. } => match value {
+                    ReadScope::Integer(v) => {
+                        let v = v.signed_super();
+                        quote! { #v }
+                    }
+                    ReadScope::InstStart(_) => {
+                        quote! { i128::try_from(#inst_start).unwrap() }
+                    }
+                    ReadScope::InstNext(_) => {
+                        quote! { i128::try_from(#inst_next).unwrap() }
+                    }
+                    ReadScope::TokenField(tf) => {
+                        match self.constructor.ass_fields.get(tf) {
+                            Some(n) => quote! { i128::try_from(self.#n).unwrap() },
+                            None => quote! { 0i128 },
+                        }
+                    }
+                    ReadScope::Context(_) => quote! { 0i128 },
+                    ReadScope::Local(var_id) => {
+                        match self.constructor.dis_fields.get(var_id) {
+                            Some(name) => quote! { #name },
+                            None => quote! { 0i128 },
+                        }
+                    }
+                },
+                ExprElement::Op(_, op, inner) => {
+                    let x = self.gen_dis_expr_for_lift(inner);
+                    crate::codegen::builder::disassembly::op_unary(op, x)
+                }
+            },
+            Expr::Op(_, op, left, right) => {
+                let l = self.gen_dis_expr_for_lift(left);
+                let r = self.gen_dis_expr_for_lift(right);
+                crate::codegen::builder::disassembly::disassembly_op(l, op, r)
             }
         }
     }
@@ -223,33 +320,36 @@ impl<'a> ExecutionGenerator<'a> {
             }
             AssignmentWrite::TableExport { table_id, op, .. } => {
                 let mut tokens = TokenStream::new();
-                let dest_name = format_ident!("dest_export_{}", {
-                    let c = self.unique_counter.get();
-                    self.unique_counter.set(c + 1);
-                    c
-                });
+                let c = self.unique_counter.get();
+                self.unique_counter.set(c + 1);
+                let dest_name = format_ident!("dest_export_{}", c);
+                let ref_name = format_ident!("dest_ref_{}", c);
                 // First, lift the subtable to get its export (the destination varnode)
                 match self.constructor.table_fields.get(table_id) {
                     Some(field) => {
                         let is = self.inst_start;
                         let in_ = self.inst_next;
                         tokens.extend(quote! {
-                            let #dest_name = {
-                                let (s_ops, s_exp) = self.#field.lift(#is, #in_);
+                            let (#dest_name, #ref_name) = {
+                                let (s_ops, s_exp, s_ref) = self.#field.lift(#is, #in_);
                                 ops.extend(s_ops);
-                                s_exp
+                                (s_exp, s_ref)
                             };
                         });
                     }
                     None => {
                         tokens.extend(quote! {
                             let #dest_name: Option<pcode_ir::Varnode> = None;
+                            let #ref_name: Option<(pcode_ir::AddressSpaceId, pcode_ir::Varnode, u32)> = None;
                         });
                     }
                 }
                 tokens.extend(rhs_code);
+                // For reference exports, use Store; for value exports, use Copy
                 tokens.extend(quote! {
-                    if let Some(dest) = #dest_name {
+                    if let Some((space, ptr, _size)) = #ref_name {
+                        ops.push(pcode_ir::PcodeOp::Store { space, ptr, val: #rhs });
+                    } else if let Some(dest) = #dest_name {
                         ops.push(pcode_ir::PcodeOp::Copy { out: dest, input: #rhs });
                     }
                 });
@@ -279,7 +379,9 @@ impl<'a> ExecutionGenerator<'a> {
     // ── Branch / LocalGoto / Build / UserCall / Export ────────────────
 
     fn gen_branch(&self, branch: &CpuBranch, execution: &Execution) -> TokenStream {
-        let (dst, dst_code) = self.lower_expr(&branch.dst, execution);
+        // For branch destinations from table references, use the reference address
+        // (not the loaded value) since branches target addresses, not memory contents
+        let (dst, dst_code) = self.lower_branch_dest(&branch.dst, execution);
         let mut tokens = dst_code;
 
         match (&branch.cond, &branch.call) {
@@ -337,7 +439,7 @@ impl<'a> ExecutionGenerator<'a> {
                 let in_ = self.inst_next;
                 quote! {
                     {
-                        let (s_ops, _) = self.#field.lift(#is, #in_);
+                        let (s_ops, _, _) = self.#field.lift(#is, #in_);
                         ops.extend(s_ops);
                     }
                 }
@@ -376,11 +478,16 @@ impl<'a> ExecutionGenerator<'a> {
                 let (vn, code) = self.lower_expr(addr, execution);
                 let sp = self.space_id_expr(memory.space);
                 // len_bytes is actually in bits despite the name
-                let size = Self::bytes_from_bits(memory.len_bytes.get()) as u32;
+                let size_bytes = Self::bytes_from_bits(memory.len_bytes.get());
+                let size = size_bytes as u32;
+                let out = self.fresh_unique(size_bytes);
+                let o = out.clone();
                 let mut tokens = code;
-                // Reference export: the address varnode's offset becomes the export's offset
+                // Reference export: Load the value (for reading), store ref info (for writing/branching)
                 tokens.extend(quote! {
-                    export_varnode = Some(pcode_ir::Varnode { space: #sp, offset: #vn.offset, size: #size });
+                    ops.push(pcode_ir::PcodeOp::Load { out: #o, space: #sp, ptr: #vn });
+                    export_varnode = Some(#out);
+                    export_ref = Some((#sp, #vn, #size));
                 });
                 tokens
             }
@@ -391,9 +498,10 @@ impl<'a> ExecutionGenerator<'a> {
                         let in_ = self.inst_next;
                         quote! {
                             {
-                                let (s_ops, s_exp) = self.#field.lift(#is, #in_);
+                                let (s_ops, s_exp, s_ref) = self.#field.lift(#is, #in_);
                                 ops.extend(s_ops);
                                 export_varnode = s_exp;
+                                export_ref = s_ref;
                             }
                         }
                     }
@@ -438,6 +546,41 @@ impl<'a> ExecutionGenerator<'a> {
                 }
             }
         }
+    }
+
+    /// Lower a branch destination — for table references that export a reference,
+    /// use the address directly instead of loading the value at that address.
+    fn lower_branch_dest(&self, expr: &Expr, execution: &Execution) -> (TokenStream, TokenStream) {
+        // Check if the expression is a simple table reference
+        if let Expr::Value(ExprElement::Value { value: ExprValue::Table(table_id), .. }) = expr {
+            let sz = self.addr_size();
+            if let Some(field) = self.constructor.table_fields.get(table_id) {
+                let is = self.inst_start;
+                let in_ = self.inst_next;
+                let var_name = format_ident!("branch_dest_{}", {
+                    let c = self.unique_counter.get();
+                    self.unique_counter.set(c + 1);
+                    c
+                });
+                return (
+                    quote! { #var_name },
+                    quote! {
+                        let #var_name = {
+                            let (s_ops, s_exp, s_ref) = self.#field.lift(#is, #in_);
+                            ops.extend(s_ops);
+                            // For reference exports, use the address directly for branches
+                            if let Some((ref_space, ref_ptr, ref_size)) = s_ref {
+                                pcode_ir::Varnode { space: ref_space, offset: ref_ptr.offset, size: ref_size }
+                            } else {
+                                s_exp.unwrap_or(pcode_ir::Varnode::constant(0, #sz))
+                            }
+                        };
+                    },
+                );
+            }
+        }
+        // Fall back to normal expression lowering
+        self.lower_expr(expr, execution)
     }
 
     // ── Expression lowering ──────────────────────────────────────────
@@ -555,7 +698,7 @@ impl<'a> ExecutionGenerator<'a> {
                             quote! { #var_name },
                             quote! {
                                 let #var_name = {
-                                    let (s_ops, s_exp) = self.#field.lift(#is, #in_);
+                                    let (s_ops, s_exp, _s_ref) = self.#field.lift(#is, #in_);
                                     ops.extend(s_ops);
                                     s_exp.unwrap_or(pcode_ir::Varnode::constant(0, #sz))
                                 };
@@ -569,7 +712,8 @@ impl<'a> ExecutionGenerator<'a> {
                 let sz = Self::bytes_from_bits(dv.size.get()) as u32;
                 match self.constructor.dis_fields.get(&dv.id) {
                     Some(name) => {
-                        (quote! { pcode_ir::Varnode::constant(self.#name as u64, #sz) }, quote! {})
+                        // Use the local recomputed variable (shadowed from self)
+                        (quote! { pcode_ir::Varnode::constant(#name as u64, #sz) }, quote! {})
                     }
                     None => {
                         (quote! { pcode_ir::Varnode::constant(0, #sz) }, quote! {})

@@ -167,7 +167,7 @@ impl TableEnum {
                     &self,
                     inst_start: #addr_type,
                     inst_next: #addr_type,
-                ) -> (Vec<pcode_ir::PcodeOp>, Option<pcode_ir::Varnode>) {
+                ) -> (Vec<pcode_ir::PcodeOp>, Option<pcode_ir::Varnode>, Option<(pcode_ir::AddressSpaceId, pcode_ir::Varnode, u32)>) {
                     match self {
                         #(Self::#variant_lift_names(x) => x.lift(inst_start, inst_next)),*
                     }
@@ -310,7 +310,7 @@ impl TableEnum {
                     &self,
                     inst_start: #addr_type,
                     inst_next: #addr_type,
-                ) -> (Vec<pcode_ir::PcodeOp>, Option<pcode_ir::Varnode>) {
+                ) -> (Vec<pcode_ir::PcodeOp>, Option<pcode_ir::Varnode>, Option<(pcode_ir::AddressSpaceId, pcode_ir::Varnode, u32)>) {
                     match self {
                         #(Self::#variant_lift_names(x) => x.lift(inst_start, inst_next)),*
                     }

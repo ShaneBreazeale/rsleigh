@@ -224,7 +224,7 @@ impl Disassembler {
                     inst_next,
                     global_set,
                 );
-                let (pcode, _export) = instruction.lift(inst_start, inst_next);
+                let (pcode, _export, _ref) = instruction.lift(inst_start, inst_next);
                 Some((inst_next, display, pcode))
             }
         };
@@ -286,7 +286,7 @@ impl ToTokens for Disassembler {
                     inst_next,
                     global_set,
                 );
-                let (pcode, _export) = instruction.lift(inst_start, inst_next);
+                let (pcode, _export, _ref) = instruction.lift(inst_start, inst_next);
                 Some((inst_next, display, pcode))
             }
         });
