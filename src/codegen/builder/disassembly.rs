@@ -6,7 +6,6 @@ use crate::disassembly::{
     Assertation, Assignment, Expr, ExprElement, GlobalSet, Op, OpUnary,
     ReadScope, Variable, VariableId,
 };
-use crate::Span;
 
 pub fn disassembly_op(x: impl ToTokens, op: &Op, y: impl ToTokens) -> TokenStream {
     match (crate::codegen::DISASSEMBLY_ALLOW_OVERFLOW, op) {

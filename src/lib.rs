@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_must_use)]
+
 use std::num::TryFromIntError;
 use std::ops::{Bound, RangeBounds};
 use std::path::Path;

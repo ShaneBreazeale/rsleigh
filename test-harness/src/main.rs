@@ -32,6 +32,13 @@ fn main() {
         (&[0xff, 0xd0], "CALL rax"),
         (&[0x48, 0x8b, 0x07], "MOV rax,[rdi]"),
         (&[0x48, 0x39, 0xc7], "CMP rdi, rax"),
+        // New test instructions
+        (&[0x48, 0x29, 0xc7], "SUB rdi, rax"),
+        (&[0x48, 0x31, 0xc7], "XOR rdi, rax"),
+        (&[0x90], "NOP"),
+        (&[0x48, 0x8d, 0x47, 0x10], "LEA rax,[rdi+0x10]"),
+        (&[0x48, 0x89, 0x07], "MOV [rdi], rax"),
+        (&[0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00], "MOV rax, 1"),
     ];
 
     for (bytes, name) in tests {
@@ -53,7 +60,12 @@ fn con(value: u64, size: u32) -> Varnode { Varnode::constant(value, size) }
 
 // x86-64 register offsets (from Ghidra's x86-64 register map)
 const RAX: u64 = 0;
+const RCX: u64 = 8;
+const RDX: u64 = 16;
+const RBX: u64 = 24;
 const RSP: u64 = 32;
+const RBP: u64 = 40;
+const RSI: u64 = 48;
 const RDI: u64 = 56;
 const CF: u64 = 512;
 const PF: u64 = 514;
@@ -105,7 +117,13 @@ mod tests {
         test_call_reg();
         test_mov_reg_mem();
         test_cmp_reg_reg();
-        eprintln!("all 10 golden tests passed");
+        test_sub_reg_reg();
+        test_xor_reg_reg();
+        test_nop();
+        test_lea();
+        test_mov_mem_reg();
+        test_mov_reg_imm();
+        eprintln!("all 16 golden tests passed");
     }
 
     fn test_mov_reg_reg() {
@@ -217,6 +235,66 @@ mod tests {
             |op| matches!(op, PcodeOp::Copy { out, .. } if *out == reg(SF, 1)),
             |op| matches!(op, PcodeOp::Copy { out, .. } if *out == reg(ZF, 1)),
             |op| matches!(op, PcodeOp::Copy { out, .. } if *out == reg(PF, 1)),
+        ]);
+    }
+
+    fn test_sub_reg_reg() {
+        let (len, disasm, pcode) = decode(&[0x48, 0x29, 0xc7], 0x1000);
+        assert_eq!(len, 3);
+        assert_eq!(disasm, "SUB RDI,RAX");
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::IntSub { left, right, .. }
+                if *left == reg(RDI, 8) && *right == reg(RAX, 8)),
+            |op| matches!(op, PcodeOp::Copy { out, .. } if *out == reg(RDI, 8)),
+        ]);
+    }
+
+    fn test_xor_reg_reg() {
+        let (len, disasm, pcode) = decode(&[0x48, 0x31, 0xc7], 0x1000);
+        assert_eq!(len, 3);
+        assert_eq!(disasm, "XOR RDI,RAX");
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::IntXor { left, right, .. }
+                if *left == reg(RDI, 8) && *right == reg(RAX, 8)),
+            |op| matches!(op, PcodeOp::Copy { out, .. } if *out == reg(RDI, 8)),
+        ]);
+    }
+
+    fn test_nop() {
+        let (len, disasm, _pcode) = decode(&[0x90], 0x1000);
+        assert_eq!(len, 1);
+        assert_eq!(disasm, "NOP");
+    }
+
+    fn test_lea() {
+        let (len, disasm, pcode) = decode(&[0x48, 0x8d, 0x47, 0x10], 0x1000);
+        assert_eq!(len, 4);
+        assert!(disasm.starts_with("LEA"), "expected LEA, got {disasm}");
+        // LEA computes address, writes to RAX — should have an IntAdd and Copy to RAX
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::Copy { out, .. } if *out == reg(RAX, 8)),
+        ]);
+    }
+
+    fn test_mov_mem_reg() {
+        let (len, disasm, pcode) = decode(&[0x48, 0x89, 0x07], 0x1000);
+        assert_eq!(len, 3);
+        assert_eq!(disasm, "MOV qword ptr [RDI],RAX");
+        // Should Store RAX to [RDI]
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::Store { space: AddressSpaceId::Ram, ptr, val }
+                if *ptr == reg(RDI, 8) && *val == reg(RAX, 8)),
+        ]);
+    }
+
+    fn test_mov_reg_imm() {
+        let (len, disasm, pcode) = decode(&[0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00], 0x1000);
+        assert_eq!(len, 7);
+        assert!(disasm.contains("MOV") && disasm.contains("RAX"), "expected MOV RAX,imm got {disasm}");
+        // Should Copy constant 1 to RAX
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::Copy { out, input }
+                if *out == reg(RAX, 8) && input.space == AddressSpaceId::Const && input.offset == 1),
         ]);
     }
 }

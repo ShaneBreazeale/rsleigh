@@ -172,8 +172,8 @@ impl<'a> ExecutionGenerator<'a> {
         let constructor = self.disassembler.sleigh
             .table(self.constructor.table_id)
             .constructor(self.constructor.constructor_id);
-        let inst_start = self.inst_start;
-        let inst_next = self.inst_next;
+        let _inst_start = self.inst_start;
+        let _inst_next = self.inst_next;
         let mut tokens = TokenStream::new();
 
         // Declare mutable locals for all disassembly variables
@@ -354,7 +354,7 @@ impl<'a> ExecutionGenerator<'a> {
                 });
                 tokens
             }
-            AssignmentWrite::TableExport { table_id, op, .. } => {
+            AssignmentWrite::TableExport { table_id, op: _, .. } => {
                 let mut tokens = TokenStream::new();
                 let c = self.unique_counter.get();
                 self.unique_counter.set(c + 1);
@@ -570,7 +570,7 @@ impl<'a> ExecutionGenerator<'a> {
                         }
                     }
                     crate::execution::DynamicValueType::Context(ctx_id) => {
-                        let read_fn = &self.disassembler.context.context_functions(*ctx_id).read;
+                        let _read_fn = &self.disassembler.context.context_functions(*ctx_id).read;
                         quote! { 0u64 } // TODO: context read
                     }
                 };
@@ -697,7 +697,7 @@ impl<'a> ExecutionGenerator<'a> {
         }
     }
 
-    fn lower_value(&self, value: &ExprValue, execution: &Execution) -> (TokenStream, TokenStream) {
+    fn lower_value(&self, value: &ExprValue, _execution: &Execution) -> (TokenStream, TokenStream) {
         match value {
             ExprValue::Int(ExprNumber { size, number }) => {
                 let sz = Self::bytes_from_bits(size.get()) as u32;

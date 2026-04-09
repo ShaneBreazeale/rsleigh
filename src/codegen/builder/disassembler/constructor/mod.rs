@@ -5,7 +5,7 @@ use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote, ToTokens};
 
 use crate::codegen::builder::formater::from_sleigh;
-use crate::codegen::builder::{DisassemblyGenerator, DISPLAY_WORK_TYPE, ToLiteral};
+use crate::codegen::builder::{DisassemblyGenerator, DISPLAY_WORK_TYPE};
 
 use super::Disassembler;
 

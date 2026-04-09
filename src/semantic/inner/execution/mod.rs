@@ -225,7 +225,7 @@ impl Execution {
         Ok(VariableId(var_id))
     }
 
-    pub fn export_statements(&self) -> impl Iterator<Item = Ref<Export>> {
+    pub fn export_statements(&self) -> impl Iterator<Item = Ref<'_, Export>> {
         self.blocks
             .iter()
             .filter(|block| block.next.is_none())
@@ -245,7 +245,7 @@ impl Execution {
 
     pub fn export_statements_mut(
         &self,
-    ) -> impl Iterator<Item = RefMut<Export>> {
+    ) -> impl Iterator<Item = RefMut<'_, Export>> {
         self.blocks
             .iter()
             .filter(|block| block.next.is_none())
