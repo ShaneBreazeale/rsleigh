@@ -414,6 +414,7 @@ dependencies = [
  "mips-root",
  "pcode-ir",
  "riscv-root",
+ "rsleigh-api",
  "serde",
  "serde_json",
  "x86-root",

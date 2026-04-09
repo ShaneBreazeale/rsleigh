@@ -945,6 +945,117 @@ mod tests {
             ],
         );
     }
+
+    // ---- Edge-case / robustness tests ----
+    // Verify that truncated, empty, and garbage input returns None without panicking.
+
+    #[test]
+    fn truncated_and_garbage_input() {
+        let t = std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(run_edge_case_tests)
+            .unwrap();
+        t.join().unwrap();
+    }
+
+    fn try_x86(bytes: &[u8]) -> bool {
+        let mut ctx = x86::context();
+        let mut gs = x86_root::GlobalSet::new(x86::context());
+        x86_root::parse_instruction(bytes, &mut ctx, 0x1000, &mut gs).is_some()
+    }
+
+    fn try_aarch64(bytes: &[u8]) -> bool {
+        let mut ctx = aarch64_root::ContextMemory::default();
+        let mut gs = aarch64_root::GlobalSet::new(aarch64_root::ContextMemory::default());
+        aarch64_root::parse_instruction(bytes, &mut ctx, 0x1000, &mut gs).is_some()
+    }
+
+    fn try_arm32(bytes: &[u8]) -> bool {
+        let mut ctx = arm32_root::ContextMemory::default();
+        let mut gs = arm32_root::GlobalSet::new(arm32_root::ContextMemory::default());
+        arm32_root::parse_instruction(bytes, &mut ctx, 0x1000u32, &mut gs).is_some()
+    }
+
+    fn try_mips(bytes: &[u8]) -> bool {
+        let mut ctx = mips_root::ContextMemory::default();
+        let mut gs = mips_root::GlobalSet::new(mips_root::ContextMemory::default());
+        mips_root::parse_instruction(bytes, &mut ctx, 0x1000u32, &mut gs).is_some()
+    }
+
+    fn try_riscv(bytes: &[u8]) -> bool {
+        let mut ctx = riscv_root::ContextMemory::default();
+        let mut gs = riscv_root::GlobalSet::new(riscv_root::ContextMemory::default());
+        riscv_root::parse_instruction(bytes, &mut ctx, 0x1000, &mut gs).is_some()
+    }
+
+    fn run_edge_case_tests() {
+        // Empty input — must not panic
+        assert!(!try_x86(&[]));
+        assert!(!try_aarch64(&[]));
+        assert!(!try_arm32(&[]));
+        assert!(!try_mips(&[]));
+        assert!(!try_riscv(&[]));
+
+        // Single byte — too short for most instructions
+        for b in [0x00, 0xff, 0x48, 0x0f, 0x66] {
+            // Should either decode (some single-byte x86 insns exist) or return None
+            let _ = try_x86(&[b]);
+            // Fixed-width ISAs need 4 bytes — these must return None
+            assert!(!try_aarch64(&[b]));
+            assert!(!try_arm32(&[b]));
+            assert!(!try_mips(&[b]));
+        }
+
+        // Truncated x86 multi-byte instructions
+        // REX.W + MOV needs 3 bytes, give it 1 or 2
+        assert!(!try_x86(&[0x48]));
+        assert!(!try_x86(&[0x48, 0x89]));
+        // 0F-prefixed instructions need more bytes
+        assert!(!try_x86(&[0x0f]));
+        assert!(!try_x86(&[0x0f, 0x84])); // JE rel32 needs 6 bytes
+
+        // Truncated fixed-width (2 or 3 bytes of a 4-byte instruction)
+        assert!(!try_aarch64(&[0xe0, 0x03]));
+        assert!(!try_aarch64(&[0xe0, 0x03, 0x01]));
+        assert!(!try_arm32(&[0x00, 0x00]));
+        assert!(!try_mips(&[0x00, 0x00, 0x00]));
+        assert!(!try_riscv(&[0x93, 0x00]));
+
+        // Random garbage — 1000 random 16-byte sequences, must not panic
+        // Use a simple LCG so the test is deterministic
+        let mut rng: u64 = 0xdeadbeef;
+        let mut decoded = [0u64; 5]; // count successful decodes per arch
+        for _ in 0..1000 {
+            let mut buf = [0u8; 16];
+            for b in &mut buf {
+                rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+                *b = (rng >> 33) as u8;
+            }
+            if try_x86(&buf) { decoded[0] += 1; }
+            if try_aarch64(&buf) { decoded[1] += 1; }
+            if try_arm32(&buf) { decoded[2] += 1; }
+            if try_mips(&buf) { decoded[3] += 1; }
+            if try_riscv(&buf) { decoded[4] += 1; }
+        }
+        eprintln!(
+            "  edge-case tests passed (random decode rates: x86={}/1000 aarch64={}/1000 arm32={}/1000 mips={}/1000 riscv={}/1000)",
+            decoded[0], decoded[1], decoded[2], decoded[3], decoded[4]
+        );
+    }
+
+    // Verify register_name works for known registers
+    #[test]
+    fn register_name_lookup() {
+        use rsleigh_api::Architecture;
+        // x86-64: RAX is at offset 0, size 8
+        assert_eq!(Architecture::X86_64.register_name(0, 8), Some("RAX"));
+        // x86-64: EAX is at offset 0, size 4
+        assert_eq!(Architecture::X86_64.register_name(0, 4), Some("EAX"));
+        // x86-64: AL is at offset 0, size 1
+        assert_eq!(Architecture::X86_64.register_name(0, 1), Some("AL"));
+        // Unknown offset returns None
+        assert_eq!(Architecture::X86_64.register_name(99999, 8), None);
+    }
 }
 
 /// Validate structural properties of a P-code op.

@@ -39,6 +39,19 @@ impl Architecture {
             Architecture::ARM32 | Architecture::MIPS32 => 4,
         }
     }
+
+    /// Look up a register name by its Ghidra offset and size.
+    ///
+    /// Returns `None` if no register matches the given (offset, size) pair.
+    pub fn register_name(&self, offset: u64, size: u32) -> Option<&'static str> {
+        match self {
+            Architecture::X86_64 => x86_root::register_name(offset, size),
+            Architecture::AArch64 => aarch64_root::register_name(offset, size),
+            Architecture::ARM32 => arm32_root::register_name(offset, size),
+            Architecture::MIPS32 => mips_root::register_name(offset, size),
+            Architecture::RiscV64 => riscv_root::register_name(offset, size),
+        }
+    }
 }
 
 /// Unified instruction decoder.

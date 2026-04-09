@@ -85,7 +85,7 @@ impl<'a> ExecutionGenerator<'a> {
                 }
             }
             crate::execution::DynamicValueType::Context(ctx_id) => {
-                let read_fn = &self.disassembler.context.context_functions(*ctx_id).read;
+                let _read_fn = &self.disassembler.context.context_functions(*ctx_id).read;
                 // Context is read via self on the ContextMemory but we don't have it in lift.
                 // Context values are fixed at decode time, so we'd need to store them.
                 // For now, generate a zero — context-dependent register selection is rare.

@@ -83,6 +83,25 @@ impl RegistersEnum {
         let elements_display = self
             .registers()
             .map(|(_name, id)| disassembler.sleigh.varnode(id).name());
+
+        // Build (offset, size) -> name lookup table
+        let reg_entries: Vec<_> = self
+            .registers()
+            .map(|(_ident, id)| {
+                let vn = disassembler.sleigh.varnode(id);
+                let offset = vn.address;
+                let size = vn.len_bytes.get();
+                let name_str = vn.name();
+                (offset, size, name_str.to_string())
+            })
+            .collect();
+        let entry_offsets = reg_entries.iter().map(|(o, _, _)| *o);
+        let entry_sizes = reg_entries.iter().map(|(_, s, _)| {
+            let s = *s as u32;
+            quote! { #s }
+        });
+        let entry_names = reg_entries.iter().map(|(_, _, n)| n.as_str());
+
         tokens.extend(quote! {
             #[derive(Clone, Copy, Debug)]
             pub enum #name {
@@ -99,6 +118,17 @@ impl RegistersEnum {
                 fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> std::fmt::Result {
                     write!(f, "{}", self.as_str())
                 }
+            }
+
+            /// Look up a register name by its Ghidra offset and size in bytes.
+            /// Returns `None` if no register matches.
+            pub fn register_name(offset: u64, size: u32) -> Option<&'static str> {
+                static TABLE: &[(u64, u32, &str)] = &[
+                    #((#entry_offsets, #entry_sizes, #entry_names),)*
+                ];
+                TABLE.iter()
+                    .find(|(o, s, _)| *o == offset && *s == size)
+                    .map(|(_, _, name)| *name)
             }
         })
     }

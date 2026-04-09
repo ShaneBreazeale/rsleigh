@@ -58,3 +58,4 @@ ethnum = "1"
 [features]
 thread = []
 no_overflow_inline = []
+strict_solve = []

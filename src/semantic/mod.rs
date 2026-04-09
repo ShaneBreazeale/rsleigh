@@ -15,7 +15,7 @@ pub(crate) mod inner;
 
 use std::collections::HashMap;
 
-use crate::semantic::inner::{SolvedLocation, SolverStatus};
+use crate::semantic::inner::SolverStatus;
 use crate::{syntax, Endian, NumberNonZeroUnsigned, SleighError, Span};
 
 use self::inner::Solved;
@@ -301,7 +301,7 @@ impl Sleigh {
                 // This handles MIPS16/microMIPS variable-length encoding edge cases.
                 #[cfg(feature = "strict_solve")]
                 {
-                    let mut solved = SolvedLocation::default();
+                    let mut solved = crate::semantic::inner::SolvedLocation::default();
                     for table in inner.tables.iter() {
                         table.solve(&inner, &mut solved)?;
                     }

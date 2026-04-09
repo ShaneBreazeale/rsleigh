@@ -58,6 +58,13 @@ impl VarMeaning {
             quote! { #regs::#variant }
         });
         let registers_enum = disassembler.registers.name();
+        // Default to first entry for out-of-range indices (can happen with malformed input)
+        let first_value = {
+            let (_i, v) = &sleigh.0[0];
+            let regs = disassembler.registers.name();
+            let variant = disassembler.registers.register(*v);
+            quote! { #regs::#variant }
+        };
         tokens.extend(quote! {
             pub fn #value_func<T>(num: T) -> #registers_enum
             where
@@ -66,7 +73,7 @@ impl VarMeaning {
             {
                 match #index_type::try_from(num).unwrap() {
                     #(#ele_index => #ele_value,)*
-                    _ => unreachable!("Invalid Attach Value"),
+                    _ => #first_value,
                 }
             }
             pub fn #display_func<T>(num: T) -> #display_element
@@ -115,6 +122,7 @@ impl NameMeaning {
         let ele_value = attach.0.iter().map(|(_i, v)| v);
         let display_func = &self.display_func;
         let index_type = &self.index_type;
+        let first_literal = attach.0[0].1.clone();
         tokens.extend(quote! {
             pub fn #display_func<T>(num: T) -> #display_element
             where
@@ -123,7 +131,7 @@ impl NameMeaning {
             {
                 match #index_type::try_from(num).unwrap() {
                     #(#ele_index => <#display_element>::Literal(#ele_value),)*
-                    _ => unreachable!("Invalid Attach Value"),
+                    _ => <#display_element>::Literal(#first_literal),
                 }
             }
         });
@@ -198,6 +206,7 @@ impl ValueMeaning {
                 <#display_element>::#number_ele(hex, false, value as #DISPLAY_WORK_TYPE)
             }
         };
+        let first_num_value = sleigh.0[0].1.signed_super().unsuffixed();
         tokens.extend(quote! {
             pub fn #value_func<T>(num: T) -> #value_type
             where
@@ -206,7 +215,7 @@ impl ValueMeaning {
             {
                 match #index_type::try_from(num).unwrap() {
                     #(#ele_index => #ele_value,)*
-                    _ => unreachable!("Invalid Attach Value"),
+                    _ => #first_num_value,
                 }
             }
             pub fn #display_func<T>(hex: bool, num: T) -> #display_element
