@@ -1,155 +1,120 @@
 # rsleigh
 
-Pure Rust SLEIGH compiler. Parses Ghidra's `.slaspec` architecture definitions and generates Rust code that decodes instructions and emits P-code IR.
+Compiles Ghidra's SLEIGH architecture specs (`.slaspec`) into native Rust decoders that turn raw bytes into P-code IR. No JVM, no C++, just `cargo build`.
 
-Zero C++ dependencies, no JVM required.
+This is the disassembly/lifting backend for [Spectra](https://github.com/ShaneBreazeale/spectra) — it replaces the Ghidra JVM daemon with generated Rust code.
 
-## How it works
-
-```
-.slaspec file
-    |
-    v
-rsleigh (parser + codegen)
-    |
-    v
-Generated Rust crates (parallel compilation)
-    |
-    v
-parse_instruction(bytes) -> (length, display, Vec<PcodeOp>)
-```
-
-rsleigh reads the same `.slaspec` files that ship with Ghidra (Apache 2.0) and generates standalone Rust crates that can decode any instruction for that architecture. The generated code depends only on `pcode-ir`, a zero-dependency crate defining `PcodeOp` and `Varnode` types.
-
-## Supported architectures
-
-| Architecture | Constructors | Extensions | Generated | Build time |
-|---|---|---|---|---|
-| x86-64 | 5700+ | full | 33 MB | ~3.5 min |
-| AARCH64 | 3500+ | NEON + SVE | 34 MB | ~11 sec |
-| ARM32 (ARMv7) | 1200+ | Thumb | 9 MB | ~4.3 sec |
-| MIPS32 (BE) | 900+ | FPU + DSP + MIPS16 + microMIPS | 8 MB | ~3.2 sec |
-| RISC-V (RV64) | 500+ | F/D/B/K/P/Q/V/C | 5 MB | ~2.6 sec |
-
-## Workspace
-
-| Crate | Description |
-|-------|-------------|
-| `rsleigh` | SLEIGH parser and Rust code generator (merged from `sleigh-rs` + `sleigh2rust`) |
-| `pcode-ir` | P-code IR types + peephole optimizer — zero dependencies, `no_std` |
-| `rsleigh-generate` | Pre-build step: parses `.slaspec` files, writes generated crate source |
-| `generated/x86-*` | Generated x86-64 crates (shared, subtables, 8 instruction batches, root) |
-| `generated/aarch64-*` | Generated AARCH64 crates (shared, subtables, 4 instruction batches, root) |
-| `generated/riscv-*` | Generated RISC-V crates (shared, subtables, 2 instruction batches, root) |
-| `generated/mips-*` | Generated MIPS32 crates (shared, subtables, 2 instruction batches, root) |
-| `generated/arm32-*` | Generated ARM32 crates (shared, subtables, 2 instruction batches, root) |
-| `test-harness` | Golden P-code tests + at-scale corpus validation (301 instructions) |
-| `rsleigh-api` | Spectra integration API — unified `Decoder` across all architectures |
-
-## Status
-
-- [x] SLEIGH parser — x86-64, AARCH64 (NEON + SVE), ARM32 (Thumb), MIPS32 (MIPS16 + microMIPS), RISC-V (RV64)
-- [x] Instruction decoding — pattern matching and disassembly
-- [x] P-code emission — `lift()` generates `Vec<PcodeOp>` per instruction
-- [x] Export propagation — register, memory reference, and branch target exports
-- [x] Disassembly variable resolution (branch targets, relocations)
-- [x] Peephole optimizer — identity Subpiece, Copy forwarding, DCE, output sinking (matches/beats Ghidra)
-- [x] Lift-path allocation tuning — generated decoders pre-reserve P-code capacity from subtable caches and local op estimates
-- [x] Optimizer pass tuning — unique-varnode use analysis avoids repeated whole-slice scans in hot peephole passes
-- [x] Parallel crate compilation — instruction batches compile concurrently
-- [x] 301 validated instructions across 5 architectures (golden + capstone corpus)
-- [x] Ghidra comparison — matches or beats Ghidra 12.0.4 P-code op counts
-- [x] Spectra integration API — `Decoder::new(arch).decode(bytes, addr)` returns optimized P-code
-- [x] Panic-free generated code — all runtime decode paths use bounds-checked access, no `.unwrap()` on input
-- [x] CI — GitHub Actions runs `make test` on push/PR
-- [ ] Additional architectures (PowerPC, SPARC, etc.)
-
-## Guarantees
-
-- Generated decoders are standalone Rust crates with no JVM or native C++ runtime dependency.
-- The generated lifting surface is `parse_instruction(bytes, addr) -> Option<(length, display, Vec<PcodeOp>)>`.
-- Generated runtime code contains zero `.unwrap()` calls — truncated or invalid input returns `None` instead of panicking.
-- Validation currently focuses on decode length, mnemonic agreement, and structural P-code sanity across curated golden cases plus corpus samples in `test-harness`.
-- `pcode-ir` stays zero-dependency and `no_std`.
-
-## Current Limits
-
-- Validation is strong but not yet exhaustive semantic equivalence for every constructor on every bundled architecture.
-- The generator currently targets the bundled `slaspec` set and the crate graph layout in this workspace.
-- Some generated code paths are optimized for compile throughput and large-table splitting, so internal codegen structure is still evolving.
-- Public library APIs are usable, but the project is still closer to a compiler workspace than a polished end-user crate.
-
-### Example output (matches Ghidra)
-
-```
-x86-64:
-  MOV RDI,RAX     ->  Copy { RDI, RAX }                    (1 op, Ghidra: 1)
-  ADD RDI,RAX     ->  IntCarry; IntSCarry; IntAdd; flags... (9 ops, Ghidra: 9)
-  PUSH RAX        ->  IntSub { RSP, RSP, 8 }; Store { [RSP], RAX }  (2 ops, Ghidra: 3)
-  POP RAX         ->  Load { RAX, [RSP] }; IntAdd { RSP, RSP, 8 }   (2 ops, Ghidra: 4)
-  RET             ->  Load { RIP, [RSP] }; IntAdd { RSP }; Return   (3 ops, Ghidra: 3)
-  JZ 0x1007       ->  CBranch { Ram(0x1007), ZF }           (1 op)
-  CALL RAX        ->  IntSub { RSP }; Store { [RSP], inst_next }; CallInd { RAX }  (3 ops)
-
-aarch64:
-  ADD X0, X1, X2  ->  IntAdd { X0, X1, X2 }
-  RET             ->  Return { X30 }
-
-riscv64:
-  li ra,0x5     ->  Copy { ra, Const(5) }
-  add x3,x0,x12 -> IntAdd { x3, x0, x12 }
-```
-
-## Building
+## Quick start
 
 ```bash
-# Generate + build + test (recommended)
-make test
+make test   # generate all archs + build + run 301 tests
+```
 
-# Or manually:
-cargo run -p rsleigh-generate       # parse all slaspecs, generate code (~30s)
-cargo test -p test-harness           # parallel compile + test
+Or step by step:
 
-# Single architecture:
+```bash
+cargo run -p rsleigh-generate          # parse slaspecs, emit generated Rust (~30s)
+cargo test -p test-harness             # compile generated crates + run tests
+```
+
+You can also generate a single architecture:
+
+```bash
 cargo run -p rsleigh-generate -- x86-64
 cargo run -p rsleigh-generate -- aarch64
 cargo run -p rsleigh-generate -- riscv
+cargo run -p rsleigh-generate -- mips
+cargo run -p rsleigh-generate -- arm32
 ```
 
-The generator parses `.slaspec` files for all 5 architectures and writes generated Rust source across parallel-compilable crates.
-
-### Using the API
+## Using it
 
 ```rust
 use rsleigh_api::{Decoder, Architecture};
 
 let mut dec = Decoder::new(Architecture::X86_64);
 let inst = dec.decode(&[0x48, 0x89, 0xd8], 0x1000).unwrap();
-println!("{} ({} bytes, {} ops)", inst.disassembly, inst.len, inst.ops.len());
-// MOV RAX,RBX (3 bytes, 1 ops)
+
+println!("{}", inst.disassembly);  // "MOV RAX,RBX"
+println!("{} bytes", inst.len);    // 3
+for op in &inst.ops {
+    println!("  {:?}", op);        // Copy { out: RAX, input: RBX }
+}
 ```
 
-Requires Rust 1.70+.
+`Decoder` manages the SLEIGH context and global set internally. Create one per architecture, call `decode()` in a loop.
 
-## Validation
+## What it does
 
-```bash
-cargo test -p test-harness
+SLEIGH is Ghidra's language for describing CPU instruction sets. A `.slaspec` file defines how to match byte patterns, extract fields, and emit P-code (Ghidra's register-transfer IL). rsleigh parses these specs and generates Rust code that does the same thing Ghidra's Java decoder does:
+
+1. **Pattern match** — find which constructor matches the input bytes
+2. **Disassemble** — produce human-readable text (`MOV RAX,RBX`)
+3. **Lift** — emit P-code operations (`Copy { out: RAX, input: RBX }`)
+4. **Optimize** — peephole passes eliminate redundant copies, dead code, identity operations
+
+The output is `Vec<PcodeOp>` — the same IR Ghidra produces, ready for SSA construction, dataflow analysis, or decompilation.
+
+## Architectures
+
+| Arch | Constructors | Notes |
+|------|-------------|-------|
+| x86-64 | 5700+ | Full instruction set, 8 parallel compile batches |
+| AArch64 | 3500+ | NEON + SVE, 4 batches |
+| ARM32 | 1200+ | ARMv7 + Thumb |
+| MIPS32 | 900+ | Big-endian, FPU + DSP + MIPS16 + microMIPS |
+| RISC-V 64 | 500+ | RV64GC + F/D/B/K/P/Q/V/C extensions |
+
+Adding a new architecture is just adding its `.slaspec` to `slaspec/` and a few lines in the generator.
+
+## How it's structured
+
+```
+rsleigh/
+  src/                    # SLEIGH parser + Rust codegen library
+  pcode-ir/               # PcodeOp, Varnode types + peephole optimizer (no_std, zero deps)
+  rsleigh-api/            # High-level Decoder API (what you import)
+  rsleigh-generate/       # CLI that runs the parser and writes generated crates
+  generated/              # Output crates (gitignored /out/ dirs, regenerated from slaspecs)
+    x86-shared/           # Registers, context, token fields
+    x86-subtables/        # Subtable constructors
+    x86-instr-00..07/     # Instruction constructors (8 batches, compile in parallel)
+    x86-root/             # Top-level instruction enum + parse_instruction()
+  test-harness/           # Golden tests + corpus validation
+  slaspec/                # Ghidra .slaspec files (Apache 2.0)
 ```
 
-The harness runs golden instruction checks plus corpus validation across x86-64, AARCH64, ARM32, MIPS32, and RISC-V. It is the main source of confidence for regressions and codegen changes.
+The generated code splits large tables across multiple crates so `cargo` compiles them in parallel. x86-64 hits ~500% CPU on an M4.
 
-## Architecture
-
-Generated crate dependency graph (x86-64 shown; AARCH64 has 4 batches, RISC-V has 2):
+Crate dependency graph (x86 shown):
 
 ```
-pcode-ir  ->  x86-shared  ->  x86-subtables  ->  x86-instr-00 ─┐
-                                                  x86-instr-01 ─┤
-                                                  ...           ├─> x86-root -> test-harness
-                                                  x86-instr-07 ─┘
+pcode-ir -> x86-shared -> x86-subtables -> x86-instr-00 -+
+                                           x86-instr-01 -+
+                                           ...           +-> x86-root -> rsleigh-api
+                                           x86-instr-07 -+
 ```
+
+## P-code output
+
+After the peephole optimizer runs, the output matches or beats Ghidra's op counts:
+
+```
+MOV RAX,RBX   -> 1 op   (Copy)
+ADD RAX,RBX   -> 9 ops  (IntCarry, IntSCarry, IntAdd, flags)
+PUSH RAX      -> 2 ops  (IntSub RSP; Store)         -- Ghidra: 3
+RET           -> 3 ops  (Load RIP; IntAdd RSP; Return)
+MOV RAX,[RBP+8] -> 2 ops (IntAdd; Load)             -- Ghidra: 5
+```
+
+The optimizer eliminates identity subpieces, forwards single-use copies, removes dead writes to temporaries, and sinks unique outputs into their consumers.
+
+## Known limitations
+
+- **Context fields in P-code expressions** return 0. Not used by x86/ARM/RISC-V but would matter for some exotic archs.
+- **ExprNew / ExprCPool** are stubbed (JVM/WASM only).
+- Validation is 301 instructions across 5 archs — good coverage but not exhaustive.
 
 ## License
 
-Apache 2.0
+Apache 2.0. The bundled `.slaspec` files are from Ghidra (also Apache 2.0).
