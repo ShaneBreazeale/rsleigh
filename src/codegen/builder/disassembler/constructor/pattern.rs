@@ -86,11 +86,100 @@ pub fn root_pattern_function(
         })
         .collect();
 
+    // Generate post-match disassembly assertions (for variables that use inst_next)
+    let post_match_dis = {
+        let inst_next_local = format_ident!("inst_next_tmp");
+        let mut post_tokens = TokenStream::new();
+        // Compute inst_next = inst_start + pattern_len
+        post_tokens.extend(quote! {
+            let #inst_next_local = #inst_start + #pattern_len;
+        });
+        // Process post-match assertions that reference inst_next
+        for ass in constructor.pattern.disassembly_pos_match() {
+            use crate::disassembly::Assertation;
+            match ass {
+                Assertation::Assignment(assignment) => {
+                    fn gen_dis_expr(
+                        expr: &crate::disassembly::Expr,
+                        inst_start: &Ident,
+                        inst_next: &Ident,
+                        vars: &IndexMap<crate::disassembly::VariableId, Ident>,
+                        ass_fields: &IndexMap<crate::TokenFieldId, Ident>,
+                        disassembler: &Disassembler,
+                    ) -> TokenStream {
+                        use crate::disassembly::{Expr, ExprElement, ReadScope};
+                        match expr {
+                            Expr::Value(element) => match element {
+                                ExprElement::Value { value, .. } => match value {
+                                    ReadScope::Integer(v) => {
+                                        let v = v.signed_super();
+                                        quote! { #v }
+                                    }
+                                    ReadScope::InstStart(_) => {
+                                        quote! { i128::try_from(#inst_start).unwrap() }
+                                    }
+                                    ReadScope::InstNext(_) => {
+                                        quote! { i128::try_from(#inst_next).unwrap() }
+                                    }
+                                    ReadScope::TokenField(tf) => {
+                                        let tf_name = ass_fields.get(tf)
+                                            .cloned()
+                                            .unwrap_or_else(|| {
+                                                let ass = disassembler.sleigh.token_field(*tf);
+                                                format_ident!("{}", from_sleigh(ass.name()))
+                                            });
+                                        quote! { i128::try_from(#tf_name).unwrap() }
+                                    }
+                                    ReadScope::Context(_) => {
+                                        quote! { 0i128 } // TODO
+                                    }
+                                    ReadScope::Local(var_id) => {
+                                        let name = vars.get(var_id).unwrap();
+                                        quote! { #name }
+                                    }
+                                },
+                                ExprElement::Op(_, op, inner) => {
+                                    let x = gen_dis_expr(inner, inst_start, inst_next, vars, ass_fields, disassembler);
+                                    crate::codegen::builder::disassembly::op_unary(op, x)
+                                }
+                            },
+                            Expr::Op(_, op, left, right) => {
+                                let l = gen_dis_expr(left, inst_start, inst_next, vars, ass_fields, disassembler);
+                                let r = gen_dis_expr(right, inst_start, inst_next, vars, ass_fields, disassembler);
+                                crate::codegen::builder::disassembly::disassembly_op(l, op, r)
+                            }
+                        }
+                    }
+                    let value = gen_dis_expr(
+                        &assignment.right,
+                        &inst_start,
+                        &inst_next_local,
+                        &disassembly_vars,
+                        &constructor_struct.ass_fields,
+                        disassembler,
+                    );
+                    match &assignment.left {
+                        crate::disassembly::WriteScope::Local(var_id) => {
+                            let name = disassembly_vars.get(var_id).unwrap();
+                            post_tokens.extend(quote! { #name = #value; });
+                        }
+                        crate::disassembly::WriteScope::Context(_) => {
+                            // Context writes handled elsewhere
+                        }
+                    }
+                }
+                Assertation::GlobalSet(_) => {}
+            }
+        }
+        post_tokens
+    };
+
     //all tables produced are stored, always
     let table_fields = constructor_struct.table_fields.values();
     //only pass the token fields that need to be stored
     let token_fields = constructor_struct.ass_fields.values();
-    let fields = table_fields.chain(token_fields);
+    let dis_fields = constructor_struct.dis_fields.values();
+    let fields = table_fields.chain(token_fields).chain(dis_fields);
     quote! {
         pub fn #parse_fun(
             mut #tokens_current: &[u8],
@@ -107,6 +196,8 @@ pub fn root_pattern_function(
             //the current_token will be increseased by each block, so the
             //next block knows when to start parsing
             #blocks_parse
+            // Compute post-match disassembly variables (uses inst_next)
+            #post_match_dis
             //only on instruction table, otherwise this is on a function
             *context = #context_instance;
             Some((

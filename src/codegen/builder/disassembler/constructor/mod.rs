@@ -31,12 +31,9 @@ pub struct ConstructorStruct {
     pub parser_fun: Ident,
     pub table_fields: IndexMap<crate::TableId, Ident>,
     pub ass_fields: IndexMap<crate::TokenFieldId, Ident>,
-    //TODO instead of having calc fields, have a constructor phase 1/2, with
-    //the display/execution values in phase2 and values required by the
-    //disassembly in phase1
-    //Alternativally, having the having display call execute all the disassembly
-    //as this will never be in the disassembly_pre
-    //pub calc_fields: IndexMap<*const Variable, ParsedField<Rc<Variable>>>,
+    /// Disassembly variables (e.g. `reloc` in rel8) stored as struct fields
+    /// so they're available to both display_extend() and lift().
+    pub dis_fields: IndexMap<crate::disassembly::VariableId, Ident>,
 }
 impl ConstructorStruct {
     pub fn new(
@@ -137,6 +134,20 @@ impl ConstructorStruct {
             }
         }
 
+        // Collect disassembly variables as struct fields
+        let dis_fields: IndexMap<crate::disassembly::VariableId, Ident> = constructor
+            .pattern
+            .disassembly_vars()
+            .iter()
+            .enumerate()
+            .map(|(i, var)| {
+                (
+                    crate::disassembly::VariableId(i),
+                    format_ident!("calc_{}", from_sleigh(var.name())),
+                )
+            })
+            .collect();
+
         let struct_name =
             if let Some(mneumonic) = &constructor.display.mneumonic {
                 format_ident!(
@@ -157,6 +168,7 @@ impl ConstructorStruct {
             parser_fun: format_ident!("parse"),
             ass_fields,
             table_fields,
+            dis_fields,
             constructor_id,
             table_id,
         }
@@ -173,6 +185,7 @@ impl ConstructorStruct {
             table_id,
             table_fields: _,
             ass_fields: _,
+            dis_fields: _,
         } = self;
         let display_param = format_ident!("display");
         let context_param = format_ident!("context");
@@ -397,6 +410,7 @@ impl ConstructorStruct {
             struct_name,
             table_fields,
             ass_fields,
+            dis_fields,
             parser_fun,
             enum_name: _,
             display_fun: _,
@@ -434,12 +448,16 @@ impl ConstructorStruct {
         let lift_impl = self.gen_execution(disassembler);
         let parser_function =
             root_pattern_function(parser_fun, self, disassembler);
+        let dis_field_defs = dis_fields.values().map(|name| {
+            quote! { #name: i128 }
+        });
         tokens.extend(quote! {
             #[doc = #doc]
             #[derive(Clone, Debug)]
             pub struct #struct_name {
                 #(pub #ass_fields,)*
                 #(pub #table_fields,)*
+                #(pub #dis_field_defs,)*
             }
             impl #struct_name {
                 #display_impl

@@ -8,7 +8,7 @@ use crate::disassembly::{
 };
 use crate::Span;
 
-fn disassembly_op(x: impl ToTokens, op: &Op, y: impl ToTokens) -> TokenStream {
+pub fn disassembly_op(x: impl ToTokens, op: &Op, y: impl ToTokens) -> TokenStream {
     match (crate::codegen::DISASSEMBLY_ALLOW_OVERFLOW, op) {
         (true, Op::Add) => quote! {#x.wrapping_add(#y)},
         (true, Op::Sub) => quote! {#x.wrapping_sub(#y)},
@@ -32,7 +32,7 @@ fn disassembly_op(x: impl ToTokens, op: &Op, y: impl ToTokens) -> TokenStream {
         (_, Op::Xor) => quote! {(#x ^ #y)},
     }
 }
-fn op_unary(op: &OpUnary, x: impl ToTokens) -> TokenStream {
+pub fn op_unary(op: &OpUnary, x: impl ToTokens) -> TokenStream {
     match op {
         OpUnary::Negation => quote! {(!#x)},
         OpUnary::Negative => quote! {(-#x)},

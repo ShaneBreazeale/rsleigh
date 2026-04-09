@@ -567,7 +567,14 @@ impl<'a> ExecutionGenerator<'a> {
             }
             ExprValue::DisVar(dv) => {
                 let sz = Self::bytes_from_bits(dv.size.get()) as u32;
-                (quote! { pcode_ir::Varnode::constant(0, #sz) }, quote! {})
+                match self.constructor.dis_fields.get(&dv.id) {
+                    Some(name) => {
+                        (quote! { pcode_ir::Varnode::constant(self.#name as u64, #sz) }, quote! {})
+                    }
+                    None => {
+                        (quote! { pcode_ir::Varnode::constant(0, #sz) }, quote! {})
+                    }
+                }
             }
             ExprValue::Bitrange(br) => {
                 (self.varnode_expr(self.disassembler.sleigh.bitrange(br.id).varnode), quote! {})
