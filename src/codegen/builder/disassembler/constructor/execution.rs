@@ -193,16 +193,24 @@ impl<'a> ExecutionGenerator<'a> {
                 collect_table_refs(stmt, &mut referenced_tables);
             }
         }
-        // Emit implicit builds only for subtable fields NOT referenced in execution
-        let implicit_builds: TokenStream = self.constructor.table_fields.iter()
-            .filter(|(tid, _)| !referenced_tables.contains(tid))
+        // Pre-lift all subtable fields once and cache results.
+        // Referenced tables get their ops/exports cached; unreferenced ones just get ops.
+        let subtable_cache: TokenStream = self.constructor.table_fields.iter()
             .map(|(_, field)| {
+                let cache_ops = format_ident!("{}_ops", field);
+                let cache_exp = format_ident!("{}_exp", field);
+                let cache_ref = format_ident!("{}_ref", field);
                 quote! {
-                    {
-                        let (s_ops, _, _) = self.#field.lift(#inst_start, #inst_next);
-                        ops.extend(s_ops);
-                    }
+                    let (#cache_ops, #cache_exp, #cache_ref) = self.#field.lift(#inst_start, #inst_next);
                 }
+            })
+            .collect();
+
+        // Extend ops from all subtable caches
+        let subtable_ops_extend: TokenStream = self.constructor.table_fields.iter()
+            .map(|(_, field)| {
+                let cache_ops = format_ident!("{}_ops", field);
+                quote! { ops.extend(#cache_ops); }
             })
             .collect();
 
@@ -219,9 +227,11 @@ impl<'a> ExecutionGenerator<'a> {
                 let unique_base: u64 = (#inst_start as u64) << 16;
                 let mut export_varnode: Option<pcode_ir::Varnode> = None;
                 let mut export_ref: Option<(pcode_ir::AddressSpaceId, pcode_ir::Varnode, u32)> = None;
+                // Lift all subtables once and cache results
+                #subtable_cache
+                #subtable_ops_extend
                 #dis_recompute
                 #var_decls
-                #implicit_builds
                 #block_code
                 (ops, export_varnode, export_ref)
             }
@@ -423,17 +433,14 @@ impl<'a> ExecutionGenerator<'a> {
                 self.unique_counter.set(c + 1);
                 let dest_name = format_ident!("dest_export_{}", c);
                 let ref_name = format_ident!("dest_ref_{}", c);
-                // First, lift the subtable to get its export (the destination varnode)
+                // Use cached subtable export
                 match self.constructor.table_fields.get(table_id) {
                     Some(field) => {
-                        let is = self.inst_start;
-                        let in_ = self.inst_next;
+                        let cache_exp = format_ident!("{}_exp", field);
+                        let cache_ref = format_ident!("{}_ref", field);
                         tokens.extend(quote! {
-                            let (#dest_name, #ref_name) = {
-                                let (s_ops, s_exp, s_ref) = self.#field.lift(#is, #in_);
-                                ops.extend(s_ops);
-                                (s_exp, s_ref)
-                            };
+                            let #dest_name = #cache_exp;
+                            let #ref_name = #cache_ref;
                         });
                     }
                     None => {
@@ -532,20 +539,9 @@ impl<'a> ExecutionGenerator<'a> {
         }
     }
 
-    fn gen_build(&self, build: &Build) -> TokenStream {
-        match self.constructor.table_fields.get(&build.table) {
-            Some(field) => {
-                let is = self.inst_start;
-                let in_ = self.inst_next;
-                quote! {
-                    {
-                        let (s_ops, _, _) = self.#field.lift(#is, #in_);
-                        ops.extend(s_ops);
-                    }
-                }
-            }
-            None => quote! {},
-        }
+    fn gen_build(&self, _build: &Build) -> TokenStream {
+        // Build ops are already added via the subtable cache at the top of lift()
+        quote! {}
     }
 
     fn gen_user_call(&self, call: &UserCall, execution: &Execution) -> TokenStream {
@@ -606,15 +602,11 @@ impl<'a> ExecutionGenerator<'a> {
             Export::Table { table_id, .. } => {
                 match self.constructor.table_fields.get(table_id) {
                     Some(field) => {
-                        let is = self.inst_start;
-                        let in_ = self.inst_next;
+                        let cache_exp = format_ident!("{}_exp", field);
+                        let cache_ref = format_ident!("{}_ref", field);
                         quote! {
-                            {
-                                let (s_ops, s_exp, s_ref) = self.#field.lift(#is, #in_);
-                                ops.extend(s_ops);
-                                export_varnode = s_exp;
-                                export_ref = s_ref;
-                            }
+                            export_varnode = #cache_exp;
+                            export_ref = #cache_ref;
                         }
                     }
                     None => quote! {},
@@ -635,8 +627,8 @@ impl<'a> ExecutionGenerator<'a> {
         if let Expr::Value(ExprElement::Value { value: ExprValue::Table(table_id), .. }) = expr {
             let sz = self.addr_size();
             if let Some(field) = self.constructor.table_fields.get(table_id) {
-                let is = self.inst_start;
-                let in_ = self.inst_next;
+                let cache_exp = format_ident!("{}_exp", field);
+                let cache_ref = format_ident!("{}_ref", field);
                 let var_name = format_ident!("branch_dest_{}", {
                     let c = self.unique_counter.get();
                     self.unique_counter.set(c + 1);
@@ -645,15 +637,10 @@ impl<'a> ExecutionGenerator<'a> {
                 return (
                     quote! { #var_name },
                     quote! {
-                        let #var_name = {
-                            let (s_ops, s_exp, s_ref) = self.#field.lift(#is, #in_);
-                            ops.extend(s_ops);
-                            // For reference exports, use the address directly for branches
-                            if let Some((ref_space, ref_ptr, ref_size)) = s_ref {
-                                pcode_ir::Varnode { space: ref_space, offset: ref_ptr.offset, size: ref_size }
-                            } else {
-                                s_exp.unwrap_or(pcode_ir::Varnode::constant(0, #sz))
-                            }
+                        let #var_name = if let Some((ref_space, ref_ptr, ref_size)) = #cache_ref {
+                            pcode_ir::Varnode { space: ref_space, offset: ref_ptr.offset, size: ref_size }
+                        } else {
+                            #cache_exp.unwrap_or(pcode_ir::Varnode::constant(0, #sz))
                         };
                     },
                 );
@@ -769,9 +756,9 @@ impl<'a> ExecutionGenerator<'a> {
                 let sz = self.addr_size();
                 match self.constructor.table_fields.get(table_id) {
                     Some(field) => {
-                        let is = self.inst_start;
-                        let in_ = self.inst_next;
-                        let var_name = format_ident!("table_export_{}", {
+                        let cache_exp = format_ident!("{}_exp", field);
+                        let cache_ref = format_ident!("{}_ref", field);
+                        let var_name = format_ident!("table_val_{}", {
                             let c = self.unique_counter.get();
                             self.unique_counter.set(c + 1);
                             c
@@ -779,22 +766,17 @@ impl<'a> ExecutionGenerator<'a> {
                         (
                             quote! { #var_name },
                             quote! {
-                                let #var_name = {
-                                    let (s_ops, s_exp, s_ref) = self.#field.lift(#is, #in_);
-                                    ops.extend(s_ops);
-                                    if let Some((ref_space, ref_ptr, ref_size)) = s_ref {
-                                        // RAM reference export: Load the value
-                                        let loaded = pcode_ir::Varnode::unique(
-                                            unique_base + (ops.len() as u64 + 0x8000),
-                                            ref_size,
-                                        );
-                                        ops.push(pcode_ir::PcodeOp::Load {
-                                            out: loaded.clone(), space: ref_space, ptr: ref_ptr,
-                                        });
-                                        loaded
-                                    } else {
-                                        s_exp.unwrap_or(pcode_ir::Varnode::constant(0, #sz))
-                                    }
+                                let #var_name = if let Some((ref_space, ref_ptr, ref_size)) = #cache_ref {
+                                    let loaded = pcode_ir::Varnode::unique(
+                                        unique_base + (ops.len() as u64 + 0x8000),
+                                        ref_size,
+                                    );
+                                    ops.push(pcode_ir::PcodeOp::Load {
+                                        out: loaded.clone(), space: ref_space, ptr: ref_ptr,
+                                    });
+                                    loaded
+                                } else {
+                                    #cache_exp.unwrap_or(pcode_ir::Varnode::constant(0, #sz))
                                 };
                             },
                         )
