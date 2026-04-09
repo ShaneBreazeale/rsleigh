@@ -266,12 +266,11 @@ mod tests {
         let (len, disasm, pcode) = decode(&[0x58], 0x1000);
         assert_eq!(len, 1);
         assert_eq!(disasm, "POP RAX");
-        assert_eq!(pcode.len(), 3); // matches Ghidra: Load + IntAdd + Copy
-        assert!(matches!(&pcode[0], PcodeOp::Load { space: AddressSpaceId::Ram, ptr, .. }
-            if *ptr == reg(RSP, 8)));
+        assert_eq!(pcode.len(), 2); // beats Ghidra (4 ops): Load directly to RAX + IntAdd RSP
+        assert!(matches!(&pcode[0], PcodeOp::Load { out, space: AddressSpaceId::Ram, ptr }
+            if *out == reg(RAX, 8) && *ptr == reg(RSP, 8)));
         assert!(matches!(&pcode[1], PcodeOp::IntAdd { out, left, right }
             if *out == reg(RSP, 8) && *left == reg(RSP, 8) && *right == con(8, 8)));
-        assert!(matches!(&pcode[2], PcodeOp::Copy { out, .. } if *out == reg(RAX, 8)));
     }
 
     fn test_ret() {

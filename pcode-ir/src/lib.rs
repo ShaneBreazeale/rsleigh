@@ -61,6 +61,15 @@ impl Varnode {
 /// - Forward-substitute `Copy` chains (A=B, C=A → C=B) when the
 ///   intermediate is a unique varnode used only once after its definition
 pub fn optimize(ops: &mut Vec<PcodeOp>) {
+    // Run passes until fixpoint (later passes create opportunities for earlier ones)
+    for _round in 0..4 {
+        let before = ops.len();
+        optimize_once(ops);
+        if ops.len() == before { break; }
+    }
+}
+
+fn optimize_once(ops: &mut Vec<PcodeOp>) {
     // Pass 1: eliminate identity Subpiece
     for op in ops.iter_mut() {
         if let PcodeOp::Subpiece { out, input, lsb: 0 } = op {
@@ -163,39 +172,46 @@ pub fn optimize(ops: &mut Vec<PcodeOp>) {
     }
 
     // Pass 4: sink unique outputs into subsequent Copy destinations
-    // If ops[i] writes to Unique(X) and ops[i+1] is Copy { out: dest, input: Unique(X) },
-    // and Unique(X) is used only by that Copy, rewrite ops[i] to output directly to dest.
-    // P-code semantics: inputs read before output written, so this is safe even when
-    // dest is also an input (e.g. ADD RDI, RAX where RDI is both input and output).
+    // If ops[i] writes to Unique(X) and some later ops[j] is Copy { out: dest, input: Unique(X) },
+    // and Unique(X) is read exactly once (by that Copy), and dest is not written or read between
+    // i and j, rewrite ops[i] to output directly to dest and remove the Copy.
     let mut i = 0;
-    while i + 1 < ops.len() {
+    while i < ops.len() {
         let should_sink = if let Some(out) = get_output(&ops[i]) {
             if out.space == AddressSpaceId::Unique {
-                // Check if next op is Copy from this unique
-                if let PcodeOp::Copy { out: copy_dest, input: copy_src } = &ops[i + 1] {
-                    if *copy_src == out {
-                        // Verify unique is only read by this one Copy
-                        let total_reads: usize = ops[i+1..].iter()
-                            .map(|op| count_reads(op, &out))
-                            .sum();
-                        if total_reads == 1 {
-                            Some(*copy_dest)
-                        } else {
-                            None
+                // Count total reads of this unique after definition
+                let total_reads: usize = ops[i+1..].iter()
+                    .map(|op| count_reads(op, &out))
+                    .sum();
+                if total_reads == 1 {
+                    // Find the single Copy that reads it
+                    let mut copy_idx = None;
+                    let mut dest = None;
+                    for j in (i+1)..ops.len() {
+                        if let PcodeOp::Copy { out: copy_dest, input: copy_src } = &ops[j] {
+                            if *copy_src == out {
+                                copy_idx = Some(j);
+                                dest = Some(*copy_dest);
+                                break;
+                            }
                         }
+                    }
+                    // Verify dest is not read or written between i and j
+                    if let (Some(j), Some(d)) = (copy_idx, dest) {
+                        let safe = (i+1..j).all(|k| {
+                            count_reads(&ops[k], &d) == 0 && !writes_to(&ops[k], &d)
+                        });
+                        if safe { Some((j, d)) } else { None }
                     } else { None }
                 } else { None }
             } else { None }
         } else { None };
 
-        if let Some(new_dest) = should_sink {
-            // Rewrite the op's output to the Copy's destination
+        if let Some((copy_idx, new_dest)) = should_sink {
             if let Some(out) = get_output_mut(&mut ops[i]) {
                 *out = new_dest;
             }
-            // Remove the now-redundant Copy
-            ops.remove(i + 1);
-            // Don't increment — check the same position again
+            ops.remove(copy_idx);
             continue;
         }
         i += 1;
