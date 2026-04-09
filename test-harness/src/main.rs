@@ -1,6 +1,7 @@
 use pcode_ir::{AddressSpaceId, PcodeOp, Varnode};
 
 mod corpus;
+mod ghidra;
 
 mod x86 {
     use super::*;
@@ -315,6 +316,8 @@ mod tests {
         test_riscv_addi();
         test_riscv_add();
         test_riscv_jalr();
+        test_x86_64_vs_ghidra_fixture();
+        test_aarch64_vs_ghidra_fixture();
         eprintln!("  23 golden tests passed");
         // Scale validation
         test_x86_64_corpus();
@@ -645,6 +648,89 @@ mod tests {
             disasm.to_lowercase().contains("jalr") || disasm.to_lowercase().contains("ret"),
             "expected jalr/ret, got {disasm}"
         );
+    }
+
+    fn test_x86_64_vs_ghidra_fixture() {
+        let fixture = ghidra::x86_fixture().expect("failed to parse x86 Ghidra fixture");
+
+        for case in fixture {
+            let (len, disasm, pcode) = decode(&case.bytes, 0);
+            assert_eq!(
+                len, case.length,
+                "length mismatch vs Ghidra for {} bytes {:02x?}",
+                case.name, case.bytes
+            );
+            assert_eq!(
+                disasm, case.name,
+                "disassembly mismatch vs Ghidra for bytes {:02x?}",
+                case.bytes
+            );
+
+            let expected = ghidra::canonicalize_pcode(&ghidra::optimize_fixture_pcode(
+                case.pcode.as_ref().expect("x86 fixture missing pcode"),
+            ));
+            let actual = ghidra::canonicalize_pcode(&pcode);
+
+            assert_eq!(
+                actual, expected,
+                "P-code mismatch vs Ghidra for {} bytes {:02x?}\nexpected:\n{}\nactual:\n{}\nraw expected:\n{:#?}\nraw actual:\n{:#?}",
+                case.name,
+                case.bytes,
+                expected.join("\n"),
+                actual.join("\n"),
+                case.pcode,
+                pcode,
+            );
+        }
+    }
+
+    fn test_aarch64_vs_ghidra_fixture() {
+        let fixture = ghidra::aarch64_fixture().expect("failed to parse aarch64 Ghidra fixture");
+
+        for case in fixture {
+            let (len, disasm, pcode) = arm::decode(&case.bytes, 0);
+            assert_eq!(
+                len, case.length,
+                "length mismatch vs Ghidra for {} bytes {:02x?}",
+                case.name, case.bytes
+            );
+
+            let disasm_lower = disasm.to_lowercase();
+            let expected_mnemonic = case
+                .name
+                .split_whitespace()
+                .next()
+                .expect("fixture name missing mnemonic");
+            assert!(
+                disasm_lower.starts_with(expected_mnemonic),
+                "mnemonic mismatch vs Ghidra for bytes {:02x?}: expected '{}', got '{}'",
+                case.bytes,
+                expected_mnemonic,
+                disasm,
+            );
+
+            if let Some(expected_ops) = case.pcode_count {
+                assert!(
+                    pcode.len() <= expected_ops,
+                    "P-code op count exceeds Ghidra for {} bytes {:02x?}: got {}, expected at most {}",
+                    case.name,
+                    case.bytes,
+                    pcode.len(),
+                    expected_ops,
+                );
+            }
+
+            if let Some(expected_pcode) = case.pcode.as_ref() {
+                let expected =
+                    ghidra::canonicalize_pcode(&ghidra::optimize_fixture_pcode(expected_pcode));
+                let actual = ghidra::canonicalize_pcode(&pcode);
+                assert_eq!(
+                    actual, expected,
+                    "P-code mismatch vs Ghidra for {} bytes {:02x?}",
+                    case.name, case.bytes,
+                );
+            }
+        }
     }
 
     // ── Scale validation ─────────────────────────────────────────────

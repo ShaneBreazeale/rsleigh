@@ -272,6 +272,36 @@ fn optimize_once(ops: &mut Vec<PcodeOp>) {
         i += 1;
     }
 
+    // Pass 2b: remove writes to Unique varnodes that are overwritten before any read.
+    let mut i = 0;
+    while i < ops.len() {
+        let target = match get_output(&ops[i]) {
+            Some(out) if out.space == AddressSpaceId::Unique => out,
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+
+        let mut overwritten = false;
+        for op in ops.iter().skip(i + 1) {
+            if count_reads(op, &target) > 0 {
+                break;
+            }
+            if writes_to(op, &target) {
+                overwritten = true;
+                break;
+            }
+        }
+
+        if overwritten {
+            ops.remove(i);
+            continue;
+        }
+
+        i += 1;
+    }
+
     // Pass 3: dead code elimination
     // Remove ops that write to a Unique varnode that is never read afterwards.
     let mut i = 0;
@@ -375,8 +405,11 @@ fn optimize_once(ops: &mut Vec<PcodeOp>) {
                     }
                     // Verify dest is not read or written between i and j
                     if let (Some(j), Some(d)) = (copy_idx, dest) {
-                        let safe = (i + 1..j)
-                            .all(|k| count_reads(&ops[k], &d) == 0 && !writes_to(&ops[k], &d));
+                        let safe = (i + 1..j).all(|k| {
+                            !writes_to(&ops[k], &out)
+                                && count_reads(&ops[k], &d) == 0
+                                && !writes_to(&ops[k], &d)
+                        });
                         if safe {
                             Some((j, d))
                         } else {

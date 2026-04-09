@@ -1,0 +1,651 @@
+{
+  "fixture_version": 1,
+  "architecture": "aarch64",
+  "cases": [
+    {
+      "name": "add x0,x0,x1",
+      "pcode": [
+        {
+          "op": "COPY",
+          "output": {
+            "space": "unique",
+            "offset": 147200,
+            "size": 8
+          },
+          "inputs": [
+            {
+              "space": "register",
+              "offset": 16392,
+              "size": 8
+            }
+          ]
+        },
+        {
+          "op": "INT_CARRY",
+          "output": {
+            "space": "register",
+            "offset": 261,
+            "size": 1
+          },
+          "inputs": [
+            {
+              "space": "register",
+              "offset": 16384,
+              "size": 8
+            },
+            {
+              "space": "unique",
+              "offset": 147200,
+              "size": 8
+            }
+          ]
+        },
+        {
+          "op": "INT_SCARRY",
+          "output": {
+            "space": "register",
+            "offset": 262,
+            "size": 1
+          },
+          "inputs": [
+            {
+              "space": "register",
+              "offset": 16384,
+              "size": 8
+            },
+            {
+              "space": "unique",
+              "offset": 147200,
+              "size": 8
+            }
+          ]
+        },
+        {
+          "op": "INT_ADD",
+          "output": {
+            "space": "unique",
+            "offset": 147712,
+            "size": 8
+          },
+          "inputs": [
+            {
+              "space": "register",
+              "offset": 16384,
+              "size": 8
+            },
+            {
+              "space": "unique",
+              "offset": 147200,
+              "size": 8
+            }
+          ]
+        },
+        {
+          "op": "INT_SLESS",
+          "output": {
+            "space": "register",
+            "offset": 263,
+            "size": 1
+          },
+          "inputs": [
+            {
+              "space": "unique",
+              "offset": 147712,
+              "size": 8
+            },
+            {
+              "space": "const",
+              "offset": 0,
+              "size": 8
+            }
+          ]
+        },
+        {
+          "op": "INT_EQUAL",
+          "output": {
+            "space": "register",
+            "offset": 264,
+            "size": 1
+          },
+          "inputs": [
+            {
+              "space": "unique",
+              "offset": 147712,
+              "size": 8
+            },
+            {
+              "space": "const",
+              "offset": 0,
+              "size": 8
+            }
+          ]
+        },
+        {
+          "op": "COPY",
+          "output": {
+            "space": "register",
+            "offset": 16384,
+            "size": 8
+          },
+          "inputs": [
+            {
+              "space": "unique",
+              "offset": 147712,
+              "size": 8
+            }
+          ]
+        }
+      ],
+      "bytes": [
+        0,
+        0,
+        1,
+        139
+      ],
+      "length": 4,
+      "pcode_count": 7
+    },
+    {
+      "name": "sub x0,x0,x1",
+      "pcode": [
+        {
+          "op": "INT_SUB",
+          "output": {
+            "space": "register",
+            "offset": 16384,
+            "size": 8
+          },
+          "inputs": [
+            {
+              "space": "register",
+              "offset": 16384,
+              "size": 8
+            },
+            {
+              "space": "register",
+              "offset": 16392,
+              "size": 8
+            }
+          ]
+        }
+      ],
+      "bytes": [
+        0,
+        0,
+        1,
+        203
+      ],
+      "length": 4,
+      "pcode_count": 1
+    },
+    {
+      "name": "mov x0,x1",
+      "pcode": [
+        {
+          "op": "COPY",
+          "output": {
+            "space": "register",
+            "offset": 16384,
+            "size": 8
+          },
+          "inputs": [
+            {
+              "space": "register",
+              "offset": 16392,
+              "size": 8
+            }
+          ]
+        }
+      ],
+      "bytes": [
+        224,
+        3,
+        1,
+        170
+      ],
+      "length": 4,
+      "pcode_count": 1
+    },
+    {
+      "name": "and x0,x0,x1",
+      "pcode": [
+        {
+          "op": "INT_AND",
+          "output": {
+            "space": "register",
+            "offset": 16384,
+            "size": 8
+          },
+          "inputs": [
+            {
+              "space": "register",
+              "offset": 16384,
+              "size": 8
+            },
+            {
+              "space": "register",
+              "offset": 16392,
+              "size": 8
+            }
+          ]
+        }
+      ],
+      "bytes": [
+        0,
+        0,
+        1,
+        138
+      ],
+      "length": 4,
+      "pcode_count": 1
+    },
+    {
+      "name": "orr x0,x0,x1",
+      "pcode": [
+        {
+          "op": "INT_OR",
+          "output": {
+            "space": "register",
+            "offset": 16384,
+            "size": 8
+          },
+          "inputs": [
+            {
+              "space": "register",
+              "offset": 16384,
+              "size": 8
+            },
+            {
+              "space": "register",
+              "offset": 16392,
+              "size": 8
+            }
+          ]
+        }
+      ],
+      "bytes": [
+        0,
+        0,
+        1,
+        170
+      ],
+      "length": 4,
+      "pcode_count": 1
+    },
+    {
+      "name": "eor x0,x0,x1",
+      "pcode": [
+        {
+          "op": "INT_XOR",
+          "output": {
+            "space": "register",
+            "offset": 16384,
+            "size": 8
+          },
+          "inputs": [
+            {
+              "space": "register",
+              "offset": 16384,
+              "size": 8
+            },
+            {
+              "space": "register",
+              "offset": 16392,
+              "size": 8
+            }
+          ]
+        }
+      ],
+      "bytes": [
+        0,
+        0,
+        1,
+        202
+      ],
+      "length": 4,
+      "pcode_count": 1
+    },
+    {
+      "name": "cmp x0,x1",
+      "pcode": [
+        {
+          "op": "INT_LESSEQUAL",
+          "output": {
+            "space": "register",
+            "offset": 261,
+            "size": 1
+          },
+          "inputs": [
+            {
+              "space": "register",
+              "offset": 16392,
+              "size": 8
+            },
+            {
+              "space": "register",
+              "offset": 16384,
+              "size": 8
+            }
+          ]
+        },
+        {
+          "op": "INT_SBORROW",
+          "output": {
+            "space": "register",
+            "offset": 262,
+            "size": 1
+          },
+          "inputs": [
+            {
+              "space": "register",
+              "offset": 16384,
+              "size": 8
+            },
+            {
+              "space": "register",
+              "offset": 16392,
+              "size": 8
+            }
+          ]
+        },
+        {
+          "op": "INT_SUB",
+          "output": {
+            "space": "unique",
+            "offset": 235776,
+            "size": 8
+          },
+          "inputs": [
+            {
+              "space": "register",
+              "offset": 16384,
+              "size": 8
+            },
+            {
+              "space": "register",
+              "offset": 16392,
+              "size": 8
+            }
+          ]
+        },
+        {
+          "op": "INT_SLESS",
+          "output": {
+            "space": "register",
+            "offset": 263,
+            "size": 1
+          },
+          "inputs": [
+            {
+              "space": "unique",
+              "offset": 235776,
+              "size": 8
+            },
+            {
+              "space": "const",
+              "offset": 0,
+              "size": 8
+            }
+          ]
+        },
+        {
+          "op": "INT_EQUAL",
+          "output": {
+            "space": "register",
+            "offset": 264,
+            "size": 1
+          },
+          "inputs": [
+            {
+              "space": "unique",
+              "offset": 235776,
+              "size": 8
+            },
+            {
+              "space": "const",
+              "offset": 0,
+              "size": 8
+            }
+          ]
+        },
+        {
+          "op": "COPY",
+          "output": {
+            "space": "register",
+            "offset": 256,
+            "size": 1
+          },
+          "inputs": [
+            {
+              "space": "register",
+              "offset": 263,
+              "size": 1
+            }
+          ]
+        },
+        {
+          "op": "COPY",
+          "output": {
+            "space": "register",
+            "offset": 257,
+            "size": 1
+          },
+          "inputs": [
+            {
+              "space": "register",
+              "offset": 264,
+              "size": 1
+            }
+          ]
+        },
+        {
+          "op": "COPY",
+          "output": {
+            "space": "register",
+            "offset": 258,
+            "size": 1
+          },
+          "inputs": [
+            {
+              "space": "register",
+              "offset": 261,
+              "size": 1
+            }
+          ]
+        },
+        {
+          "op": "COPY",
+          "output": {
+            "space": "register",
+            "offset": 259,
+            "size": 1
+          },
+          "inputs": [
+            {
+              "space": "register",
+              "offset": 262,
+              "size": 1
+            }
+          ]
+        }
+      ],
+      "bytes": [
+        31,
+        0,
+        1,
+        235
+      ],
+      "length": 4,
+      "pcode_count": 9
+    },
+    {
+      "name": "mul x0,x0,x1",
+      "pcode": [
+        {
+          "op": "INT_MULT",
+          "output": {
+            "space": "register",
+            "offset": 16384,
+            "size": 8
+          },
+          "inputs": [
+            {
+              "space": "register",
+              "offset": 16384,
+              "size": 8
+            },
+            {
+              "space": "register",
+              "offset": 16392,
+              "size": 8
+            }
+          ]
+        }
+      ],
+      "bytes": [
+        0,
+        124,
+        1,
+        155
+      ],
+      "length": 4,
+      "pcode_count": 1
+    },
+    {
+      "name": "ldr x0,[x0]",
+      "pcode": [
+        {
+          "op": "COPY",
+          "output": {
+            "space": "unique",
+            "offset": 51200,
+            "size": 8
+          },
+          "inputs": [
+            {
+              "space": "register",
+              "offset": 16384,
+              "size": 8
+            }
+          ]
+        },
+        {
+          "op": "LOAD",
+          "output": {
+            "space": "register",
+            "offset": 16384,
+            "size": 8
+          },
+          "inputs": [
+            {
+              "space": "const",
+              "offset": 433,
+              "size": 8
+            },
+            {
+              "space": "unique",
+              "offset": 51200,
+              "size": 8
+            }
+          ]
+        }
+      ],
+      "bytes": [
+        0,
+        0,
+        64,
+        249
+      ],
+      "length": 4,
+      "pcode_count": 2
+    },
+    {
+      "name": "str x0,[x0]",
+      "pcode": [
+        {
+          "op": "COPY",
+          "output": {
+            "space": "unique",
+            "offset": 51200,
+            "size": 8
+          },
+          "inputs": [
+            {
+              "space": "register",
+              "offset": 16384,
+              "size": 8
+            }
+          ]
+        },
+        {
+          "op": "STORE",
+          "output": null,
+          "inputs": [
+            {
+              "space": "const",
+              "offset": 433,
+              "size": 8
+            },
+            {
+              "space": "unique",
+              "offset": 51200,
+              "size": 8
+            },
+            {
+              "space": "register",
+              "offset": 16384,
+              "size": 8
+            }
+          ]
+        }
+      ],
+      "bytes": [
+        0,
+        0,
+        0,
+        249
+      ],
+      "length": 4,
+      "pcode_count": 2
+    },
+    {
+      "name": "ret",
+      "pcode": [
+        {
+          "op": "COPY",
+          "output": {
+            "space": "register",
+            "offset": 0,
+            "size": 8
+          },
+          "inputs": [
+            {
+              "space": "register",
+              "offset": 16624,
+              "size": 8
+            }
+          ]
+        },
+        {
+          "op": "RETURN",
+          "output": null,
+          "inputs": [
+            {
+              "space": "register",
+              "offset": 0,
+              "size": 8
+            }
+          ]
+        }
+      ],
+      "bytes": [
+        192,
+        3,
+        95,
+        214
+      ],
+      "length": 4,
+      "pcode_count": 2
+    }
+  ]
+}
