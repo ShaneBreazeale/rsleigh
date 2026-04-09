@@ -1,16 +1,4 @@
-#[allow(
-    non_camel_case_types,
-    non_snake_case,
-    unused_variables,
-    unused_mut,
-    unused_parens,
-    clippy::all
-)]
-mod x86_64 {
-    include!(concat!(env!("OUT_DIR"), "/x86_64/root.rs"));
-}
-
-use x86_64::*;
+use x86_root::*;
 use pcode_ir::{PcodeOp, Varnode, AddressSpaceId};
 
 fn context_x86_64() -> ContextMemory {

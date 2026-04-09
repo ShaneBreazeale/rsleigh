@@ -4,7 +4,22 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace]
-members = ["pcode-ir", "test-harness"]
+members = [
+    "pcode-ir",
+    "test-harness",
+    "rsleigh-generate",
+    "generated/x86-shared",
+    "generated/x86-subtables",
+    "generated/x86-instr-00",
+    "generated/x86-instr-01",
+    "generated/x86-instr-02",
+    "generated/x86-instr-03",
+    "generated/x86-instr-04",
+    "generated/x86-instr-05",
+    "generated/x86-instr-06",
+    "generated/x86-instr-07",
+    "generated/x86-root",
+]
 resolver = "2"
 
 [dependencies]

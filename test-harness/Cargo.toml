@@ -5,6 +5,4 @@ edition = "2021"
 
 [dependencies]
 pcode-ir = { path = "../pcode-ir" }
-
-[build-dependencies]
-rsleigh = { path = ".." }
+x86-root = { path = "../generated/x86-root" }

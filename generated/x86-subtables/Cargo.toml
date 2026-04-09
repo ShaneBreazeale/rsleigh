@@ -1,0 +1,8 @@
+[package]
+name = "x86-subtables"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pcode-ir = { path = "../../pcode-ir" }
+x86-shared = { path = "../x86-shared" }

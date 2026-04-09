@@ -4,3 +4,4 @@ main
 sweep.timestamp
 test_include
 test_modules
+generated/*/out/

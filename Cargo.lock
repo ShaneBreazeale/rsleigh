@@ -125,6 +125,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsleigh-generate"
+version = "0.1.0"
+dependencies = [
+ "rsleigh",
+]
+
+[[package]]
 name = "syn"
 version = "2.0.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -146,7 +153,7 @@ name = "test-harness"
 version = "0.1.0"
 dependencies = [
  "pcode-ir",
- "rsleigh",
+ "x86-root",
 ]
 
 [[package]]
@@ -213,4 +220,108 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05f360fc0b24296329c78fda852a1e9ae82de9cf7b27dae4b7f62f118f77b9ed"
 dependencies = [
  "tap",
+]
+
+[[package]]
+name = "x86-instr-00"
+version = "0.1.0"
+dependencies = [
+ "pcode-ir",
+ "x86-shared",
+ "x86-subtables",
+]
+
+[[package]]
+name = "x86-instr-01"
+version = "0.1.0"
+dependencies = [
+ "pcode-ir",
+ "x86-shared",
+ "x86-subtables",
+]
+
+[[package]]
+name = "x86-instr-02"
+version = "0.1.0"
+dependencies = [
+ "pcode-ir",
+ "x86-shared",
+ "x86-subtables",
+]
+
+[[package]]
+name = "x86-instr-03"
+version = "0.1.0"
+dependencies = [
+ "pcode-ir",
+ "x86-shared",
+ "x86-subtables",
+]
+
+[[package]]
+name = "x86-instr-04"
+version = "0.1.0"
+dependencies = [
+ "pcode-ir",
+ "x86-shared",
+ "x86-subtables",
+]
+
+[[package]]
+name = "x86-instr-05"
+version = "0.1.0"
+dependencies = [
+ "pcode-ir",
+ "x86-shared",
+ "x86-subtables",
+]
+
+[[package]]
+name = "x86-instr-06"
+version = "0.1.0"
+dependencies = [
+ "pcode-ir",
+ "x86-shared",
+ "x86-subtables",
+]
+
+[[package]]
+name = "x86-instr-07"
+version = "0.1.0"
+dependencies = [
+ "pcode-ir",
+ "x86-shared",
+ "x86-subtables",
+]
+
+[[package]]
+name = "x86-root"
+version = "0.1.0"
+dependencies = [
+ "pcode-ir",
+ "x86-instr-00",
+ "x86-instr-01",
+ "x86-instr-02",
+ "x86-instr-03",
+ "x86-instr-04",
+ "x86-instr-05",
+ "x86-instr-06",
+ "x86-instr-07",
+ "x86-shared",
+ "x86-subtables",
+]
+
+[[package]]
+name = "x86-shared"
+version = "0.1.0"
+dependencies = [
+ "pcode-ir",
+]
+
+[[package]]
+name = "x86-subtables"
+version = "0.1.0"
+dependencies = [
+ "pcode-ir",
+ "x86-shared",
 ]

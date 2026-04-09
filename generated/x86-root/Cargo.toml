@@ -1,0 +1,17 @@
+[package]
+name = "x86-root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pcode-ir = { path = "../../pcode-ir" }
+x86-shared = { path = "../x86-shared" }
+x86-subtables = { path = "../x86-subtables" }
+x86-instr-00 = { path = "../x86-instr-00" }
+x86-instr-01 = { path = "../x86-instr-01" }
+x86-instr-02 = { path = "../x86-instr-02" }
+x86-instr-03 = { path = "../x86-instr-03" }
+x86-instr-04 = { path = "../x86-instr-04" }
+x86-instr-05 = { path = "../x86-instr-05" }
+x86-instr-06 = { path = "../x86-instr-06" }
+x86-instr-07 = { path = "../x86-instr-07" }
