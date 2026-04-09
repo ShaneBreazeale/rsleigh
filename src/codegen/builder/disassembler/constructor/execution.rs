@@ -76,6 +76,69 @@ impl<'a> ExecutionGenerator<'a> {
         self.disassembler.sleigh.addr_bytes().get() as u32
     }
 
+    /// Generate a runtime expression for a DynamicValueType (token field or context value).
+    fn dynamic_value_expr(&self, dv: &crate::execution::DynamicValueType) -> TokenStream {
+        match dv {
+            crate::execution::DynamicValueType::TokenField(tf_id) => {
+                match self.constructor.ass_fields.get(tf_id) {
+                    Some(n) => quote! { self.#n as u64 },
+                    None => quote! { 0u64 },
+                }
+            }
+            crate::execution::DynamicValueType::Context(ctx_id) => {
+                let read_fn = &self.disassembler.context.context_functions(*ctx_id).read;
+                // Context is read via self on the ContextMemory but we don't have it in lift.
+                // Context values are fixed at decode time, so we'd need to store them.
+                // For now, generate a zero — context-dependent register selection is rare.
+                quote! { 0u64 }
+            }
+        }
+    }
+
+    /// Generate a varnode expression for a dynamically-selected register (AttachVarnode lookup).
+    fn dynamic_varnode_expr(
+        &self,
+        attach_id: crate::AttachVarnodeId,
+        value_expr: &TokenStream,
+    ) -> TokenStream {
+        let attach = self.disassembler.sleigh.attach_varnode(attach_id);
+        let varnode_size = attach.0.first()
+            .map(|(_, vid)| self.disassembler.sleigh.varnode(*vid).len_bytes.get() as u32)
+            .unwrap_or(8);
+        let arms: Vec<_> = attach.0.iter().map(|(idx, vid)| {
+            let v = self.disassembler.sleigh.varnode(*vid);
+            let offset = v.address;
+            let index = *idx as u64;
+            quote! { #index => #offset }
+        }).collect();
+        let size = varnode_size;
+        quote! {{
+            let reg_val = #value_expr;
+            let offset = match reg_val { #(#arms,)* _ => 0 };
+            pcode_ir::Varnode::register(offset, #size)
+        }}
+    }
+
+    /// Generate a constant expression for a dynamically-selected integer (AttachNumber lookup).
+    fn dynamic_int_expr(
+        &self,
+        attach_id: crate::AttachNumberId,
+        value_expr: &TokenStream,
+        size: u32,
+    ) -> TokenStream {
+        let attach = self.disassembler.sleigh.attach_number(attach_id);
+        let arms: Vec<_> = attach.0.iter().map(|(idx, val)| {
+            let index = *idx as u64;
+            let v = val.signed_super() as u64;
+            quote! { #index => #v }
+        }).collect();
+        quote! {{
+            let num_val = #value_expr;
+            let value = match num_val { #(#arms,)* _ => 0u64 };
+            pcode_ir::Varnode::constant(value, #size)
+        }}
+    }
+
     // ── Top-level ────────────────────────────────────────────────────
 
     pub fn gen_lift(&self, execution: &Execution) -> TokenStream {
@@ -406,8 +469,9 @@ impl<'a> ExecutionGenerator<'a> {
                 let br = self.disassembler.sleigh.bitrange(*id);
                 self.varnode_expr(br.varnode)
             }
-            AssignmentWriteVariable::DynVarnode { .. } => {
-                quote! { pcode_ir::Varnode::unique(0, 8) }
+            AssignmentWriteVariable::DynVarnode { value_id, attach_id } => {
+                let value_expr = self.dynamic_value_expr(value_id);
+                self.dynamic_varnode_expr(*attach_id, &value_expr)
             }
         }
     }
@@ -557,41 +621,9 @@ impl<'a> ExecutionGenerator<'a> {
                 }
             }
             Export::AttachVarnode { attach_value, attach_id, .. } => {
-                // Look up the token field/context value and map to a register varnode
-                let attach = self.disassembler.sleigh.attach_varnode(*attach_id);
-                let varnode_size = attach.0.first()
-                    .map(|(_, vid)| self.disassembler.sleigh.varnode(*vid).len_bytes.get() as u32)
-                    .unwrap_or(8);
-                let value_expr = match attach_value {
-                    crate::execution::DynamicValueType::TokenField(tf_id) => {
-                        match self.constructor.ass_fields.get(tf_id) {
-                            Some(n) => quote! { self.#n as u64 },
-                            None => quote! { 0u64 },
-                        }
-                    }
-                    crate::execution::DynamicValueType::Context(ctx_id) => {
-                        let _read_fn = &self.disassembler.context.context_functions(*ctx_id).read;
-                        quote! { 0u64 } // TODO: context read
-                    }
-                };
-                // Build a match on the value to find the register offset
-                let arms: Vec<_> = attach.0.iter().map(|(idx, vid)| {
-                    let v = self.disassembler.sleigh.varnode(*vid);
-                    let offset = v.address;
-                    let index = *idx as u64;
-                    quote! { #index => #offset }
-                }).collect();
-                let size = varnode_size;
-                quote! {
-                    export_varnode = Some({
-                        let reg_val = #value_expr;
-                        let offset = match reg_val {
-                            #(#arms,)*
-                            _ => 0,
-                        };
-                        pcode_ir::Varnode::register(offset, #size)
-                    });
-                }
+                let value_expr = self.dynamic_value_expr(attach_value);
+                let vn = self.dynamic_varnode_expr(*attach_id, &value_expr);
+                quote! { export_varnode = Some(#vn); }
             }
         }
     }
@@ -728,6 +760,8 @@ impl<'a> ExecutionGenerator<'a> {
                 }
             }
             ExprValue::Context(ctx) => {
+                // Context values are fixed at decode time and rarely appear in P-code
+                // execution. Would need context to be passed to lift() to read properly.
                 let sz = Self::bytes_from_bits(ctx.size.get()) as u32;
                 (quote! { pcode_ir::Varnode::constant(0, #sz) }, quote! {})
             }
@@ -785,11 +819,14 @@ impl<'a> ExecutionGenerator<'a> {
             }
             ExprValue::IntDynamic(d) => {
                 let sz = Self::bytes_from_bits(d.bits.get()) as u32;
-                (quote! { pcode_ir::Varnode::constant(0, #sz) }, quote! {})
+                let value_expr = self.dynamic_value_expr(&d.attach_value);
+                let vn = self.dynamic_int_expr(d.attach_id, &value_expr, sz);
+                (vn, quote! {})
             }
-            ExprValue::VarnodeDynamic(_) => {
-                let sz = self.addr_size();
-                (quote! { pcode_ir::Varnode::unique(0, #sz) }, quote! {})
+            ExprValue::VarnodeDynamic(dv) => {
+                let value_expr = self.dynamic_value_expr(&dv.attach_value);
+                let vn = self.dynamic_varnode_expr(dv.attach_id, &value_expr);
+                (vn, quote! {})
             }
         }
     }
