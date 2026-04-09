@@ -70,6 +70,33 @@ pub fn optimize(ops: &mut Vec<PcodeOp>) {
 }
 
 fn optimize_once(ops: &mut Vec<PcodeOp>) {
+    // Pass 0: constant folding — IntZext/IntSext of constants
+    for op in ops.iter_mut() {
+        match op {
+            PcodeOp::IntZext { out, input } if input.space == AddressSpaceId::Const => {
+                *op = PcodeOp::Copy {
+                    out: *out,
+                    input: Varnode::constant(input.offset, out.size),
+                };
+            }
+            PcodeOp::IntSext { out, input } if input.space == AddressSpaceId::Const => {
+                // Sign-extend: if the high bit of input is set, fill upper bits
+                let val = input.offset;
+                let in_bits = (input.size as u64) * 8;
+                let extended = if in_bits < 64 && (val >> (in_bits - 1)) & 1 != 0 {
+                    val | (!0u64 << in_bits)
+                } else {
+                    val
+                };
+                *op = PcodeOp::Copy {
+                    out: *out,
+                    input: Varnode::constant(extended, out.size),
+                };
+            }
+            _ => {}
+        }
+    }
+
     // Pass 1: eliminate identity Subpiece
     for op in ops.iter_mut() {
         if let PcodeOp::Subpiece { out, input, lsb: 0 } = op {
