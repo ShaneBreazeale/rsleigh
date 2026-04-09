@@ -110,8 +110,64 @@ fn optimize_once(ops: &mut Vec<PcodeOp>) {
                     input: Varnode::constant(extended, out.size),
                 };
             }
+            // Shift by zero → Copy
+            PcodeOp::IntLsr { out, left, right }
+            | PcodeOp::IntLsl { out, left, right }
+            | PcodeOp::IntAsr { out, left, right }
+                if right.space == AddressSpaceId::Const && right.offset == 0 =>
+            {
+                *op = PcodeOp::Copy { out: *out, input: *left };
+            }
+            // OR with zero → Copy
+            PcodeOp::IntOr { out, left, right }
+                if right.space == AddressSpaceId::Const && right.offset == 0 =>
+            {
+                *op = PcodeOp::Copy { out: *out, input: *left };
+            }
+            PcodeOp::IntOr { out, left, right }
+                if left.space == AddressSpaceId::Const && left.offset == 0 =>
+            {
+                *op = PcodeOp::Copy { out: *out, input: *right };
+            }
+            // AND with all-ones (for the size) → Copy
+            PcodeOp::IntAnd { out, left, right }
+                if right.space == AddressSpaceId::Const
+                && right.offset == u64::MAX >> (64 - out.size as u64 * 8) =>
+            {
+                *op = PcodeOp::Copy { out: *out, input: *left };
+            }
             _ => {}
         }
+    }
+
+    // Pass 1a: redundant IntAnd — if IntAnd{out1, x, mask} followed by IntAnd{out2, out1, mask}
+    // with same mask and out1 used only once, remove the second
+    let mut i = 0;
+    while i + 1 < ops.len() {
+        let collapse = if let PcodeOp::IntAnd { out: out1, left: _, right: mask1 } = &ops[i] {
+            if out1.space == AddressSpaceId::Unique && mask1.space == AddressSpaceId::Const {
+                if let PcodeOp::IntAnd { out: out2, left: in2, right: mask2 } = &ops[i + 1] {
+                    if *in2 == *out1 && *mask2 == *mask1 {
+                        let total_reads: usize = ops[i+1..].iter()
+                            .map(|op| count_reads(op, out1))
+                            .sum();
+                        if total_reads == 1 {
+                            Some(*out2)
+                        } else { None }
+                    } else { None }
+                } else { None }
+            } else { None }
+        } else { None };
+
+        if let Some(new_out) = collapse {
+            // Rewrite first IntAnd to output directly to second's dest
+            if let PcodeOp::IntAnd { out, .. } = &mut ops[i] {
+                *out = new_out;
+            }
+            ops.remove(i + 1);
+            continue;
+        }
+        i += 1;
     }
 
     // Pass 1: eliminate identity Subpiece
