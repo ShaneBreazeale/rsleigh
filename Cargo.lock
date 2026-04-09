@@ -175,6 +175,50 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
+name = "riscv-instr-00"
+version = "0.1.0"
+dependencies = [
+ "pcode-ir",
+ "riscv-shared",
+ "riscv-subtables",
+]
+
+[[package]]
+name = "riscv-instr-01"
+version = "0.1.0"
+dependencies = [
+ "pcode-ir",
+ "riscv-shared",
+ "riscv-subtables",
+]
+
+[[package]]
+name = "riscv-root"
+version = "0.1.0"
+dependencies = [
+ "pcode-ir",
+ "riscv-instr-00",
+ "riscv-instr-01",
+ "riscv-shared",
+ "riscv-subtables",
+]
+
+[[package]]
+name = "riscv-shared"
+version = "0.1.0"
+dependencies = [
+ "pcode-ir",
+]
+
+[[package]]
+name = "riscv-subtables"
+version = "0.1.0"
+dependencies = [
+ "pcode-ir",
+ "riscv-shared",
+]
+
+[[package]]
 name = "rsleigh"
 version = "0.1.0"
 dependencies = [
@@ -218,6 +262,7 @@ version = "0.1.0"
 dependencies = [
  "aarch64-root",
  "pcode-ir",
+ "riscv-root",
  "x86-root",
 ]
 

@@ -38,6 +38,21 @@ mod arm {
     }
 }
 
+mod riscv {
+    use super::*;
+
+    pub fn decode(bytes: &[u8], addr: u64) -> (u64, String, Vec<PcodeOp>) {
+        let mut ctx = riscv_root::ContextMemory::default();
+        let mut gs = riscv_root::GlobalSet::new(riscv_root::ContextMemory::default());
+        let (inst_next, display, mut pcode) =
+            riscv_root::parse_instruction(bytes, &mut ctx, addr, &mut gs)
+                .expect("failed to decode");
+        pcode_ir::optimize(&mut pcode);
+        let disasm: Vec<String> = display.iter().map(|d| format!("{}", d)).collect();
+        (inst_next - addr, disasm.join(""), pcode)
+    }
+}
+
 fn main() {
     let tests: &[(&[u8], &str)] = &[
         (&[0x48, 0x89, 0xc7], "MOV rdi, rax"),
@@ -79,6 +94,27 @@ fn main() {
         (&[0x00, 0x00, 0x00, 0x14], "B ."),                 // b .
         (&[0x20, 0x00, 0x20, 0xd4], "BRK #1"),             // brk #1
     ];
+
+    // RISC-V test instructions (little-endian, 4-byte or 2-byte compressed)
+    let riscv_tests: &[(&[u8], &str)] = &[
+        (&[0x93, 0x00, 0x50, 0x00], "addi x1, x0, 5"),    // addi x1, x0, 5
+        (&[0xb3, 0x01, 0xc0, 0x00], "add x3, x0, x12"),   // add x3, x0, x12
+        (&[0x67, 0x80, 0x00, 0x00], "jalr x0, 0(x1)"),     // ret-like: jalr x0, 0(x1)
+    ];
+
+    println!("=== riscv64 ===\n");
+    for (bytes, name) in riscv_tests {
+        match std::panic::catch_unwind(|| riscv::decode(bytes, 0x1000)) {
+            Ok((len, disasm, pcode)) => {
+                println!("{name}:");
+                println!("  decoded: {disasm}");
+                println!("  len={len}, pcode_ops={}", pcode.len());
+                for op in &pcode { println!("    {op:?}"); }
+            }
+            Err(_) => println!("{name}: FAILED to decode"),
+        }
+        println!();
+    }
 
     println!("=== aarch64 ===\n");
     for (bytes, name) in arm_tests {
@@ -177,7 +213,11 @@ mod tests {
         test_arm_add_reg();
         test_arm_ret();
         test_arm_branch();
-        eprintln!("all 20 golden tests passed");
+        // RISC-V tests
+        test_riscv_addi();
+        test_riscv_add();
+        test_riscv_jalr();
+        eprintln!("all 23 golden tests passed");
     }
 
     fn test_mov_reg_reg() {
@@ -390,5 +430,34 @@ mod tests {
         assert_pcode_contains(&pcode, &disasm, &[
             |op| matches!(op, PcodeOp::Branch { .. }),
         ]);
+    }
+
+    // ── RISC-V tests ─────────────────────────────────────────────────
+
+    fn test_riscv_addi() {
+        // addi x1, x0, 5 = 0x00500093
+        let (len, disasm, _pcode) = riscv::decode(&[0x93, 0x00, 0x50, 0x00], 0x1000);
+        assert_eq!(len, 4);
+        // Ghidra displays "addi x1,x0,5" as "li ra,0x5" (pseudo-instruction)
+        assert!(disasm.to_lowercase().contains("li") || disasm.to_lowercase().contains("addi"),
+            "expected li/addi, got {disasm}");
+    }
+
+    fn test_riscv_add() {
+        // add x3, x0, x12 = 0x00c001b3
+        let (len, disasm, pcode) = riscv::decode(&[0xb3, 0x01, 0xc0, 0x00], 0x1000);
+        assert_eq!(len, 4);
+        assert!(disasm.to_lowercase().contains("add"), "expected add, got {disasm}");
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::IntAdd { .. } | PcodeOp::Copy { .. }),
+        ]);
+    }
+
+    fn test_riscv_jalr() {
+        // jalr x0, 0(x1) = 0x00008067
+        let (len, disasm, _pcode) = riscv::decode(&[0x67, 0x80, 0x00, 0x00], 0x1000);
+        assert_eq!(len, 4);
+        assert!(disasm.to_lowercase().contains("jalr") || disasm.to_lowercase().contains("ret"),
+            "expected jalr/ret, got {disasm}");
     }
 }

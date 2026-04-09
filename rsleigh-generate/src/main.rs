@@ -5,7 +5,7 @@ fn main() {
     let archs: Vec<&str> = if args.len() > 1 {
         args[1..].iter().map(|s| s.as_str()).collect()
     } else {
-        vec!["x86-64", "aarch64"]
+        vec!["x86-64", "aarch64", "riscv"]
     };
 
     for arch in &archs {
@@ -23,6 +23,13 @@ fn main() {
                 "aarch64",
                 200,
                 4,
+            ),
+            "riscv" | "riscv64" => generate_arch(
+                "riscv64",
+                Path::new("slaspec/RISCV/riscv.lp64d.slaspec"),
+                "riscv",
+                200,
+                2,
             ),
             other => {
                 eprintln!("Unknown arch: {other}. Supported: x86-64, aarch64");

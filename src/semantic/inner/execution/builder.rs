@@ -622,32 +622,16 @@ pub trait ExecutionBuilder {
                         right,
                     ))),
                     // TODO is this required, if so where?
-                    // HACK: write to a table that export a value is actually a
-                    // mem_write with the table export being the address
-                    // for the default space
+                    // Write to a table that exports a value — treat as TableExport write.
+                    // The table's exported varnode becomes the write destination.
                     Some(TableExportType::Const(_))
                     | Some(TableExportType::Value(_)) => {
-                        todo!("write to {:?}", &input.src);
-                        // let space = self
-                        //     .sleigh()
-                        //     .default_space()
-                        //     .ok_or_else(|| ExecutionError::DefaultSpace)?;
-                        // let mem = MemoryLocation {
-                        //     space,
-                        //     size: FieldSize::new_unsized(),
-                        //     location: input.src.clone(),
-                        // };
-                        // Ok(Statement::MemWrite(MemWrite::new(
-                        //     self.sleigh(),
-                        //     self.execution(),
-                        //     Expr::new_value(ExprElement::Value {
-                        //         location: input.src.clone(),
-                        //         value: ExprValue::Table(table_id),
-                        //     }),
-                        //     mem,
-                        //     input.src,
-                        //     right,
-                        // )))
+                        Ok(Statement::Assignment(Assignment::new(
+                            input.src.clone(),
+                            AssignmentWrite::TableExport { table_id, op },
+                            input.src,
+                            right,
+                        )))
                     }
                     // table is unimpl or simply don't export
                     None | Some(TableExportType::None) => Err(Box::new(

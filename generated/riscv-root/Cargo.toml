@@ -1,0 +1,10 @@
+[package]
+name = "riscv-root"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+pcode-ir = { path = "../../pcode-ir" }
+riscv-shared = { path = "../riscv-shared" }
+riscv-subtables = { path = "../riscv-subtables" }
+riscv-instr-00 = { path = "../riscv-instr-00" }
+riscv-instr-01 = { path = "../riscv-instr-01" }

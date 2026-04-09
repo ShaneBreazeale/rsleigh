@@ -26,6 +26,11 @@ members = [
     "generated/aarch64-instr-02",
     "generated/aarch64-instr-03",
     "generated/aarch64-root",
+    "generated/riscv-shared",
+    "generated/riscv-subtables",
+    "generated/riscv-instr-00",
+    "generated/riscv-instr-01",
+    "generated/riscv-root",
 ]
 resolver = "2"
 
