@@ -30,9 +30,7 @@ impl ConstructorPatternLen {
     pub fn single_len(&self) -> Option<NumberUnsigned> {
         match self {
             Self::Basic(basic) => basic.single_len(),
-            Self::NonGrowingRecursive(_) | Self::GrowingRecursive { .. } => {
-                None
-            }
+            Self::NonGrowingRecursive(_) | Self::GrowingRecursive { .. } => None,
         }
     }
     pub fn is_basic(&self) -> bool {
@@ -41,18 +39,14 @@ impl ConstructorPatternLen {
     pub fn basic(&self) -> Option<PatternLen> {
         match self {
             Self::Basic(basic) => Some(*basic),
-            Self::NonGrowingRecursive(_) | Self::GrowingRecursive { .. } => {
-                None
-            }
+            Self::NonGrowingRecursive(_) | Self::GrowingRecursive { .. } => None,
         }
     }
     ///if is some kind of recursive
     pub fn is_recursive(&self) -> bool {
         match self {
             Self::Basic(basic) => basic.is_recursive(),
-            Self::NonGrowingRecursive(_) | Self::GrowingRecursive { .. } => {
-                true
-            }
+            Self::NonGrowingRecursive(_) | Self::GrowingRecursive { .. } => true,
         }
     }
     ///the min possible pattern len size, None means the min can't be calculated

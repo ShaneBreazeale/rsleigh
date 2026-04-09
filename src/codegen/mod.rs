@@ -11,17 +11,12 @@ use builder::Disassembler;
 
 pub(crate) const DISASSEMBLY_ALLOW_OVERFLOW: bool = true;
 
-fn disassembler(
-    file: impl AsRef<Path>,
-    debug: bool,
-) -> Result<TokenStream, Box<SleighError>> {
+fn disassembler(file: impl AsRef<Path>, debug: bool) -> Result<TokenStream, Box<SleighError>> {
     let sleigh = file_to_sleigh(file.as_ref())?;
     Ok(Disassembler::new(sleigh, debug).into_token_stream())
 }
 
-pub fn generate_disassembler(
-    file: impl AsRef<Path>,
-) -> Result<TokenStream, Box<SleighError>> {
+pub fn generate_disassembler(file: impl AsRef<Path>) -> Result<TokenStream, Box<SleighError>> {
     disassembler(file, false)
 }
 
@@ -32,7 +27,17 @@ pub fn generate_debug_disassembler(
 }
 
 /// A named chunk of generated code suitable for writing to a separate file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GeneratedModuleKind {
+    Shared,
+    TableBatch,
+    TableEnum,
+    Root,
+}
+
 pub struct GeneratedModule {
+    /// Semantic role of the generated module.
+    pub kind: GeneratedModuleKind,
     /// Filename (without path), e.g. "shared.rs", "table_0.rs", "root.rs"
     pub filename: String,
     /// The generated Rust source code as a TokenStream. For "root.rs" this

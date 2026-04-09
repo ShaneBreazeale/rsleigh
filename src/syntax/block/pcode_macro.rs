@@ -23,11 +23,7 @@ impl PcodeMacro {
             tuple((
                 this_ident("macro"),
                 ident,
-                delimited(
-                    tag!("("),
-                    separated_list0(tag!(","), ident),
-                    tag!(")"),
-                ),
+                delimited(tag!("("), separated_list0(tag!(","), ident), tag!(")")),
                 delimited(tag!("{"), Execution::parse, tag!("}")),
             )),
             eof,

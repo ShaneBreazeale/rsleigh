@@ -222,10 +222,7 @@ impl Sleigh {
     pub fn context_memory(&self) -> &ContextMemoryMapping {
         &self.context_memory
     }
-    pub fn global_scope_by_name<'a>(
-        &'a self,
-        name: &str,
-    ) -> Option<&'a GlobalScope> {
+    pub fn global_scope_by_name<'a>(&'a self, name: &str) -> Option<&'a GlobalScope> {
         self.global_scope.get(name)
     }
     pub fn space(&self, space: SpaceId) -> &Space {
@@ -246,10 +243,7 @@ impl Sleigh {
     pub fn token_field(&self, token_field: TokenFieldId) -> &TokenField {
         &self.token_fields[token_field.0]
     }
-    pub fn user_function(
-        &self,
-        user_function: UserFunctionId,
-    ) -> &UserFunction {
+    pub fn user_function(&self, user_function: UserFunctionId) -> &UserFunction {
         &self.user_functions[user_function.0]
     }
     pub fn table(&self, table: TableId) -> &Table {
@@ -277,9 +271,7 @@ impl Sleigh {
         for table_id in tables {
             use std::ops::ControlFlow;
             let table = inner.table(table_id);
-            if let ControlFlow::Break(rec) =
-                table.pattern_indirect_recursion(&inner, table_id)
-            {
+            if let ControlFlow::Break(rec) = table.pattern_indirect_recursion(&inner, table_id) {
                 unimplemented!(
                     "Indirect recursion is not implemented at the moment {:?}",
                     rec
@@ -309,26 +301,20 @@ impl Sleigh {
                 // This handles MIPS16/microMIPS variable-length encoding edge cases.
                 #[cfg(feature = "strict_solve")]
                 {
-                let mut solved = SolvedLocation::default();
-                for table in inner.tables.iter() {
-                    table.solve(&inner, &mut solved)?;
-                }
-                return Err(Box::new(SleighError::TableUnsolvable(
-                    solved.locations.iter().fold(
-                        String::new(),
-                        |mut acc, (location, file, line)| {
-                            use std::fmt::Write;
-                            writeln!(
-                                &mut acc,
-                                "{}:{}: {location}",
-                                file,
-                                line + 1
-                            )
-                            .unwrap();
-                            acc
-                        },
-                    ),
-                )));
+                    let mut solved = SolvedLocation::default();
+                    for table in inner.tables.iter() {
+                        table.solve(&inner, &mut solved)?;
+                    }
+                    return Err(Box::new(SleighError::TableUnsolvable(
+                        solved.locations.iter().fold(
+                            String::new(),
+                            |mut acc, (location, file, line)| {
+                                use std::fmt::Write;
+                                writeln!(&mut acc, "{}:{}: {location}", file, line + 1).unwrap();
+                                acc
+                            },
+                        ),
+                    )));
                 }
                 // Non-strict mode: break with unresolved sizes
                 break;
@@ -432,10 +418,7 @@ impl Sleigh {
         self.default_space
     }
 
-    pub fn attach_varnodes_len_bytes(
-        &self,
-        id: AttachVarnodeId,
-    ) -> NumberNonZeroUnsigned {
+    pub fn attach_varnodes_len_bytes(&self, id: AttachVarnodeId) -> NumberNonZeroUnsigned {
         self.varnode(self.attach_varnode(id).0[0].1).len_bytes
     }
 }

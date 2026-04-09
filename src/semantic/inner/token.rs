@@ -1,8 +1,7 @@
 use crate::semantic::meaning::Meaning;
 use crate::semantic::token::{TokenField as FinalTokenField, TokenFieldAttach};
 use crate::semantic::{
-    NumberNonZeroUnsigned, PrintBase, SleighError, Span, Token, TokenFieldId,
-    TokenId,
+    NumberNonZeroUnsigned, PrintBase, SleighError, Span, Token, TokenFieldId, TokenId,
 };
 use crate::{syntax, FieldBits};
 
@@ -27,9 +26,7 @@ impl TokenField {
     pub fn attach(&mut self, meaning: Meaning) -> Result<(), Box<SleighError>> {
         if self.attach.is_some() {
             //once attached, can't attach again
-            return Err(Box::new(SleighError::AttachMultiple(
-                self.location.clone(),
-            )));
+            return Err(Box::new(SleighError::AttachMultiple(self.location.clone())));
         }
         if self.print_flags.signed_set {
             todo!("Is allowed to attach to signed value?");
@@ -42,10 +39,9 @@ impl TokenField {
             Meaning::Varnode(x) => TokenFieldAttach::Varnode(x),
             Meaning::Literal(x) => TokenFieldAttach::Literal(x),
             // use the default print base for TokenField with attach number: Hex
-            Meaning::Number(_, x) => TokenFieldAttach::Number(
-                self.print_flags.base.unwrap_or(PrintBase::Hex),
-                x,
-            ),
+            Meaning::Number(_, x) => {
+                TokenFieldAttach::Number(self.print_flags.base.unwrap_or(PrintBase::Hex), x)
+            }
         };
         //TODO what if print_flags are set?
         self.attach = Some(attach);
@@ -68,17 +64,12 @@ impl TokenField {
 }
 
 impl Sleigh {
-    pub fn create_token(
-        &mut self,
-        input: syntax::define::Token,
-    ) -> Result<(), Box<SleighError>> {
+    pub fn create_token(&mut self, input: syntax::define::Token) -> Result<(), Box<SleighError>> {
         let size = input
             .size
             .checked_div(8)
             .and_then(NumberNonZeroUnsigned::new)
-            .ok_or_else(|| {
-                SleighError::TokenFieldSizeInvalid(input.src.clone())
-            })?;
+            .ok_or_else(|| SleighError::TokenFieldSizeInvalid(input.src.clone()))?;
         let endian = input
             .endian
             .or(self.endian)
@@ -98,10 +89,7 @@ impl Sleigh {
 
         for field in input.token_fields.into_iter() {
             let range: FieldBits = field.range.try_into()?;
-            let print_flags = PrintFlags::from_token_att(
-                &input.src,
-                field.attributes.iter(),
-            )?;
+            let print_flags = PrintFlags::from_token_att(&input.src, field.attributes.iter())?;
             //default into print in hex format
             let token_field = TokenField {
                 name: field.name.clone(),

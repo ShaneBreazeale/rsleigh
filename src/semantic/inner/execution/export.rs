@@ -4,8 +4,8 @@ use crate::semantic::execution::ExportLen as FinalExportLen;
 use crate::semantic::inner::pattern::Pattern;
 use crate::semantic::inner::{Sleigh, SolverStatus};
 use crate::{
-    AttachVarnodeId, ExecutionError, Number, NumberNonZeroUnsigned, SpaceId,
-    Span, TableId, VarSizeError,
+    AttachVarnodeId, ExecutionError, Number, NumberNonZeroUnsigned, SpaceId, Span, TableId,
+    VarSizeError,
 };
 
 use super::ExprContext;
@@ -14,8 +14,8 @@ use super::ExprIntDynamic;
 use super::ExprTokenField;
 use super::ReadScope;
 use super::{
-    Execution, Expr, ExprElement, ExprNumber, ExprValue, FieldSize,
-    FieldSizeMut, FieldSizeTableExport, FieldSizeUnmutable, MemoryLocation,
+    Execution, Expr, ExprElement, ExprNumber, ExprValue, FieldSize, FieldSizeMut,
+    FieldSizeTableExport, FieldSizeUnmutable, MemoryLocation,
 };
 
 /// Changes allowed:
@@ -73,17 +73,13 @@ impl TableExportType {
     pub fn size(&self) -> Option<&FieldSize> {
         match self {
             Self::None => None,
-            Self::Const(len)
-            | Self::Value(len)
-            | Self::Reference { len, .. } => Some(len),
+            Self::Const(len) | Self::Value(len) | Self::Reference { len, .. } => Some(len),
         }
     }
     pub fn size_mut(&mut self) -> Option<&mut FieldSize> {
         match self {
             Self::None => None,
-            Self::Const(len)
-            | Self::Value(len)
-            | Self::Reference { len, .. } => Some(len),
+            Self::Const(len) | Self::Value(len) | Self::Reference { len, .. } => Some(len),
         }
     }
     pub fn combine(self, other: Self) -> Option<Self> {
@@ -99,10 +95,9 @@ impl TableExportType {
             }
 
             // if one value and a constant, result in a value
-            (
-                Self::Const(len_a) | Self::Value(len_a),
-                Self::Const(len_b) | Self::Value(len_b),
-            ) => Some(Self::Value(len_a.intersection(len_b)?)),
+            (Self::Const(len_a) | Self::Value(len_a), Self::Const(len_b) | Self::Value(len_b)) => {
+                Some(Self::Value(len_a.intersection(len_b)?))
+            }
 
             // export a reference and also a value
             (
@@ -156,21 +151,23 @@ impl TableExportType {
             Self::None => None,
             Self::Const(len) => Some(len.possible_value().unwrap_or(32.try_into().unwrap())),
             Self::Value(len) => Some(len.possible_value().unwrap_or(32.try_into().unwrap())),
-            Self::Reference { len, .. } => Some(len.possible_value().unwrap_or(32.try_into().unwrap())),
+            Self::Reference { len, .. } => {
+                Some(len.possible_value().unwrap_or(32.try_into().unwrap()))
+            }
         }
     }
     pub fn convert(self) -> Option<FinalExportLen> {
         match self {
             Self::None => None,
-            Self::Const(x) => {
-                Some(FinalExportLen::Const(x.possible_value().unwrap_or(32.try_into().unwrap())))
-            }
-            Self::Value(x) => {
-                Some(FinalExportLen::Value(x.possible_value().unwrap_or(32.try_into().unwrap())))
-            }
-            Self::Reference { len, .. } => {
-                Some(FinalExportLen::Reference(len.possible_value().unwrap_or(32.try_into().unwrap())))
-            }
+            Self::Const(x) => Some(FinalExportLen::Const(
+                x.possible_value().unwrap_or(32.try_into().unwrap()),
+            )),
+            Self::Value(x) => Some(FinalExportLen::Value(
+                x.possible_value().unwrap_or(32.try_into().unwrap()),
+            )),
+            Self::Reference { len, .. } => Some(FinalExportLen::Reference(
+                len.possible_value().unwrap_or(32.try_into().unwrap()),
+            )),
         }
     }
 }
@@ -225,9 +222,9 @@ impl Export {
                 let table = sleigh.table(table_id);
                 match *table.export.borrow() {
                     // don't allow export a table that don't export
-                    Some(TableExportType::None) | None => Err(Box::new(
-                        ExecutionError::WriteInvalidTable(location),
-                    )),
+                    Some(TableExportType::None) | None => {
+                        Err(Box::new(ExecutionError::WriteInvalidTable(location)))
+                    }
                     _ => Ok(Export::Table { table_id, location }),
                 }
             }
@@ -285,9 +282,9 @@ impl Export {
 
         // memory can be any size, and the size of the space is possible
         // but ignore if not possible, because it can also be smaller
-        let _ = addr.size_mut(sleigh, execution).update_action(|s| {
-            s.set_possible_bytes(sleigh.space(memory.space).addr_bytes)
-        });
+        let _ = addr
+            .size_mut(sleigh, execution)
+            .update_action(|s| s.set_possible_bytes(sleigh.space(memory.space).addr_bytes));
 
         let _ = modified.ok_or_else(|| VarSizeError::AddressTooBig {
             address_size: addr.size(sleigh, execution),
@@ -296,11 +293,7 @@ impl Export {
         })?;
         Ok(Self::Reference { addr, memory })
     }
-    pub fn return_type(
-        &self,
-        sleigh: &Sleigh,
-        execution: &Execution,
-    ) -> TableExportType {
+    pub fn return_type(&self, sleigh: &Sleigh, execution: &Execution) -> TableExportType {
         match self {
             Export::Const { value, .. } | Export::Value(value) => match value {
                 Expr::Value(ExprElement::Value {
@@ -316,22 +309,18 @@ impl Export {
                     ..
                 }) => {
                     // TODO error here? Or make addr_bytes always available?
-                    TableExportType::Const(FieldSize::new_bytes(
-                        sleigh.addr_bytes().unwrap(),
-                    ))
+                    TableExportType::Const(FieldSize::new_bytes(sleigh.addr_bytes().unwrap()))
                 }
 
                 // any other expr is a value being exportd
                 value => TableExportType::Value(value.size(sleigh, execution)),
             },
 
-            Export::Reference { addr: _, memory } => {
-                TableExportType::Reference {
-                    len: memory.size,
-                    space: Some(memory.space),
-                    also_values: false,
-                }
-            }
+            Export::Reference { addr: _, memory } => TableExportType::Reference {
+                len: memory.size,
+                space: Some(memory.space),
+                also_values: false,
+            },
 
             Export::AttachVarnode {
                 attach_value: _,
@@ -363,15 +352,10 @@ impl Export {
             Self::Const { value: expr, .. }
             | Self::Value(expr)
             | Export::Reference { addr: expr, .. } => expr.src(),
-            Self::Table { location, .. }
-            | Export::AttachVarnode { location, .. } => location,
+            Self::Table { location, .. } | Export::AttachVarnode { location, .. } => location,
         }
     }
-    pub fn output_size(
-        &self,
-        sleigh: &Sleigh,
-        execution: &Execution,
-    ) -> FieldSize {
+    pub fn output_size(&self, sleigh: &Sleigh, execution: &Execution) -> FieldSize {
         match self {
             Self::Const { bytes, .. } => FieldSize::new_bytes(*bytes),
             Self::Value(expr) => expr.size(sleigh, execution),
@@ -396,17 +380,13 @@ impl Export {
         variables: &'a Execution,
     ) -> Box<dyn FieldSizeMut + 'a> {
         match self {
-            Self::Const { bytes, .. } => {
-                Box::new(FieldSizeUnmutable(FieldSize::new_bytes(*bytes)))
-            }
+            Self::Const { bytes, .. } => Box::new(FieldSizeUnmutable(FieldSize::new_bytes(*bytes))),
             Self::Value(expr) => expr.size_mut(sleigh, variables),
             //TODO verify this
             Self::Reference { addr: _, memory } => Box::new(&mut memory.size),
             Self::AttachVarnode { attach_id, .. } => {
                 let attach_bytes = sleigh.attach_varnodes_len_bytes(*attach_id);
-                Box::new(FieldSizeUnmutable::from(FieldSize::new_bytes(
-                    attach_bytes,
-                )))
+                Box::new(FieldSizeUnmutable::from(FieldSize::new_bytes(attach_bytes)))
             }
             Self::Table {
                 location: _,
@@ -429,9 +409,7 @@ impl Export {
                 value,
                 input_len,
             } => {
-                if hack_export_simple_disassembly_value(
-                    value, sleigh, execution,
-                ) {
+                if hack_export_simple_disassembly_value(value, sleigh, execution) {
                     solved.i_did_a_thing();
                 }
                 // input can have any size
@@ -441,8 +419,7 @@ impl Export {
             }
             Self::AttachVarnode { .. } => Ok(()),
             Self::Value(expr) => {
-                if hack_export_simple_disassembly_value(expr, sleigh, execution)
-                {
+                if hack_export_simple_disassembly_value(expr, sleigh, execution) {
                     solved.i_did_a_thing();
                 }
                 expr.solve(sleigh, execution, solved)
@@ -486,9 +463,7 @@ impl Export {
                         crate::semantic::execution::ExprElement::Op(
                             crate::semantic::execution::ExprUnaryOp {
                                 location: value.src().clone(),
-                                op: crate::semantic::execution::Unary::TakeLsb(
-                                    bytes,
-                                ),
+                                op: crate::semantic::execution::Unary::TakeLsb(bytes),
                                 input: Box::new(value.convert()),
                             },
                         ),
@@ -510,9 +485,7 @@ impl Export {
                 attach_id,
             },
 
-            Self::Table { location, table_id } => {
-                FinalExport::Table { location, table_id }
-            }
+            Self::Table { location, table_id } => FinalExport::Table { location, table_id },
         }
     }
 }

@@ -1,6 +1,4 @@
-use crate::semantic::{
-    ContextId, InstNext, InstStart, Span, TableId, TokenFieldId,
-};
+use crate::semantic::{ContextId, InstNext, InstStart, Span, TableId, TokenFieldId};
 use crate::{Number, NumberUnsigned};
 
 #[derive(Clone, Debug, Copy)]

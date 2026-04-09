@@ -23,9 +23,7 @@ impl Op {
 }
 
 impl CmpOp {
-    pub fn parse(
-        input: &[Token],
-    ) -> IResult<&[Token], CmpOp, Box<SleighError>> {
+    pub fn parse(input: &[Token]) -> IResult<&[Token], CmpOp, Box<SleighError>> {
         alt((
             value(CmpOp::Le, tag!("<=")),
             value(CmpOp::Ge, tag!(">=")),
@@ -47,11 +45,7 @@ impl ConstraintValue {
     fn parse(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
         map(
             alt((
-                delimited(
-                    tag!("("),
-                    |x| disassembly::Expr::parse_safe(x),
-                    tag!(")"),
-                ),
+                delimited(tag!("("), |x| disassembly::Expr::parse_safe(x), tag!(")")),
                 |x| disassembly::Expr::parse_unsafe(x),
             )),
             |expr| ConstraintValue { expr },
@@ -117,13 +111,8 @@ impl Element {
             |(left, field, right)| {
                 let ellipsis = match (left, right) {
                     (Some((_, left)), Some((_, right))) => {
-                        let location = Span::combine(
-                            left.clone().start(),
-                            right.clone().end(),
-                        );
-                        return Err(Box::new(SleighError::DualEllipsis(
-                            location,
-                        )));
+                        let location = Span::combine(left.clone().start(), right.clone().end());
+                        return Err(Box::new(SleighError::DualEllipsis(location)));
                     }
                     (left, right) => left.or(right).map(|(e, _)| e),
                 };
@@ -182,12 +171,11 @@ impl IntoIterator for Pattern {
 
 impl Pattern {
     pub fn parse(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
-        let (rest, pattern) =
-            map(separated_list0(tag!(";"), Block::parse), |blocks| Pattern {
-                //TODO improve the src here
-                src: input.first().unwrap().location.clone(),
-                blocks,
-            })(input)?;
+        let (rest, pattern) = map(separated_list0(tag!(";"), Block::parse), |blocks| Pattern {
+            //TODO improve the src here
+            src: input.first().unwrap().location.clone(),
+            blocks,
+        })(input)?;
         Ok((rest, pattern))
     }
 }

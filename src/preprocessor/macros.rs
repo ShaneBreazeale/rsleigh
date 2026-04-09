@@ -8,8 +8,8 @@ use nom::IResult;
 use super::ifs::{if_cond, IfCheckOwned};
 use super::parser::{end_of_line, ident, number, string};
 use super::{
-    MACRO_DEFINE, MACRO_ELIF, MACRO_ELSE, MACRO_ENDIF, MACRO_IF, MACRO_IFDEF,
-    MACRO_IFNDEF, MACRO_INCLUDE, MACRO_UNDEFINE,
+    MACRO_DEFINE, MACRO_ELIF, MACRO_ELSE, MACRO_ENDIF, MACRO_IF, MACRO_IFDEF, MACRO_IFNDEF,
+    MACRO_INCLUDE, MACRO_UNDEFINE,
 };
 
 pub(crate) fn expansion(input: &str) -> IResult<&str, &str> {

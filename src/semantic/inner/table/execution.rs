@@ -1,8 +1,6 @@
 use crate::execution::DynamicValueType;
 use crate::semantic::execution::BlockId;
-use crate::semantic::inner::execution::{
-    Execution, ExecutionBuilder, ReadScope, WriteValue,
-};
+use crate::semantic::inner::execution::{Execution, ExecutionBuilder, ReadScope, WriteValue};
 use crate::semantic::inner::pattern::Pattern;
 use crate::semantic::inner::Sleigh;
 use crate::semantic::token::TokenFieldAttach;
@@ -19,11 +17,7 @@ pub struct Builder<'a> {
 }
 
 impl<'a> Builder<'a> {
-    pub fn new(
-        sleigh: &'a Sleigh,
-        pattern: &'a mut Pattern,
-        src: Span,
-    ) -> Self {
+    pub fn new(sleigh: &'a Sleigh, pattern: &'a mut Pattern, src: Span) -> Self {
         let execution = Execution::new_empty(src);
         let current_block = execution.entry_block;
         Self {
@@ -54,11 +48,7 @@ impl ExecutionBuilder for Builder<'_> {
     fn pattern(&self) -> &Pattern {
         self.pattern
     }
-    fn read_scope(
-        &mut self,
-        name: &str,
-        src: &Span,
-    ) -> Result<ReadScope, Box<ExecutionError>> {
+    fn read_scope(&mut self, name: &str, src: &Span) -> Result<ReadScope, Box<ExecutionError>> {
         //check local scope
         if let Some(var) = self.execution().variable_by_name(name) {
             return Ok(ReadScope::ExeVar(var));
@@ -99,18 +89,12 @@ impl ExecutionBuilder for Builder<'_> {
             }
             // Allow non-exporting tables in pcodeop arguments (e.g. NEON_bfdot)
             // These tables are used for their pattern-matched register selection
-            Table(table_id) => {
-                Ok(ReadScope::Table(table_id))
-            }
+            Table(table_id) => Ok(ReadScope::Table(table_id)),
             _ => Err(Box::new(ExecutionError::InvalidRef(src.clone()))),
         }
     }
 
-    fn write_scope(
-        &mut self,
-        name: &str,
-        src: &Span,
-    ) -> Result<WriteValue, Box<ExecutionError>> {
+    fn write_scope(&mut self, name: &str, src: &Span) -> Result<WriteValue, Box<ExecutionError>> {
         if let Some(var) = self.execution().variable_by_name(name) {
             return Ok(WriteValue::Local {
                 id: var,
@@ -128,9 +112,7 @@ impl ExecutionBuilder for Builder<'_> {
                 //filter field with meaning to variable
                 let meaning = self.sleigh().token_field(token_field_id).attach;
                 let Some(TokenFieldAttach::Varnode(attach_id)) = meaning else {
-                    return Err(Box::new(ExecutionError::InvalidRef(
-                        src.clone(),
-                    )));
+                    return Err(Box::new(ExecutionError::InvalidRef(src.clone())));
                 };
                 Ok(WriteValue::DynVarnode {
                     value_id: DynamicValueType::TokenField(token_field_id),
@@ -141,18 +123,14 @@ impl ExecutionBuilder for Builder<'_> {
                 //filter field with meaning to variable
                 let meaning = self.sleigh().context(context_id).attach;
                 let Some(ContextAttach::Varnode(attach_id)) = meaning else {
-                    return Err(Box::new(ExecutionError::InvalidRef(
-                        src.clone(),
-                    )));
+                    return Err(Box::new(ExecutionError::InvalidRef(src.clone())));
                 };
                 Ok(WriteValue::DynVarnode {
                     value_id: DynamicValueType::Context(context_id),
                     attach_id,
                 })
             }
-            GlobalScope::Table(table_id) => {
-                Ok(WriteValue::TableExport(table_id))
-            }
+            GlobalScope::Table(table_id) => Ok(WriteValue::TableExport(table_id)),
             _ => Err(Box::new(ExecutionError::InvalidRef(src.clone()))),
         }
     }

@@ -3,8 +3,7 @@ use quote::{format_ident, quote};
 
 use super::{Disassembler, WorkType};
 
-pub const DISPLAY_WORK_TYPE: WorkType =
-    WorkType::new_int_bits(crate::NumberSigned::BITS, false);
+pub const DISPLAY_WORK_TYPE: WorkType = WorkType::new_int_bits(crate::NumberSigned::BITS, false);
 #[derive(Debug, Clone)]
 pub struct DisplayElement {
     pub name: Ident,
@@ -21,11 +20,7 @@ impl DisplayElement {
             number_var: format_ident!("Number"),
         }
     }
-    pub fn to_tokens(
-        &self,
-        tokens: &mut TokenStream,
-        disassembler: &Disassembler,
-    ) {
+    pub fn to_tokens(&self, tokens: &mut TokenStream, disassembler: &Disassembler) {
         let Self {
             name,
             literal_var,

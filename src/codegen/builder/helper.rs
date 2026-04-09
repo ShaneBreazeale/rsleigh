@@ -21,8 +21,7 @@ pub struct PatternByte {
 impl PatternByte {
     pub(crate) fn from_bit_constraints(bits: &[BitConstraint]) -> Vec<Self> {
         let context_bytes = (usize::try_from(bits.len()).unwrap() + 7) / 8;
-        let mut bytes: Vec<PatternByte> =
-            vec![PatternByte::default(); context_bytes];
+        let mut bytes: Vec<PatternByte> = vec![PatternByte::default(); context_bytes];
         for (bit, bit_constraint) in bits.iter().enumerate() {
             match bit_constraint {
                 BitConstraint::Unrestrained => {}
@@ -46,11 +45,7 @@ impl PatternByte {
     }
 }
 
-pub fn bytes_from_value(
-    endian: Endian,
-    type_bytes: u32,
-    value_bytes: u32,
-) -> (u32, u32) {
+pub fn bytes_from_value(endian: Endian, type_bytes: u32, value_bytes: u32) -> (u32, u32) {
     assert!(type_bytes >= value_bytes);
     match endian {
         // in le, the lsB is first, so we copy from 0 to the value len

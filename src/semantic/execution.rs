@@ -1,13 +1,12 @@
 use std::ops::Range;
 
 use crate::{
-    AttachNumberId, AttachVarnodeId, Number, NumberNonZeroUnsigned,
-    NumberUnsigned, Sleigh, Span,
+    AttachNumberId, AttachVarnodeId, Number, NumberNonZeroUnsigned, NumberUnsigned, Sleigh, Span,
 };
 
 use super::{
-    disassembly, BitrangeId, ContextId, InstNext, InstStart, SpaceId, TableId,
-    TokenFieldId, UserFunctionId, VarnodeId,
+    disassembly, BitrangeId, ContextId, InstNext, InstStart, SpaceId, TableId, TokenFieldId,
+    UserFunctionId, VarnodeId,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -26,10 +25,9 @@ pub enum ExportLen {
 impl ExportLen {
     pub fn len(&self) -> NumberNonZeroUnsigned {
         match self {
-            Self::Const(len)
-            | Self::Value(len)
-            | Self::Reference(len)
-            | Self::Multiple(len) => *len,
+            Self::Const(len) | Self::Value(len) | Self::Reference(len) | Self::Multiple(len) => {
+                *len
+            }
         }
     }
 }
@@ -84,11 +82,7 @@ pub enum Expr {
     Op(ExprBinaryOp),
 }
 impl Expr {
-    pub fn len_bits(
-        &self,
-        sleigh: &Sleigh,
-        execution: &Execution,
-    ) -> NumberNonZeroUnsigned {
+    pub fn len_bits(&self, sleigh: &Sleigh, execution: &Execution) -> NumberNonZeroUnsigned {
         match self {
             Expr::Value(value) => value.len_bits(sleigh, execution),
             Expr::Op(op) => op.len_bits,
@@ -115,20 +109,13 @@ pub enum ExprElement {
     CPool(ExprCPool),
 }
 impl ExprElement {
-    fn len_bits(
-        &self,
-        sleigh: &Sleigh,
-        execution: &Execution,
-    ) -> NumberNonZeroUnsigned {
+    fn len_bits(&self, sleigh: &Sleigh, execution: &Execution) -> NumberNonZeroUnsigned {
         match self {
             Self::Value { value, .. } => value.len_bits(sleigh, execution),
             Self::UserCall(_x) => {
                 // User functions don't declare return size in SLEIGH;
                 // default to address size.
-                NumberNonZeroUnsigned::new(
-                    sleigh.addr_bytes().get() as u64 * 8,
-                )
-                .unwrap()
+                NumberNonZeroUnsigned::new(sleigh.addr_bytes().get() as u64 * 8).unwrap()
             }
             Self::Reference(x) => x.len_bits,
             Self::Op(x) => x.len_bits(sleigh, execution),
@@ -159,11 +146,7 @@ pub struct ExprUnaryOp {
 }
 
 impl ExprUnaryOp {
-    pub fn len_bits(
-        &self,
-        sleigh: &Sleigh,
-        execution: &Execution,
-    ) -> NumberNonZeroUnsigned {
+    pub fn len_bits(&self, sleigh: &Sleigh, execution: &Execution) -> NumberNonZeroUnsigned {
         match &self.op {
             Unary::TakeLsb(len) => (len.get() * 8).try_into().unwrap(),
             Unary::TrunkLsb { trunk: _, bits } => *bits,
@@ -234,20 +217,14 @@ pub enum ExprValue {
 }
 
 impl ExprValue {
-    pub fn len_bits(
-        &self,
-        sleigh: &Sleigh,
-        execution: &Execution,
-    ) -> NumberNonZeroUnsigned {
+    pub fn len_bits(&self, sleigh: &Sleigh, execution: &Execution) -> NumberNonZeroUnsigned {
         match self {
             Self::Int(x) => x.size,
             Self::TokenField(x) => x.size,
             Self::InstStart(_) | Self::InstNext(_) => {
                 (sleigh.addr_bytes().get() * 8).try_into().unwrap()
             }
-            Self::Varnode(x) => {
-                (sleigh.varnode(*x).len_bytes.get() * 8).try_into().unwrap()
-            }
+            Self::Varnode(x) => (sleigh.varnode(*x).len_bytes.get() * 8).try_into().unwrap(),
             Self::Context(x) => sleigh.context(x.id).bitrange.bits.len(),
             Self::Bitrange(x) => sleigh.bitrange(x.id).bits.len(),
             Self::Table(x) => sleigh.table(*x).export.unwrap().len(),
@@ -447,11 +424,7 @@ pub enum Export {
 }
 
 impl Export {
-    pub fn len_bits(
-        &self,
-        sleigh: &Sleigh,
-        execution: &Execution,
-    ) -> NumberNonZeroUnsigned {
+    pub fn len_bits(&self, sleigh: &Sleigh, execution: &Execution) -> NumberNonZeroUnsigned {
         match self {
             Export::Value(value) => value.len_bits(sleigh, execution),
             Export::Reference { addr: _, memory } => {

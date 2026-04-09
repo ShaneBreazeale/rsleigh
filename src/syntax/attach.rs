@@ -6,9 +6,7 @@ use nom::IResult;
 use crate::preprocessor::token::Token;
 use crate::{Number, SleighError, Span};
 
-use super::parser::{
-    fieldlist, numberlist, registerlist, stringlist, this_ident,
-};
+use super::parser::{fieldlist, numberlist, registerlist, stringlist, this_ident};
 
 #[derive(Clone, Debug)]
 pub struct Attach {
@@ -29,18 +27,9 @@ impl Attach {
             this_ident("attach"),
             cut(terminated(
                 alt((
-                    Attach::attach_lists(
-                        "variables",
-                        map(registerlist, Meaning::Variable),
-                    ),
-                    Attach::attach_lists(
-                        "names",
-                        map(stringlist, Meaning::Name),
-                    ),
-                    Attach::attach_lists(
-                        "values",
-                        map(numberlist, Meaning::Number),
-                    ),
+                    Attach::attach_lists("variables", map(registerlist, Meaning::Variable)),
+                    Attach::attach_lists("names", map(stringlist, Meaning::Name)),
+                    Attach::attach_lists("values", map(numberlist, Meaning::Number)),
                 )),
                 pair(tag!(";"), eof),
             )),
@@ -54,13 +43,7 @@ impl Attach {
     fn attach_lists<'a, O, E>(
         name: &'a str,
         element: E,
-    ) -> impl FnMut(
-        &'a [Token],
-    ) -> IResult<
-        &'a [Token],
-        (Vec<(String, Span)>, O),
-        Box<SleighError>,
-    >
+    ) -> impl FnMut(&'a [Token]) -> IResult<&'a [Token], (Vec<(String, Span)>, O), Box<SleighError>>
     where
         E: FnMut(&'a [Token]) -> IResult<&'a [Token], O, Box<SleighError>>,
     {

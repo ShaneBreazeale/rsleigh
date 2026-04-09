@@ -24,12 +24,7 @@ impl Varnode {
                 preceded(pair(this_ident("size"), tag!("=")), number),
                 registerlist,
             )),
-            |(
-                (space_name, space_span),
-                (offset, _),
-                (value_bytes, _),
-                names,
-            )| Varnode {
+            |((space_name, space_span), (offset, _), (value_bytes, _), names)| Varnode {
                 space_name,
                 space_span: space_span.clone(),
                 offset,

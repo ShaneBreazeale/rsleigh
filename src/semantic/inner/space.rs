@@ -5,13 +5,9 @@ use crate::{syntax, SleighError};
 use super::{GlobalScope, Sleigh};
 
 impl Sleigh {
-    pub fn create_space(
-        &mut self,
-        input: syntax::define::Space,
-    ) -> Result<(), Box<SleighError>> {
+    pub fn create_space(&mut self, input: syntax::define::Space) -> Result<(), Box<SleighError>> {
         let src = input.src;
-        let (mut default, mut addr_size, mut wordsize, mut space_type) =
-            (false, None, None, None);
+        let (mut default, mut addr_size, mut wordsize, mut space_type) = (false, None, None, None);
         for att in input.attributes.into_iter() {
             use syntax::define::Attribute::*;
             match att {
@@ -22,21 +18,17 @@ impl Sleigh {
                 _ => return Err(Box::new(SleighError::SpaceInvalidAtt(src))),
             }
         }
-        let word_size = wordsize.unwrap_or(1).try_into().map_err(|_| {
-            Box::new(SleighError::SpaceMissingSize(src.clone()))
-        })?;
-        let addr_size = match addr_size.ok_or_else(|| {
-            Box::new(SleighError::SpaceMissingSize(src.clone()))
-        })? {
-            0 => {
-                return Err(Box::new(SleighError::SpaceInvalidSize(
-                    src.clone(),
-                )))
-            }
-            x => x.try_into().map_err(|_| {
-                Box::new(SleighError::SpaceInvalidSize(src.clone()))
-            })?,
-        };
+        let word_size = wordsize
+            .unwrap_or(1)
+            .try_into()
+            .map_err(|_| Box::new(SleighError::SpaceMissingSize(src.clone())))?;
+        let addr_size =
+            match addr_size.ok_or_else(|| Box::new(SleighError::SpaceMissingSize(src.clone())))? {
+                0 => return Err(Box::new(SleighError::SpaceInvalidSize(src.clone()))),
+                x => x
+                    .try_into()
+                    .map_err(|_| Box::new(SleighError::SpaceInvalidSize(src.clone())))?,
+            };
         let space_type = space_type.unwrap_or(SpaceType::Register);
         let space = Space {
             src,

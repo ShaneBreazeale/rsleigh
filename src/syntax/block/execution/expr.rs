@@ -1,9 +1,7 @@
 use nom::branch::alt;
 use nom::combinator::{map, map_opt, opt};
 use nom::multi::separated_list0;
-use nom::sequence::{
-    delimited, pair, preceded, separated_pair, terminated, tuple,
-};
+use nom::sequence::{delimited, pair, preceded, separated_pair, terminated, tuple};
 use nom::IResult;
 
 use super::op::{ByteRangeLsb, Unary};
@@ -29,9 +27,7 @@ macro_rules! declare_expr_level {
 }
 
 impl Expr {
-    fn parse_call(
-        input: &[Token],
-    ) -> IResult<&[Token], Self, Box<SleighError>> {
+    fn parse_call(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
         map(
             pair(
                 Binary::parse_call_name,
@@ -46,17 +42,13 @@ impl Expr {
             },
         )(input)
     }
-    fn value_or_rec(
-        input: &[Token],
-    ) -> IResult<&[Token], Self, Box<SleighError>> {
+    fn value_or_rec(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
         alt((Self::parse_rec, map(ExprElement::parse_ele, Self::Value)))(input)
     }
     fn eleme_rec(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
         alt((Self::parse_rec, map(ExprElement::parse, Self::Value)))(input)
     }
-    pub fn parse_rec(
-        input: &[Token],
-    ) -> IResult<&[Token], Self, Box<SleighError>> {
+    pub fn parse_rec(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
         alt((
             delimited(tag!("("), Self::parse, tag!(")")),
             Self::parse_call,
@@ -66,13 +58,10 @@ impl Expr {
     fn parse_op(
         this_level: fn(&[Token]) -> IResult<&[Token], Expr, Box<SleighError>>,
         next_level: fn(&[Token]) -> IResult<&[Token], Expr, Box<SleighError>>,
-        op: fn(
-            &[Token],
-        ) -> IResult<&[Token], (Binary, &Span), Box<SleighError>>,
+        op: fn(&[Token]) -> IResult<&[Token], (Binary, &Span), Box<SleighError>>,
     ) -> impl FnMut(&[Token]) -> IResult<&[Token], Expr, Box<SleighError>> {
         move |input: &[Token]| {
-            let (input, (left, rest)) =
-                pair(next_level, opt(pair(op, this_level)))(input)?;
+            let (input, (left, rest)) = pair(next_level, opt(pair(op, this_level)))(input)?;
             let expr = if let Some(((op, op_src), rest)) = rest {
                 Self::Op(op_src.clone(), op, Box::new(left), Box::new(rest))
             } else {
@@ -111,27 +100,19 @@ pub enum ExprElement {
 }
 
 impl ExprElement {
-    fn parse_value(
-        input: &[Token],
-    ) -> IResult<&[Token], Self, Box<SleighError>> {
+    fn parse_value(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
         map(Value::parse_signed, Self::Value)(input)
     }
-    fn parse_op_call(
-        input: &[Token],
-    ) -> IResult<&[Token], Self, Box<SleighError>> {
+    fn parse_op_call(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
         map(
             pair(
                 Unary::parse_call_name,
                 delimited(tag!("("), Expr::parse, tag!(")")),
             ),
-            |((op, src), param)| {
-                Self::Op(src.clone(), Box::new(op), Box::new(param))
-            },
+            |((op, src), param)| Self::Op(src.clone(), Box::new(op), Box::new(param)),
         )(input)
     }
-    fn parse_new_call(
-        input: &[Token],
-    ) -> IResult<&[Token], Self, Box<SleighError>> {
+    fn parse_new_call(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
         map(
             tuple((
                 terminated(this_ident("newobject"), tag!("(")),
@@ -139,15 +120,12 @@ impl ExprElement {
                 tag!(")"),
             )),
             |(start, (param0, param1), end)| {
-                let location =
-                    Span::combine(start.clone().start(), end.clone().end());
+                let location = Span::combine(start.clone().start(), end.clone().end());
                 Self::New(location, Box::new(param0), param1.map(Box::new))
             },
         )(input)
     }
-    fn parse_cpool_call(
-        input: &[Token],
-    ) -> IResult<&[Token], Self, Box<SleighError>> {
+    fn parse_cpool_call(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
         map_opt(
             pair(
                 this_ident("cpool"),
@@ -157,14 +135,10 @@ impl ExprElement {
                     tag!(")"),
                 ),
             ),
-            |(src, params)| {
-                (params.len() >= 2).then(|| Self::CPool(src.clone(), params))
-            },
+            |(src, params)| (params.len() >= 2).then(|| Self::CPool(src.clone(), params)),
         )(input)
     }
-    fn parse_amb1(
-        input: &[Token],
-    ) -> IResult<&[Token], Self, Box<SleighError>> {
+    fn parse_amb1(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
         map(
             pair(ident, delimited(tag!("("), number, tag!(")"))),
             |((name, _name_src), (param, param_src))| Self::Ambiguous1 {
@@ -174,24 +148,16 @@ impl ExprElement {
             },
         )(input)
     }
-    fn parse_user_call(
-        input: &[Token],
-    ) -> IResult<&[Token], Self, Box<SleighError>> {
+    fn parse_user_call(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
         map(UserCall::parse_expr, Self::UserCall)(input)
     }
-    fn parse_reference(
-        input: &[Token],
-    ) -> IResult<&[Token], Self, Box<SleighError>> {
+    fn parse_reference(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
         map(
             tuple((tag!("&"), opt(ByteRangeLsb::parse), ident)),
-            |(src, ref_size, (value, _))| {
-                Self::Reference(src.clone(), ref_size, value)
-            },
+            |(src, ref_size, (value, _))| Self::Reference(src.clone(), ref_size, value),
         )(input)
     }
-    fn parse_user_call_or_amb1(
-        input: &[Token],
-    ) -> IResult<&[Token], Self, Box<SleighError>> {
+    fn parse_user_call_or_amb1(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
         //NOTE order is importante here
         alt((Self::parse_amb1, Self::parse_user_call))(input)
     }

@@ -1,9 +1,5 @@
-use crate::semantic::meaning::{
-    AttachLiteral, AttachNumber, AttachVarnode, Meaning,
-};
-use crate::semantic::{
-    AttachLiteralId, AttachNumberId, AttachVarnodeId, PrintBase, VarnodeId,
-};
+use crate::semantic::meaning::{AttachLiteral, AttachNumber, AttachVarnode, Meaning};
+use crate::semantic::{AttachLiteralId, AttachNumberId, AttachVarnodeId, PrintBase, VarnodeId};
 use crate::{syntax, SleighError, Span};
 
 use super::{GlobalScope, Sleigh};
@@ -53,9 +49,7 @@ impl Sleigh {
                             let var_id = self
                                 .get_global(&var_name)
                                 .ok_or_else(|| {
-                                    Box::new(SleighError::VarnodeUndefined(
-                                        var_src.clone(),
-                                    ))
+                                    Box::new(SleighError::VarnodeUndefined(var_src.clone()))
                                 })?
                                 .varnode()
                                 .ok_or_else(|| {
@@ -66,20 +60,15 @@ impl Sleigh {
                     )
                     .collect::<Result<_, _>>()?;
                 // all varnodes need to have the same size
-                let mut var_iter =
-                    vars.iter().map(|(_i, var)| self.varnode(*var).len_bytes);
+                let mut var_iter = vars.iter().map(|(_i, var)| self.varnode(*var).len_bytes);
                 let varnode_len = var_iter.next().unwrap();
                 for var in var_iter {
                     if var != varnode_len {
-                        return Err(Box::new(SleighError::VarnodeInvalid(
-                            src.clone(),
-                        )));
+                        return Err(Box::new(SleighError::VarnodeInvalid(src.clone())));
                     }
                 }
                 self.attach_varnodes.push(AttachVarnode(vars));
-                let meaning = Meaning::Varnode(AttachVarnodeId(
-                    self.attach_varnodes.len() - 1,
-                ));
+                let meaning = Meaning::Varnode(AttachVarnodeId(self.attach_varnodes.len() - 1));
                 self.attach_meaning_fields(fields, meaning)?;
             }
             syntax::attach::Meaning::Name(x) => {
@@ -89,9 +78,7 @@ impl Sleigh {
                     .filter_map(|(i, (x, _s))| Some((i, x?)))
                     .collect();
                 self.attach_literals.push(AttachLiteral(names));
-                let meaning = Meaning::Literal(AttachLiteralId(
-                    self.attach_literals.len() - 1,
-                ));
+                let meaning = Meaning::Literal(AttachLiteralId(self.attach_literals.len() - 1));
                 self.attach_meaning_fields(fields, meaning)?;
             }
             syntax::attach::Meaning::Number(x) => {

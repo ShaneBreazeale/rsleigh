@@ -1,12 +1,8 @@
 use std::collections::HashMap;
 
 use crate::meaning::Meaning;
-use crate::semantic::{
-    AttachLiteralId, AttachVarnodeId, SpaceId, ValueFmt, VarnodeId,
-};
-use crate::{
-    ContextId, FieldBits, NumberNonZeroUnsigned, NumberUnsigned, Span,
-};
+use crate::semantic::{AttachLiteralId, AttachVarnodeId, SpaceId, ValueFmt, VarnodeId};
+use crate::{ContextId, FieldBits, NumberNonZeroUnsigned, NumberUnsigned, Span};
 
 use super::inner::Sleigh;
 
@@ -88,8 +84,7 @@ pub struct ContextMemoryMapping {
 impl ContextMemoryMapping {
     pub(crate) fn map_all(sleigh: &Sleigh) -> Self {
         // 1. get all the contexts, separated by varnode
-        let mut context_mapping: HashMap<VarnodeId, Vec<ContextId>> =
-            HashMap::new();
+        let mut context_mapping: HashMap<VarnodeId, Vec<ContextId>> = HashMap::new();
         for (i, context) in sleigh.contexts.iter().enumerate() {
             context_mapping
                 .entry(context.bitrange.varnode)
@@ -103,9 +98,7 @@ impl ContextMemoryMapping {
                 let x = &sleigh.context(*x).bitrange.bits;
                 let y = &sleigh.context(*y).bitrange.bits;
                 match x.start().cmp(&y.start()) {
-                    std::cmp::Ordering::Equal => {
-                        x.len().get().cmp(&y.len().get())
-                    }
+                    std::cmp::Ordering::Equal => x.len().get().cmp(&y.len().get()),
                     x => x,
                 }
             });
@@ -117,10 +110,8 @@ impl ContextMemoryMapping {
             Vec::with_capacity(sleigh.contexts.len());
         for (_varnode_id, contexts) in context_mapping.into_iter() {
             for current_context_id in contexts.into_iter() {
-                let current_context =
-                    &sleigh.context(current_context_id).bitrange.bits;
-                let Some((last_context_id, last_bits)) = mem_mapping.last()
-                else {
+                let current_context = &sleigh.context(current_context_id).bitrange.bits;
+                let Some((last_context_id, last_bits)) = mem_mapping.last() else {
                     // first mapping is just added at bit 0
                     mem_mapping.push((
                         current_context_id,
@@ -128,26 +119,20 @@ impl ContextMemoryMapping {
                     ));
                     continue;
                 };
-                let last_context =
-                    &sleigh.context(*last_context_id).bitrange.bits;
+                let last_context = &sleigh.context(*last_context_id).bitrange.bits;
                 let current_context_start_bit = current_context.start();
                 //if the last entry intersect with the current, add using
                 //the last position as offset, otherwise add from the end of the
                 //last context
-                let new_start =
-                    if last_context.end().get() > current_context_start_bit {
-                        let offset =
-                            current_context_start_bit - last_context.start();
-                        last_bits.start() + offset
-                    } else {
-                        last_bits.end().get()
-                    };
+                let new_start = if last_context.end().get() > current_context_start_bit {
+                    let offset = current_context_start_bit - last_context.start();
+                    last_bits.start() + offset
+                } else {
+                    last_bits.end().get()
+                };
                 mem_mapping.push((
                     current_context_id,
-                    FieldBits::new(
-                        new_start,
-                        new_start + current_context.len().get(),
-                    ),
+                    FieldBits::new(new_start, new_start + current_context.len().get()),
                 ));
             }
         }

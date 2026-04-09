@@ -34,17 +34,13 @@ impl Value {
             Value::Number(location, _) | Value::Ident(location, _) => location,
         }
     }
-    pub fn parse_unsigned(
-        input: &[Token],
-    ) -> IResult<&[Token], Self, Box<SleighError>> {
+    pub fn parse_unsigned(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
         alt((
             map(number_unsigned, |(x, span)| Self::Number(span.clone(), x)),
             map(ident, |(x, span)| Self::Ident(span.clone(), x)),
         ))(input)
     }
-    pub fn parse_signed(
-        input: &[Token],
-    ) -> IResult<&[Token], Self, Box<SleighError>> {
+    pub fn parse_signed(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
         alt((
             map(number_signed, |(x, span)| Self::Number(span.clone(), x)),
             map(ident, |(x, span)| Self::Ident(span.clone(), x)),
@@ -172,8 +168,7 @@ impl Sleigh {
         let mut assertations = vec![];
         loop {
             buf.clear();
-            let Some(ass) = Assertation::parse(input, buf, inside_with_block)?
-            else {
+            let Some(ass) = Assertation::parse(input, buf, inside_with_block)? else {
                 break;
             };
             assertations.push(ass);

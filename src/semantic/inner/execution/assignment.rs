@@ -3,20 +3,18 @@ use std::ops::Range;
 use crate::execution::{Binary, DynamicValueType, VariableId};
 use crate::semantic::execution::{
     Assignment as FinalAssignment, AssignmentOp as FinalAssignmentOp,
-    AssignmentWrite as FinalAssignmentType,
-    AssignmentWriteVariable as FinalAssignmentValueWrite,
+    AssignmentWrite as FinalAssignmentType, AssignmentWriteVariable as FinalAssignmentValueWrite,
 };
 use crate::semantic::inner::execution::TableExportType;
 use crate::semantic::inner::{Sleigh, SolverStatus};
 use crate::{
-    AttachVarnodeId, BitrangeId, ExecutionError, NumberNonZeroUnsigned,
-    NumberUnsigned, Span, TableId, VarSizeError, VarnodeId,
+    AttachVarnodeId, BitrangeId, ExecutionError, NumberNonZeroUnsigned, NumberUnsigned, Span,
+    TableId, VarSizeError, VarnodeId,
 };
 
 use super::{
-    len, Execution, Expr, ExprBinaryOp, ExprElement, ExprNumber, ExprUnaryOp,
-    ExprValue, FieldSize, FieldSizeMut, FieldSizeTableExport,
-    FieldSizeUnmutable, MemoryLocation, Unary,
+    len, Execution, Expr, ExprBinaryOp, ExprElement, ExprNumber, ExprUnaryOp, ExprValue, FieldSize,
+    FieldSizeMut, FieldSizeTableExport, FieldSizeUnmutable, MemoryLocation, Unary,
 };
 
 #[derive(Clone, Debug)]
@@ -53,25 +51,19 @@ pub enum AssignmentWrite {
 impl AssignmentWrite {
     fn convert(self) -> FinalAssignmentType {
         match self {
-            AssignmentWrite::Variable { value, op } => {
-                FinalAssignmentType::Variable {
-                    value: value.convert(),
-                    op: op.map(AssignmentOp::convert),
-                }
-            }
-            AssignmentWrite::Memory { mem, addr } => {
-                FinalAssignmentType::Memory {
-                    mem: mem.convert(),
-                    addr: addr.convert(),
-                }
-            }
-            AssignmentWrite::TableExport { table_id, op } => {
-                FinalAssignmentType::TableExport {
-                    table_id,
-                    op: op.map(AssignmentOp::convert),
-                    size: None,
-                }
-            }
+            AssignmentWrite::Variable { value, op } => FinalAssignmentType::Variable {
+                value: value.convert(),
+                op: op.map(AssignmentOp::convert),
+            },
+            AssignmentWrite::Memory { mem, addr } => FinalAssignmentType::Memory {
+                mem: mem.convert(),
+                addr: addr.convert(),
+            },
+            AssignmentWrite::TableExport { table_id, op } => FinalAssignmentType::TableExport {
+                table_id,
+                op: op.map(AssignmentOp::convert),
+                size: None,
+            },
             AssignmentWrite::TableReferenceExport { table_id, size } => {
                 FinalAssignmentType::TableExport {
                     table_id,
@@ -99,12 +91,8 @@ pub enum AssignmentWriteVariable {
 impl AssignmentWriteVariable {
     fn convert(self) -> FinalAssignmentValueWrite {
         match self {
-            AssignmentWriteVariable::Varnode(var) => {
-                FinalAssignmentValueWrite::Varnode(var)
-            }
-            AssignmentWriteVariable::Bitrange(bit) => {
-                FinalAssignmentValueWrite::Bitrange(bit)
-            }
+            AssignmentWriteVariable::Varnode(var) => FinalAssignmentValueWrite::Varnode(var),
+            AssignmentWriteVariable::Bitrange(bit) => FinalAssignmentValueWrite::Bitrange(bit),
             AssignmentWriteVariable::DynVarnode {
                 value_id,
                 attach_id,
@@ -120,12 +108,7 @@ impl AssignmentWriteVariable {
 }
 
 impl Assignment {
-    pub fn new(
-        var_location: Span,
-        var: AssignmentWrite,
-        location: Span,
-        right: Expr,
-    ) -> Self {
+    pub fn new(var_location: Span, var: AssignmentWrite, location: Span, right: Expr) -> Self {
         // TODO table export can't be writen if is value or const
         Self {
             var_location,
@@ -185,8 +168,7 @@ impl Assignment {
 
         // left and right sizes are the same
         let modified = {
-            let (mut left, mut right) =
-                self.left_and_right_size_mut(sleigh, execution);
+            let (mut left, mut right) = self.left_and_right_size_mut(sleigh, execution);
             len::a_receive_b(&mut *left, &mut *right)
         };
         if modified.ok_or_else(|| VarSizeError::AssignmentSides {
@@ -202,22 +184,14 @@ impl Assignment {
             AssignmentWrite::Variable { value, op } => {
                 if let Some(op) = op {
                     if op.output_size().is_undefined() {
-                        solved.iam_not_finished(
-                            &self.var_location,
-                            file!(),
-                            line!(),
-                        )
+                        solved.iam_not_finished(&self.var_location, file!(), line!())
                     }
                 }
                 match value {
                     AssignmentWriteVariable::Local { id, creation: _ } => {
                         let var = execution.variable(*id);
                         if var.size.get().is_undefined() {
-                            solved.iam_not_finished(
-                                &self.var_location,
-                                file!(),
-                                line!(),
-                            )
+                            solved.iam_not_finished(&self.var_location, file!(), line!())
                         }
                     }
                     AssignmentWriteVariable::Varnode(_)
@@ -227,32 +201,20 @@ impl Assignment {
             }
             AssignmentWrite::Memory { mem, addr } => {
                 if mem.size.is_undefined() {
-                    solved.iam_not_finished(
-                        &self.var_location,
-                        file!(),
-                        line!(),
-                    )
+                    solved.iam_not_finished(&self.var_location, file!(), line!())
                 }
                 addr.solve(sleigh, execution, solved)?;
             }
             AssignmentWrite::TableExport { table_id: _, op } => {
                 if let Some(op) = op {
                     if op.output_size().is_undefined() {
-                        solved.iam_not_finished(
-                            &self.var_location,
-                            file!(),
-                            line!(),
-                        )
+                        solved.iam_not_finished(&self.var_location, file!(), line!())
                     }
                 }
             }
             AssignmentWrite::TableReferenceExport { table_id: _, size } => {
                 if size.is_undefined() {
-                    solved.iam_not_finished(
-                        &self.var_location,
-                        file!(),
-                        line!(),
-                    )
+                    solved.iam_not_finished(&self.var_location, file!(), line!())
                 }
             }
         }
@@ -260,11 +222,7 @@ impl Assignment {
         Ok(())
     }
 
-    pub fn left_size(
-        &self,
-        sleigh: &Sleigh,
-        execution: &Execution,
-    ) -> FieldSize {
+    pub fn left_size(&self, sleigh: &Sleigh, execution: &Execution) -> FieldSize {
         match &self.var {
             AssignmentWrite::TableExport { table_id, op: None } => {
                 let table = sleigh.table(*table_id);
@@ -273,9 +231,7 @@ impl Assignment {
             }
             AssignmentWrite::Memory { mem, .. } => mem.size,
             AssignmentWrite::Variable { op: Some(op), .. }
-            | AssignmentWrite::TableExport { op: Some(op), .. } => {
-                op.output_size()
-            }
+            | AssignmentWrite::TableExport { op: Some(op), .. } => op.output_size(),
             AssignmentWrite::Variable {
                 op: None,
                 value: AssignmentWriteVariable::Varnode(var),
@@ -287,9 +243,7 @@ impl Assignment {
             AssignmentWrite::Variable {
                 op: None,
                 value: AssignmentWriteVariable::DynVarnode { attach_id, .. },
-            } => FieldSize::new_bytes(
-                sleigh.attach_varnodes_len_bytes(*attach_id),
-            ),
+            } => FieldSize::new_bytes(sleigh.attach_varnodes_len_bytes(*attach_id)),
             AssignmentWrite::Variable {
                 op: None,
                 value: AssignmentWriteVariable::Local { id, creation: _ },
@@ -304,13 +258,9 @@ impl Assignment {
         execution: &'a Execution,
     ) -> (Box<dyn FieldSizeMut + 'a>, Box<dyn FieldSizeMut + 'a>) {
         let left = match &mut self.var {
-            AssignmentWrite::TableReferenceExport { size, .. } => {
-                Box::new(size)
-            }
+            AssignmentWrite::TableReferenceExport { size, .. } => Box::new(size),
             AssignmentWrite::Variable { op: Some(op), .. }
-            | AssignmentWrite::TableExport { op: Some(op), .. } => {
-                op.output_size_mut()
-            }
+            | AssignmentWrite::TableExport { op: Some(op), .. } => op.output_size_mut(),
             AssignmentWrite::Memory { mem, .. } => Box::new(&mut mem.size),
             AssignmentWrite::Variable {
                 op: None,
@@ -392,17 +342,14 @@ impl MacroParamAssignment {
         self.right.solve(sleigh, execution, solved)?;
 
         let var = execution.variable(self.var);
-        let result = len::a_equivalent_b(
-            &mut &var.size,
-            &mut *self.right.size_mut(sleigh, execution),
-        );
-        let did_something =
-            result.ok_or_else(|| VarSizeError::AssignmentSides {
-                left: var.size.get(),
-                right: self.right.size(sleigh, execution),
-                location: self.right.src().clone(),
-                backtrace: format!("{}:{}", file!(), line!()),
-            })?;
+        let result =
+            len::a_equivalent_b(&mut &var.size, &mut *self.right.size_mut(sleigh, execution));
+        let did_something = result.ok_or_else(|| VarSizeError::AssignmentSides {
+            left: var.size.get(),
+            right: self.right.size(sleigh, execution),
+            location: self.right.src().clone(),
+            backtrace: format!("{}:{}", file!(), line!()),
+        })?;
 
         if did_something {
             solved.i_did_a_thing();
@@ -443,11 +390,9 @@ impl AssignmentOp {
                 bytes: _,
                 output_size,
             } => Box::new(output_size),
-            AssignmentOp::BitRange(bits) => {
-                Box::new(len::FieldSizeUnmutable(FieldSize::new_bits(
-                    (bits.end - bits.start).try_into().unwrap(),
-                )))
-            }
+            AssignmentOp::BitRange(bits) => Box::new(len::FieldSizeUnmutable(FieldSize::new_bits(
+                (bits.end - bits.start).try_into().unwrap(),
+            ))),
         }
     }
     pub fn output_size(&self) -> FieldSize {
@@ -502,8 +447,7 @@ fn hack_solve_table_reference_export_size(
     };
 
     // right need to have a defined size
-    let Some(right_size) = ass.right.size(sleigh, execution).final_value()
-    else {
+    let Some(right_size) = ass.right.size(sleigh, execution).final_value() else {
         return false;
     };
 
@@ -592,8 +536,7 @@ fn hack_solve_simple_bin_ands(
                 return Ok(false);
             };
 
-            let result_right =
-                right_size.update_action(|x| x.set_final_value(ass_size));
+            let result_right = right_size.update_action(|x| x.set_final_value(ass_size));
             let result_right = result_right.ok_or_else(|| {
                 Box::new(VarSizeError::AssignmentSides {
                     left: FieldSize::new_bits(ass_size),
@@ -602,8 +545,7 @@ fn hack_solve_simple_bin_ands(
                     backtrace: format!("{}:{}", file!(), line!()),
                 })
             })?;
-            let result_left =
-                left_size.update_action(|x| x.set_final_value(ass_size));
+            let result_left = left_size.update_action(|x| x.set_final_value(ass_size));
             let result_left = result_left.ok_or_else(|| {
                 Box::new(VarSizeError::AssignmentSides {
                     left: FieldSize::new_bits(ass_size),
@@ -612,8 +554,7 @@ fn hack_solve_simple_bin_ands(
                     backtrace: format!("{}:{}", file!(), line!()),
                 })
             })?;
-            let result_output =
-                output_size.update_action(|x| x.set_final_value(ass_size));
+            let result_output = output_size.update_action(|x| x.set_final_value(ass_size));
             let result_output = result_output.ok_or_else(|| {
                 Box::new(VarSizeError::AssignmentSides {
                     left: FieldSize::new_bits(ass_size),
@@ -645,8 +586,7 @@ fn hack_auto_fix_bitrange_with_bitand(
     let range = bitrange.end - bitrange.start;
 
     // right side need to be bigger then the left side
-    let Some(right_size) = ass.right.size(sleigh, execution).final_value()
-    else {
+    let Some(right_size) = ass.right.size(sleigh, execution).final_value() else {
         return false;
     };
     if right_size.get() <= range {
@@ -760,11 +700,7 @@ fn hack_auto_trunkate_right_side(
 // byte instead of bitranges (eg flags on X86 like ZF), and assigned
 // binary values to it, when that happen, it's unclear if zext or a left
 // hand truncation happen, I'll stick with left hand operation for now
-fn hack_auto_zext_right_side(
-    ass: &mut Assignment,
-    sleigh: &Sleigh,
-    execution: &Execution,
-) -> bool {
+fn hack_auto_zext_right_side(ass: &mut Assignment, sleigh: &Sleigh, execution: &Execution) -> bool {
     // left hand need to have a known size
     let left_size = match &mut ass.var {
         // can be a varnode
@@ -825,16 +761,12 @@ fn hack_1_byte_varnode_assign_to_bit(
     execution: &Execution,
 ) -> bool {
     // right hand need to be one byte sized
-    if ass.right.size(sleigh, execution).final_value()
-        != Some(8.try_into().unwrap())
-    {
+    if ass.right.size(sleigh, execution).final_value() != Some(8.try_into().unwrap()) {
         return false;
     }
 
     // left hand need to be one bit len
-    if ass.left_size(sleigh, execution).final_value()
-        != Some(1.try_into().unwrap())
-    {
+    if ass.left_size(sleigh, execution).final_value() != Some(1.try_into().unwrap()) {
         return false;
     }
 
@@ -866,8 +798,7 @@ fn hack_force_solve_usercall(
     };
     let location = usercall.location.clone();
     // user the same size on both sides
-    let (mut left_size, mut right_size) =
-        ass.left_and_right_size_mut(sleigh, execution);
+    let (mut left_size, mut right_size) = ass.left_and_right_size_mut(sleigh, execution);
     len::a_equivalent_b(&mut *left_size, &mut *right_size).ok_or_else(|| {
         Box::new(VarSizeError::AssignmentSides {
             left: left_size.get(),

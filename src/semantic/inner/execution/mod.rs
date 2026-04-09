@@ -1,8 +1,8 @@
 use std::cell::{Ref, RefMut};
 
 use crate::semantic::execution::{
-    BlockId, BranchCall, Build, Execution as FinalExecution,
-    Statement as FinalStatement, VariableId,
+    BlockId, BranchCall, Build, Execution as FinalExecution, Statement as FinalStatement,
+    VariableId,
 };
 use crate::{ExecutionError, NumberUnsigned, Span};
 
@@ -76,9 +76,7 @@ impl Statement {
             Self::LocalGoto(x) => x.solve(sleigh, execution, solved)?,
             Self::UserCall(x) => x.solve(sleigh, execution, solved)?,
             Self::Assignment(x) => x.solve(sleigh, execution, solved)?,
-            Self::MacroParamAssignment(x) => {
-                x.solve(sleigh, execution, solved)?
-            }
+            Self::MacroParamAssignment(x) => x.solve(sleigh, execution, solved)?,
         }
         Ok(())
     }
@@ -131,15 +129,12 @@ impl Execution {
             .export_statements_mut()
             .map(|x| x.output_size(sleigh, self))
             .collect();
-        let modified =
-            len::n_generate_a(inputs.as_mut_slice(), &mut return_size)
-                .ok_or_else(|| Box::new(ExecutionError::InvalidExport))?;
+        let modified = len::n_generate_a(inputs.as_mut_slice(), &mut return_size)
+            .ok_or_else(|| Box::new(ExecutionError::InvalidExport))?;
 
         if modified {
             solved.i_did_a_thing();
-            for (new_size, mut old_size) in
-                inputs.into_iter().zip(self.export_statements_mut())
-            {
+            for (new_size, mut old_size) in inputs.into_iter().zip(self.export_statements_mut()) {
                 old_size.output_size_mut(sleigh, self).set(new_size);
             }
             *self.return_value.size_mut().unwrap() = return_size;
@@ -153,11 +148,7 @@ impl Execution {
     }
     pub fn convert(self) -> FinalExecution {
         FinalExecution {
-            variables: self
-                .variables
-                .into_iter()
-                .map(|x| x.convert())
-                .collect(),
+            variables: self.variables.into_iter().map(|x| x.convert()).collect(),
             blocks: self
                 .blocks
                 .into_iter()
@@ -243,9 +234,7 @@ impl Execution {
             })
     }
 
-    pub fn export_statements_mut(
-        &self,
-    ) -> impl Iterator<Item = RefMut<'_, Export>> {
+    pub fn export_statements_mut(&self) -> impl Iterator<Item = RefMut<'_, Export>> {
         self.blocks
             .iter()
             .filter(|block| block.next.is_none())

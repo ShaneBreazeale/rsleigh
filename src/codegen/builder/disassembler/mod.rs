@@ -34,13 +34,11 @@ pub struct Disassembler {
 
 impl Disassembler {
     pub fn new(sleigh: crate::Sleigh, debug: bool) -> Self {
-        let registers =
-            RegistersEnum::from_all(format_ident!("Register"), &sleigh);
+        let registers = RegistersEnum::from_all(format_ident!("Register"), &sleigh);
         //TODO make sleigh to include all the meanings on the struct?
         //TODO removing the borrow in attach will simplifi this a lot
-        let inst_work_type = WorkType::unsigned_from_bytes(
-            sleigh.addr_bytes().get().try_into().unwrap(),
-        );
+        let inst_work_type =
+            WorkType::unsigned_from_bytes(sleigh.addr_bytes().get().try_into().unwrap());
 
         let display = DisplayElement::new(format_ident!("DisplayElement"));
 
@@ -55,8 +53,7 @@ impl Disassembler {
             })
             .collect();
         let field_structs = TokenFieldFunctions::new(&sleigh);
-        let context =
-            ContextMemory::new(&sleigh, format_ident!("ContextMemory"));
+        let context = ContextMemory::new(&sleigh, format_ident!("ContextMemory"));
         Self {
             addr_type: format_ident!("AddrType"),
             display,
@@ -75,15 +72,12 @@ impl Disassembler {
         &self.tables[table.0]
     }
 
-    pub fn token_field_function(
-        &self,
-        id: crate::TokenFieldId,
-    ) -> &TokenFieldFunction {
+    pub fn token_field_function(&self, id: crate::TokenFieldId) -> &TokenFieldFunction {
         self.token_field_functions.read_function(&self.sleigh, id)
     }
 }
 
-use crate::codegen::GeneratedModule;
+use crate::codegen::{GeneratedModule, GeneratedModuleKind};
 
 impl Disassembler {
     /// Split the generated code into multiple files for faster compilation.
@@ -112,6 +106,7 @@ impl Disassembler {
         self.token_field_functions.to_tokens(&mut shared, self);
         self.context.to_tokens(&mut shared, self);
         modules.push(GeneratedModule {
+            kind: GeneratedModuleKind::Shared,
             filename: "shared.rs".into(),
             code: shared,
             raw_code: None,
@@ -137,6 +132,7 @@ impl Disassembler {
                     tokens.extend(quote! { #[allow(unused_imports)] use super::*; });
                     tokens.extend(batch);
                     modules.push(GeneratedModule {
+                        kind: GeneratedModuleKind::TableBatch,
                         filename: format!("table_{}.rs", file_idx),
                         code: tokens,
                         raw_code: None,
@@ -150,6 +146,7 @@ impl Disassembler {
                 tokens.extend(enum_tokens);
                 table_enum_file[i] = file_idx;
                 modules.push(GeneratedModule {
+                    kind: GeneratedModuleKind::TableEnum,
                     filename: format!("table_{}.rs", file_idx),
                     code: tokens,
                     raw_code: None,
@@ -162,6 +159,7 @@ impl Disassembler {
                 table.to_tokens(&mut tokens, self);
                 table_enum_file[i] = file_idx;
                 modules.push(GeneratedModule {
+                    kind: GeneratedModuleKind::TableEnum,
                     filename: format!("table_{}.rs", file_idx),
                     code: tokens,
                     raw_code: None,
@@ -231,6 +229,7 @@ impl Disassembler {
         root.push_str(&parse_fn.to_string());
 
         modules.push(GeneratedModule {
+            kind: GeneratedModuleKind::Root,
             filename: "root.rs".into(),
             code: TokenStream::new(),
             raw_code: Some(root),
@@ -243,8 +242,7 @@ impl Disassembler {
 impl ToTokens for Disassembler {
     fn to_tokens(&self, tokens: &mut TokenStream) {
         let display_data_type = &self.display.name;
-        let instruction_table =
-            self.table_struct(self.sleigh.instruction_table());
+        let instruction_table = self.table_struct(self.sleigh.instruction_table());
         let instruction_table_name = &instruction_table.name;
         let instruction_table_parse = &instruction_table.parse_fun;
         let instruction_table_display = &instruction_table.display_fun;

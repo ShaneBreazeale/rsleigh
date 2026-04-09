@@ -1,11 +1,6 @@
 use crate::semantic::disassembly::VariableId;
-use crate::semantic::{
-    ContextId, Sleigh as FinalSleigh, TableId, TokenFieldId,
-};
-use crate::{
-    field_in_be, field_in_le, value_in_context, value_in_token, NumberUnsigned,
-    Span,
-};
+use crate::semantic::{ContextId, Sleigh as FinalSleigh, TableId, TokenFieldId};
+use crate::{field_in_be, field_in_le, value_in_context, value_in_token, NumberUnsigned, Span};
 
 use super::disassembly::{Assertation, Expr, Variable};
 use super::InstStart;
@@ -65,9 +60,7 @@ impl PatternLen {
     /// min size of the token this patterns requires to match
     pub fn min(&self) -> NumberUnsigned {
         match self {
-            Self::Min(min)
-            | Self::Defined(min)
-            | Self::Range { min, max: _ } => *min,
+            Self::Min(min) | Self::Defined(min) | Self::Range { min, max: _ } => *min,
         }
     }
     /// max size of the token this patterns requires to match
@@ -188,9 +181,7 @@ impl Pattern {
         self.blocks().iter().flat_map(Block::tables)
     }
 
-    pub fn produced_token_fields(
-        &self,
-    ) -> impl Iterator<Item = &ProducedTokenField> {
+    pub fn produced_token_fields(&self) -> impl Iterator<Item = &ProducedTokenField> {
         self.blocks()
             .iter()
             .flat_map(|block| block.token_fields().iter())
@@ -227,10 +218,8 @@ impl Pattern {
     pub(crate) fn pattern_bits_variants<'a>(
         &'a self,
         sleigh: &'a FinalSleigh,
-    ) -> impl Iterator<Item = (usize, Vec<BitConstraint>, Vec<BitConstraint>)> + 'a
-    {
-        let context_bits =
-            usize::try_from(sleigh.context_memory.memory_bits).unwrap();
+    ) -> impl Iterator<Item = (usize, Vec<BitConstraint>, Vec<BitConstraint>)> + 'a {
+        let context_bits = usize::try_from(sleigh.context_memory.memory_bits).unwrap();
         let pattern_bits = self.bits_produced();
         let mut context_buf = vec![BitConstraint::default(); context_bits];
         let mut pattern_buf = vec![BitConstraint::default(); pattern_bits];
@@ -278,8 +267,7 @@ impl Block {
     }
     pub fn token_fields(&self) -> &[ProducedTokenField] {
         match self {
-            Block::And { token_fields, .. }
-            | Block::Or { token_fields, .. } => token_fields,
+            Block::And { token_fields, .. } | Block::Or { token_fields, .. } => token_fields,
         }
     }
     pub fn len(&self) -> PatternLen {
@@ -310,8 +298,7 @@ impl Block {
 
     pub fn variants_prior(&self) -> usize {
         match self {
-            Block::And { variants_prior, .. }
-            | Block::Or { variants_prior, .. } => *variants_prior,
+            Block::And { variants_prior, .. } | Block::Or { variants_prior, .. } => *variants_prior,
         }
     }
     pub fn variants_number(&self) -> usize {
@@ -357,8 +344,7 @@ impl Block {
                 ..
             } => {
                 //find the correct verification in the OR to constraint
-                let mut verification_id =
-                    (variant_id / variants_prior) % variants_number;
+                let mut verification_id = (variant_id / variants_prior) % variants_number;
                 for branch in branches.iter() {
                     let verification_variants = branch.variants_number();
                     if verification_id < verification_variants {
@@ -415,12 +401,9 @@ fn apply_verification(
                 value,
             )
         }
-        Verification::SubPattern { pattern, .. } => pattern.constraint(
-            sleigh,
-            variant_id,
-            context_bits,
-            constraint_bits,
-        ),
+        Verification::SubPattern { pattern, .. } => {
+            pattern.constraint(sleigh, variant_id, context_bits, constraint_bits)
+        }
     }
 }
 

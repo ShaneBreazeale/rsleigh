@@ -35,27 +35,18 @@ impl RegistersEnum {
                         Varnode(var) => {
                             vars.insert(*var);
                         }
-                        Context(context) => {
-                            match sleigh.context(*context).attach {
-                                ContextAttach::NoAttach(_)
-                                | ContextAttach::Literal(_) => {}
-                                ContextAttach::Varnode(id) => {
-                                    add_varnodes(&mut vars, id)
-                                }
-                            }
-                        }
-                        TokenField(token_field) => {
-                            match sleigh.token_field(*token_field).attach {
-                                TokenFieldAttach::NoAttach(_)
-                                | TokenFieldAttach::Literal(_)
-                                | TokenFieldAttach::Number(_, _) => {}
-                                TokenFieldAttach::Varnode(id) => {
-                                    add_varnodes(&mut vars, id)
-                                }
-                            }
-                        }
-                        InstStart(_) | InstNext(_) | Disassembly(_)
-                        | Table(_) | Literal(_) | Space => {}
+                        Context(context) => match sleigh.context(*context).attach {
+                            ContextAttach::NoAttach(_) | ContextAttach::Literal(_) => {}
+                            ContextAttach::Varnode(id) => add_varnodes(&mut vars, id),
+                        },
+                        TokenField(token_field) => match sleigh.token_field(*token_field).attach {
+                            TokenFieldAttach::NoAttach(_)
+                            | TokenFieldAttach::Literal(_)
+                            | TokenFieldAttach::Number(_, _) => {}
+                            TokenFieldAttach::Varnode(id) => add_varnodes(&mut vars, id),
+                        },
+                        InstStart(_) | InstNext(_) | Disassembly(_) | Table(_) | Literal(_)
+                        | Space => {}
                     }
                 }
             }
@@ -76,9 +67,7 @@ impl RegistersEnum {
     pub fn name(&self) -> &Ident {
         &self.name
     }
-    pub fn registers(
-        &self,
-    ) -> impl Iterator<Item = (&Ident, crate::VarnodeId)> {
+    pub fn registers(&self) -> impl Iterator<Item = (&Ident, crate::VarnodeId)> {
         self.registers
             .iter()
             .enumerate()
@@ -87,11 +76,7 @@ impl RegistersEnum {
     pub fn register(&self, id: crate::VarnodeId) -> &Ident {
         &self.registers[id.to_raw()]
     }
-    pub fn to_tokens(
-        &self,
-        tokens: &mut TokenStream,
-        disassembler: &Disassembler,
-    ) {
+    pub fn to_tokens(&self, tokens: &mut TokenStream, disassembler: &Disassembler) {
         let name = self.name();
         let elements_names = self.registers.iter();
         let elements_names2 = self.registers.iter();

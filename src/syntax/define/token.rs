@@ -22,9 +22,7 @@ pub struct Token {
 }
 
 impl Token {
-    pub fn parse(
-        input: &[ParserToken],
-    ) -> IResult<&[ParserToken], Self, Box<SleighError>> {
+    pub fn parse(input: &[ParserToken]) -> IResult<&[ParserToken], Self, Box<SleighError>> {
         map(
             preceded(
                 this_ident("token"),
@@ -55,9 +53,7 @@ pub struct TokenField {
 }
 
 impl TokenField {
-    pub fn parse(
-        input: &[ParserToken],
-    ) -> IResult<&[ParserToken], Self, Box<SleighError>> {
+    pub fn parse(input: &[ParserToken]) -> IResult<&[ParserToken], Self, Box<SleighError>> {
         map(
             tuple((
                 terminated(ident, tag!("=")),

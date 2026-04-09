@@ -63,8 +63,7 @@ impl ConstructorStruct {
         for display in constructor.display.elements() {
             use crate::display::DisplayElement::*;
             match display {
-                Context(_) | InstStart(_) | InstNext(_) | Varnode(_)
-                | Literal(_) | Space => (),
+                Context(_) | InstStart(_) | InstNext(_) | Varnode(_) | Literal(_) | Space => (),
                 TokenField(ass) => {
                     ass_fields.entry(*ass).or_insert_with(|| {
                         let ass = sleigh.token_field(*ass);
@@ -84,9 +83,7 @@ impl ConstructorStruct {
             .blocks()
             .iter()
             .flat_map(|block| match block {
-                crate::pattern::Block::And { pre, pos, .. } => {
-                    pre.iter().chain(pos.iter())
-                }
+                crate::pattern::Block::And { pre, pos, .. } => pre.iter().chain(pos.iter()),
                 crate::pattern::Block::Or { pos, .. } => {
                     pos.iter().chain([/*LOL*/].iter())
                 }
@@ -95,12 +92,11 @@ impl ConstructorStruct {
         {
             use crate::disassembly;
             match field {
-                disassembly::Assertation::GlobalSet(
-                    disassembly::GlobalSet { .. },
-                ) => (),
-                disassembly::Assertation::Assignment(
-                    disassembly::Assignment { left: _, right },
-                ) => {
+                disassembly::Assertation::GlobalSet(disassembly::GlobalSet { .. }) => (),
+                disassembly::Assertation::Assignment(disassembly::Assignment {
+                    left: _,
+                    right,
+                }) => {
                     fn collect_token_fields(
                         expr: &disassembly::Expr,
                         out: &mut Vec<crate::TokenFieldId>,
@@ -148,17 +144,11 @@ impl ConstructorStruct {
             })
             .collect();
 
-        let struct_name =
-            if let Some(mneumonic) = &constructor.display.mneumonic {
-                format_ident!(
-                    "{}_{}Var{}",
-                    from_sleigh(mneumonic),
-                    table_name,
-                    number
-                )
-            } else {
-                format_ident!("{}Var{}", table_name, number)
-            };
+        let struct_name = if let Some(mneumonic) = &constructor.display.mneumonic {
+            format_ident!("{}_{}Var{}", from_sleigh(mneumonic), table_name, number)
+        } else {
+            format_ident!("{}Var{}", table_name, number)
+        };
 
         Self {
             enum_name: format_ident!("Var{}", number),
@@ -215,18 +205,14 @@ impl ConstructorStruct {
             .disassembly_vars()
             .iter()
             .enumerate()
-            .map(|(i, var)| {
-                disassembly
-                    .new_variable(&crate::disassembly::VariableId(i), var)
-            })
+            .map(|(i, var)| disassembly.new_variable(&crate::disassembly::VariableId(i), var))
             .collect();
         disassembly_body.extend(disassembly.to_token_stream());
-        let add_mneumonic =
-            constructor.display.mneumonic.as_ref().map(|mneumonic| {
-                let display_element = &disassembler.display.name;
-                let literal = &disassembler.display.literal_var;
-                quote! { #display_param.push(#display_element::#literal(#mneumonic)); }
-            });
+        let add_mneumonic = constructor.display.mneumonic.as_ref().map(|mneumonic| {
+            let display_element = &disassembler.display.name;
+            let literal = &disassembler.display.literal_var;
+            quote! { #display_param.push(#display_element::#literal(#mneumonic)); }
+        });
         let elements: Vec<_> = constructor.display.elements().collect();
         let displays = elements
             .split_inclusive(|ele| matches!(ele, DisplayScope::Table(_)))
@@ -367,25 +353,24 @@ impl ConstructorStruct {
                 // This handles constructors like `:^instruction is ... & instruction {}`
                 // where the subtable is implicitly built
 
-                let gen = ExecutionGenerator::new(
-                    disassembler,
-                    self,
-                    &inst_start,
-                    &inst_next,
-                );
+                let gen = ExecutionGenerator::new(disassembler, self, &inst_start, &inst_next);
                 gen.gen_lift(execution)
             }
             None => {
                 let addr_type = &disassembler.addr_type;
                 // No execution → build all subtables
-                let builds: TokenStream = self.table_fields.values().map(|field| {
-                    quote! {
-                        {
-                            let (s_ops, _, _) = self.#field.lift(#inst_start, #inst_next);
-                            ops.extend(s_ops);
+                let builds: TokenStream = self
+                    .table_fields
+                    .values()
+                    .map(|field| {
+                        quote! {
+                            {
+                                let (s_ops, _, _) = self.#field.lift(#inst_start, #inst_next);
+                                ops.extend(s_ops);
+                            }
                         }
-                    }
-                }).collect();
+                    })
+                    .collect();
                 quote! {
                     pub fn lift(
                         &self,
@@ -401,11 +386,7 @@ impl ConstructorStruct {
         }
     }
 
-    pub fn to_tokens(
-        &self,
-        tokens: &mut TokenStream,
-        disassembler: &Disassembler,
-    ) {
+    pub fn to_tokens(&self, tokens: &mut TokenStream, disassembler: &Disassembler) {
         let Self {
             struct_name,
             table_fields,
@@ -424,8 +405,7 @@ impl ConstructorStruct {
             .constructor(*constructor_id);
         let doc = format!("Constructor at {}", &constructor.location);
         let ass_fields = ass_fields.iter().map(|(field_id, name)| {
-            let data_type =
-                &disassembler.token_field_function(*field_id).read_type;
+            let data_type = &disassembler.token_field_function(*field_id).read_type;
             quote! { #name: #data_type }
         });
         let table_fields = table_fields.iter().map(|(table_id, name)| {
@@ -446,8 +426,7 @@ impl ConstructorStruct {
         });
         let display_impl = self.gen_display(disassembler);
         let lift_impl = self.gen_execution(disassembler);
-        let parser_function =
-            root_pattern_function(parser_fun, self, disassembler);
+        let parser_function = root_pattern_function(parser_fun, self, disassembler);
         let dis_field_defs = dis_fields.values().map(|name| {
             quote! { #name: i128 }
         });

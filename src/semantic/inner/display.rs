@@ -12,9 +12,7 @@ impl Sleigh {
         src: &Span,
     ) -> Result<DisplayElement, Box<DisplayError>> {
         use crate::semantic::inner::GlobalScope::*;
-        if let Some(disassembly_var) =
-            pattern.disassembly_variable_names.get(name)
-        {
+        if let Some(disassembly_var) = pattern.disassembly_variable_names.get(name) {
             return Ok(DisplayElement::Disassembly(*disassembly_var));
         }
         match self
@@ -71,9 +69,7 @@ impl Sleigh {
         for ele in iter {
             match ele {
                 Concat => (),
-                Ident(src, name) => {
-                    elements.push(self.get_display_ref(pattern, &name, &src)?)
-                }
+                Ident(src, name) => elements.push(self.get_display_ref(pattern, &name, &src)?),
                 // Multiple spaces should be combined into a single one
                 // NOTE: a literal with a space in the end, followed by
                 // Other(' ') should NOT be condensated.

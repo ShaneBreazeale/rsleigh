@@ -4,12 +4,10 @@ use crate::codegen::builder::formater::from_sleigh;
 use crate::codegen::builder::{
     Disassembler, DisassemblyGenerator, ToLiteral, DISASSEMBLY_WORK_TYPE,
 };
+use crate::disassembly::{self, Assertation, GlobalSet};
+use crate::pattern::{ConstraintValue, ProducedTable, ProducedTokenField, Verification};
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote, ToTokens};
-use crate::disassembly::{self, Assertation, GlobalSet};
-use crate::pattern::{
-    ConstraintValue, ProducedTable, ProducedTokenField, Verification,
-};
 
 use super::{ConstructorStruct, DisassemblyPattern};
 
@@ -47,10 +45,7 @@ pub fn root_pattern_function(
         .disassembly_vars()
         .iter()
         .enumerate()
-        .map(|(i, var)| {
-            disassembly
-                .new_variable(&crate::disassembly::VariableId(i), var)
-        })
+        .map(|(i, var)| disassembly.new_variable(&crate::disassembly::VariableId(i), var))
         .collect();
 
     // dissable flat pattern if in debug mode
@@ -122,9 +117,8 @@ pub fn root_pattern_function(
                                         quote! { i128::try_from(#inst_next).unwrap() }
                                     }
                                     ReadScope::TokenField(tf) => {
-                                        let tf_name = ass_fields.get(tf)
-                                            .cloned()
-                                            .unwrap_or_else(|| {
+                                        let tf_name =
+                                            ass_fields.get(tf).cloned().unwrap_or_else(|| {
                                                 let ass = disassembler.sleigh.token_field(*tf);
                                                 format_ident!("{}", from_sleigh(ass.name()))
                                             });
@@ -139,13 +133,34 @@ pub fn root_pattern_function(
                                     }
                                 },
                                 ExprElement::Op(_, op, inner) => {
-                                    let x = gen_dis_expr(inner, inst_start, inst_next, vars, ass_fields, disassembler);
+                                    let x = gen_dis_expr(
+                                        inner,
+                                        inst_start,
+                                        inst_next,
+                                        vars,
+                                        ass_fields,
+                                        disassembler,
+                                    );
                                     crate::codegen::builder::disassembly::op_unary(op, x)
                                 }
                             },
                             Expr::Op(_, op, left, right) => {
-                                let l = gen_dis_expr(left, inst_start, inst_next, vars, ass_fields, disassembler);
-                                let r = gen_dis_expr(right, inst_start, inst_next, vars, ass_fields, disassembler);
+                                let l = gen_dis_expr(
+                                    left,
+                                    inst_start,
+                                    inst_next,
+                                    vars,
+                                    ass_fields,
+                                    disassembler,
+                                );
+                                let r = gen_dis_expr(
+                                    right,
+                                    inst_start,
+                                    inst_next,
+                                    vars,
+                                    ass_fields,
+                                    disassembler,
+                                );
                                 crate::codegen::builder::disassembly::disassembly_op(l, op, r)
                             }
                         }
@@ -491,46 +506,38 @@ fn body_block_and_pre(
         } if part_of_flat
             && matches!(
                 value.expr(),
-                crate::disassembly::Expr::Value(
-                    crate::disassembly::ExprElement::Value {
-                        value: crate::disassembly::ReadScope::Integer(_),
-                        location: _,
-                    }
-                )
+                crate::disassembly::Expr::Value(crate::disassembly::ExprElement::Value {
+                    value: crate::disassembly::ReadScope::Integer(_),
+                    location: _,
+                })
             ) =>
         {
             None
         }
-        Verification::ContextCheck { context, op, value } => {
-            Some(context_verification(
-                true,
-                *context,
-                op,
-                value,
-                disassembler,
-                tokens,
-                context_instance,
-                inst_start,
-                root_token_fields,
-            ))
-        }
-        Verification::TokenFieldCheck { field, op, value } => {
-            Some(field_verification(
-                true,
-                *field,
-                op,
-                value,
-                disassembler,
-                tokens,
-                context_instance,
-                inst_start,
-                root_token_fields,
-            ))
-        }
+        Verification::ContextCheck { context, op, value } => Some(context_verification(
+            true,
+            *context,
+            op,
+            value,
+            disassembler,
+            tokens,
+            context_instance,
+            inst_start,
+            root_token_fields,
+        )),
+        Verification::TokenFieldCheck { field, op, value } => Some(field_verification(
+            true,
+            *field,
+            op,
+            value,
+            disassembler,
+            tokens,
+            context_instance,
+            inst_start,
+            root_token_fields,
+        )),
         //table and sub_pattern is done on pos
-        Verification::TableBuild { .. } | Verification::SubPattern { .. } => {
-            None
-        }
+        Verification::TableBuild { .. } | Verification::SubPattern { .. } => None,
     });
 
     let disassembly = DisassemblyPattern {
@@ -576,8 +583,7 @@ fn body_block_and_pos(
         .iter()
         .filter_map(|ver| match ver {
             //done in pre
-            Verification::ContextCheck { .. }
-            | Verification::TokenFieldCheck { .. } => None,
+            Verification::ContextCheck { .. } | Verification::TokenFieldCheck { .. } => None,
             Verification::TableBuild {
                 produced_table,
                 verification,
@@ -630,8 +636,7 @@ fn body_block_and_pos(
                 );
                 let tables = pattern.produced_tables().map(|table_field| {
                     let table = disassembler.sleigh.table(table_field.table);
-                    let table_name =
-                        format_ident!("{}", from_sleigh(table.name()));
+                    let table_name = format_ident!("{}", from_sleigh(table.name()));
                     produced_tables
                         .entry(table_field.table)
                         .and_modify(|_| unreachable!())
@@ -644,22 +649,16 @@ fn body_block_and_pos(
                         table_name.to_token_stream()
                     }
                 });
-                let fields =
-                    pattern.produced_token_fields().map(|prod_field| {
-                        let token_field =
-                            disassembler.sleigh.token_field(prod_field.field);
-                        let field_name = format_ident!(
-                            "{}",
-                            from_sleigh(token_field.name())
-                        );
-                        produced_token_fields
-                            .entry(prod_field.field)
-                            .and_modify(|_| unreachable!())
-                            .or_insert_with(|| field_name.clone());
-                        field_name
-                    });
-                let sub_pattern_name =
-                    format_ident!("sub_pattern_c{}", location.start_column());
+                let fields = pattern.produced_token_fields().map(|prod_field| {
+                    let token_field = disassembler.sleigh.token_field(prod_field.field);
+                    let field_name = format_ident!("{}", from_sleigh(token_field.name()));
+                    produced_token_fields
+                        .entry(prod_field.field)
+                        .and_modify(|_| unreachable!())
+                        .or_insert_with(|| field_name.clone());
+                    field_name
+                });
+                let sub_pattern_name = format_ident!("sub_pattern_c{}", location.start_column());
                 Some(quote! {
                     let mut #sub_pattern_name = #sub_func;
                     let (
@@ -678,10 +677,8 @@ fn body_block_and_pos(
         .filter(|prod_field| prod_field.local)
         .map(|prod_field| {
             let token_field = disassembler.sleigh.token_field(prod_field.field);
-            let token_field_name =
-                format_ident!("{}", from_sleigh(token_field.name()));
-            let token_field =
-                &disassembler.token_field_function(prod_field.field).read;
+            let token_field_name = format_ident!("{}", from_sleigh(token_field.name()));
+            let token_field = &disassembler.token_field_function(prod_field.field).read;
             produced_token_fields
                 .entry(prod_field.field)
                 .and_modify(|_| unreachable!())
@@ -773,10 +770,8 @@ fn block_or_closure(
                 //token fields is only exported if in the produced list
                 let token_field_export = match sleigh_token_fields {
                     [prod] => {
-                        if prod.field == *field
-                        {
-                            let token_field_new = &disassembler
-                                .token_field_function(*field).read;
+                        if prod.field == *field {
+                            let token_field_new = &disassembler.token_field_function(*field).read;
                             quote! { #token_field_new(#tokens_param) }
                         } else {
                             unreachable!()
@@ -816,17 +811,13 @@ fn block_or_closure(
                     root_token_fields,
                     disassembler,
                 );
-                let sub_pattern_name =
-                    format_ident!("sub_pattern_c{}", location.start_column());
+                let sub_pattern_name = format_ident!("sub_pattern_c{}", location.start_column());
                 let tables: IndexMap<_, _> = pattern
                     .produced_tables()
                     .map(|field_table| {
                         let table = field_table.table;
                         let table_name = disassembler.sleigh.table(table).name();
-                         let table_name =   format_ident!(
-                                "{}",
-                                from_sleigh(table_name)
-                            );
+                        let table_name = format_ident!("{}", from_sleigh(table_name));
                         (field_table.table, (field_table, table_name))
                     })
                     .collect();
@@ -834,10 +825,7 @@ fn block_or_closure(
                     .produced_token_fields()
                     .map(|field| {
                         let token_field = disassembler.sleigh.token_field(field.field);
-                        let name = format_ident!(
-                            "{}",
-                            from_sleigh(token_field.name())
-                        );
+                        let name = format_ident!("{}", from_sleigh(token_field.name()));
                         (field.field, name)
                     })
                     .collect();
@@ -845,9 +833,7 @@ fn block_or_closure(
                 let sub_fields = fields.values();
                 let tables = sleigh_tables.iter().map(|table_produced| {
                     //TODO what if the table have multiple levels of Option?
-                    if let Some((table_sub, table_sub_name)) =
-                        tables.get(&table_produced.table)
-                    {
+                    if let Some((table_sub, table_sub_name)) = tables.get(&table_produced.table) {
                         produced_table(
                             table_sub_name,
                             table_sub.recursive,
@@ -861,9 +847,9 @@ fn block_or_closure(
                         quote! {None}
                     }
                 });
-                let fields = sleigh_token_fields.iter().map(|field| {
-                    fields.get(&field.field).unwrap()
-                });
+                let fields = sleigh_token_fields
+                    .iter()
+                    .map(|field| fields.get(&field.field).unwrap());
                 quote! {
                     let mut #sub_pattern_name = #sub_func;
                     let mut context_current = #context_instance.clone();
@@ -977,9 +963,7 @@ impl DisassemblyGenerator for BlockParserValuesDisassembly<'_> {
     fn value(&self, value: &crate::disassembly::ReadScope) -> TokenStream {
         use crate::disassembly::*;
         match value {
-            ReadScope::Integer(value) => {
-                value.signed_super().suffixed().into_token_stream()
-            }
+            ReadScope::Integer(value) => value.signed_super().suffixed().into_token_stream(),
             ReadScope::Context(context) => {
                 let read_call = self
                     .disassembler
@@ -988,34 +972,27 @@ impl DisassemblyGenerator for BlockParserValuesDisassembly<'_> {
                 quote! { #DISASSEMBLY_WORK_TYPE::try_from(#read_call).unwrap()}
             }
             ReadScope::TokenField(ass) => {
-                let token_field_value = if let Some(token_field_name) =
-                    self.produced_fields.get(ass)
-                {
-                    token_field_name.to_token_stream()
-                } else {
-                    let token_field_new =
-                        &self.disassembler.token_field_function(*ass).read;
-                    let tokens = self.tokens;
-                    quote! { #token_field_new(#tokens) }
-                };
-                let token_field = self.disassembler.sleigh.token_field(*ass);
                 let token_field_value =
-                    self.disassembler.meanings.disassembly_function_call(
-                        token_field.bits.len().get().try_into().unwrap(),
-                        token_field_value,
-                        token_field.meaning(),
-                    );
+                    if let Some(token_field_name) = self.produced_fields.get(ass) {
+                        token_field_name.to_token_stream()
+                    } else {
+                        let token_field_new = &self.disassembler.token_field_function(*ass).read;
+                        let tokens = self.tokens;
+                        quote! { #token_field_new(#tokens) }
+                    };
+                let token_field = self.disassembler.sleigh.token_field(*ass);
+                let token_field_value = self.disassembler.meanings.disassembly_function_call(
+                    token_field.bits.len().get().try_into().unwrap(),
+                    token_field_value,
+                    token_field.meaning(),
+                );
                 quote! {#DISASSEMBLY_WORK_TYPE::try_from(#token_field_value).unwrap()}
             }
             ReadScope::InstStart(_) => self.inst_start.to_token_stream(),
             ReadScope::InstNext(_) | ReadScope::Local(_) => unreachable!(),
         }
     }
-    fn set_context(
-        &self,
-        _context: &crate::ContextId,
-        _value: TokenStream,
-    ) -> TokenStream {
+    fn set_context(&self, _context: &crate::ContextId, _value: TokenStream) -> TokenStream {
         unreachable!()
     }
     fn new_variable(

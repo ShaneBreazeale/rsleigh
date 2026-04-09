@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
+use crate::{Endian, FieldBits, NumberNonZeroUnsigned};
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
-use crate::{Endian, FieldBits, NumberNonZeroUnsigned};
 
 use crate::codegen::builder::helper::bytes_from_value;
 use crate::codegen::builder::WorkType;
@@ -77,11 +77,7 @@ impl TokenFieldFunctions {
         &self.functions.get(&key).unwrap()
     }
 
-    pub fn to_tokens(
-        &self,
-        tokens: &mut TokenStream,
-        disassembler: &Disassembler,
-    ) {
+    pub fn to_tokens(&self, tokens: &mut TokenStream, disassembler: &Disassembler) {
         for (key, value) in self.functions.iter() {
             let TokenFieldKey {
                 bits,
@@ -94,9 +90,7 @@ impl TokenFieldFunctions {
                 read_type,
             } = value;
             let from_endian_call = from_endian_bytes(*token_endian);
-            let token_type = WorkType::unsigned_from_bytes(
-                token_bytes.get().try_into().unwrap(),
-            );
+            let token_type = WorkType::unsigned_from_bytes(token_bytes.get().try_into().unwrap());
             let token_bytes_un = token_bytes.get().unsuffixed();
             let tokens_param = format_ident!("tokens");
 
@@ -106,9 +100,7 @@ impl TokenFieldFunctions {
                 doc.push_str(disassembler.sleigh.token_field(*id).name());
             }
             //TODO attach value should be converted here or in execution?
-            let body = if u32::try_from(token_bytes.get()).unwrap()
-                != token_type.len_bytes()
-            {
+            let body = if u32::try_from(token_bytes.get()).unwrap() != token_type.len_bytes() {
                 let bytes = format_ident!("bytes");
                 let value = format_ident!("value");
                 let token_type_bytes = token_type.len_bytes().unsuffixed();
@@ -118,8 +110,7 @@ impl TokenFieldFunctions {
                     token_bytes.get().try_into().unwrap(),
                 );
                 let convert = bitrange_from_value(
-                    bits.start().try_into().unwrap()
-                        ..bits.end().get().try_into().unwrap(),
+                    bits.start().try_into().unwrap()..bits.end().get().try_into().unwrap(),
                     *read_type,
                     &value,
                 );
@@ -134,8 +125,7 @@ impl TokenFieldFunctions {
                 }
             } else {
                 bitrange_from_value(
-                    bits.start().try_into().unwrap()
-                        ..bits.end().get().try_into().unwrap(),
+                    bits.start().try_into().unwrap()..bits.end().get().try_into().unwrap(),
                     *read_type,
                     quote! {#token_type::#from_endian_call(
                         #tokens_param[0..#token_bytes_un].try_into().unwrap()

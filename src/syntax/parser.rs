@@ -24,10 +24,7 @@ pub trait Parser {
 }
 
 impl<'a> nom::error::ParseError<&'a [Token]> for SleighError {
-    fn from_error_kind(
-        input: &'a [Token],
-        kind: nom::error::ErrorKind,
-    ) -> Self {
+    fn from_error_kind(input: &'a [Token], kind: nom::error::ErrorKind) -> Self {
         if let Some(first) = input.first() {
             Self::UnableToParse(first.location.clone(), kind)
         } else {
@@ -35,11 +32,7 @@ impl<'a> nom::error::ParseError<&'a [Token]> for SleighError {
         }
     }
 
-    fn append(
-        _input: &'a [Token],
-        _kind: nom::error::ErrorKind,
-        other: Self,
-    ) -> Self {
+    fn append(_input: &'a [Token], _kind: nom::error::ErrorKind, other: Self) -> Self {
         other
     }
 }
@@ -56,9 +49,7 @@ impl From<nom::Err<Box<SleighError>>> for Box<SleighError> {
         }
     }
 }
-impl nom::error::FromExternalError<&[Token], Box<SleighError>>
-    for Box<SleighError>
-{
+impl nom::error::FromExternalError<&[Token], Box<SleighError>> for Box<SleighError> {
     fn from_external_error(
         _input: &[Token],
         _kind: nom::error::ErrorKind,
@@ -113,16 +104,15 @@ impl Parser for FilePreProcessor {
 #[allow(clippy::type_complexity)]
 pub fn this_ident<'a, 'b>(
     value: &'b str,
-) -> impl FnMut(&'a [Token]) -> IResult<&'a [Token], &'a Span, Box<SleighError>> + 'b
-{
+) -> impl FnMut(&'a [Token]) -> IResult<&'a [Token], &'a Span, Box<SleighError>> + 'b {
     move |input: &'a [Token]| {
         let (first, rest) = input
             .split_first()
             .ok_or_else(|| Box::new(SleighError::UnexpectedEof))?;
         if first.ident()? != value {
-            return Err(nom::Err::Error(Box::new(
-                SleighError::StatementInvalid(first.location.clone()),
-            )));
+            return Err(nom::Err::Error(Box::new(SleighError::StatementInvalid(
+                first.location.clone(),
+            ))));
         }
         Ok((rest, &first.location))
     }
@@ -224,9 +214,9 @@ pub fn tag_token_type(
             .split_first()
             .ok_or_else(|| Box::new(SleighError::UnexpectedEof))?;
         if first.token_type != value {
-            return Err(nom::Err::Error(Box::new(
-                SleighError::StatementInvalid(first.location.clone()),
-            )));
+            return Err(nom::Err::Error(Box::new(SleighError::StatementInvalid(
+                first.location.clone(),
+            ))));
         }
         Ok((rest, &first.location))
     }
@@ -235,13 +225,9 @@ pub fn tag_token_type(
 #[allow(clippy::type_complexity)]
 pub fn option<'a, O, F>(
     mut parser: F,
-) -> impl FnMut(
-    &'a [Token],
-) -> IResult<&'a [Token], (Option<O>, &'a Span), Box<SleighError>>
+) -> impl FnMut(&'a [Token]) -> IResult<&'a [Token], (Option<O>, &'a Span), Box<SleighError>>
 where
-    F: FnMut(
-        &'a [Token],
-    ) -> IResult<&'a [Token], (O, &'a Span), Box<SleighError>>,
+    F: FnMut(&'a [Token]) -> IResult<&'a [Token], (O, &'a Span), Box<SleighError>>,
 {
     // can't delete parser call without trouble
     #[allow(clippy::redundant_closure)]
@@ -254,9 +240,7 @@ where
 }
 
 #[allow(clippy::type_complexity)]
-pub fn ident_ref(
-    input: &[Token],
-) -> IResult<&[Token], (&str, &Span), Box<SleighError>> {
+pub fn ident_ref(input: &[Token]) -> IResult<&[Token], (&str, &Span), Box<SleighError>> {
     let (first, rest) = input
         .split_first()
         .ok_or_else(|| Box::new(SleighError::UnexpectedEof))?;
@@ -264,17 +248,13 @@ pub fn ident_ref(
     Ok((rest, (name, &first.location)))
 }
 #[allow(clippy::type_complexity)]
-pub fn ident(
-    input: &[Token],
-) -> IResult<&[Token], (String, &Span), Box<SleighError>> {
+pub fn ident(input: &[Token]) -> IResult<&[Token], (String, &Span), Box<SleighError>> {
     let (rest, (ident, span)) = ident_ref(input)?;
     Ok((rest, (ident.to_owned(), span)))
 }
 
 #[allow(clippy::type_complexity)]
-pub fn string(
-    input: &[Token],
-) -> IResult<&[Token], (String, &Span), Box<SleighError>> {
+pub fn string(input: &[Token]) -> IResult<&[Token], (String, &Span), Box<SleighError>> {
     let (first, rest) = input
         .split_first()
         .ok_or_else(|| Box::new(SleighError::UnexpectedEof))?;
@@ -283,9 +263,7 @@ pub fn string(
 }
 
 #[allow(clippy::type_complexity)]
-pub fn number(
-    input: &[Token],
-) -> IResult<&[Token], (NumberUnsigned, &Span), Box<SleighError>> {
+pub fn number(input: &[Token]) -> IResult<&[Token], (NumberUnsigned, &Span), Box<SleighError>> {
     let (first, rest) = input
         .split_first()
         .ok_or_else(|| Box::new(SleighError::UnexpectedEof))?;
@@ -293,17 +271,12 @@ pub fn number(
     Ok((rest, (number, &first.location)))
 }
 #[allow(clippy::type_complexity)]
-pub fn number_unsigned(
-    input: &[Token],
-) -> IResult<&[Token], (Number, &Span), Box<SleighError>> {
+pub fn number_unsigned(input: &[Token]) -> IResult<&[Token], (Number, &Span), Box<SleighError>> {
     map(number, |(number, span)| (Number::Positive(number), span))(input)
 }
 #[allow(clippy::type_complexity)]
-pub fn number_signed(
-    input: &[Token],
-) -> IResult<&[Token], (Number, &Span), Box<SleighError>> {
-    let (rest, (is_neg, (number, location))) =
-        pair(opt(tag!("-")), number)(input)?;
+pub fn number_signed(input: &[Token]) -> IResult<&[Token], (Number, &Span), Box<SleighError>> {
+    let (rest, (is_neg, (number, location))) = pair(opt(tag!("-")), number)(input)?;
     let number = if is_neg.is_some() {
         Number::Negative(number)
     } else {
@@ -314,16 +287,12 @@ pub fn number_signed(
 
 //matches both X and "X"
 #[allow(clippy::type_complexity)]
-fn string_inline(
-    input: &[Token],
-) -> IResult<&[Token], (String, &Span), Box<SleighError>> {
+fn string_inline(input: &[Token]) -> IResult<&[Token], (String, &Span), Box<SleighError>> {
     alt((string, ident))(input)
 }
 
 #[allow(clippy::type_complexity)]
-pub fn fieldlist(
-    input: &[Token],
-) -> IResult<&[Token], Vec<(String, Span)>, Box<SleighError>> {
+pub fn fieldlist(input: &[Token]) -> IResult<&[Token], Vec<(String, Span)>, Box<SleighError>> {
     alt((
         map(ident, |(x, span)| vec![(x, span.clone())]),
         delimited(

@@ -3,8 +3,8 @@ use proc_macro2::TokenStream;
 use quote::{quote, ToTokens};
 
 use crate::disassembly::{
-    Assertation, Assignment, Expr, ExprElement, GlobalSet, Op, OpUnary,
-    ReadScope, Variable, VariableId,
+    Assertation, Assignment, Expr, ExprElement, GlobalSet, Op, OpUnary, ReadScope, Variable,
+    VariableId,
 };
 
 pub fn disassembly_op(x: impl ToTokens, op: &Op, y: impl ToTokens) -> TokenStream {
@@ -40,16 +40,8 @@ pub fn op_unary(op: &OpUnary, x: impl ToTokens) -> TokenStream {
 pub trait DisassemblyGenerator {
     fn global_set(&self, global_set: &GlobalSet) -> TokenStream;
     fn value(&self, value: &ReadScope) -> TokenStream;
-    fn set_context(
-        &self,
-        id: &crate::ContextId,
-        value: TokenStream,
-    ) -> TokenStream;
-    fn new_variable(
-        &mut self,
-        var_id: &VariableId,
-        variable: &Variable,
-    ) -> TokenStream;
+    fn set_context(&self, id: &crate::ContextId, value: TokenStream) -> TokenStream;
+    fn new_variable(&mut self, var_id: &VariableId, variable: &Variable) -> TokenStream;
     fn var_name(&self, var: &VariableId) -> TokenStream;
     fn expr(&self, expr: &Expr) -> TokenStream {
         match expr {
@@ -70,11 +62,7 @@ pub trait DisassemblyGenerator {
             }
         }
     }
-    fn set_variable(
-        &self,
-        var: &VariableId,
-        value: TokenStream,
-    ) -> TokenStream {
+    fn set_variable(&self, var: &VariableId, value: TokenStream) -> TokenStream {
         let var_name = self.var_name(var);
         quote! { #var_name = #value; }
     }
@@ -86,10 +74,7 @@ pub trait DisassemblyGenerator {
             Local(variable) => self.set_variable(variable, value),
         }
     }
-    fn disassembly(
-        &self,
-        assertations: &mut dyn Iterator<Item = &Assertation>,
-    ) -> TokenStream {
+    fn disassembly(&self, assertations: &mut dyn Iterator<Item = &Assertation>) -> TokenStream {
         assertations
             .map(|ass| {
                 use crate::disassembly::Assertation::*;

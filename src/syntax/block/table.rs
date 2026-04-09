@@ -31,8 +31,7 @@ impl Constructor {
         buf: &mut Vec<Token>,
     ) -> Result<Self, Box<SleighError>> {
         input.parse_until(buf, |x| x.token_type == token_type!(":"))?;
-        let (_eof, ((table_name, table_src), _, _)) =
-            tuple((ident, tag!(":"), eof))(buf)?;
+        let (_eof, ((table_name, table_src), _, _)) = tuple((ident, tag!(":"), eof))(buf)?;
         let table_src = table_src.clone();
 
         buf.clear();
@@ -48,10 +47,7 @@ impl Constructor {
         let display = Display::parse(input)?;
 
         input.parse_until(buf, |token| {
-            matches!(
-                &token.token_type,
-                token_type!("}") | token_type!("unimpl")
-            )
+            matches!(&token.token_type, token_type!("}") | token_type!("unimpl"))
         })?;
         let (_eof, (pattern, disassembly, execution)) = tuple((
             cut(Pattern::parse),
@@ -60,11 +56,7 @@ impl Constructor {
             //semantic could be empty or unimplemented (None)
             cut(alt((
                 value(None, tag!("unimpl")),
-                delimited(
-                    tag!("{"),
-                    map(Execution::parse, Option::Some),
-                    tag!("}"),
-                ),
+                delimited(tag!("{"), map(Execution::parse, Option::Some), tag!("}")),
             ))),
         ))(buf)?;
 

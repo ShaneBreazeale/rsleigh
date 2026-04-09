@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use rsleigh::codegen::GeneratedModuleKind;
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let archs: Vec<&str> = if args.len() > 1 {
@@ -74,24 +76,18 @@ fn generate_arch(
     let mut subtable_files = Vec::new();
 
     for m in &modules {
-        if m.filename == "shared.rs" || m.filename == "root.rs" {
-            continue;
-        }
-        let code_str = if let Some(raw) = &m.raw_code {
-            raw.clone()
-        } else {
-            m.code.to_string()
-        };
-        if code_str.contains("instructionVar") || code_str.contains("Tableinstruction") {
-            instr_files.push(m);
-        } else {
-            subtable_files.push(m);
+        match m.kind {
+            GeneratedModuleKind::Shared | GeneratedModuleKind::Root => {}
+            GeneratedModuleKind::TableBatch => instr_files.push(m),
+            GeneratedModuleKind::TableEnum => subtable_files.push(m),
         }
     }
 
     eprintln!(
         "  {} modules: {} instruction files, {} subtable files",
-        modules.len(), instr_files.len(), subtable_files.len()
+        modules.len(),
+        instr_files.len(),
+        subtable_files.len()
     );
 
     // Write shared.rs
@@ -152,7 +148,8 @@ fn generate_arch(
         std::fs::write(batch_dir.join("batch.rs"), &combined).unwrap();
         eprintln!(
             "  {batch_name}: {:.1} KB ({} files)",
-            combined.len() as f64 / 1e3, end - start
+            combined.len() as f64 / 1e3,
+            end - start
         );
     }
 
@@ -192,7 +189,11 @@ fn generate_arch(
 }
 
 fn get_code(m: &rsleigh::codegen::GeneratedModule) -> String {
-    if let Some(raw) = &m.raw_code { raw.clone() } else { m.code.to_string() }
+    if let Some(raw) = &m.raw_code {
+        raw.clone()
+    } else {
+        m.code.to_string()
+    }
 }
 
 fn strip_super_import(code: &str) -> String {

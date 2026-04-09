@@ -1,6 +1,4 @@
-use crate::semantic::execution::{
-    Binary, MemoryLocation as FinalMemoryLocation,
-};
+use crate::semantic::execution::{Binary, MemoryLocation as FinalMemoryLocation};
 use crate::semantic::inner::SolverStatus;
 use crate::semantic::SpaceId;
 use crate::{FloatType, NumberSigned, NumberUnsigned, Span};
@@ -30,11 +28,7 @@ impl MemoryLocation {
 
 impl Binary {
     #[cfg(feature = "no_overflow_inline")]
-    pub fn execute(
-        &self,
-        left: NumberUnsigned,
-        right: NumberUnsigned,
-    ) -> Option<NumberUnsigned> {
+    pub fn execute(&self, left: NumberUnsigned, right: NumberUnsigned) -> Option<NumberUnsigned> {
         //COMPILER please optimize this
         let (left_s, right_s) = (left as NumberSigned, right as NumberSigned);
         let sig = |x: NumberSigned| x as NumberUnsigned;
@@ -83,11 +77,7 @@ impl Binary {
         }
     }
     #[cfg(not(feature = "no_overflow_inline"))]
-    pub fn execute(
-        &self,
-        left: NumberUnsigned,
-        right: NumberUnsigned,
-    ) -> Option<NumberUnsigned> {
+    pub fn execute(&self, left: NumberUnsigned, right: NumberUnsigned) -> Option<NumberUnsigned> {
         //COMPILER please optimize this
         let (left_s, right_s) = (left as NumberSigned, right as NumberSigned);
         let sig = |x: NumberSigned| x as NumberUnsigned;

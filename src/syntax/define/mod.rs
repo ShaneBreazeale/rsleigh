@@ -37,9 +37,7 @@ pub enum Define {
     Space(Space),
 }
 
-pub fn parse_endian(
-    input: &[ParserToken],
-) -> IResult<&[ParserToken], Endian, Box<SleighError>> {
+pub fn parse_endian(input: &[ParserToken]) -> IResult<&[ParserToken], Endian, Box<SleighError>> {
     preceded(
         pair(this_ident("endian"), tag!("=")),
         cut(alt((

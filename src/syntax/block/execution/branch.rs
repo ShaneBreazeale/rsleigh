@@ -17,19 +17,13 @@ pub struct Branch {
     pub dst: BranchDst,
 }
 impl Branch {
-    pub fn parse_cond(
-        input: &[Token],
-    ) -> IResult<&[Token], Expr, Box<SleighError>> {
+    pub fn parse_cond(input: &[Token]) -> IResult<&[Token], Expr, Box<SleighError>> {
         preceded(tag!("if"), expr::Expr::parse)(input)
     }
     pub fn parse(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
         map(
             terminated(
-                tuple((
-                    opt(Self::parse_cond),
-                    BranchCall::parse,
-                    BranchDst::parse,
-                )),
+                tuple((opt(Self::parse_cond), BranchCall::parse, BranchDst::parse)),
                 tag!(";"),
             ),
             |(cond, call, dst)| Self { cond, call, dst },
@@ -38,9 +32,7 @@ impl Branch {
 }
 
 impl BranchCall {
-    pub fn parse(
-        input: &[Token],
-    ) -> IResult<&[Token], BranchCall, Box<SleighError>> {
+    pub fn parse(input: &[Token]) -> IResult<&[Token], BranchCall, Box<SleighError>> {
         alt((
             value(BranchCall::Goto, tag!("goto")),
             value(BranchCall::Call, tag!("call")),

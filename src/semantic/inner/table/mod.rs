@@ -7,14 +7,10 @@ use crate::semantic::pattern::PatternLen;
 use crate::semantic::table::Constructor as FinalConstructor;
 use crate::semantic::{Sleigh as FinalSleigh, Table as FinalTable, TableId};
 use crate::table::{ConstructorId, Matcher, VariantId};
-use crate::{
-    syntax, ExecutionError, PatternError, SleighError, Span, TableError,
-};
+use crate::{syntax, ExecutionError, PatternError, SleighError, Span, TableError};
 
 use super::disassembly;
-use super::execution::{
-    Execution, ExecutionBuilder, FieldSize, FieldSizeMut, TableExportType,
-};
+use super::execution::{Execution, ExecutionBuilder, FieldSize, FieldSizeMut, TableExportType};
 use super::pattern::{Pattern, PatternWalker};
 use super::with_block::WithBlockCurrent;
 use super::{GlobalScope, Sleigh, SolverStatus};
@@ -83,10 +79,8 @@ fn is_first_then(
             .cloned()
             .chain((0..extend).map(|_| BitConstraint::Unrestrained))
     }
-    let bits_a =
-        produce_iter(constructor_a, matcher_a.variant_id, extend_len_a);
-    let bits_b =
-        produce_iter(constructor_b, matcher_b.variant_id, extend_len_b);
+    let bits_a = produce_iter(constructor_a, matcher_a.variant_id, extend_len_a);
+    let bits_b = produce_iter(constructor_b, matcher_b.variant_id, extend_len_b);
     use BitConstraint::*;
     bits_a.zip(bits_b).all(|(x, y)| {
         match (x, y) {
@@ -100,9 +94,7 @@ fn is_first_then(
             // verify that this complex restraint is equal in both
             // TODO: deep test, checking if the complex constraint can be
             // compatible. For now, just assume they are different.
-            (Defined(_), Restrained)
-            | (Restrained, Defined(_))
-            | (Restrained, Restrained) => false,
+            (Defined(_), Restrained) | (Restrained, Defined(_)) | (Restrained, Restrained) => false,
             // matcher_a don't constraint something in b.
             (Unrestrained, Restrained) | (Unrestrained, Defined(_)) => false,
         }
@@ -126,10 +118,7 @@ impl Table {
     pub fn is_root(&self) -> bool {
         self.is_root
     }
-    pub fn add_constructor(
-        &mut self,
-        constructor: Constructor,
-    ) -> Result<(), Box<SleighError>> {
+    pub fn add_constructor(&mut self, constructor: Constructor) -> Result<(), Box<SleighError>> {
         //all the constructor need to export or none can export
         //if this constructor is not `unimpl` update/verify the return type
         if let Some(execution) = constructor.execution() {
@@ -137,14 +126,12 @@ impl Table {
             if let Some(export) = export.as_mut() {
                 //if this table exports, the new constructor need to be
                 //compatible
-                *export = export.combine(execution.return_value).ok_or_else(
-                    || {
-                        Box::new(SleighError::new_table(
-                            constructor.src.clone(),
-                            ExecutionError::InvalidExport,
-                        ))
-                    },
-                )?;
+                *export = export.combine(execution.return_value).ok_or_else(|| {
+                    Box::new(SleighError::new_table(
+                        constructor.src.clone(),
+                        ExecutionError::InvalidExport,
+                    ))
+                })?;
             } else {
                 //first constructor will define the table export type
                 *export = Some(execution.return_value);
@@ -174,9 +161,7 @@ impl Table {
         //This borrow will detect the recursion, we hold the lock, while the
         //sub patterns are checked, we are only unable to borrow, if the lock
         //is hold by a previous interation.
-        let mut checked = if let Ok(checked) =
-            self.pattern_recursion_checked.try_borrow_mut()
-        {
+        let mut checked = if let Ok(checked) = self.pattern_recursion_checked.try_borrow_mut() {
             //if this table was already checked, then we don't need to check
             //again
             if *checked {
@@ -200,18 +185,15 @@ impl Table {
     pub fn pattern_len(&self) -> Option<PatternLen> {
         self.pattern_len.get()
     }
-    fn solve_pattern_len<T>(
-        &self,
-        sleigh: &Sleigh,
-        solved: &mut T,
-    ) -> Result<(), Box<SleighError>>
+    fn solve_pattern_len<T>(&self, sleigh: &Sleigh, solved: &mut T) -> Result<(), Box<SleighError>>
     where
         T: SolverStatus + Default,
     {
         //update all constructors
-        self.constructors.borrow_mut().iter_mut().try_for_each(
-            |constructor| constructor.solve_pattern(sleigh, solved).map(|_| ()),
-        )?;
+        self.constructors
+            .borrow_mut()
+            .iter_mut()
+            .try_for_each(|constructor| constructor.solve_pattern(sleigh, solved).map(|_| ()))?;
 
         //if already solved, do nothing
         if self.pattern_len.get().is_some() {
@@ -226,9 +208,7 @@ impl Table {
             //get all the lens, returning none if is undefined len,
             //in this case abort the whole len calculation
             //indexs are 1/1
-            .map(|constructor| {
-                constructor.pattern.len.ok_or_else(|| constructor.src())
-            })
+            .map(|constructor| constructor.pattern.len.ok_or_else(|| constructor.src()))
             .collect();
         let lens: Vec<_> = match lens {
             Ok(lens) => lens,
@@ -245,9 +225,10 @@ impl Table {
         //the biggest possible table pattern_len
         //FUTURE use try_reduce instead
         let mut iter = lens.iter().map(|len| len.max());
-        let max = iter.next().unwrap().and_then(|first| {
-            iter.try_fold(first, |acc, len| len.map(|len| len.max(acc)))
-        });
+        let max = iter
+            .next()
+            .unwrap()
+            .and_then(|first| iter.try_fold(first, |acc, len| len.map(|len| len.max(acc))));
 
         match (min, max) {
             //impossible to happen, only invalid logic can generate that
@@ -276,11 +257,7 @@ impl Table {
 
         Ok(())
     }
-    pub fn solve<T>(
-        &self,
-        sleigh: &Sleigh,
-        solved: &mut T,
-    ) -> Result<(), Box<SleighError>>
+    pub fn solve<T>(&self, sleigh: &Sleigh, solved: &mut T) -> Result<(), Box<SleighError>>
     where
         T: SolverStatus + Default,
     {
@@ -298,16 +275,16 @@ impl Table {
 
         //TODO move this into solve_execution
         //update all constructors
-        self.constructors.borrow_mut().iter_mut().try_for_each(
-            |constructor| constructor.solve_execution(sleigh, solved),
-        )?;
+        self.constructors
+            .borrow_mut()
+            .iter_mut()
+            .try_for_each(|constructor| constructor.solve_execution(sleigh, solved))?;
         //TODO update the FieldSize::all_same_size to use iterators and use it
         //here
         //update all the constructors return size, if none/undefined return just
         //finish solving
         let mut export = self.export.borrow_mut();
-        let Some(export_size) = export.as_mut().and_then(|x| x.size_mut())
-        else {
+        let Some(export_size) = export.as_mut().and_then(|x| x.size_mut()) else {
             return Ok(());
         };
 
@@ -319,11 +296,8 @@ impl Table {
             .filter_map(|con| con.execution())
             .map(|exe| exe.return_value.size().unwrap().clone())
             .collect();
-        let modified = super::execution::len::n_generate_a(
-            inputs.as_mut_slice(),
-            export_size,
-        )
-        .ok_or_else(|| SleighError::TableUnsolvable(self.name.clone()))?;
+        let modified = super::execution::len::n_generate_a(inputs.as_mut_slice(), export_size)
+            .ok_or_else(|| SleighError::TableUnsolvable(self.name.clone()))?;
 
         // update all the constructors
         if modified {
@@ -352,22 +326,20 @@ impl Table {
             .into_iter()
             .map(|constructor| constructor.convert(sleigh))
             .collect();
-        let matchers_num =
-            constructors.iter().map(|c| c.variants_bits.len()).sum();
+        let matchers_num = constructors.iter().map(|c| c.variants_bits.len()).sum();
         let mut matcher_order = Vec::with_capacity(matchers_num);
 
-        let matcher_a_iter =
-            constructors.iter().enumerate().flat_map(|(i, c)| {
-                c.variants().map(move |x| Matcher {
-                    constructor: ConstructorId(i),
-                    variant_id: x.0,
-                })
-            });
+        let matcher_a_iter = constructors.iter().enumerate().flat_map(|(i, c)| {
+            c.variants().map(move |x| Matcher {
+                constructor: ConstructorId(i),
+                variant_id: x.0,
+            })
+        });
         for matcher_a in matcher_a_iter {
             //TODO detect conflicting instead of just looking for contains
-            let pos = matcher_order.iter().position(|matcher_b| {
-                is_first_then(&constructors, matcher_a, *matcher_b)
-            });
+            let pos = matcher_order
+                .iter()
+                .position(|matcher_b| is_first_then(&constructors, matcher_a, *matcher_b));
             //insert constructors in the correct order accordingly with the
             //rules of `7.8.1. Matching`
             if let Some(pos) = pos {
@@ -402,8 +374,12 @@ impl FieldSizeMut for &Table {
 
     fn set(&mut self, size: FieldSize) -> Option<bool> {
         let mut self_export = self.export.borrow_mut();
-        let Some(export) = self_export.as_mut() else { return Some(false) };
-        let Some(self_ref) = export.size_mut() else { return Some(false) };
+        let Some(export) = self_export.as_mut() else {
+            return Some(false);
+        };
+        let Some(self_ref) = export.size_mut() else {
+            return Some(false);
+        };
         let modify = *self_ref != size;
         if modify {
             let _ = std::mem::replace(self_ref, size);
@@ -505,27 +481,19 @@ impl Sleigh {
         with_block_current: &mut WithBlockCurrent,
         constructor: syntax::block::table::Constructor,
     ) -> Result<(), Box<SleighError>> {
-        let table_name =
-            with_block_current.table_name(constructor.table_name());
-        let table_id =
-            self.get_table_or_create_empty(table_name, &constructor.src)?;
+        let table_name = with_block_current.table_name(constructor.table_name());
+        let table_id = self.get_table_or_create_empty(table_name, &constructor.src)?;
 
         let pattern = with_block_current.pattern(&constructor.pattern);
-        let mut pattern =
-            Pattern::new(self, pattern, table_id).map_err(|e| {
-                Box::new(SleighError::new_table(constructor.src.clone(), *e))
-            })?;
+        let mut pattern = Pattern::new(self, pattern, table_id)
+            .map_err(|e| Box::new(SleighError::new_table(constructor.src.clone(), *e)))?;
         //TODO move this into the Pattern::new function
-        pattern.unresolved_token_fields(self).try_for_each(
-            |(token_field, location)| {
+        pattern
+            .unresolved_token_fields(self)
+            .try_for_each(|(token_field, location)| {
                 let token_produced = pattern
                     .produce_token_field(self, token_field)
-                    .map_err(|e| {
-                        Box::new(SleighError::new_table(
-                            constructor.src.clone(),
-                            *e,
-                        ))
-                    })?;
+                    .map_err(|e| Box::new(SleighError::new_table(constructor.src.clone(), *e)))?;
                 if token_produced.is_none() {
                     //TODO error with the list of unresolved fields instead of
                     //only the first
@@ -535,47 +503,32 @@ impl Sleigh {
                     )));
                 }
                 Ok(())
-            },
-        )?;
+            })?;
 
-        let disassembly_raw =
-            with_block_current.disassembly(constructor.disassembly);
+        let disassembly_raw = with_block_current.disassembly(constructor.disassembly);
         if let Some(disassembly_raw) = disassembly_raw {
             disassembly::Builder::new(self, &mut pattern)
                 .build(disassembly_raw)
-                .map_err(|e| {
-                    Box::new(SleighError::new_table(
-                        constructor.src.clone(),
-                        *e,
-                    ))
-                })?;
+                .map_err(|e| Box::new(SleighError::new_table(constructor.src.clone(), *e)))?;
         }
 
         let is_root = self.instruction_table == table_id;
         let display = self
             .new_display(constructor.display, &mut pattern, is_root)
-            .map_err(|e| {
-                Box::new(SleighError::new_table(constructor.src.clone(), *e))
-            })?;
+            .map_err(|e| Box::new(SleighError::new_table(constructor.src.clone(), *e)))?;
 
         let execution = constructor
             .execution
             .map(|x| -> Result<Execution, Box<ExecutionError>> {
-                let mut execution = execution::Builder::new(
-                    self,
-                    &mut pattern,
-                    constructor.src.clone(),
-                );
+                let mut execution =
+                    execution::Builder::new(self, &mut pattern, constructor.src.clone());
                 execution.extend(x)?;
                 Ok(execution.into())
             })
             .transpose()
-            .map_err(|e| {
-                Box::new(SleighError::new_table(constructor.src.clone(), *e))
-            })?;
+            .map_err(|e| Box::new(SleighError::new_table(constructor.src.clone(), *e)))?;
 
-        let constructor =
-            Constructor::new(display, pattern, execution, constructor.src);
+        let constructor = Constructor::new(display, pattern, execution, constructor.src);
         let table = self.table_mut(table_id);
         table.add_constructor(constructor)?;
         Ok(())

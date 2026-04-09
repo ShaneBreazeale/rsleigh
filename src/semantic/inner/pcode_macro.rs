@@ -17,12 +17,7 @@ pub struct PcodeMacro {
 }
 
 impl PcodeMacro {
-    pub fn new(
-        name: String,
-        src: Span,
-        params: Vec<VariableId>,
-        execution: Execution,
-    ) -> Self {
+    pub fn new(name: String, src: Span, params: Vec<VariableId>, execution: Execution) -> Self {
         Self {
             name,
             params,
@@ -69,11 +64,7 @@ impl ExecutionBuilder for Builder<'_, '_> {
     fn execution_mut(&mut self) -> &mut Execution {
         self.execution
     }
-    fn read_scope(
-        &mut self,
-        name: &str,
-        src: &Span,
-    ) -> Result<ReadScope, Box<ExecutionError>> {
+    fn read_scope(&mut self, name: &str, src: &Span) -> Result<ReadScope, Box<ExecutionError>> {
         //check local scope
         if let Some(var) = self.execution().variable_by_name(name) {
             return Ok(ReadScope::ExeVar(var));
@@ -96,11 +87,7 @@ impl ExecutionBuilder for Builder<'_, '_> {
         }
     }
 
-    fn write_scope(
-        &mut self,
-        name: &str,
-        src: &Span,
-    ) -> Result<WriteValue, Box<ExecutionError>> {
+    fn write_scope(&mut self, name: &str, src: &Span) -> Result<WriteValue, Box<ExecutionError>> {
         //check local scope
         if let Some(var) = self.execution().variable_by_name(name) {
             return Ok(WriteValue::Local {
@@ -120,9 +107,7 @@ impl ExecutionBuilder for Builder<'_, '_> {
                 //filter field with meaning to variable
                 let meaning = self.sleigh().context(context_id).attach;
                 let Some(ContextAttach::Varnode(attach_id)) = meaning else {
-                    return Err(Box::new(ExecutionError::InvalidRef(
-                        src.clone(),
-                    )));
+                    return Err(Box::new(ExecutionError::InvalidRef(src.clone())));
                 };
                 Ok(WriteValue::DynVarnode {
                     value_id: DynamicValueType::Context(context_id),
@@ -166,22 +151,12 @@ impl Sleigh {
         let params = pcode
             .params
             .into_iter()
-            .map(|(name, src)| {
-                execution.create_variable(name, src.clone(), None, false)
-            })
+            .map(|(name, src)| execution.create_variable(name, src.clone(), None, false))
             .collect::<Result<_, _>>()
-            .map_err(|e| {
-                Box::new(SleighError::new_pcode_macro(pcode.src.clone(), *e))
-            })?;
-        Builder::parse(self, &mut execution, pcode.body).map_err(|e| {
-            Box::new(SleighError::new_pcode_macro(pcode.src.clone(), *e))
-        })?;
-        let pcode_macro = PcodeMacro::new(
-            pcode.name.clone(),
-            pcode.src.clone(),
-            params,
-            execution,
-        );
+            .map_err(|e| Box::new(SleighError::new_pcode_macro(pcode.src.clone(), *e)))?;
+        Builder::parse(self, &mut execution, pcode.body)
+            .map_err(|e| Box::new(SleighError::new_pcode_macro(pcode.src.clone(), *e)))?;
+        let pcode_macro = PcodeMacro::new(pcode.name.clone(), pcode.src.clone(), params, execution);
         self.pcode_macros.push(pcode_macro);
         let pcode_macro_id = PcodeMacroId(self.pcode_macros.len() - 1);
         self.global_scope

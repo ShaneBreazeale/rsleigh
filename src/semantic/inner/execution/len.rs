@@ -11,10 +11,7 @@ pub struct FieldRange {
     max: Option<NumberNonZeroUnsigned>,
 }
 impl FieldRange {
-    fn new(
-        min: Option<NumberNonZeroUnsigned>,
-        max: Option<NumberNonZeroUnsigned>,
-    ) -> Self {
+    fn new(min: Option<NumberNonZeroUnsigned>, max: Option<NumberNonZeroUnsigned>) -> Self {
         Self { min, max }
     }
     fn new_unsize() -> Self {
@@ -92,10 +89,7 @@ impl FieldSize {
         Self::Value(bits)
     }
     pub fn new_bytes(bytes: NumberNonZeroUnsigned) -> Self {
-        Self::Value(
-            NumberNonZeroUnsigned::new(bytes.get().checked_mul(8).unwrap())
-                .unwrap(),
-        )
+        Self::Value(NumberNonZeroUnsigned::new(bytes.get().checked_mul(8).unwrap()).unwrap())
     }
     pub fn new_unsized() -> Self {
         Self::Unsized {
@@ -164,10 +158,7 @@ impl FieldSize {
         *self = new_size;
         Some(changed)
     }
-    pub fn set_final_value(
-        self,
-        final_value: NumberNonZeroUnsigned,
-    ) -> Option<Self> {
+    pub fn set_final_value(self, final_value: NumberNonZeroUnsigned) -> Option<Self> {
         match self {
             //if already value, check if value is eq
             Self::Value(value) => (value == final_value).then_some(self),
@@ -199,8 +190,7 @@ impl FieldSize {
                 if let Some(value) = range.single_value() {
                     return Some(Self::Value(value));
                 }
-                let possible_value =
-                    possible_value.filter(|value| range.contains(value));
+                let possible_value = possible_value.filter(|value| range.contains(value));
                 Some(Self::Unsized {
                     range,
                     possible_min,
@@ -231,8 +221,7 @@ impl FieldSize {
                 if let Some(value) = range.single_value() {
                     return Some(Self::Value(value));
                 }
-                let possible_value =
-                    possible_value.filter(|value| range.contains(value));
+                let possible_value = possible_value.filter(|value| range.contains(value));
                 Some(Self::Unsized {
                     range,
                     possible_value,
@@ -250,10 +239,9 @@ impl FieldSize {
             } => Some(*value),
             Self::Unsized {
                 possible_min: true,
-                range:
-                    FieldRange {
-                        min: Some(value), ..
-                    },
+                range: FieldRange {
+                    min: Some(value), ..
+                },
                 ..
             } => Some(*value),
             Self::Unsized { .. } => None,
@@ -272,17 +260,11 @@ impl FieldSize {
         }
         self
     }
-    pub fn set_possible_bytes(
-        self,
-        pos_bytes: NumberNonZeroUnsigned,
-    ) -> Option<Self> {
+    pub fn set_possible_bytes(self, pos_bytes: NumberNonZeroUnsigned) -> Option<Self> {
         let pos_bits = (pos_bytes.get() * 8).try_into().unwrap();
         self.set_possible_bits(pos_bits)
     }
-    pub fn set_possible_bits(
-        mut self,
-        pos_bits: NumberNonZeroUnsigned,
-    ) -> Option<Self> {
+    pub fn set_possible_bits(mut self, pos_bits: NumberNonZeroUnsigned) -> Option<Self> {
         match self {
             Self::Unsized { range, .. } if !range.contains(&pos_bits) => None,
             Self::Unsized {
@@ -369,9 +351,7 @@ impl From<FieldSize> for FieldSizeUnmutable {
     }
 }
 
-pub struct FieldSizeTableExport<'a>(
-    pub(crate) &'a RefCell<Option<TableExportType>>,
-);
+pub struct FieldSizeTableExport<'a>(pub(crate) &'a RefCell<Option<TableExportType>>);
 impl<'a> FieldSizeMut for FieldSizeTableExport<'a> {
     fn get(&self) -> FieldSize {
         *self.0.borrow().unwrap().size().unwrap()
@@ -399,9 +379,7 @@ fn intersect_all(fields: &mut [&mut dyn FieldSizeMut]) -> Option<bool> {
     let final_len = fields
         .iter_mut()
         .map(|x| x.get())
-        .try_fold(FieldSize::default(), |me, new_len| {
-            me.intersection(new_len)
-        })?;
+        .try_fold(FieldSize::default(), |me, new_len| me.intersection(new_len))?;
     // update all the fields with the final size
     fields
         .iter_mut()
@@ -434,10 +412,7 @@ fn set_possible(
 }
 
 /// comparison between a and b
-pub fn a_cmp_b(
-    a: &mut dyn FieldSizeMut,
-    b: &mut dyn FieldSizeMut,
-) -> Option<bool> {
+pub fn a_cmp_b(a: &mut dyn FieldSizeMut, b: &mut dyn FieldSizeMut) -> Option<bool> {
     let mut modified = false;
     // a and b have the same size
     modified |= intersect_all(&mut [a, b])?;
@@ -448,10 +423,7 @@ pub fn a_cmp_b(
 }
 
 /// a and b are the same value
-pub fn a_equivalent_b(
-    a: &mut dyn FieldSizeMut,
-    b: &mut dyn FieldSizeMut,
-) -> Option<bool> {
+pub fn a_equivalent_b(a: &mut dyn FieldSizeMut, b: &mut dyn FieldSizeMut) -> Option<bool> {
     let mut modified = false;
     // a and b have the same size
     modified |= intersect_all(&mut [a, b])?;
@@ -475,10 +447,7 @@ pub fn a_equivalent_b(
 }
 
 /// value b is put into a, AKA a = b;
-pub fn a_receive_b(
-    a: &mut dyn FieldSizeMut,
-    b: &mut dyn FieldSizeMut,
-) -> Option<bool> {
+pub fn a_receive_b(a: &mut dyn FieldSizeMut, b: &mut dyn FieldSizeMut) -> Option<bool> {
     let mut modified = false;
 
     // if a size is unrestricted and no possible value is set, use b
@@ -505,10 +474,7 @@ pub fn a_receive_b(
 }
 
 /// a operation that result into b, don't change size
-pub fn a_generate_b(
-    a: &mut dyn FieldSizeMut,
-    b: &mut dyn FieldSizeMut,
-) -> Option<bool> {
+pub fn a_generate_b(a: &mut dyn FieldSizeMut, b: &mut dyn FieldSizeMut) -> Option<bool> {
     let mut modified = false;
     // both have the same size
     modified |= intersect_all(&mut [a, b])?;
@@ -538,10 +504,7 @@ pub fn a_generate_b(
 }
 
 /// a extend into b
-pub fn a_extend_b(
-    a: &mut dyn FieldSizeMut,
-    b: &mut dyn FieldSizeMut,
-) -> Option<bool> {
+pub fn a_extend_b(a: &mut dyn FieldSizeMut, b: &mut dyn FieldSizeMut) -> Option<bool> {
     let mut modified = false;
     // a need to be smaller or equal to b
     if let Some(max_bits) = b.get().max_bits() {
@@ -618,10 +581,7 @@ pub fn a_b_generate_c(
 // multiple inputs generate a single output
 // use by combining multiple exports statement into a single constructors export
 // and multiples constructors into a single table export
-pub fn n_generate_a(
-    n: &mut [FieldSize],
-    mut c: &mut FieldSize,
-) -> Option<bool> {
+pub fn n_generate_a(n: &mut [FieldSize], mut c: &mut FieldSize) -> Option<bool> {
     let mut modified = false;
     // start with the final output size
     let mut acc = c.get();
@@ -674,8 +634,7 @@ pub fn n_generate_a(
     modified |= c.set(acc)?;
     for input_size in n.iter_mut() {
         if let Some(Some(possible_value)) = possible_value {
-            modified |= input_size
-                .update_action(|size| size.set_possible_bits(possible_value))?;
+            modified |= input_size.update_action(|size| size.set_possible_bits(possible_value))?;
         }
         input_size.update_action(|size| size.intersection(acc))?;
     }

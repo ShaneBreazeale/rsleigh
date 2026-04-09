@@ -15,24 +15,16 @@ pub enum DisplayElement {
 pub struct Display(pub Vec<DisplayElement>);
 
 impl Display {
-    pub fn parse(
-        input: &mut FilePreProcessor,
-    ) -> Result<Self, Box<SleighError>> {
+    pub fn parse(input: &mut FilePreProcessor) -> Result<Self, Box<SleighError>> {
         let mut display = vec![];
         loop {
             let token = input.parse_display()?;
             match token {
                 DisplayToken::End => break,
                 DisplayToken::Concat => display.push(DisplayElement::Concat),
-                DisplayToken::Ident(src, ident) => {
-                    display.push(DisplayElement::Ident(src, ident))
-                }
-                DisplayToken::Literal(lit) => {
-                    display.push(DisplayElement::Literal(lit))
-                }
-                DisplayToken::Other(c) => {
-                    display.push(DisplayElement::Other(c))
-                }
+                DisplayToken::Ident(src, ident) => display.push(DisplayElement::Ident(src, ident)),
+                DisplayToken::Literal(lit) => display.push(DisplayElement::Literal(lit)),
+                DisplayToken::Other(c) => display.push(DisplayElement::Other(c)),
             }
         }
         Ok(Self(display))

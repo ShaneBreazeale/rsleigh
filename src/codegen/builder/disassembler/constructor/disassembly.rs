@@ -1,9 +1,9 @@
 use indexmap::IndexMap;
 use std::cell::RefCell;
 
+use crate::disassembly::{Assertation, GlobalSet, Variable, VariableId};
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote, ToTokens};
-use crate::disassembly::{Assertation, GlobalSet, Variable, VariableId};
 
 use crate::codegen::builder::formater::from_sleigh;
 use crate::codegen::builder::{Disassembler, DisassemblyGenerator, ToLiteral, WorkType};
@@ -85,9 +85,7 @@ impl ToTokens for DisassemblyDisplay<'_> {
             .blocks()
             .iter()
             .flat_map(|block| match block {
-                crate::pattern::Block::And { pre, pos, .. } => {
-                    pre.iter().chain(pos.iter())
-                }
+                crate::pattern::Block::And { pre, pos, .. } => pre.iter().chain(pos.iter()),
                 crate::pattern::Block::Or { pos, .. } => {
                     pos.iter().chain([/*LOL*/].iter())
                 }
@@ -144,12 +142,8 @@ impl<'a> DisassemblyGenerator for DisassemblyDisplay<'a> {
     fn value(&self, value: &crate::disassembly::ReadScope) -> TokenStream {
         use crate::disassembly::ReadScope;
         match value {
-            ReadScope::Integer(value) => {
-                value.signed_super().suffixed().into_token_stream()
-            }
-            ReadScope::Context(context) => {
-                self.context_field(context).to_token_stream()
-            }
+            ReadScope::Integer(value) => value.signed_super().suffixed().into_token_stream(),
+            ReadScope::Context(context) => self.context_field(context).to_token_stream(),
             ReadScope::TokenField(ass) => self.ass_field(*ass),
             ReadScope::Local(var) => self.var_name(var),
             ReadScope::InstStart(_) => self.inst_start().to_token_stream(),
@@ -157,22 +151,14 @@ impl<'a> DisassemblyGenerator for DisassemblyDisplay<'a> {
         }
     }
 
-    fn set_context(
-        &self,
-        _context: &crate::ContextId,
-        _value: TokenStream,
-    ) -> TokenStream {
+    fn set_context(&self, _context: &crate::ContextId, _value: TokenStream) -> TokenStream {
         //TODO what if we modify the context and the result is used in the
         //global_set? check for that and find solutions!
         //for now, we just ignore context writes
         quote! {}
     }
 
-    fn new_variable(
-        &mut self,
-        var_id: &VariableId,
-        var: &Variable,
-    ) -> TokenStream {
+    fn new_variable(&mut self, var_id: &VariableId, var: &Variable) -> TokenStream {
         let mut vars = self.vars.borrow_mut();
         use indexmap::map::Entry::*;
         let Vacant(entry) = vars.entry(*var_id) else {
@@ -210,8 +196,7 @@ impl DisassemblyPattern<'_> {
     //get var name on that contains the this assembly field value
     fn ass_field(&self, ass: &crate::TokenFieldId) -> TokenStream {
         let tokens = self.tokens;
-        let token_field_new =
-            &self.disassembler.token_field_function(*ass).read;
+        let token_field_new = &self.disassembler.token_field_function(*ass).read;
         quote! { #DISASSEMBLY_WORK_TYPE::try_from(#token_field_new(#tokens)).unwrap() }
     }
     //get var name on that contains the this context value
@@ -228,8 +213,7 @@ impl DisassemblyPattern<'_> {
         match expr {
             crate::disassembly::Expr::Value(element) => match element {
                 Value { value, location: _ } => match value {
-                    Integer(_) | Context(_) | InstStart(_) | Local(_)
-                    | TokenField(_) => true,
+                    Integer(_) | Context(_) | InstStart(_) | Local(_) | TokenField(_) => true,
                     InstNext(_) => false,
                 },
                 Op(_, _, inner) => self.can_execute(inner),
@@ -243,10 +227,7 @@ impl DisassemblyPattern<'_> {
 
 impl DisassemblyGenerator for DisassemblyPattern<'_> {
     //TODO identify disassembly that can't be executed separated between pre/pos
-    fn disassembly(
-        &self,
-        assertations: &mut dyn Iterator<Item = &Assertation>,
-    ) -> TokenStream {
+    fn disassembly(&self, assertations: &mut dyn Iterator<Item = &Assertation>) -> TokenStream {
         let mut tokens = TokenStream::new();
         for ass in assertations {
             use crate::disassembly::Assertation::*;
@@ -270,12 +251,8 @@ impl DisassemblyGenerator for DisassemblyPattern<'_> {
     fn value(&self, value: &crate::disassembly::ReadScope) -> TokenStream {
         use crate::disassembly::ReadScope;
         match value {
-            ReadScope::Integer(value) => {
-                value.signed_super().suffixed().into_token_stream()
-            }
-            ReadScope::Context(context) => {
-                self.context_field(context).to_token_stream()
-            }
+            ReadScope::Integer(value) => value.signed_super().suffixed().into_token_stream(),
+            ReadScope::Context(context) => self.context_field(context).to_token_stream(),
             ReadScope::TokenField(ass) => self.ass_field(ass),
             ReadScope::Local(var) => self.var_name(var),
             ReadScope::InstStart(_) => self.inst_start().to_token_stream(),
@@ -283,11 +260,7 @@ impl DisassemblyGenerator for DisassemblyPattern<'_> {
         }
     }
 
-    fn set_context(
-        &self,
-        context: &crate::ContextId,
-        value: TokenStream,
-    ) -> TokenStream {
+    fn set_context(&self, context: &crate::ContextId, value: TokenStream) -> TokenStream {
         let write = self.disassembler.context.write_call(
             self.disassembler,
             self.context_instance,
@@ -297,11 +270,7 @@ impl DisassemblyGenerator for DisassemblyPattern<'_> {
         quote! { #write; }
     }
 
-    fn new_variable(
-        &mut self,
-        var_id: &VariableId,
-        var: &Variable,
-    ) -> TokenStream {
+    fn new_variable(&mut self, var_id: &VariableId, var: &Variable) -> TokenStream {
         use indexmap::map::Entry::*;
         let Vacant(entry) = self.vars.entry(*var_id) else {
             unreachable!("Variable duplicated")

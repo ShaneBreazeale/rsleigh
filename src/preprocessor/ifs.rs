@@ -71,10 +71,7 @@ pub(crate) fn if_cond_check(input: &str) -> IResult<&str, IfCheckOwned> {
                 map(ident, |x| x.to_owned()),
                 delimited(
                     space0,
-                    alt((
-                        value(CmpOp::Eq, tag("==")),
-                        value(CmpOp::Ne, tag("!=")),
-                    )),
+                    alt((value(CmpOp::Eq, tag("==")), value(CmpOp::Ne, tag("!=")))),
                     space0,
                 ),
                 string,
@@ -101,10 +98,9 @@ pub(crate) fn if_cond(input: &str) -> IResult<&str, IfCheckOwned> {
             alt((
                 // end of the if, only if we are root and not recursive
                 map(pair(end_of_line, peek(line_ending)), |_| None),
-                map(
-                    pair(terminated(bool_op, space0), if_cond),
-                    |(op, cond2)| Some((op, cond2)),
-                ),
+                map(pair(terminated(bool_op, space0), if_cond), |(op, cond2)| {
+                    Some((op, cond2))
+                }),
             )),
         ),
         |(cond1, rest)| match rest {

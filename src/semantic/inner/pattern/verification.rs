@@ -1,13 +1,10 @@
 use crate::semantic::inner::GlobalScope;
-use crate::semantic::pattern::{
-    CmpOp, PatternLen, Verification as FinalVerification,
-};
+use crate::semantic::pattern::{CmpOp, PatternLen, Verification as FinalVerification};
 use crate::semantic::{ContextId, TableId, TokenFieldId};
 use crate::{syntax, PatternError, Span};
 
 use super::{
-    ConstraintValue, ConstructorPatternLen, DisassemblyBuilder, Pattern,
-    ProducedTable, Sleigh,
+    ConstraintValue, ConstructorPatternLen, DisassemblyBuilder, Pattern, ProducedTable, Sleigh,
 };
 
 #[derive(Clone, Debug)]
@@ -39,11 +36,8 @@ impl Verification {
         constraint: syntax::block::pattern::Constraint,
         this_table: TableId,
     ) -> Result<Self, Box<PatternError>> {
-        let syntax::block::pattern::Constraint { op: cmp_op, value } =
-            constraint;
-        let value = ConstraintValue::new(DisassemblyBuilder::parse_expr(
-            sleigh, value.expr,
-        )?);
+        let syntax::block::pattern::Constraint { op: cmp_op, value } = constraint;
+        let value = ConstraintValue::new(DisassemblyBuilder::parse_expr(sleigh, value.expr)?);
         let field = sleigh
             .get_global(&field)
             .ok_or_else(|| Box::new(PatternError::MissingRef(src.clone())))?;
@@ -76,12 +70,7 @@ impl Verification {
             _ => Err(Box::new(PatternError::InvalidRef(src))),
         }
     }
-    pub fn new_context(
-        context: ContextId,
-        _src: Span,
-        op: CmpOp,
-        value: ConstraintValue,
-    ) -> Self {
+    pub fn new_context(context: ContextId, _src: Span, op: CmpOp, value: ConstraintValue) -> Self {
         Self::ContextCheck { context, op, value }
     }
     pub fn new_table(
@@ -111,8 +100,7 @@ impl Verification {
     }
     pub fn root_len(&self, sleigh: &Sleigh) -> usize {
         match self {
-            Verification::ContextCheck { .. }
-            | Verification::TableBuild { .. } => 0,
+            Verification::ContextCheck { .. } | Verification::TableBuild { .. } => 0,
             Verification::TokenFieldCheck {
                 field,
                 op: _,
@@ -129,17 +117,14 @@ impl Verification {
             } => pattern.root_len(sleigh),
         }
     }
-    pub fn tables<'a>(
-        &'a self,
-    ) -> Option<impl Iterator<Item = &'a ProducedTable> + 'a> {
+    pub fn tables<'a>(&'a self) -> Option<impl Iterator<Item = &'a ProducedTable> + 'a> {
         match self {
             Self::TokenFieldCheck { .. } | Self::ContextCheck { .. } => None,
             Self::TableBuild {
                 produced_table,
                 verification: _,
             } => {
-                let iter: Box<dyn Iterator<Item = &'a _>> =
-                    Box::new([produced_table].into_iter());
+                let iter: Box<dyn Iterator<Item = &'a _>> = Box::new([produced_table].into_iter());
                 Some(iter)
             }
             Self::SubPattern {
@@ -159,16 +144,14 @@ impl Verification {
     pub fn token_field_check(&self) -> Option<TokenFieldId> {
         match self {
             Self::TokenFieldCheck { field, .. } => Some(*field),
-            Self::ContextCheck { .. }
-            | Self::TableBuild { .. }
-            | Self::SubPattern { .. } => None,
+            Self::ContextCheck { .. } | Self::TableBuild { .. } | Self::SubPattern { .. } => None,
         }
     }
     pub fn sub_pattern(&self) -> Option<&Pattern> {
         match self {
-            Self::TokenFieldCheck { .. }
-            | Self::ContextCheck { .. }
-            | Self::TableBuild { .. } => None,
+            Self::TokenFieldCheck { .. } | Self::ContextCheck { .. } | Self::TableBuild { .. } => {
+                None
+            }
             Self::SubPattern {
                 location: _,
                 pattern,
@@ -177,23 +160,18 @@ impl Verification {
     }
     pub fn sub_pattern_mut(&mut self) -> Option<&mut Pattern> {
         match self {
-            Self::TokenFieldCheck { .. }
-            | Self::ContextCheck { .. }
-            | Self::TableBuild { .. } => None,
+            Self::TokenFieldCheck { .. } | Self::ContextCheck { .. } | Self::TableBuild { .. } => {
+                None
+            }
             Self::SubPattern {
                 location: _,
                 pattern,
             } => Some(pattern),
         }
     }
-    pub fn pattern_len(
-        &self,
-        sleigh: &Sleigh,
-    ) -> Option<ConstructorPatternLen> {
+    pub fn pattern_len(&self, sleigh: &Sleigh) -> Option<ConstructorPatternLen> {
         match self {
-            Self::ContextCheck { .. } => {
-                Some(ConstructorPatternLen::Basic(PatternLen::Defined(0)))
-            }
+            Self::ContextCheck { .. } => Some(ConstructorPatternLen::Basic(PatternLen::Defined(0))),
             Self::TableBuild {
                 produced_table:
                     ProducedTable {
@@ -262,12 +240,10 @@ impl Verification {
             Verification::TokenFieldCheck { field, op, value } => {
                 FinalVerification::TokenFieldCheck { field, op, value }
             }
-            Verification::SubPattern { location, pattern } => {
-                FinalVerification::SubPattern {
-                    location,
-                    pattern: pattern.convert(),
-                }
-            }
+            Verification::SubPattern { location, pattern } => FinalVerification::SubPattern {
+                location,
+                pattern: pattern.convert(),
+            },
         }
     }
 }

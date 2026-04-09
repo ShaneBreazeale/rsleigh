@@ -22,10 +22,10 @@ use syntax::{BitRangeLsbLen, BitRangeLsbMsb};
 pub use semantic::inner::execution::FieldSize;
 
 pub use semantic::{
-    disassembly, display, execution, meaning, pattern, space, table, token,
-    user_function, varnode, AttachLiteralId, AttachNumberId, AttachVarnodeId,
-    BitrangeId, ContextId, GlobalScope, PrintBase, Sleigh, SpaceId, TableId,
-    TokenFieldId, TokenId, UserFunctionId, ValueFmt, VarnodeId,
+    disassembly, display, execution, meaning, pattern, space, table, token, user_function, varnode,
+    AttachLiteralId, AttachNumberId, AttachVarnodeId, BitrangeId, ContextId, GlobalScope,
+    PrintBase, Sleigh, SpaceId, TableId, TokenFieldId, TokenId, UserFunctionId, ValueFmt,
+    VarnodeId,
 };
 
 pub type FloatType = f64;
@@ -115,11 +115,7 @@ impl Number {
     }
     pub(crate) fn bits_required(&self) -> u32 {
         let value = match self {
-            Number::Positive(value) | Number::Negative(value)
-                if *value != 0 =>
-            {
-                value.ilog2() + 1
-            }
+            Number::Positive(value) | Number::Negative(value) if *value != 0 => value.ilog2() + 1,
             _ => 1,
         };
         let signal = match self {
@@ -354,13 +350,8 @@ pub enum SleighError {
     },
 }
 
-impl nom::error::ParseError<&[preprocessor::token::Token]>
-    for Box<SleighError>
-{
-    fn from_error_kind(
-        input: &[preprocessor::token::Token],
-        kind: nom::error::ErrorKind,
-    ) -> Self {
+impl nom::error::ParseError<&[preprocessor::token::Token]> for Box<SleighError> {
+    fn from_error_kind(input: &[preprocessor::token::Token], kind: nom::error::ErrorKind) -> Self {
         Box::new(SleighError::from_error_kind(input, kind))
     }
 
@@ -582,15 +573,15 @@ pub enum VarSizeError {
         output: FieldSize,
         location: Span,
     },
-    #[error(
-        "BitRange input is too small {input:?} taking {bits}bits at {location}"
-    )]
+    #[error("BitRange input is too small {input:?} taking {bits}bits at {location}")]
     BitRangeInputSmall {
         bits: NumberNonZeroUnsigned,
         input: FieldSize,
         location: Span,
     },
-    #[error("Unary Operator with input {input:?} and output {output:?} with diff size at {location}")]
+    #[error(
+        "Unary Operator with input {input:?} and output {output:?} with diff size at {location}"
+    )]
     UnaryOpDiffSize {
         location: Span,
         input: FieldSize,
@@ -608,9 +599,7 @@ pub enum VarSizeError {
         output: FieldSize,
         location: Span,
     },
-    #[error(
-        "Shift Left {left:?} and output {output:?} are not equal at {location}"
-    )]
+    #[error("Shift Left {left:?} and output {output:?} are not equal at {location}")]
     ShiftLeftOutputDiff {
         left: FieldSize,
         output: FieldSize,
@@ -623,7 +612,9 @@ pub enum VarSizeError {
         output: FieldSize,
         location: Span,
     },
-    #[error("BinaryOp with bool output left {left:?} right {right:?} with diferent size at {location}")]
+    #[error(
+        "BinaryOp with bool output left {left:?} right {right:?} with diferent size at {location}"
+    )]
     BoolBinaryOp {
         left: FieldSize,
         right: FieldSize,
@@ -644,9 +635,7 @@ pub enum VarSizeError {
         location: Span,
     },
 
-    #[error(
-        "Invalid size {size} set for TokenField at {location} at {backtrace}"
-    )]
+    #[error("Invalid size {size} set for TokenField at {location} at {backtrace}")]
     TokenFieldSetSize {
         tf_id: TokenFieldId,
         size: u64,
@@ -672,10 +661,7 @@ impl SleighError {
         let error: TableError = error.into();
         Self::Table { location, error }
     }
-    pub fn new_pcode_macro<E: Into<PcodeMacroError>>(
-        location: Span,
-        error: E,
-    ) -> Self {
+    pub fn new_pcode_macro<E: Into<PcodeMacroError>>(location: Span, error: E) -> Self {
         let error: PcodeMacroError = error.into();
         Self::PacodeMacro { location, error }
     }
@@ -714,14 +700,11 @@ impl Span {
     }
     fn combine(start: Location, end: Location) -> Self {
         match (start, end) {
-            (Location::Macro(start), Location::Macro(end)) => {
-                Self::combine_macros(start, end)
+            (Location::Macro(start), Location::Macro(end)) => Self::combine_macros(start, end),
+            (Location::File(start), Location::File(end)) => Self::combine_files(start, end),
+            (Location::Macro(_), Location::File(_)) | (Location::File(_), Location::Macro(_)) => {
+                todo!()
             }
-            (Location::File(start), Location::File(end)) => {
-                Self::combine_files(start, end)
-            }
-            (Location::Macro(_), Location::File(_))
-            | (Location::File(_), Location::Macro(_)) => todo!(),
         }
     }
     fn combine_files(start: FileLocation, end: FileLocation) -> Self {
@@ -1138,15 +1121,11 @@ mod test {
             //"Dalvik/data/languages/Dalvik_DEX_Lollipop.slaspec",
         ];
         const SLEIGH_PROCESSOR_PATH: &str = "Ghidra/Processors";
-        let home = std::env::var("GHIDRA_SRC")
-            .expect("Enviroment variable GHIDRA_SRC not found");
+        let home = std::env::var("GHIDRA_SRC").expect("Enviroment variable GHIDRA_SRC not found");
         for arch in ARCHS {
             let file = format!("{home}/{SLEIGH_PROCESSOR_PATH}/{arch}");
             let path = Path::new(&file);
-            println!(
-                "parsing: {}",
-                path.file_name().unwrap().to_str().unwrap()
-            );
+            println!("parsing: {}", path.file_name().unwrap().to_str().unwrap());
 
             if let Err(err) = file_to_sleigh(path) {
                 panic!("Unable to parse: {err}");

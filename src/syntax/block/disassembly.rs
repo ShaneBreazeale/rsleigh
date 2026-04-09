@@ -24,9 +24,7 @@ pub enum ExprElement {
 
 macro_rules! op_parser {
     ($name:ident, $op:ident, $tag:tt) => {
-        pub fn $name(
-            input: &[Token],
-        ) -> IResult<&[Token], (Self, &Span), Box<SleighError>> {
+        pub fn $name(input: &[Token]) -> IResult<&[Token], (Self, &Span), Box<SleighError>> {
             map(tag!($tag), |span| (Self::$op, span))(input)
         }
     };
@@ -51,9 +49,7 @@ macro_rules! declare_expr_level {
 }
 
 impl OpUnary {
-    fn parse(
-        input: &[Token],
-    ) -> IResult<&[Token], (Self, &Span), Box<SleighError>> {
+    fn parse(input: &[Token]) -> IResult<&[Token], (Self, &Span), Box<SleighError>> {
         use OpUnary::*;
         alt((
             map(tag!("~"), |x| (Negation, x)),
@@ -99,9 +95,7 @@ impl ExprElement {
 }
 
 impl Expr {
-    fn parse_rec_or_ele(
-        input: &[Token],
-    ) -> IResult<&[Token], Self, Box<SleighError>> {
+    fn parse_rec_or_ele(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
         alt((
             delimited(tag!("("), Self::parse_safe, tag!(")")),
             map(ExprElement::parse, Self::Value),
@@ -115,8 +109,7 @@ impl Expr {
         op: fn(&[Token]) -> IResult<&[Token], (Op, &Span), Box<SleighError>>,
     ) -> impl FnMut(&[Token]) -> IResult<&[Token], Expr, Box<SleighError>> {
         move |input: &[Token]| {
-            let (input, (left, rest)) =
-                pair(next_level, opt(pair(op, this_level)))(input)?;
+            let (input, (left, rest)) = pair(next_level, opt(pair(op, this_level)))(input)?;
             let expr = if let Some(((op, op_src), rest)) = rest {
                 Self::Op(op_src.clone(), op, Box::new(left), Box::new(rest))
             } else {
@@ -128,31 +121,19 @@ impl Expr {
 
     // parse with precedence
     // safe, things around brackets
-    declare_expr_level!(
-        parse_safe_lv1,
-        parse_safe_unsafe_lv1,
-        Op::parse_safe_level4
-    );
-    declare_expr_level!(
-        parse_safe_unsafe_lv1,
-        parse_lv2,
-        Op::parse_unsafe_level4
-    );
+    declare_expr_level!(parse_safe_lv1, parse_safe_unsafe_lv1, Op::parse_safe_level4);
+    declare_expr_level!(parse_safe_unsafe_lv1, parse_lv2, Op::parse_unsafe_level4);
     // unsafe, things not around brackets
     declare_expr_level!(parse_unsafe_lv1, parse_lv2, Op::parse_unsafe_level4);
     declare_expr_level!(parse_lv2, parse_lv3, Op::parse_level3);
     declare_expr_level!(parse_lv3, parse_lv4, Op::parse_level2);
     declare_expr_level!(parse_lv4, parse_rec_or_ele, Op::parse_level1);
 
-    pub fn parse_safe(
-        input: &[Token],
-    ) -> IResult<&[Token], Self, Box<SleighError>> {
+    pub fn parse_safe(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
         Self::parse_safe_lv1(input)
     }
 
-    pub fn parse_unsafe(
-        input: &[Token],
-    ) -> IResult<&[Token], Self, Box<SleighError>> {
+    pub fn parse_unsafe(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
         Self::parse_unsafe_lv1(input)
     }
 }

@@ -17,9 +17,7 @@ pub struct ByteRangeMsb {
     pub src: Span,
 }
 impl ByteRangeMsb {
-    pub fn parse(
-        input: &[Token],
-    ) -> IResult<&[Token], ByteRangeMsb, Box<SleighError>> {
+    pub fn parse(input: &[Token]) -> IResult<&[Token], ByteRangeMsb, Box<SleighError>> {
         map(delimited(tag!("("), number, tag!(")")), |(value, src)| {
             Self {
                 src: src.clone(),
@@ -35,9 +33,7 @@ pub struct ByteRangeLsb {
     pub src: Span,
 }
 impl ByteRangeLsb {
-    pub fn parse(
-        input: &[Token],
-    ) -> IResult<&[Token], ByteRangeLsb, Box<SleighError>> {
+    pub fn parse(input: &[Token]) -> IResult<&[Token], ByteRangeLsb, Box<SleighError>> {
         map(preceded(tag!(":"), number), |(value, src)| Self {
             src: src.clone(),
             value,
@@ -114,9 +110,7 @@ impl Unary {
             FloatRound,
         )
     }
-    pub fn parse_after(
-        input: &[Token],
-    ) -> IResult<&[Token], (Self, Span), Box<SleighError>> {
+    pub fn parse_after(input: &[Token]) -> IResult<&[Token], (Self, Span), Box<SleighError>> {
         alt((
             map(BitRangeLsbLen::parse, |x| {
                 let location = x.src.clone();
@@ -132,9 +126,7 @@ impl Unary {
             }),
         ))(input)
     }
-    pub fn parse_before(
-        input: &[Token],
-    ) -> IResult<&[Token], (Self, Span), Box<SleighError>> {
+    pub fn parse_before(input: &[Token]) -> IResult<&[Token], (Self, Span), Box<SleighError>> {
         alt((
             map(tag!("!"), |span| (Self::Negation, span.clone())),
             map(tag!("~"), |span| (Self::BitNegation, span.clone())),
@@ -169,9 +161,7 @@ impl Unary {
 
 macro_rules! op_parser {
     ($name:ident, $op:ident, $tag:tt) => {
-        pub fn $name(
-            input: &[Token],
-        ) -> IResult<&[Token], (Self, &Span), Box<SleighError>> {
+        pub fn $name(input: &[Token]) -> IResult<&[Token], (Self, &Span), Box<SleighError>> {
             map(tag!($tag), |span| (Self::$op, span))(input)
         }
     };

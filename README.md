@@ -58,6 +58,20 @@ rsleigh reads the same `.slaspec` files that ship with Ghidra (Apache 2.0) and g
 - [x] Ghidra comparison — matches or beats Ghidra 12.0.4 P-code op counts
 - [ ] Additional architectures (PowerPC, SPARC, etc.)
 
+## Guarantees
+
+- Generated decoders are standalone Rust crates with no JVM or native C++ runtime dependency.
+- The generated lifting surface is `parse_instruction(bytes, addr) -> (length, display, Vec<PcodeOp>)`.
+- Validation currently focuses on decode length, mnemonic agreement, and structural P-code sanity across curated golden cases plus corpus samples in `test-harness`.
+- `pcode-ir` stays zero-dependency and `no_std`.
+
+## Current Limits
+
+- Validation is strong but not yet exhaustive semantic equivalence for every constructor on every bundled architecture.
+- The generator currently targets the bundled `slaspec` set and the crate graph layout in this workspace.
+- Some generated code paths are optimized for compile throughput and large-table splitting, so internal codegen structure is still evolving.
+- Public library APIs are usable, but the project is still closer to a compiler workspace than a polished end-user crate.
+
 ### Example output (matches Ghidra)
 
 ```
@@ -98,6 +112,14 @@ cargo run -p rsleigh-generate -- riscv
 The generator parses x86-64, AARCH64, and RISC-V `.slaspec` files and writes ~72 MB of Rust source across 27 crates. Instruction batch crates compile in parallel, achieving ~500% CPU utilization on Apple Silicon.
 
 Requires Rust 1.70+.
+
+## Validation
+
+```bash
+cargo test -p test-harness
+```
+
+The harness runs golden instruction checks plus corpus validation across x86-64, AARCH64, ARM32, MIPS32, and RISC-V. It is the main source of confidence for regressions and codegen changes.
 
 ## Architecture
 

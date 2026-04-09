@@ -16,9 +16,7 @@ impl BitConstraint {
     pub fn most_restrictive(self, other: Self) -> Option<Self> {
         match (self, other) {
             //if one is unrestrained, just return the other
-            (Self::Unrestrained, other) | (other, Self::Unrestrained) => {
-                Some(other)
-            }
+            (Self::Unrestrained, other) | (other, Self::Unrestrained) => Some(other),
             // both have the same value
             (Self::Restrained, Self::Restrained) => Some(self),
             (Self::Defined(self_value), Self::Defined(other_value))
@@ -36,9 +34,7 @@ impl BitConstraint {
     /// select the least restrictive from both
     pub fn least_restrictive(self, other: Self) -> Self {
         match (self, other) {
-            (Self::Unrestrained, _other) | (_other, Self::Unrestrained) => {
-                Self::Unrestrained
-            }
+            (Self::Unrestrained, _other) | (_other, Self::Unrestrained) => Self::Unrestrained,
             (Self::Defined(self_value), Self::Defined(other_value))
                 if self_value != other_value =>
             {

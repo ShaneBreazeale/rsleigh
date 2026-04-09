@@ -44,14 +44,12 @@ impl VarnodeField {
     fn parse(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
         map(
             tuple((terminated(ident, tag!("=")), ident, BitRangeLsbLen::parse)),
-            |((name, name_span), (varnode_name, varnode_name_span), range)| {
-                VarnodeField {
-                    name,
-                    src: name_span.clone(),
-                    varnode_name,
-                    varnode_name_span: varnode_name_span.clone(),
-                    range,
-                }
+            |((name, name_span), (varnode_name, varnode_name_span), range)| VarnodeField {
+                name,
+                src: name_span.clone(),
+                varnode_name,
+                varnode_name_span: varnode_name_span.clone(),
+                range,
             },
         )(input)
     }

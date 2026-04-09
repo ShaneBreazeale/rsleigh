@@ -5,9 +5,7 @@ pub mod expr;
 pub mod op;
 
 use crate::preprocessor::token::Token;
-use crate::syntax::block::execution::assignment::{
-    Assignment, Declare, MemWrite,
-};
+use crate::syntax::block::execution::assignment::{Assignment, Declare, MemWrite};
 use crate::syntax::parser::{ident, number, this_ident};
 use crate::{NumberUnsigned, SleighError, Span};
 use nom::branch::alt;
@@ -56,11 +54,7 @@ impl Delayslot {
     fn parse(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
         map(
             terminated(
-                delimited(
-                    pair(this_ident("delayslot"), tag!("(")),
-                    number,
-                    tag!(")"),
-                ),
+                delimited(pair(this_ident("delayslot"), tag!("(")), number, tag!(")")),
                 tag!(";"),
             ),
             |(value, _)| Self(value),
@@ -119,14 +113,10 @@ impl UserCall {
             params,
         }
     }
-    pub fn parse_statement(
-        input: &[Token],
-    ) -> IResult<&[Token], Self, Box<SleighError>> {
+    pub fn parse_statement(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
         terminated(UserCall::parse_expr, tag!(";"))(input)
     }
-    pub fn parse_expr(
-        input: &[Token],
-    ) -> IResult<&[Token], Self, Box<SleighError>> {
+    pub fn parse_expr(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
         map(
             pair(
                 ident,

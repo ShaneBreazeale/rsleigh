@@ -21,24 +21,19 @@ pub struct Constructor {
     // impossible variants are simply not present here
     // TODO VariantId is the position on the vector, just use the index
     #[allow(clippy::type_complexity)]
-    pub(crate) variants_bits:
-        Box<[(VariantId, Box<[BitConstraint]>, Box<[BitConstraint]>)]>,
+    pub(crate) variants_bits: Box<[(VariantId, Box<[BitConstraint]>, Box<[BitConstraint]>)]>,
 }
 
 impl Constructor {
     pub fn variants(
         &self,
-    ) -> impl Iterator<Item = (VariantId, &'_ [BitConstraint], &'_ [BitConstraint])>
-    {
+    ) -> impl Iterator<Item = (VariantId, &'_ [BitConstraint], &'_ [BitConstraint])> {
         self.variants_bits
             .iter()
             .map(|(id, context, token)| (*id, context.as_ref(), token.as_ref()))
     }
     /// return the variant constraint for the context and pattern
-    pub fn variant(
-        &self,
-        id: VariantId,
-    ) -> (&[BitConstraint], &[BitConstraint]) {
+    pub fn variant(&self, id: VariantId) -> (&[BitConstraint], &[BitConstraint]) {
         self.variants_bits
             .iter()
             .find(|(current, _, _)| *current == id)

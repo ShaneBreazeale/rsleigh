@@ -2,13 +2,13 @@ use std::collections::HashMap;
 
 use crate::semantic::meaning::{AttachLiteral, AttachNumber, AttachVarnode};
 use crate::semantic::{
-    AttachLiteralId, AttachNumberId, AttachVarnodeId, BitrangeId, ContextId,
-    SpaceId, TableId, TokenFieldId, TokenId, UserFunctionId, VarnodeId,
+    AttachLiteralId, AttachNumberId, AttachVarnodeId, BitrangeId, ContextId, SpaceId, TableId,
+    TokenFieldId, TokenId, UserFunctionId, VarnodeId,
 };
 use crate::syntax::define::TokenFieldAttribute;
 use crate::{
-    syntax, Endian, NumberNonZeroUnsigned, NumberUnsigned, SleighError, Span,
-    IDENT_EPSILON, IDENT_INSTRUCTION, IDENT_INST_NEXT, IDENT_INST_START,
+    syntax, Endian, NumberNonZeroUnsigned, NumberUnsigned, SleighError, Span, IDENT_EPSILON,
+    IDENT_INSTRUCTION, IDENT_INST_NEXT, IDENT_INST_START,
 };
 
 use super::space::Space;
@@ -133,17 +133,9 @@ impl PrintFlags {
             match att {
                 Hex if base.is_none() => base = Some(PrintBase::Hex),
                 Dec if base.is_none() => base = Some(PrintBase::Dec),
-                Hex | Dec => {
-                    return Err(Box::new(SleighError::TokenFieldAttachDup(
-                        src.clone(),
-                    )))
-                }
+                Hex | Dec => return Err(Box::new(SleighError::TokenFieldAttachDup(src.clone()))),
                 Signed if !signed_set => signed_set = true,
-                Signed => {
-                    return Err(Box::new(SleighError::TokenFieldAttDup(
-                        src.clone(),
-                    )))
-                }
+                Signed => return Err(Box::new(SleighError::TokenFieldAttDup(src.clone()))),
             }
         }
         Ok(Self { signed_set, base })
@@ -164,12 +156,7 @@ impl From<PrintFlags> for ValueFmt {
 }
 
 pub trait SolverStatus {
-    fn iam_not_finished(
-        &mut self,
-        location: &Span,
-        file: &'static str,
-        line: u32,
-    );
+    fn iam_not_finished(&mut self, location: &Span, file: &'static str, line: u32);
     fn i_did_a_thing(&mut self);
     fn we_finished(&self) -> bool;
     fn we_did_a_thing(&self) -> bool;
@@ -184,12 +171,7 @@ pub struct Solved {
 }
 
 impl SolverStatus for Solved {
-    fn iam_not_finished(
-        &mut self,
-        _location: &Span,
-        _file: &'static str,
-        _line: u32,
-    ) {
+    fn iam_not_finished(&mut self, _location: &Span, _file: &'static str, _line: u32) {
         self.finished = false;
     }
     fn i_did_a_thing(&mut self) {
@@ -226,12 +208,7 @@ pub struct SolvedLocation {
 }
 
 impl SolverStatus for SolvedLocation {
-    fn iam_not_finished(
-        &mut self,
-        location: &Span,
-        file: &'static str,
-        line: u32,
-    ) {
+    fn iam_not_finished(&mut self, location: &Span, file: &'static str, line: u32) {
         self.solved.iam_not_finished(location, file, line);
         self.locations.push((location.clone(), file, line));
     }
@@ -305,16 +282,10 @@ impl Sleigh {
     pub fn token_field(&self, token_field: TokenFieldId) -> &TokenField {
         &self.token_fields[token_field.0]
     }
-    pub fn token_field_mut(
-        &mut self,
-        token_field: TokenFieldId,
-    ) -> &mut TokenField {
+    pub fn token_field_mut(&mut self, token_field: TokenFieldId) -> &mut TokenField {
         &mut self.token_fields[token_field.0]
     }
-    pub fn user_function(
-        &self,
-        user_function: UserFunctionId,
-    ) -> &UserFunction {
+    pub fn user_function(&self, user_function: UserFunctionId) -> &UserFunction {
         &self.user_functions[user_function.0]
     }
     pub fn pcode_macro(&self, pcode_macro: PcodeMacroId) -> &PcodeMacro {
@@ -335,10 +306,7 @@ impl Sleigh {
     pub fn attach_literal(&self, id: AttachLiteralId) -> &AttachLiteral {
         &self.attach_literals[id.0]
     }
-    pub fn attach_varnodes_len_bytes(
-        &self,
-        id: AttachVarnodeId,
-    ) -> NumberNonZeroUnsigned {
+    pub fn attach_varnodes_len_bytes(&self, id: AttachVarnodeId) -> NumberNonZeroUnsigned {
         self.varnode(self.attach_varnode(id).0[0].1).len_bytes
     }
     pub fn default_space(&self) -> Option<SpaceId> {
@@ -347,10 +315,7 @@ impl Sleigh {
     pub fn get_global(&self, name: &str) -> Option<GlobalScope> {
         self.global_scope.get(name).copied()
     }
-    pub fn set_endian(
-        &mut self,
-        endian: Endian,
-    ) -> Result<(), Box<SleighError>> {
+    pub fn set_endian(&mut self, endian: Endian) -> Result<(), Box<SleighError>> {
         self.endian
             .replace(endian)
             .map(|_old| Err(Box::new(SleighError::EndianMultiple)))
@@ -383,9 +348,7 @@ impl Sleigh {
                 Define(Context(x)) => self.create_context(x)?,
                 Define(Token(x)) => self.create_token(x)?,
                 Attach(x) => self.attach_meaning(x)?,
-                TableConstructor(x) => {
-                    self.insert_table_constructor(with_block_current, x)?
-                }
+                TableConstructor(x) => self.insert_table_constructor(with_block_current, x)?,
                 PcodeMacro(x) => self.create_pcode_macro(x)?,
                 WithBlock(with_block) => {
                     //TODO remove this clone
@@ -405,8 +368,7 @@ impl Sleigh {
     }
 
     pub fn new(syntax: syntax::Sleigh) -> Result<Self, Box<SleighError>> {
-        let instruction_table =
-            Table::new_empty(true, IDENT_INSTRUCTION.to_owned());
+        let instruction_table = Table::new_empty(true, IDENT_INSTRUCTION.to_owned());
         let instruction_table_id = TableId(0);
         let mut sleigh = Sleigh {
             tables: vec![instruction_table],

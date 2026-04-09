@@ -1,7 +1,7 @@
 use proc_macro2::{Ident, TokenStream};
 
-use quote::{format_ident, quote, ToTokens};
 use crate::NumberUnsigned;
+use quote::{format_ident, quote, ToTokens};
 
 use super::formater::from_sleigh;
 use super::helper::{bitrange_from_value, rotation_and_mask_from_range};
@@ -37,9 +37,7 @@ impl ContextMemory {
             .contexts()
             .iter()
             .enumerate()
-            .map(|(i, context)| {
-                ContextFunctions::new(crate::ContextId(i), context)
-            })
+            .map(|(i, context)| ContextFunctions::new(crate::ContextId(i), context))
             .collect()
     }
 
@@ -59,18 +57,11 @@ impl ContextMemory {
         }
     }
 
-    pub fn context_functions(
-        &self,
-        context: crate::ContextId,
-    ) -> &ContextFunctions {
+    pub fn context_functions(&self, context: crate::ContextId) -> &ContextFunctions {
         &self.contexts[context.0]
     }
 
-    pub fn read_call(
-        &self,
-        context: crate::ContextId,
-        instance: &Ident,
-    ) -> TokenStream {
+    pub fn read_call(&self, context: crate::ContextId, instance: &Ident) -> TokenStream {
         let read_fun = &self.context_functions(context).read;
         quote! { #instance.#read_fun() }
     }
@@ -114,11 +105,7 @@ impl ContextMemory {
         )
     }
 
-    pub fn to_tokens(
-        &self,
-        tokens: &mut TokenStream,
-        disassembler: &Disassembler,
-    ) {
+    pub fn to_tokens(&self, tokens: &mut TokenStream, disassembler: &Disassembler) {
         let Self {
             name: context_name,
             context_bytes: context_len,
@@ -128,12 +115,10 @@ impl ContextMemory {
         let (context_type, impl_block) = if *context_len == 0 {
             (quote! {()}, None)
         } else {
-            let context_type = WorkType::unsigned_from_bytes(
-                (*context_len).try_into().unwrap(),
-            );
-            let functions = contexts.iter().map(|context| {
-                context.functions_from_type(disassembler, context_type)
-            });
+            let context_type = WorkType::unsigned_from_bytes((*context_len).try_into().unwrap());
+            let functions = contexts
+                .iter()
+                .map(|context| context.functions_from_type(disassembler, context_type));
             let impl_block = quote! {
                 impl #context_name {
                     #(#functions)*
@@ -153,10 +138,7 @@ impl ContextMemory {
 }
 
 impl ContextFunctions {
-    fn new(
-        id: crate::ContextId,
-        context: &crate::varnode::Context,
-    ) -> Self {
+    fn new(id: crate::ContextId, context: &crate::varnode::Context) -> Self {
         Self {
             read: format_ident!("read_{}", from_sleigh(context.name())),
             write: format_ident!("write_{}", from_sleigh(context.name())),
@@ -190,18 +172,11 @@ impl ContextFunctions {
         // To make this work, all we need to do is invert the bit order,
         // so bit_0 => bit_(len-1) and bit_(len_1) => bit_0
         let value_type = self.value_type(disassembler);
-        let context_memory =
-            disassembler.sleigh.context_memory().context(self.context);
-        let bit_end =
-            (context_type.len_bytes() as u64 * 8) - context_memory.start();
-        let bit_start =
-            (context_type.len_bytes() as u64 * 8) - context_memory.end().get();
+        let context_memory = disassembler.sleigh.context_memory().context(self.context);
+        let bit_end = (context_type.len_bytes() as u64 * 8) - context_memory.start();
+        let bit_start = (context_type.len_bytes() as u64 * 8) - context_memory.end().get();
         let bits = bit_start.try_into().unwrap()..bit_end.try_into().unwrap();
-        let convert = bitrange_from_value(
-            bits.clone(),
-            value_type,
-            quote! {self.0.reverse_bits()},
-        );
+        let convert = bitrange_from_value(bits.clone(), value_type, quote! {self.0.reverse_bits()});
         let (rotation, mask) = rotation_and_mask_from_range(bits);
         let rotation = rotation.unsuffixed();
         let mask = mask.unsuffixed();
@@ -217,11 +192,7 @@ impl ContextFunctions {
 }
 
 impl GlobalSet {
-    fn tokens(
-        &self,
-        disassembler: &Disassembler,
-        context: &ContextMemory,
-    ) -> TokenStream {
+    fn tokens(&self, disassembler: &Disassembler, context: &ContextMemory) -> TokenStream {
         let addr_type = &disassembler.addr_type;
         let Self {
             name,

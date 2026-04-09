@@ -41,11 +41,7 @@ impl VarMeaning {
         }
     }
 
-    pub fn to_tokens(
-        &self,
-        tokens: &mut TokenStream,
-        disassembler: &Disassembler,
-    ) {
+    pub fn to_tokens(&self, tokens: &mut TokenStream, disassembler: &Disassembler) {
         let Self {
             id,
             display_func,
@@ -111,11 +107,7 @@ impl NameMeaning {
             index_type,
         }
     }
-    pub fn to_tokens(
-        &self,
-        tokens: &mut TokenStream,
-        disassembler: &Disassembler,
-    ) {
+    pub fn to_tokens(&self, tokens: &mut TokenStream, disassembler: &Disassembler) {
         let param_type = &self.index_type;
         let display_element = &disassembler.display.name;
         let attach = disassembler.sleigh.attach_literal(self.id);
@@ -159,17 +151,18 @@ impl ValueMeaning {
             .unwrap();
         let index_bits = (usize::BITS - index_max.leading_zeros()) + 1;
         let index_type = WorkType::new_int_bits(index_bits, false);
-        let (min, max) = attach.0.iter().map(|(_i, value)| *value).fold(
-            (0, 0),
-            |(min, max), value| {
-                let min = min.min(value.signed_super());
-                let max = max.max(value.signed_super());
-                (min, max)
-            },
-        );
+        let (min, max) =
+            attach
+                .0
+                .iter()
+                .map(|(_i, value)| *value)
+                .fold((0, 0), |(min, max), value| {
+                    let min = min.min(value.signed_super());
+                    let max = max.max(value.signed_super());
+                    (min, max)
+                });
         //TODO this is not TOTALLY true, but good enough for now
-        let mut value_bits =
-            NumberSuperSigned::BITS - min.abs().max(max.abs()).leading_zeros();
+        let mut value_bits = NumberSuperSigned::BITS - min.abs().max(max.abs()).leading_zeros();
         let signed = min.is_negative();
         if min.is_negative() {
             value_bits += 1;
@@ -184,17 +177,12 @@ impl ValueMeaning {
         }
     }
 
-    pub fn to_tokens(
-        &self,
-        tokens: &mut TokenStream,
-        disassembler: &Disassembler,
-    ) {
+    pub fn to_tokens(&self, tokens: &mut TokenStream, disassembler: &Disassembler) {
         let param_type = &self.index_type;
         let display_element = &disassembler.display.name;
         let sleigh = disassembler.sleigh.attach_number(self.id);
         let ele_index = sleigh.0.iter().map(|(i, _v)| i.unsuffixed());
-        let ele_value =
-            sleigh.0.iter().map(|(_i, v)| v.signed_super().unsuffixed());
+        let ele_value = sleigh.0.iter().map(|(_i, v)| v.signed_super().unsuffixed());
         let display_func = &self.display_func;
         let value_func = &self.value_func;
         let value_type = &self.value_type;
@@ -253,37 +241,20 @@ impl Meanings {
             .iter()
             .enumerate()
             .map(|(i, var)| {
-                VarMeaning::new(
-                    sleigh,
-                    crate::AttachVarnodeId(i),
-                    var,
-                    counter_value(),
-                )
+                VarMeaning::new(sleigh, crate::AttachVarnodeId(i), var, counter_value())
             })
             .collect();
         let names = sleigh
             .attach_literals()
             .iter()
             .enumerate()
-            .map(|(i, var)| {
-                NameMeaning::new(
-                    crate::AttachLiteralId(i),
-                    var,
-                    counter_value(),
-                )
-            })
+            .map(|(i, var)| NameMeaning::new(crate::AttachLiteralId(i), var, counter_value()))
             .collect();
         let values = sleigh
             .attach_numbers()
             .iter()
             .enumerate()
-            .map(|(i, var)| {
-                ValueMeaning::new(
-                    crate::AttachNumberId(i),
-                    var,
-                    counter_value(),
-                )
-            })
+            .map(|(i, var)| ValueMeaning::new(crate::AttachNumberId(i), var, counter_value()))
             .collect();
         Self {
             vars,
@@ -339,9 +310,7 @@ impl Meanings {
         match meaning {
             Meaning::NoAttach(print_fmt) if print_fmt.signed => {
                 let final_type = WorkType::new_int_bits(len_bits, true);
-                crate::codegen::builder::helper::sign_from_value(
-                    len_bits, final_type, value,
-                )
+                crate::codegen::builder::helper::sign_from_value(len_bits, final_type, value)
             }
             Meaning::Number(_base, vars) => {
                 let function = &self.values[vars.0].value_func;
@@ -356,11 +325,7 @@ impl Meanings {
     //  todo!();
     //}
 
-    pub fn to_tokens(
-        &self,
-        tokens: &mut TokenStream,
-        disassembler: &Disassembler,
-    ) {
+    pub fn to_tokens(&self, tokens: &mut TokenStream, disassembler: &Disassembler) {
         for variable in self.vars.iter() {
             variable.to_tokens(tokens, disassembler);
         }

@@ -32,9 +32,9 @@ impl Block {
         execution: &Execution,
         solved: &mut T,
     ) -> Result<(), Box<ExecutionError>> {
-        self.statements.iter().try_for_each(|statements| {
-            statements.borrow_mut().solve(sleigh, execution, solved)
-        })
+        self.statements
+            .iter()
+            .try_for_each(|statements| statements.borrow_mut().solve(sleigh, execution, solved))
     }
 
     pub fn convert(self) -> FinalBlock {

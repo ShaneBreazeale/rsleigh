@@ -1,6 +1,4 @@
-use crate::semantic::{
-    AttachLiteralId, AttachNumberId, AttachVarnodeId, VarnodeId,
-};
+use crate::semantic::{AttachLiteralId, AttachNumberId, AttachVarnodeId, VarnodeId};
 use crate::{Number, NumberNonZeroUnsigned, Sleigh};
 
 use super::inner::execution::FieldSize;
@@ -85,17 +83,13 @@ impl Meaning {
         matches!(self, Self::Number(_, _))
     }
     #[deprecated]
-    pub fn execution_len(
-        &self,
-        sleigh: &super::inner::Sleigh,
-    ) -> Option<FieldSize> {
+    pub fn execution_len(&self, sleigh: &super::inner::Sleigh) -> Option<FieldSize> {
         match self {
             // name don't change the value size
             Meaning::NoAttach(_) | Meaning::Literal(_) => None,
             Meaning::Varnode(vars_id) => {
                 let vars = sleigh.attach_varnode(*vars_id);
-                let varnode_bits =
-                    sleigh.varnode(vars.0[0].1).len_bytes.get() * 8;
+                let varnode_bits = sleigh.varnode(vars.0[0].1).len_bytes.get() * 8;
                 Some(FieldSize::new_bits(varnode_bits.try_into().unwrap()))
             }
             Meaning::Number(_, values_id) => {
@@ -106,8 +100,7 @@ impl Meaning {
                     .map(|(_i, v)| v.bits_required())
                     .max()
                     .unwrap();
-                let len_bits =
-                    NumberNonZeroUnsigned::new(len_bits.into()).unwrap();
+                let len_bits = NumberNonZeroUnsigned::new(len_bits.into()).unwrap();
                 Some(FieldSize::default().set_min_bits(len_bits).unwrap())
             }
         }

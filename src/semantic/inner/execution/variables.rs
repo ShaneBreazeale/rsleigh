@@ -18,12 +18,7 @@ pub struct Variable {
 }
 
 impl Variable {
-    pub fn new(
-        name: String,
-        src: Span,
-        size: Option<FieldSize>,
-        explicit: bool,
-    ) -> Self {
+    pub fn new(name: String, src: Span, size: Option<FieldSize>, explicit: bool) -> Self {
         Self {
             name,
             //scope,
@@ -35,7 +30,11 @@ impl Variable {
     pub fn convert(self) -> FinalVariable {
         FinalVariable {
             name: self.name.into(),
-            len_bits: self.size.get().possible_value().unwrap_or(32.try_into().unwrap()),
+            len_bits: self
+                .size
+                .get()
+                .possible_value()
+                .unwrap_or(32.try_into().unwrap()),
             location: self.explicit.then_some(self.src),
         }
     }

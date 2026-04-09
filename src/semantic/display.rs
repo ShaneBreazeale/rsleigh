@@ -1,6 +1,5 @@
 use crate::semantic::{
-    disassembly, ContextId, InstNext, InstStart, TableId, TokenFieldId,
-    VarnodeId,
+    disassembly, ContextId, InstNext, InstStart, TableId, TokenFieldId, VarnodeId,
 };
 
 #[derive(Clone, Debug, Default)]

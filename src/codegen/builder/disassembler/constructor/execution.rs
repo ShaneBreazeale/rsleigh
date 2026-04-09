@@ -7,10 +7,9 @@ use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
 
 use crate::execution::{
-    Assignment, AssignmentOp, AssignmentWrite, AssignmentWriteVariable, Binary,
-    Block, Build, BranchCall, CpuBranch, Execution, Export, Expr,
-    ExprBinaryOp, ExprElement, ExprNumber, ExprUnaryOp, ExprValue, LocalGoto,
-    Statement, Unary, UserCall, VariableId,
+    Assignment, AssignmentOp, AssignmentWrite, AssignmentWriteVariable, Binary, Block, BranchCall,
+    Build, CpuBranch, Execution, Export, Expr, ExprBinaryOp, ExprElement, ExprNumber, ExprUnaryOp,
+    ExprValue, LocalGoto, Statement, Unary, UserCall, VariableId,
 };
 use crate::space::SpaceType;
 
@@ -102,15 +101,21 @@ impl<'a> ExecutionGenerator<'a> {
         value_expr: &TokenStream,
     ) -> TokenStream {
         let attach = self.disassembler.sleigh.attach_varnode(attach_id);
-        let varnode_size = attach.0.first()
+        let varnode_size = attach
+            .0
+            .first()
             .map(|(_, vid)| self.disassembler.sleigh.varnode(*vid).len_bytes.get() as u32)
             .unwrap_or(8);
-        let arms: Vec<_> = attach.0.iter().map(|(idx, vid)| {
-            let v = self.disassembler.sleigh.varnode(*vid);
-            let offset = v.address;
-            let index = *idx as u64;
-            quote! { #index => #offset }
-        }).collect();
+        let arms: Vec<_> = attach
+            .0
+            .iter()
+            .map(|(idx, vid)| {
+                let v = self.disassembler.sleigh.varnode(*vid);
+                let offset = v.address;
+                let index = *idx as u64;
+                quote! { #index => #offset }
+            })
+            .collect();
         let size = varnode_size;
         quote! {{
             let reg_val = #value_expr;
@@ -127,11 +132,15 @@ impl<'a> ExecutionGenerator<'a> {
         size: u32,
     ) -> TokenStream {
         let attach = self.disassembler.sleigh.attach_number(attach_id);
-        let arms: Vec<_> = attach.0.iter().map(|(idx, val)| {
-            let index = *idx as u64;
-            let v = val.signed_super() as u64;
-            quote! { #index => #v }
-        }).collect();
+        let arms: Vec<_> = attach
+            .0
+            .iter()
+            .map(|(idx, val)| {
+                let index = *idx as u64;
+                let v = val.signed_super() as u64;
+                quote! { #index => #v }
+            })
+            .collect();
         quote! {{
             let num_val = #value_expr;
             let value = match num_val { #(#arms,)* _ => 0u64 };
@@ -156,7 +165,9 @@ impl<'a> ExecutionGenerator<'a> {
             out: &mut std::collections::HashSet<crate::TableId>,
         ) {
             match stmt {
-                Statement::Build(b) => { out.insert(b.table); }
+                Statement::Build(b) => {
+                    out.insert(b.table);
+                }
                 Statement::Assignment(a) => {
                     collect_expr_tables(&a.right, out);
                     if let AssignmentWrite::TableExport { table_id, .. } = &a.var {
@@ -168,17 +179,20 @@ impl<'a> ExecutionGenerator<'a> {
                         out.insert(*table_id);
                     }
                 }
-                Statement::CpuBranch(b) => { collect_expr_tables(&b.dst, out); }
+                Statement::CpuBranch(b) => {
+                    collect_expr_tables(&b.dst, out);
+                }
                 _ => {}
             }
         }
-        fn collect_expr_tables(
-            expr: &Expr,
-            out: &mut std::collections::HashSet<crate::TableId>,
-        ) {
+        fn collect_expr_tables(expr: &Expr, out: &mut std::collections::HashSet<crate::TableId>) {
             match expr {
                 Expr::Value(elem) => {
-                    if let ExprElement::Value { value: ExprValue::Table(tid), .. } = elem {
+                    if let ExprElement::Value {
+                        value: ExprValue::Table(tid),
+                        ..
+                    } = elem
+                    {
                         out.insert(*tid);
                     }
                 }
@@ -221,7 +235,10 @@ impl<'a> ExecutionGenerator<'a> {
             .collect();
 
         // Extend ops from all subtable caches
-        let subtable_ops_extend: TokenStream = self.constructor.table_fields.iter()
+        let subtable_ops_extend: TokenStream = self
+            .constructor
+            .table_fields
+            .iter()
             .map(|(_, field)| {
                 let cache_ops = format_ident!("{}_ops", field);
                 quote! { ops.extend(#cache_ops); }
@@ -260,7 +277,9 @@ impl<'a> ExecutionGenerator<'a> {
     /// This fixes the off-by-one issue where parse computes inst_next from the
     /// subtable's local pattern_len instead of the full instruction length.
     fn gen_dis_recompute(&self, _execution: &Execution) -> TokenStream {
-        let constructor = self.disassembler.sleigh
+        let constructor = self
+            .disassembler
+            .sleigh
             .table(self.constructor.table_id)
             .constructor(self.constructor.constructor_id);
         let _inst_start = self.inst_start;
@@ -294,7 +313,10 @@ impl<'a> ExecutionGenerator<'a> {
         use crate::disassembly::{Expr, ExprElement, ReadScope};
         match expr {
             Expr::Value(element) => match element {
-                ExprElement::Value { value: ReadScope::InstNext(_), .. } => true,
+                ExprElement::Value {
+                    value: ReadScope::InstNext(_),
+                    ..
+                } => true,
                 ExprElement::Op(_, _, inner) => Self::expr_uses_inst_next(inner),
                 _ => false,
             },
@@ -321,19 +343,15 @@ impl<'a> ExecutionGenerator<'a> {
                     ReadScope::InstNext(_) => {
                         quote! { i128::try_from(#inst_next).unwrap() }
                     }
-                    ReadScope::TokenField(tf) => {
-                        match self.constructor.ass_fields.get(tf) {
-                            Some(n) => quote! { i128::try_from(self.#n).unwrap() },
-                            None => quote! { 0i128 },
-                        }
-                    }
+                    ReadScope::TokenField(tf) => match self.constructor.ass_fields.get(tf) {
+                        Some(n) => quote! { i128::try_from(self.#n).unwrap() },
+                        None => quote! { 0i128 },
+                    },
                     ReadScope::Context(_) => quote! { 0i128 },
-                    ReadScope::Local(var_id) => {
-                        match self.constructor.dis_fields.get(var_id) {
-                            Some(name) => quote! { #name },
-                            None => quote! { 0i128 },
-                        }
-                    }
+                    ReadScope::Local(var_id) => match self.constructor.dis_fields.get(var_id) {
+                        Some(name) => quote! { #name },
+                        None => quote! { 0i128 },
+                    },
                 },
                 ExprElement::Op(_, op, inner) => {
                     let x = self.gen_dis_expr_for_lift(inner);
@@ -445,7 +463,9 @@ impl<'a> ExecutionGenerator<'a> {
                 });
                 tokens
             }
-            AssignmentWrite::TableExport { table_id, op: _, .. } => {
+            AssignmentWrite::TableExport {
+                table_id, op: _, ..
+            } => {
                 let mut tokens = TokenStream::new();
                 let c = self.unique_counter.get();
                 self.unique_counter.set(c + 1);
@@ -494,7 +514,10 @@ impl<'a> ExecutionGenerator<'a> {
                 let br = self.disassembler.sleigh.bitrange(*id);
                 self.varnode_expr(br.varnode)
             }
-            AssignmentWriteVariable::DynVarnode { value_id, attach_id } => {
+            AssignmentWriteVariable::DynVarnode {
+                value_id,
+                attach_id,
+            } => {
                 let value_expr = self.dynamic_value_expr(value_id);
                 self.dynamic_varnode_expr(*attach_id, &value_expr)
             }
@@ -519,7 +542,9 @@ impl<'a> ExecutionGenerator<'a> {
             (Some(cond), BranchCall::Goto) => {
                 let (cv, cc) = self.lower_expr(cond, execution);
                 tokens.extend(cc);
-                tokens.extend(quote! { ops.push(pcode_ir::PcodeOp::CBranch { dest: #dst, cond: #cv }); });
+                tokens.extend(
+                    quote! { ops.push(pcode_ir::PcodeOp::CBranch { dest: #dst, cond: #cv }); },
+                );
             }
             (None, BranchCall::Call) if branch.direct => {
                 tokens.extend(quote! { ops.push(pcode_ir::PcodeOp::Call { dest: #dst }); });
@@ -551,7 +576,9 @@ impl<'a> ExecutionGenerator<'a> {
             Some(cond) => {
                 let (cv, cc) = self.lower_expr(cond, execution);
                 let mut t = cc;
-                t.extend(quote! { ops.push(pcode_ir::PcodeOp::CBranch { dest: #dest, cond: #cv }); });
+                t.extend(
+                    quote! { ops.push(pcode_ir::PcodeOp::CBranch { dest: #dest, cond: #cv }); },
+                );
                 t
             }
         }
@@ -617,20 +644,22 @@ impl<'a> ExecutionGenerator<'a> {
                 }
                 tokens
             }
-            Export::Table { table_id, .. } => {
-                match self.constructor.table_fields.get(table_id) {
-                    Some(field) => {
-                        let cache_exp = format_ident!("{}_exp", field);
-                        let cache_ref = format_ident!("{}_ref", field);
-                        quote! {
-                            export_varnode = #cache_exp;
-                            export_ref = #cache_ref;
-                        }
+            Export::Table { table_id, .. } => match self.constructor.table_fields.get(table_id) {
+                Some(field) => {
+                    let cache_exp = format_ident!("{}_exp", field);
+                    let cache_ref = format_ident!("{}_ref", field);
+                    quote! {
+                        export_varnode = #cache_exp;
+                        export_ref = #cache_ref;
                     }
-                    None => quote! {},
                 }
-            }
-            Export::AttachVarnode { attach_value, attach_id, .. } => {
+                None => quote! {},
+            },
+            Export::AttachVarnode {
+                attach_value,
+                attach_id,
+                ..
+            } => {
                 let value_expr = self.dynamic_value_expr(attach_value);
                 let vn = self.dynamic_varnode_expr(*attach_id, &value_expr);
                 quote! { export_varnode = Some(#vn); }
@@ -642,7 +671,11 @@ impl<'a> ExecutionGenerator<'a> {
     /// use the address directly instead of loading the value at that address.
     fn lower_branch_dest(&self, expr: &Expr, execution: &Execution) -> (TokenStream, TokenStream) {
         // Check if the expression is a simple table reference
-        if let Expr::Value(ExprElement::Value { value: ExprValue::Table(table_id), .. }) = expr {
+        if let Expr::Value(ExprElement::Value {
+            value: ExprValue::Table(table_id),
+            ..
+        }) = expr
+        {
             let sz = self.addr_size();
             if let Some(field) = self.constructor.table_fields.get(table_id) {
                 let cache_exp = format_ident!("{}_exp", field);
@@ -711,15 +744,24 @@ impl<'a> ExecutionGenerator<'a> {
                 match &reference.value {
                     ReferencedValue::InstStart(_) => {
                         let is = self.inst_start;
-                        (quote! { pcode_ir::Varnode::constant(#is as u64, #sz) }, quote! {})
+                        (
+                            quote! { pcode_ir::Varnode::constant(#is as u64, #sz) },
+                            quote! {},
+                        )
                     }
                     ReferencedValue::InstNext(_) => {
                         let in_ = self.inst_next;
-                        (quote! { pcode_ir::Varnode::constant(#in_ as u64, #sz) }, quote! {})
+                        (
+                            quote! { pcode_ir::Varnode::constant(#in_ as u64, #sz) },
+                            quote! {},
+                        )
                     }
                     ReferencedValue::TokenField(tf) => {
                         match self.constructor.ass_fields.get(&tf.id) {
-                            Some(n) => (quote! { pcode_ir::Varnode::constant(self.#n as u64, #sz) }, quote! {}),
+                            Some(n) => (
+                                quote! { pcode_ir::Varnode::constant(self.#n as u64, #sz) },
+                                quote! {},
+                            ),
                             None => (quote! { pcode_ir::Varnode::constant(0, #sz) }, quote! {}),
                         }
                     }
@@ -739,7 +781,10 @@ impl<'a> ExecutionGenerator<'a> {
             ExprValue::Int(ExprNumber { size, number }) => {
                 let sz = Self::bytes_from_bits(size.get()) as u32;
                 let val = number.signed_super();
-                (quote! { pcode_ir::Varnode::constant(#val as u64, #sz) }, quote! {})
+                (
+                    quote! { pcode_ir::Varnode::constant(#val as u64, #sz) },
+                    quote! {},
+                )
             }
             ExprValue::Varnode(id) => (self.varnode_expr(*id), quote! {}),
             ExprValue::ExeVar(id) => {
@@ -750,17 +795,26 @@ impl<'a> ExecutionGenerator<'a> {
             ExprValue::InstStart(_) => {
                 let is = self.inst_start;
                 let sz = self.addr_size();
-                (quote! { pcode_ir::Varnode::constant(#is as u64, #sz) }, quote! {})
+                (
+                    quote! { pcode_ir::Varnode::constant(#is as u64, #sz) },
+                    quote! {},
+                )
             }
             ExprValue::InstNext(_) => {
                 let in_ = self.inst_next;
                 let sz = self.addr_size();
-                (quote! { pcode_ir::Varnode::constant(#in_ as u64, #sz) }, quote! {})
+                (
+                    quote! { pcode_ir::Varnode::constant(#in_ as u64, #sz) },
+                    quote! {},
+                )
             }
             ExprValue::TokenField(tf) => {
                 let sz = Self::bytes_from_bits(tf.size.get()) as u32;
                 match self.constructor.ass_fields.get(&tf.id) {
-                    Some(n) => (quote! { pcode_ir::Varnode::constant(self.#n as u64, #sz) }, quote! {}),
+                    Some(n) => (
+                        quote! { pcode_ir::Varnode::constant(self.#n as u64, #sz) },
+                        quote! {},
+                    ),
                     None => (quote! { pcode_ir::Varnode::constant(0, #sz) }, quote! {}),
                 }
             }
@@ -807,16 +861,18 @@ impl<'a> ExecutionGenerator<'a> {
                 match self.constructor.dis_fields.get(&dv.id) {
                     Some(name) => {
                         // Use the local recomputed variable (shadowed from self)
-                        (quote! { pcode_ir::Varnode::constant(#name as u64, #sz) }, quote! {})
+                        (
+                            quote! { pcode_ir::Varnode::constant(#name as u64, #sz) },
+                            quote! {},
+                        )
                     }
-                    None => {
-                        (quote! { pcode_ir::Varnode::constant(0, #sz) }, quote! {})
-                    }
+                    None => (quote! { pcode_ir::Varnode::constant(0, #sz) }, quote! {}),
                 }
             }
-            ExprValue::Bitrange(br) => {
-                (self.varnode_expr(self.disassembler.sleigh.bitrange(br.id).varnode), quote! {})
-            }
+            ExprValue::Bitrange(br) => (
+                self.varnode_expr(self.disassembler.sleigh.bitrange(br.id).varnode),
+                quote! {},
+            ),
             ExprValue::IntDynamic(d) => {
                 let sz = Self::bytes_from_bits(d.bits.get()) as u32;
                 let value_expr = self.dynamic_value_expr(&d.attach_value);
@@ -844,8 +900,12 @@ impl<'a> ExecutionGenerator<'a> {
 
         // For Greater variants, swap operands and use Less variant.
         macro_rules! bin {
-            ($V:ident) => { quote! { ops.push(pcode_ir::PcodeOp::$V { out: #o, left: #l, right: #r }); } };
-            ($V:ident, swap) => { quote! { ops.push(pcode_ir::PcodeOp::$V { out: #o, left: #r, right: #l }); } };
+            ($V:ident) => {
+                quote! { ops.push(pcode_ir::PcodeOp::$V { out: #o, left: #l, right: #r }); }
+            };
+            ($V:ident, swap) => {
+                quote! { ops.push(pcode_ir::PcodeOp::$V { out: #o, left: #r, right: #l }); }
+            };
         }
 
         code.extend(match op.op {
@@ -942,7 +1002,9 @@ impl<'a> ExecutionGenerator<'a> {
                     Unary::FloatRound => (quote! { FloatRound }, self.addr_size() as u64),
                     Unary::FloatNan(_) => (quote! { FloatNan }, 1),
                     Unary::Int2Float(b) => (quote! { Int2Float }, Self::bytes_from_bits(b.get())),
-                    Unary::Float2Float(b) => (quote! { Float2Float }, Self::bytes_from_bits(b.get())),
+                    Unary::Float2Float(b) => {
+                        (quote! { Float2Float }, Self::bytes_from_bits(b.get()))
+                    }
                     Unary::SignTrunc(b) => (quote! { Trunc }, Self::bytes_from_bits(b.get())),
                     Unary::Popcount(b) => (quote! { Popcount }, Self::bytes_from_bits(b.get())),
                     Unary::Lzcount(b) => (quote! { Lzcount }, Self::bytes_from_bits(b.get())),

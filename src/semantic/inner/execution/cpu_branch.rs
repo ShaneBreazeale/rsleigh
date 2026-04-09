@@ -47,10 +47,10 @@ impl CpuBranch {
             cond.solve(sleigh, execution, solved)?;
         }
         // jmp dst addr can be equal or smaller then space address size
-        let modified =
-            self.dst.size_mut(sleigh, execution).update_action(|size| {
-                size.set_max_bytes(sleigh.addr_bytes().unwrap())
-            });
+        let modified = self
+            .dst
+            .size_mut(sleigh, execution)
+            .update_action(|size| size.set_max_bytes(sleigh.addr_bytes().unwrap()));
 
         if modified.ok_or_else(|| VarSizeError::AddressTooBig {
             address_size: self.dst.size(sleigh, execution),

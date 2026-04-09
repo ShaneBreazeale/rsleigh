@@ -1,7 +1,6 @@
 use crate::meaning::Meaning;
 use crate::semantic::{
-    AttachLiteralId, AttachNumberId, AttachVarnodeId, PrintBase, TokenId,
-    ValueFmt,
+    AttachLiteralId, AttachNumberId, AttachVarnodeId, PrintBase, TokenId, ValueFmt,
 };
 use crate::{Endian, FieldBits, NumberNonZeroUnsigned, Sleigh, Span};
 
@@ -49,12 +48,8 @@ impl TokenField {
     pub fn execution_value_is_signed(&self, sleigh: &Sleigh) -> bool {
         match self.attach {
             TokenFieldAttach::NoAttach(fmt) => fmt.signed,
-            TokenFieldAttach::Varnode(_) | TokenFieldAttach::Literal(_) => {
-                false
-            }
-            TokenFieldAttach::Number(_, value) => {
-                sleigh.attach_number(value).is_signed()
-            }
+            TokenFieldAttach::Varnode(_) | TokenFieldAttach::Literal(_) => false,
+            TokenFieldAttach::Number(_, value) => sleigh.attach_number(value).is_signed(),
         }
     }
 

@@ -11,10 +11,7 @@ pub(crate) struct WithBlockCurrent(
 );
 
 impl WithBlockCurrent {
-    pub fn push(
-        &mut self,
-        with_block: syntax::block::with_block::WithBlock,
-    ) -> syntax::Sleigh {
+    pub fn push(&mut self, with_block: syntax::block::with_block::WithBlock) -> syntax::Sleigh {
         //Inside a with block that has a table header, a nested with block may
         //specify the instruction table by name, as in
         //"with instruction : {...}". Inside such a block, the rule regarding
@@ -54,9 +51,7 @@ impl WithBlockCurrent {
             None => IDENT_INSTRUCTION,
         }
     }
-    fn pattern_iter(
-        &self,
-    ) -> impl ExactSizeIterator<Item = &syntax::block::pattern::Pattern> {
+    fn pattern_iter(&self) -> impl ExactSizeIterator<Item = &syntax::block::pattern::Pattern> {
         self.0
             .iter()
             .map(|(_table_name, pattern, _disassembly)| pattern)
@@ -70,9 +65,8 @@ impl WithBlockCurrent {
     ) -> syntax::block::pattern::Pattern {
         use syntax::block::pattern::Op;
         let patterns = self.pattern_iter().chain([constructor_pattern]);
-        let block_number =
-            self.pattern_iter().map(|p| p.blocks.len()).sum::<usize>()
-                + constructor_pattern.blocks.len();
+        let block_number = self.pattern_iter().map(|p| p.blocks.len()).sum::<usize>()
+            + constructor_pattern.blocks.len();
         let mut final_pattern = syntax::block::pattern::Pattern {
             blocks: Vec::with_capacity(block_number),
             src: constructor_pattern.src.clone(),
@@ -100,10 +94,7 @@ impl WithBlockCurrent {
                         last_block.elements.push((
                             Op::And,
                             syntax::block::pattern::Element {
-                                field:
-                                    syntax::block::pattern::Field::SubPattern(
-                                        pattern.clone(),
-                                    ),
+                                field: syntax::block::pattern::Field::SubPattern(pattern.clone()),
                                 ellipsis: None,
                             },
                         ));

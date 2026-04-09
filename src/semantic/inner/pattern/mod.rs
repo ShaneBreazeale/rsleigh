@@ -1,12 +1,9 @@
 use std::collections::HashMap;
 use std::ops::ControlFlow;
 
-use crate::semantic::disassembly::{
-    Assertation, Expr, ReadScope, Variable, VariableId,
-};
+use crate::semantic::disassembly::{Assertation, Expr, ReadScope, Variable, VariableId};
 use crate::semantic::pattern::{
-    ConstraintValue, Pattern as FinalPattern, PatternLen, ProducedTable,
-    ProducedTokenField,
+    ConstraintValue, Pattern as FinalPattern, PatternLen, ProducedTable, ProducedTokenField,
 };
 use crate::semantic::{ContextId, TableId, TokenFieldId, TokenId};
 use crate::{syntax, DisassemblyError, PatternError, Span};
@@ -118,15 +115,13 @@ impl<'a> DisassemblyBuilder<'a> {
 }
 
 impl<'a> ExprBuilder for DisassemblyBuilder<'a> {
-    fn read_scope(
-        &mut self,
-        name: &str,
-        src: &Span,
-    ) -> Result<ReadScope, Box<DisassemblyError>> {
+    fn read_scope(&mut self, name: &str, src: &Span) -> Result<ReadScope, Box<DisassemblyError>> {
         use super::GlobalScope::*;
-        match self.sleigh.get_global(name).ok_or_else(|| {
-            Box::new(DisassemblyError::MissingRef(src.clone()))
-        })? {
+        match self
+            .sleigh
+            .get_global(name)
+            .ok_or_else(|| Box::new(DisassemblyError::MissingRef(src.clone())))?
+        {
             TokenField(x) => Ok(ReadScope::TokenField(x)),
             Context(x) => Ok(ReadScope::Context(x)),
             _ => Err(Box::new(DisassemblyError::InvalidRef(src.clone()))),
@@ -173,10 +168,7 @@ pub trait PatternWalker<B = ()> {
     fn value(&mut self, _value: &Expr) -> ControlFlow<B, ()> {
         ControlFlow::Continue(())
     }
-    fn verification(
-        &mut self,
-        verification: &Verification,
-    ) -> ControlFlow<B, ()> {
+    fn verification(&mut self, verification: &Verification) -> ControlFlow<B, ()> {
         match verification {
             Verification::ContextCheck {
                 context,
@@ -224,8 +216,7 @@ impl Pattern {
             .collect::<Result<Vec<Block>, _>>()?;
 
         //make sure the fields are not duplicated
-        let mut token_fields: HashMap<TokenFieldId, ProducedTokenField> =
-            HashMap::new();
+        let mut token_fields: HashMap<TokenFieldId, ProducedTokenField> = HashMap::new();
         use std::collections::hash_map::Entry::*;
         for (k, produced_field) in blocks
             .iter()
@@ -247,9 +238,7 @@ impl Pattern {
         }
         //make sure the tables are not duplicated
         let mut tables: HashMap<TableId, ProducedTable> = HashMap::new();
-        for (k, produced_table) in
-            blocks.iter().flat_map(|block| block.base.tables.iter())
-        {
+        for (k, produced_table) in blocks.iter().flat_map(|block| block.base.tables.iter()) {
             match tables.entry(*k) {
                 Occupied(entry) => {
                     return Err(Box::new(PatternError::MultipleProduction(
@@ -263,8 +252,7 @@ impl Pattern {
             }
         }
         let mut tokens = HashMap::new();
-        let tokens_iter =
-            blocks.iter().flat_map(|block| block.base.tokens.iter());
+        let tokens_iter = blocks.iter().flat_map(|block| block.base.tokens.iter());
         for (token, num) in tokens_iter {
             tokens
                 .entry(*token)
@@ -301,13 +289,12 @@ impl Pattern {
     ) -> impl Iterator<Item = (TokenFieldId, Span)> {
         let mut all_unresolved = HashMap::new();
         for (index, block) in self.blocks.iter().enumerate() {
-            let mut block_unresolved =
-                block.base.unresolved_token_fields(sleigh);
+            let mut block_unresolved = block.base.unresolved_token_fields(sleigh);
             //remove unresolveds already produced by previous blocks
             block_unresolved.retain(|unresolved, _location| {
-                self.blocks[..index].iter().any(|block| {
-                    block.base.token_fields.contains_key(unresolved)
-                })
+                self.blocks[..index]
+                    .iter()
+                    .any(|block| block.base.token_fields.contains_key(unresolved))
             });
             all_unresolved.extend(block_unresolved);
         }
@@ -325,9 +312,10 @@ impl Pattern {
     ) -> Result<Option<usize>, Box<PatternError>> {
         //check if we already produces it, if so do nothing
         if self.token_fields.contains_key(&token_field_id) {
-            let block_num = self.blocks.iter().position(|block| {
-                block.base.is_token_field_produced(token_field_id)
-            });
+            let block_num = self
+                .blocks
+                .iter()
+                .position(|block| block.base.is_token_field_produced(token_field_id));
             return Ok(block_num);
         }
         //try all the blocks, find one that is able to produce it, but only one!
@@ -381,19 +369,15 @@ impl Pattern {
             .blocks
             .iter_mut()
             .map(|block| block.solve(sleigh, solved))
-            .try_fold(
-                true,
-                |acc, finished| -> Result<_, Box<PatternError>> {
-                    Ok(acc & finished?)
-                },
-            )?;
+            .try_fold(true, |acc, finished| -> Result<_, Box<PatternError>> {
+                Ok(acc & finished?)
+            })?;
         //FUTURE replace with try_reduce
         let mut lens = self.blocks.iter().map(|block| block.len());
         let first = ConstructorPatternLen::Basic(PatternLen::Defined(0));
         let final_len = lens.try_fold(first, |acc, len| acc.add(len?));
 
-        let finished_len =
-            matches!(final_len, Some(ConstructorPatternLen::Basic(_)));
+        let finished_len = matches!(final_len, Some(ConstructorPatternLen::Basic(_)));
         //is not possible to have a final len, but not finished
         assert_eq!(finished_len, finished);
 

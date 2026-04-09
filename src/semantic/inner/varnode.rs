@@ -2,8 +2,7 @@ use crate::semantic::meaning::Meaning;
 use crate::semantic::varnode::ContextAttach;
 use crate::semantic::Context as FinalContext;
 use crate::semantic::{
-    syntax, Bitrange, BitrangeId, ContextId, UserFunction, UserFunctionId,
-    Varnode, VarnodeId,
+    syntax, Bitrange, BitrangeId, ContextId, UserFunction, UserFunctionId, Varnode, VarnodeId,
 };
 use crate::{FieldBits, NumberNonZeroUnsigned, NumberUnsigned, SleighError};
 
@@ -69,35 +68,22 @@ impl Sleigh {
     ) -> Result<(), Box<SleighError>> {
         let space = self
             .get_global(&varnode.space_name)
-            .ok_or_else(|| {
-                Box::new(SleighError::SpaceUndefined(
-                    varnode.space_span.clone(),
-                ))
-            })?
+            .ok_or_else(|| Box::new(SleighError::SpaceUndefined(varnode.space_span.clone())))?
             .space()
-            .ok_or_else(|| {
-                Box::new(SleighError::SpaceInvalid(varnode.space_span.clone()))
-            })?;
+            .ok_or_else(|| Box::new(SleighError::SpaceInvalid(varnode.space_span.clone())))?;
         let varnode_bytes = NumberNonZeroUnsigned::new(varnode.value_bytes)
-            .ok_or_else(|| {
-                Box::new(SleighError::VarnodeInvalidSize(
-                    varnode.space_span.clone(),
-                ))
-            })?;
+            .ok_or_else(|| Box::new(SleighError::VarnodeInvalidSize(varnode.space_span.clone())))?;
 
         if varnode.names.is_empty() {
             //TODO verify that on syntax parsing?
             todo!("TODO ERROR here")
         }
-        for (index, (varnode_name, location)) in
-            varnode.names.into_iter().enumerate()
-        {
+        for (index, (varnode_name, location)) in varnode.names.into_iter().enumerate() {
             let Some(varnode_name) = varnode_name else {
                 // no varnode at this address, next one
                 continue;
             };
-            let address = varnode.offset
-                + (index as NumberUnsigned * varnode_bytes.get());
+            let address = varnode.offset + (index as NumberUnsigned * varnode_bytes.get());
             let location = location.clone();
             let varnode = Varnode {
                 name: varnode_name.clone().into(),
@@ -107,8 +93,7 @@ impl Sleigh {
                 space,
             };
             self.varnodes.push(varnode);
-            let varnode_id =
-                unsafe { VarnodeId::from_raw(self.varnodes.len() - 1) };
+            let varnode_id = unsafe { VarnodeId::from_raw(self.varnodes.len() - 1) };
             self.global_scope
                 .insert(varnode_name, GlobalScope::Varnode(varnode_id))
                 .map(|_| Err(Box::new(SleighError::NameDuplicated)))
@@ -123,13 +108,9 @@ impl Sleigh {
         for field in bitrange.into_iter() {
             let varnode_id = self
                 .get_global(&field.varnode_name)
-                .ok_or_else(|| {
-                    Box::new(SleighError::VarnodeUndefined(field.src.clone()))
-                })?
+                .ok_or_else(|| Box::new(SleighError::VarnodeUndefined(field.src.clone())))?
                 .varnode()
-                .ok_or_else(|| {
-                    Box::new(SleighError::VarnodeInvalid(field.src.clone()))
-                })?;
+                .ok_or_else(|| Box::new(SleighError::VarnodeInvalid(field.src.clone())))?;
             let varnode = self.varnode(varnode_id);
             let bits: FieldBits = field.range.try_into()?;
 
@@ -139,9 +120,7 @@ impl Sleigh {
             let varnode_size = varnode.len_bytes.get() * 8;
             //bitrange can't be bigger than the varnode
             if bits.field_min_len().get() > varnode_size {
-                return Err(Box::new(SleighError::VarnodeInvalidSize(
-                    field.src.clone(),
-                )));
+                return Err(Box::new(SleighError::VarnodeInvalidSize(field.src.clone())));
             }
 
             let bitrange = Bitrange {
@@ -163,8 +142,7 @@ impl Sleigh {
         &mut self,
         input: syntax::define::UserFunction,
     ) -> Result<(), Box<SleighError>> {
-        let user_function =
-            UserFunction::new(input.name.clone().into(), input.src);
+        let user_function = UserFunction::new(input.name.clone().into(), input.src);
         self.user_functions.push(user_function);
         let user_function_id = UserFunctionId(self.user_functions.len() - 1);
         self.global_scope
@@ -178,17 +156,9 @@ impl Sleigh {
     ) -> Result<(), Box<SleighError>> {
         let varnode_id = self
             .get_global(&input.varnode_name)
-            .ok_or_else(|| {
-                Box::new(SleighError::VarnodeUndefined(
-                    input.varnode_span.clone(),
-                ))
-            })?
+            .ok_or_else(|| Box::new(SleighError::VarnodeUndefined(input.varnode_span.clone())))?
             .varnode()
-            .ok_or_else(|| {
-                Box::new(SleighError::VarnodeInvalid(
-                    input.varnode_span.clone(),
-                ))
-            })?;
+            .ok_or_else(|| Box::new(SleighError::VarnodeInvalid(input.varnode_span.clone())))?;
         let varnode_len_bits = self.varnode(varnode_id).len_bytes.get() * 8;
         for field in input.fields.into_iter() {
             //check for valid range
@@ -196,16 +166,12 @@ impl Sleigh {
             //don't need make checked add/sub, don't question it
             //range can't be bigger than the varnode
             if bits.field_min_len().get() > varnode_len_bits {
-                return Err(Box::new(SleighError::ContextInvalidSize(
-                    field.src.clone(),
-                )));
+                return Err(Box::new(SleighError::ContextInvalidSize(field.src.clone())));
             }
             let print_flags = PrintFlags::from_token_att(
                 &field.src,
                 field.attributes.iter().filter_map(|att| match att {
-                    syntax::define::ContextFieldAttribute::Token(att) => {
-                        Some(att)
-                    }
+                    syntax::define::ContextFieldAttribute::Token(att) => Some(att),
                     syntax::define::ContextFieldAttribute::Noflow => None,
                 }),
             )?;
@@ -213,18 +179,12 @@ impl Sleigh {
             let noflow = field
                 .attributes
                 .iter()
-                .filter(|att| {
-                    matches!(att, syntax::define::ContextFieldAttribute::Noflow)
-                })
+                .filter(|att| matches!(att, syntax::define::ContextFieldAttribute::Noflow))
                 .count();
             let noflow_set = match noflow {
                 0 => false,
                 1 => true,
-                _ => {
-                    return Err(Box::new(SleighError::ContextAttDup(
-                        field.src.clone(),
-                    )))
-                }
+                _ => return Err(Box::new(SleighError::ContextAttDup(field.src.clone()))),
             };
 
             //default to hex print fmt
