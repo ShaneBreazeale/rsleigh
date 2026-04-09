@@ -239,14 +239,15 @@ mod tests {
         let (len, disasm, pcode) = decode(&[0x48, 0x01, 0xc7], 0x1000);
         assert_eq!(len, 3);
         assert_eq!(disasm, "ADD RDI,RAX");
+        assert_eq!(pcode.len(), 9); // matches Ghidra exactly
+        // After output sinking: ops write directly to registers (no intermediate Copies)
         assert_pcode_contains(&pcode, &disasm, &[
-            |op| matches!(op, PcodeOp::IntCarry { left, right, .. }
-                if *left == reg(RDI, 8) && *right == reg(RAX, 8)),
-            |op| matches!(op, PcodeOp::IntSCarry { left, right, .. }
-                if *left == reg(RDI, 8) && *right == reg(RAX, 8)),
-            |op| matches!(op, PcodeOp::IntAdd { left, right, .. }
-                if *left == reg(RDI, 8) && *right == reg(RAX, 8)),
-            |op| matches!(op, PcodeOp::Copy { out, .. } if *out == reg(RDI, 8)),
+            |op| matches!(op, PcodeOp::IntCarry { out, left, right }
+                if *out == reg(CF, 1) && *left == reg(RDI, 8) && *right == reg(RAX, 8)),
+            |op| matches!(op, PcodeOp::IntSCarry { out, left, right }
+                if *out == reg(OF, 1) && *left == reg(RDI, 8) && *right == reg(RAX, 8)),
+            |op| matches!(op, PcodeOp::IntAdd { out, left, right }
+                if *out == reg(RDI, 8) && *left == reg(RDI, 8) && *right == reg(RAX, 8)),
         ]);
     }
 
@@ -254,10 +255,10 @@ mod tests {
         let (len, disasm, pcode) = decode(&[0x50], 0x1000);
         assert_eq!(len, 1);
         assert_eq!(disasm, "PUSH RAX");
-        assert_eq!(pcode.len(), 3);
-        assert!(matches!(&pcode[0], PcodeOp::IntSub { left, right, .. }
-            if *left == reg(RSP, 8) && *right == con(8, 8)));
-        assert!(matches!(&pcode[2], PcodeOp::Store { space: AddressSpaceId::Ram, ptr, val }
+        assert_eq!(pcode.len(), 2); // matches Ghidra: IntSub + Store (no intermediate Copy)
+        assert!(matches!(&pcode[0], PcodeOp::IntSub { out, left, right }
+            if *out == reg(RSP, 8) && *left == reg(RSP, 8) && *right == con(8, 8)));
+        assert!(matches!(&pcode[1], PcodeOp::Store { space: AddressSpaceId::Ram, ptr, val }
             if *ptr == reg(RSP, 8) && *val == reg(RAX, 8)));
     }
 
@@ -265,21 +266,24 @@ mod tests {
         let (len, disasm, pcode) = decode(&[0x58], 0x1000);
         assert_eq!(len, 1);
         assert_eq!(disasm, "POP RAX");
-        assert_eq!(pcode.len(), 4);
+        assert_eq!(pcode.len(), 3); // matches Ghidra: Load + IntAdd + Copy
         assert!(matches!(&pcode[0], PcodeOp::Load { space: AddressSpaceId::Ram, ptr, .. }
             if *ptr == reg(RSP, 8)));
-        assert!(matches!(&pcode[1], PcodeOp::IntAdd { left, right, .. }
-            if *left == reg(RSP, 8) && *right == con(8, 8)));
-        assert!(matches!(&pcode[3], PcodeOp::Copy { out, .. } if *out == reg(RAX, 8)));
+        assert!(matches!(&pcode[1], PcodeOp::IntAdd { out, left, right }
+            if *out == reg(RSP, 8) && *left == reg(RSP, 8) && *right == con(8, 8)));
+        assert!(matches!(&pcode[2], PcodeOp::Copy { out, .. } if *out == reg(RAX, 8)));
     }
 
     fn test_ret() {
         let (len, disasm, pcode) = decode(&[0xc3], 0x1000);
         assert_eq!(len, 1);
         assert_eq!(disasm, "RET");
-        assert!(matches!(&pcode[0], PcodeOp::Load { space: AddressSpaceId::Ram, ptr, .. }
-            if *ptr == reg(RSP, 8)));
-        assert!(matches!(pcode.last(), Some(PcodeOp::Return { dest })
+        assert_eq!(pcode.len(), 3); // matches Ghidra: Load + IntAdd + Return
+        assert!(matches!(&pcode[0], PcodeOp::Load { out, space: AddressSpaceId::Ram, ptr }
+            if *out == reg(RIP, 8) && *ptr == reg(RSP, 8)));
+        assert!(matches!(&pcode[1], PcodeOp::IntAdd { out, left, right }
+            if *out == reg(RSP, 8) && *left == reg(RSP, 8) && *right == con(8, 8)));
+        assert!(matches!(&pcode[2], PcodeOp::Return { dest }
             if *dest == reg(RIP, 8)));
     }
 
@@ -307,35 +311,35 @@ mod tests {
         let (len, disasm, pcode) = decode(&[0xff, 0xd0], 0x1000);
         assert_eq!(len, 2);
         assert_eq!(disasm, "CALL RAX");
-        assert_eq!(pcode.len(), 4);
-        assert!(matches!(&pcode[0], PcodeOp::IntSub { left, right, .. }
-            if *left == reg(RSP, 8) && *right == con(8, 8)));
-        assert!(matches!(&pcode[2], PcodeOp::Store { space: AddressSpaceId::Ram, ptr, val }
+        assert_eq!(pcode.len(), 3); // matches Ghidra: IntSub + Store + CallInd
+        assert!(matches!(&pcode[0], PcodeOp::IntSub { out, left, right }
+            if *out == reg(RSP, 8) && *left == reg(RSP, 8) && *right == con(8, 8)));
+        assert!(matches!(&pcode[1], PcodeOp::Store { space: AddressSpaceId::Ram, ptr, val }
             if *ptr == reg(RSP, 8) && val.offset == 0x1002));
-        assert!(matches!(&pcode[3], PcodeOp::CallInd { dest } if *dest == reg(RAX, 8)));
+        assert!(matches!(&pcode[2], PcodeOp::CallInd { dest } if *dest == reg(RAX, 8)));
     }
 
     fn test_mov_reg_mem() {
         let (len, disasm, pcode) = decode(&[0x48, 0x8b, 0x07], 0x1000);
         assert_eq!(len, 3);
         assert_eq!(disasm, "MOV RAX,qword ptr [RDI]");
-        assert_eq!(pcode.len(), 2);
-        assert!(matches!(&pcode[0], PcodeOp::Load { space: AddressSpaceId::Ram, ptr, out }
-            if *ptr == reg(RDI, 8) && out.size == 8));
-        assert!(matches!(&pcode[1], PcodeOp::Copy { out, .. } if *out == reg(RAX, 8)));
+        assert_eq!(pcode.len(), 1); // Load writes directly to RAX after output sinking
+        assert!(matches!(&pcode[0], PcodeOp::Load { out, space: AddressSpaceId::Ram, ptr }
+            if *out == reg(RAX, 8) && *ptr == reg(RDI, 8)));
     }
 
     fn test_cmp_reg_reg() {
         let (len, disasm, pcode) = decode(&[0x48, 0x39, 0xc7], 0x1000);
         assert_eq!(len, 3);
         assert_eq!(disasm, "CMP RDI,RAX");
+        // After output sinking: flags written directly by comparison ops
         assert_pcode_contains(&pcode, &disasm, &[
-            |op| matches!(op, PcodeOp::Copy { out, .. } if *out == reg(CF, 1)),
-            |op| matches!(op, PcodeOp::Copy { out, .. } if *out == reg(OF, 1)),
+            |op| matches!(op, PcodeOp::IntLess { out, .. } if *out == reg(CF, 1)),
+            |op| matches!(op, PcodeOp::IntSBorrow { out, .. } if *out == reg(OF, 1)),
             |op| matches!(op, PcodeOp::IntSub { .. }),
-            |op| matches!(op, PcodeOp::Copy { out, .. } if *out == reg(SF, 1)),
-            |op| matches!(op, PcodeOp::Copy { out, .. } if *out == reg(ZF, 1)),
-            |op| matches!(op, PcodeOp::Copy { out, .. } if *out == reg(PF, 1)),
+            |op| matches!(op, PcodeOp::IntSLess { out, .. } if *out == reg(SF, 1)),
+            |op| matches!(op, PcodeOp::IntEq { out, .. } if *out == reg(ZF, 1)),
+            |op| matches!(op, PcodeOp::IntEq { out, .. } if *out == reg(PF, 1)),
         ]);
     }
 
@@ -344,9 +348,8 @@ mod tests {
         assert_eq!(len, 3);
         assert_eq!(disasm, "SUB RDI,RAX");
         assert_pcode_contains(&pcode, &disasm, &[
-            |op| matches!(op, PcodeOp::IntSub { left, right, .. }
-                if *left == reg(RDI, 8) && *right == reg(RAX, 8)),
-            |op| matches!(op, PcodeOp::Copy { out, .. } if *out == reg(RDI, 8)),
+            |op| matches!(op, PcodeOp::IntSub { out, left, right }
+                if *out == reg(RDI, 8) && *left == reg(RDI, 8) && *right == reg(RAX, 8)),
         ]);
     }
 
@@ -355,9 +358,8 @@ mod tests {
         assert_eq!(len, 3);
         assert_eq!(disasm, "XOR RDI,RAX");
         assert_pcode_contains(&pcode, &disasm, &[
-            |op| matches!(op, PcodeOp::IntXor { left, right, .. }
-                if *left == reg(RDI, 8) && *right == reg(RAX, 8)),
-            |op| matches!(op, PcodeOp::Copy { out, .. } if *out == reg(RDI, 8)),
+            |op| matches!(op, PcodeOp::IntXor { out, left, right }
+                if *out == reg(RDI, 8) && *left == reg(RDI, 8) && *right == reg(RAX, 8)),
         ]);
     }
 
@@ -371,9 +373,9 @@ mod tests {
         let (len, disasm, pcode) = decode(&[0x48, 0x8d, 0x47, 0x10], 0x1000);
         assert_eq!(len, 4);
         assert!(disasm.starts_with("LEA"), "expected LEA, got {disasm}");
-        // LEA computes address, writes to RAX — should have an IntAdd and Copy to RAX
+        // LEA computes address, IntAdd writes directly to RAX
         assert_pcode_contains(&pcode, &disasm, &[
-            |op| matches!(op, PcodeOp::Copy { out, .. } if *out == reg(RAX, 8)),
+            |op| matches!(op, PcodeOp::IntAdd { out, .. } if *out == reg(RAX, 8)),
         ]);
     }
 

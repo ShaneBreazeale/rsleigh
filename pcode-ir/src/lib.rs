@@ -161,6 +161,119 @@ pub fn optimize(ops: &mut Vec<PcodeOp>) {
         }
         i += 1;
     }
+
+    // Pass 4: sink unique outputs into subsequent Copy destinations
+    // If ops[i] writes to Unique(X) and ops[i+1] is Copy { out: dest, input: Unique(X) },
+    // and Unique(X) is used only by that Copy, rewrite ops[i] to output directly to dest.
+    // P-code semantics: inputs read before output written, so this is safe even when
+    // dest is also an input (e.g. ADD RDI, RAX where RDI is both input and output).
+    let mut i = 0;
+    while i + 1 < ops.len() {
+        let should_sink = if let Some(out) = get_output(&ops[i]) {
+            if out.space == AddressSpaceId::Unique {
+                // Check if next op is Copy from this unique
+                if let PcodeOp::Copy { out: copy_dest, input: copy_src } = &ops[i + 1] {
+                    if *copy_src == out {
+                        // Verify unique is only read by this one Copy
+                        let total_reads: usize = ops[i+1..].iter()
+                            .map(|op| count_reads(op, &out))
+                            .sum();
+                        if total_reads == 1 {
+                            Some(*copy_dest)
+                        } else {
+                            None
+                        }
+                    } else { None }
+                } else { None }
+            } else { None }
+        } else { None };
+
+        if let Some(new_dest) = should_sink {
+            // Rewrite the op's output to the Copy's destination
+            if let Some(out) = get_output_mut(&mut ops[i]) {
+                *out = new_dest;
+            }
+            // Remove the now-redundant Copy
+            ops.remove(i + 1);
+            // Don't increment — check the same position again
+            continue;
+        }
+        i += 1;
+    }
+}
+
+fn get_output(op: &PcodeOp) -> Option<Varnode> {
+    match op {
+        PcodeOp::Copy { out, .. } | PcodeOp::Load { out, .. }
+        | PcodeOp::Subpiece { out, .. }
+        | PcodeOp::IntNeg { out, .. } | PcodeOp::IntNot { out, .. }
+        | PcodeOp::IntZext { out, .. } | PcodeOp::IntSext { out, .. }
+        | PcodeOp::BoolNot { out, .. }
+        | PcodeOp::FloatNeg { out, .. } | PcodeOp::FloatAbs { out, .. }
+        | PcodeOp::FloatSqrt { out, .. } | PcodeOp::FloatNan { out, .. }
+        | PcodeOp::Int2Float { out, .. } | PcodeOp::Float2Float { out, .. }
+        | PcodeOp::Trunc { out, .. } | PcodeOp::FloatCeil { out, .. }
+        | PcodeOp::FloatFloor { out, .. } | PcodeOp::FloatRound { out, .. }
+        | PcodeOp::Popcount { out, .. } | PcodeOp::Lzcount { out, .. }
+        | PcodeOp::IntAdd { out, .. } | PcodeOp::IntSub { out, .. }
+        | PcodeOp::IntMult { out, .. } | PcodeOp::IntDiv { out, .. }
+        | PcodeOp::IntSDiv { out, .. } | PcodeOp::IntRem { out, .. }
+        | PcodeOp::IntSRem { out, .. }
+        | PcodeOp::IntEq { out, .. } | PcodeOp::IntNotEq { out, .. }
+        | PcodeOp::IntLess { out, .. } | PcodeOp::IntLessEq { out, .. }
+        | PcodeOp::IntSLess { out, .. } | PcodeOp::IntSLessEq { out, .. }
+        | PcodeOp::IntAnd { out, .. } | PcodeOp::IntOr { out, .. }
+        | PcodeOp::IntXor { out, .. }
+        | PcodeOp::IntLsl { out, .. } | PcodeOp::IntLsr { out, .. }
+        | PcodeOp::IntAsr { out, .. }
+        | PcodeOp::IntCarry { out, .. } | PcodeOp::IntSCarry { out, .. }
+        | PcodeOp::IntSBorrow { out, .. }
+        | PcodeOp::BoolAnd { out, .. } | PcodeOp::BoolOr { out, .. }
+        | PcodeOp::BoolXor { out, .. }
+        | PcodeOp::FloatAdd { out, .. } | PcodeOp::FloatSub { out, .. }
+        | PcodeOp::FloatMult { out, .. } | PcodeOp::FloatDiv { out, .. }
+        | PcodeOp::FloatEq { out, .. } | PcodeOp::FloatNotEq { out, .. }
+        | PcodeOp::FloatLess { out, .. } | PcodeOp::FloatLessEq { out, .. }
+            => Some(*out),
+        _ => None,
+    }
+}
+
+fn get_output_mut(op: &mut PcodeOp) -> Option<&mut Varnode> {
+    match op {
+        PcodeOp::Copy { out, .. } | PcodeOp::Load { out, .. }
+        | PcodeOp::Subpiece { out, .. }
+        | PcodeOp::IntNeg { out, .. } | PcodeOp::IntNot { out, .. }
+        | PcodeOp::IntZext { out, .. } | PcodeOp::IntSext { out, .. }
+        | PcodeOp::BoolNot { out, .. }
+        | PcodeOp::FloatNeg { out, .. } | PcodeOp::FloatAbs { out, .. }
+        | PcodeOp::FloatSqrt { out, .. } | PcodeOp::FloatNan { out, .. }
+        | PcodeOp::Int2Float { out, .. } | PcodeOp::Float2Float { out, .. }
+        | PcodeOp::Trunc { out, .. } | PcodeOp::FloatCeil { out, .. }
+        | PcodeOp::FloatFloor { out, .. } | PcodeOp::FloatRound { out, .. }
+        | PcodeOp::Popcount { out, .. } | PcodeOp::Lzcount { out, .. }
+        | PcodeOp::IntAdd { out, .. } | PcodeOp::IntSub { out, .. }
+        | PcodeOp::IntMult { out, .. } | PcodeOp::IntDiv { out, .. }
+        | PcodeOp::IntSDiv { out, .. } | PcodeOp::IntRem { out, .. }
+        | PcodeOp::IntSRem { out, .. }
+        | PcodeOp::IntEq { out, .. } | PcodeOp::IntNotEq { out, .. }
+        | PcodeOp::IntLess { out, .. } | PcodeOp::IntLessEq { out, .. }
+        | PcodeOp::IntSLess { out, .. } | PcodeOp::IntSLessEq { out, .. }
+        | PcodeOp::IntAnd { out, .. } | PcodeOp::IntOr { out, .. }
+        | PcodeOp::IntXor { out, .. }
+        | PcodeOp::IntLsl { out, .. } | PcodeOp::IntLsr { out, .. }
+        | PcodeOp::IntAsr { out, .. }
+        | PcodeOp::IntCarry { out, .. } | PcodeOp::IntSCarry { out, .. }
+        | PcodeOp::IntSBorrow { out, .. }
+        | PcodeOp::BoolAnd { out, .. } | PcodeOp::BoolOr { out, .. }
+        | PcodeOp::BoolXor { out, .. }
+        | PcodeOp::FloatAdd { out, .. } | PcodeOp::FloatSub { out, .. }
+        | PcodeOp::FloatMult { out, .. } | PcodeOp::FloatDiv { out, .. }
+        | PcodeOp::FloatEq { out, .. } | PcodeOp::FloatNotEq { out, .. }
+        | PcodeOp::FloatLess { out, .. } | PcodeOp::FloatLessEq { out, .. }
+            => Some(out),
+        _ => None,
+    }
 }
 
 fn writes_to(op: &PcodeOp, target: &Varnode) -> bool {
