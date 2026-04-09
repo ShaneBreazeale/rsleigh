@@ -39,9 +39,10 @@ fn main() {
 
     for (bytes, name) in tests {
         context = context_x86_64();
-        if let Some((inst_next, display, pcode)) =
+        if let Some((inst_next, display, mut pcode)) =
             parse_instruction(bytes, &mut context, 0x1000, &mut global_set)
         {
+            pcode_ir::optimize(&mut pcode);
             println!("{name}:");
             let disasm: Vec<String> = display.iter().map(|d| format!("{}", d)).collect();
             println!("  decoded: {}", disasm.join(""));

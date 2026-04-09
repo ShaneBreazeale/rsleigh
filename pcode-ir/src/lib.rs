@@ -56,6 +56,205 @@ impl Varnode {
     }
 }
 
+/// Peephole-optimize a P-code op sequence:
+/// - Remove identity `Subpiece { lsb: 0 }` where input.size == out.size
+/// - Forward-substitute `Copy` chains (A=B, C=A → C=B) when the
+///   intermediate is a unique varnode used only once after its definition
+pub fn optimize(ops: &mut Vec<PcodeOp>) {
+    // Pass 1: eliminate identity Subpiece
+    for op in ops.iter_mut() {
+        if let PcodeOp::Subpiece { out, input, lsb: 0 } = op {
+            if out.size == input.size {
+                *op = PcodeOp::Copy { out: *out, input: *input };
+            }
+        }
+    }
+
+    // Pass 2: forward-substitute single-use Copy chains
+    // If ops[i] is Copy { out: A, input: B } and A is Unique,
+    // and exactly one later op reads A, replace that read with B.
+    let mut i = 0;
+    while i < ops.len() {
+        if let PcodeOp::Copy { out, input } = &ops[i] {
+            if out.space == AddressSpaceId::Unique {
+                let target = *out;
+                let replacement = *input;
+                // Count uses of target after this op
+                let uses: usize = ops[i+1..].iter()
+                    .map(|op| count_reads(op, &target))
+                    .sum();
+                if uses == 1 {
+                    // Check that target is not written to between here and its use
+                    let mut rewritten = false;
+                    for op in ops[i+1..].iter() {
+                        if writes_to(op, &target) {
+                            rewritten = true;
+                            break;
+                        }
+                        if count_reads(op, &target) > 0 {
+                            break;
+                        }
+                    }
+                    if rewritten {
+                        i += 1;
+                        continue;
+                    }
+                    // Replace the read and remove this Copy
+                    for op in ops[i+1..].iter_mut() {
+                        if replace_reads(op, &target, &replacement) {
+                            break;
+                        }
+                    }
+                    ops.remove(i);
+                    continue; // don't increment i
+                }
+            }
+        }
+        i += 1;
+    }
+}
+
+fn writes_to(op: &PcodeOp, target: &Varnode) -> bool {
+    match op {
+        PcodeOp::Copy { out, .. } | PcodeOp::Load { out, .. }
+        | PcodeOp::Subpiece { out, .. }
+        | PcodeOp::IntNeg { out, .. } | PcodeOp::IntNot { out, .. }
+        | PcodeOp::IntZext { out, .. } | PcodeOp::IntSext { out, .. }
+        | PcodeOp::BoolNot { out, .. }
+        | PcodeOp::FloatNeg { out, .. } | PcodeOp::FloatAbs { out, .. }
+        | PcodeOp::FloatSqrt { out, .. } | PcodeOp::FloatNan { out, .. }
+        | PcodeOp::Int2Float { out, .. } | PcodeOp::Float2Float { out, .. }
+        | PcodeOp::Trunc { out, .. } | PcodeOp::FloatCeil { out, .. }
+        | PcodeOp::FloatFloor { out, .. } | PcodeOp::FloatRound { out, .. }
+        | PcodeOp::Popcount { out, .. } | PcodeOp::Lzcount { out, .. }
+        | PcodeOp::IntAdd { out, .. } | PcodeOp::IntSub { out, .. }
+        | PcodeOp::IntMult { out, .. } | PcodeOp::IntDiv { out, .. }
+        | PcodeOp::IntSDiv { out, .. } | PcodeOp::IntRem { out, .. }
+        | PcodeOp::IntSRem { out, .. }
+        | PcodeOp::IntEq { out, .. } | PcodeOp::IntNotEq { out, .. }
+        | PcodeOp::IntLess { out, .. } | PcodeOp::IntLessEq { out, .. }
+        | PcodeOp::IntSLess { out, .. } | PcodeOp::IntSLessEq { out, .. }
+        | PcodeOp::IntAnd { out, .. } | PcodeOp::IntOr { out, .. }
+        | PcodeOp::IntXor { out, .. }
+        | PcodeOp::IntLsl { out, .. } | PcodeOp::IntLsr { out, .. }
+        | PcodeOp::IntAsr { out, .. }
+        | PcodeOp::IntCarry { out, .. } | PcodeOp::IntSCarry { out, .. }
+        | PcodeOp::IntSBorrow { out, .. }
+        | PcodeOp::BoolAnd { out, .. } | PcodeOp::BoolOr { out, .. }
+        | PcodeOp::BoolXor { out, .. }
+        | PcodeOp::FloatAdd { out, .. } | PcodeOp::FloatSub { out, .. }
+        | PcodeOp::FloatMult { out, .. } | PcodeOp::FloatDiv { out, .. }
+        | PcodeOp::FloatEq { out, .. } | PcodeOp::FloatNotEq { out, .. }
+        | PcodeOp::FloatLess { out, .. } | PcodeOp::FloatLessEq { out, .. }
+            => out == target,
+        PcodeOp::CallOther { out: Some(out), .. } => out == target,
+        _ => false,
+    }
+}
+
+fn count_reads(op: &PcodeOp, target: &Varnode) -> usize {
+    let mut n = 0;
+    visit_reads(op, &mut |v| if v == target { n += 1 });
+    n
+}
+
+fn replace_reads(op: &mut PcodeOp, target: &Varnode, replacement: &Varnode) -> bool {
+    let mut found = false;
+    visit_reads_mut(op, &mut |v| {
+        if v == target {
+            *v = *replacement;
+            found = true;
+        }
+    });
+    found
+}
+
+fn visit_reads(op: &PcodeOp, f: &mut impl FnMut(&Varnode)) {
+    match op {
+        PcodeOp::Copy { input, .. } => f(input),
+        PcodeOp::Load { ptr, .. } => f(ptr),
+        PcodeOp::Store { ptr, val, .. } => { f(ptr); f(val); }
+        PcodeOp::Branch { dest } | PcodeOp::BranchInd { dest }
+        | PcodeOp::Call { dest } | PcodeOp::CallInd { dest }
+        | PcodeOp::Return { dest } => f(dest),
+        PcodeOp::CBranch { dest, cond } => { f(dest); f(cond); }
+        PcodeOp::Subpiece { input, .. } => f(input),
+        PcodeOp::IntNeg { input, .. } | PcodeOp::IntNot { input, .. }
+        | PcodeOp::IntZext { input, .. } | PcodeOp::IntSext { input, .. }
+        | PcodeOp::BoolNot { input, .. }
+        | PcodeOp::FloatNeg { input, .. } | PcodeOp::FloatAbs { input, .. }
+        | PcodeOp::FloatSqrt { input, .. } | PcodeOp::FloatNan { input, .. }
+        | PcodeOp::Int2Float { input, .. } | PcodeOp::Float2Float { input, .. }
+        | PcodeOp::Trunc { input, .. } | PcodeOp::FloatCeil { input, .. }
+        | PcodeOp::FloatFloor { input, .. } | PcodeOp::FloatRound { input, .. }
+        | PcodeOp::Popcount { input, .. } | PcodeOp::Lzcount { input, .. } => f(input),
+        PcodeOp::IntAdd { left, right, .. } | PcodeOp::IntSub { left, right, .. }
+        | PcodeOp::IntMult { left, right, .. } | PcodeOp::IntDiv { left, right, .. }
+        | PcodeOp::IntSDiv { left, right, .. } | PcodeOp::IntRem { left, right, .. }
+        | PcodeOp::IntSRem { left, right, .. }
+        | PcodeOp::IntEq { left, right, .. } | PcodeOp::IntNotEq { left, right, .. }
+        | PcodeOp::IntLess { left, right, .. } | PcodeOp::IntLessEq { left, right, .. }
+        | PcodeOp::IntSLess { left, right, .. } | PcodeOp::IntSLessEq { left, right, .. }
+        | PcodeOp::IntAnd { left, right, .. } | PcodeOp::IntOr { left, right, .. }
+        | PcodeOp::IntXor { left, right, .. }
+        | PcodeOp::IntLsl { left, right, .. } | PcodeOp::IntLsr { left, right, .. }
+        | PcodeOp::IntAsr { left, right, .. }
+        | PcodeOp::IntCarry { left, right, .. } | PcodeOp::IntSCarry { left, right, .. }
+        | PcodeOp::IntSBorrow { left, right, .. }
+        | PcodeOp::BoolAnd { left, right, .. } | PcodeOp::BoolOr { left, right, .. }
+        | PcodeOp::BoolXor { left, right, .. }
+        | PcodeOp::FloatAdd { left, right, .. } | PcodeOp::FloatSub { left, right, .. }
+        | PcodeOp::FloatMult { left, right, .. } | PcodeOp::FloatDiv { left, right, .. }
+        | PcodeOp::FloatEq { left, right, .. } | PcodeOp::FloatNotEq { left, right, .. }
+        | PcodeOp::FloatLess { left, right, .. } | PcodeOp::FloatLessEq { left, right, .. }
+            => { f(left); f(right); }
+        PcodeOp::CallOther { inputs, .. } => { for v in inputs { f(v); } }
+    }
+}
+
+fn visit_reads_mut(op: &mut PcodeOp, f: &mut impl FnMut(&mut Varnode)) {
+    match op {
+        PcodeOp::Copy { input, .. } => f(input),
+        PcodeOp::Load { ptr, .. } => f(ptr),
+        PcodeOp::Store { ptr, val, .. } => { f(ptr); f(val); }
+        PcodeOp::Branch { dest } | PcodeOp::BranchInd { dest }
+        | PcodeOp::Call { dest } | PcodeOp::CallInd { dest }
+        | PcodeOp::Return { dest } => f(dest),
+        PcodeOp::CBranch { dest, cond } => { f(dest); f(cond); }
+        PcodeOp::Subpiece { input, .. } => f(input),
+        PcodeOp::IntNeg { input, .. } | PcodeOp::IntNot { input, .. }
+        | PcodeOp::IntZext { input, .. } | PcodeOp::IntSext { input, .. }
+        | PcodeOp::BoolNot { input, .. }
+        | PcodeOp::FloatNeg { input, .. } | PcodeOp::FloatAbs { input, .. }
+        | PcodeOp::FloatSqrt { input, .. } | PcodeOp::FloatNan { input, .. }
+        | PcodeOp::Int2Float { input, .. } | PcodeOp::Float2Float { input, .. }
+        | PcodeOp::Trunc { input, .. } | PcodeOp::FloatCeil { input, .. }
+        | PcodeOp::FloatFloor { input, .. } | PcodeOp::FloatRound { input, .. }
+        | PcodeOp::Popcount { input, .. } | PcodeOp::Lzcount { input, .. } => f(input),
+        PcodeOp::IntAdd { left, right, .. } | PcodeOp::IntSub { left, right, .. }
+        | PcodeOp::IntMult { left, right, .. } | PcodeOp::IntDiv { left, right, .. }
+        | PcodeOp::IntSDiv { left, right, .. } | PcodeOp::IntRem { left, right, .. }
+        | PcodeOp::IntSRem { left, right, .. }
+        | PcodeOp::IntEq { left, right, .. } | PcodeOp::IntNotEq { left, right, .. }
+        | PcodeOp::IntLess { left, right, .. } | PcodeOp::IntLessEq { left, right, .. }
+        | PcodeOp::IntSLess { left, right, .. } | PcodeOp::IntSLessEq { left, right, .. }
+        | PcodeOp::IntAnd { left, right, .. } | PcodeOp::IntOr { left, right, .. }
+        | PcodeOp::IntXor { left, right, .. }
+        | PcodeOp::IntLsl { left, right, .. } | PcodeOp::IntLsr { left, right, .. }
+        | PcodeOp::IntAsr { left, right, .. }
+        | PcodeOp::IntCarry { left, right, .. } | PcodeOp::IntSCarry { left, right, .. }
+        | PcodeOp::IntSBorrow { left, right, .. }
+        | PcodeOp::BoolAnd { left, right, .. } | PcodeOp::BoolOr { left, right, .. }
+        | PcodeOp::BoolXor { left, right, .. }
+        | PcodeOp::FloatAdd { left, right, .. } | PcodeOp::FloatSub { left, right, .. }
+        | PcodeOp::FloatMult { left, right, .. } | PcodeOp::FloatDiv { left, right, .. }
+        | PcodeOp::FloatEq { left, right, .. } | PcodeOp::FloatNotEq { left, right, .. }
+        | PcodeOp::FloatLess { left, right, .. } | PcodeOp::FloatLessEq { left, right, .. }
+            => { f(left); f(right); }
+        PcodeOp::CallOther { inputs, .. } => { for v in inputs { f(v); } }
+    }
+}
+
 /// A single P-code operation.
 ///
 /// Variant naming follows Ghidra's P-code reference.
