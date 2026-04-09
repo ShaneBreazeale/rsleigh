@@ -85,17 +85,41 @@ impl<'a> ExecutionGenerator<'a> {
         let var_decls = self.gen_variable_decls(execution);
         let block_code = self.gen_blocks(execution);
 
+        // Check which subtables are explicitly built
+        let mut built_tables = std::collections::HashSet::new();
+        for block in execution.blocks().iter() {
+            for stmt in block.statements.iter() {
+                if let Statement::Build(b) = stmt {
+                    built_tables.insert(b.table);
+                }
+            }
+        }
+        // Emit implicit builds for subtable fields not explicitly built
+        let implicit_builds: TokenStream = self.constructor.table_fields.iter()
+            .filter(|(tid, _)| !built_tables.contains(tid))
+            .map(|(_, field)| {
+                quote! {
+                    {
+                        let (s_ops, _) = self.#field.lift(#inst_start, #inst_next);
+                        ops.extend(s_ops);
+                    }
+                }
+            })
+            .collect();
+
         quote! {
             pub fn lift(
                 &self,
                 #inst_start: #addr_type,
                 #inst_next: #addr_type,
-            ) -> Vec<pcode_ir::PcodeOp> {
+            ) -> (Vec<pcode_ir::PcodeOp>, Option<pcode_ir::Varnode>) {
                 let mut ops: Vec<pcode_ir::PcodeOp> = Vec::new();
                 let unique_base: u64 = (#inst_start as u64) << 16;
+                let mut export_varnode: Option<pcode_ir::Varnode> = None;
                 #var_decls
+                #implicit_builds
                 #block_code
-                ops
+                (ops, export_varnode)
             }
         }
     }
@@ -197,7 +221,40 @@ impl<'a> ExecutionGenerator<'a> {
                 });
                 tokens
             }
-            AssignmentWrite::TableExport { .. } => rhs_code,
+            AssignmentWrite::TableExport { table_id, op, .. } => {
+                let mut tokens = TokenStream::new();
+                let dest_name = format_ident!("dest_export_{}", {
+                    let c = self.unique_counter.get();
+                    self.unique_counter.set(c + 1);
+                    c
+                });
+                // First, lift the subtable to get its export (the destination varnode)
+                match self.constructor.table_fields.get(table_id) {
+                    Some(field) => {
+                        let is = self.inst_start;
+                        let in_ = self.inst_next;
+                        tokens.extend(quote! {
+                            let #dest_name = {
+                                let (s_ops, s_exp) = self.#field.lift(#is, #in_);
+                                ops.extend(s_ops);
+                                s_exp
+                            };
+                        });
+                    }
+                    None => {
+                        tokens.extend(quote! {
+                            let #dest_name: Option<pcode_ir::Varnode> = None;
+                        });
+                    }
+                }
+                tokens.extend(rhs_code);
+                tokens.extend(quote! {
+                    if let Some(dest) = #dest_name {
+                        ops.push(pcode_ir::PcodeOp::Copy { out: dest, input: #rhs });
+                    }
+                });
+                tokens
+            }
         }
     }
 
@@ -278,7 +335,12 @@ impl<'a> ExecutionGenerator<'a> {
             Some(field) => {
                 let is = self.inst_start;
                 let in_ = self.inst_next;
-                quote! { ops.extend(self.#field.lift(#is, #in_)); }
+                quote! {
+                    {
+                        let (s_ops, _) = self.#field.lift(#is, #in_);
+                        ops.extend(s_ops);
+                    }
+                }
             }
             None => quote! {},
         }
@@ -304,10 +366,76 @@ impl<'a> ExecutionGenerator<'a> {
 
     fn gen_export(&self, export: &Export, execution: &Execution) -> TokenStream {
         match export {
-            Export::Value(expr) | Export::Reference { addr: expr, .. } => {
-                self.lower_expr(expr, execution).1
+            Export::Value(expr) => {
+                let (vn, code) = self.lower_expr(expr, execution);
+                let mut tokens = code;
+                tokens.extend(quote! { export_varnode = Some(#vn); });
+                tokens
             }
-            _ => quote! {},
+            Export::Reference { addr, memory } => {
+                let (vn, code) = self.lower_expr(addr, execution);
+                let sp = self.space_id_expr(memory.space);
+                let size = memory.len_bytes.get() as u32;
+                let mut tokens = code;
+                // For reference exports, the export is the memory location itself
+                tokens.extend(quote! {
+                    export_varnode = Some(pcode_ir::Varnode { space: #sp, offset: #vn.offset, size: #size });
+                });
+                tokens
+            }
+            Export::Table { table_id, .. } => {
+                match self.constructor.table_fields.get(table_id) {
+                    Some(field) => {
+                        let is = self.inst_start;
+                        let in_ = self.inst_next;
+                        quote! {
+                            {
+                                let (s_ops, s_exp) = self.#field.lift(#is, #in_);
+                                ops.extend(s_ops);
+                                export_varnode = s_exp;
+                            }
+                        }
+                    }
+                    None => quote! {},
+                }
+            }
+            Export::AttachVarnode { attach_value, attach_id, .. } => {
+                // Look up the token field/context value and map to a register varnode
+                let attach = self.disassembler.sleigh.attach_varnode(*attach_id);
+                let varnode_size = attach.0.first()
+                    .map(|(_, vid)| self.disassembler.sleigh.varnode(*vid).len_bytes.get() as u32)
+                    .unwrap_or(8);
+                let value_expr = match attach_value {
+                    crate::execution::DynamicValueType::TokenField(tf_id) => {
+                        match self.constructor.ass_fields.get(tf_id) {
+                            Some(n) => quote! { self.#n as u64 },
+                            None => quote! { 0u64 },
+                        }
+                    }
+                    crate::execution::DynamicValueType::Context(ctx_id) => {
+                        let read_fn = &self.disassembler.context.context_functions(*ctx_id).read;
+                        quote! { 0u64 } // TODO: context read
+                    }
+                };
+                // Build a match on the value to find the register offset
+                let arms: Vec<_> = attach.0.iter().map(|(idx, vid)| {
+                    let v = self.disassembler.sleigh.varnode(*vid);
+                    let offset = v.address;
+                    let index = *idx as u64;
+                    quote! { #index => #offset }
+                }).collect();
+                let size = varnode_size;
+                quote! {
+                    export_varnode = Some({
+                        let reg_val = #value_expr;
+                        let offset = match reg_val {
+                            #(#arms,)*
+                            _ => 0,
+                        };
+                        pcode_ir::Varnode::register(offset, #size)
+                    });
+                }
+            }
         }
     }
 
@@ -417,9 +545,20 @@ impl<'a> ExecutionGenerator<'a> {
                     Some(field) => {
                         let is = self.inst_start;
                         let in_ = self.inst_next;
+                        let var_name = format_ident!("table_export_{}", {
+                            let c = self.unique_counter.get();
+                            self.unique_counter.set(c + 1);
+                            c
+                        });
                         (
-                            quote! { pcode_ir::Varnode::constant(0, #sz) },
-                            quote! { ops.extend(self.#field.lift(#is, #in_)); },
+                            quote! { #var_name },
+                            quote! {
+                                let #var_name = {
+                                    let (s_ops, s_exp) = self.#field.lift(#is, #in_);
+                                    ops.extend(s_ops);
+                                    s_exp.unwrap_or(pcode_ir::Varnode::constant(0, #sz))
+                                };
+                            },
                         )
                     }
                     None => (quote! { pcode_ir::Varnode::constant(0, #sz) }, quote! {}),

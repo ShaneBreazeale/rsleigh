@@ -12,9 +12,17 @@ mod x86_64 {
 
 use x86_64::*;
 
+fn context_x86_64() -> ContextMemory {
+    let mut ctx = ContextMemory::default();
+    ctx.write_longMode(1);
+    ctx.write_addrsize(2);
+    ctx.write_opsize(1);
+    ctx
+}
+
 fn main() {
-    let mut context = ContextMemory::default();
-    let mut global_set = GlobalSet::new(ContextMemory::default());
+    let mut context = context_x86_64();
+    let mut global_set = GlobalSet::new(context_x86_64());
 
     let tests: &[(&[u8], &str)] = &[
         (&[0x48, 0x89, 0xc7], "MOV rdi, rax"),
@@ -30,11 +38,13 @@ fn main() {
     ];
 
     for (bytes, name) in tests {
-        context = ContextMemory::default();
+        context = context_x86_64();
         if let Some((inst_next, display, pcode)) =
             parse_instruction(bytes, &mut context, 0x1000, &mut global_set)
         {
             println!("{name}:");
+            let disasm: Vec<String> = display.iter().map(|d| format!("{}", d)).collect();
+            println!("  decoded: {}", disasm.join(""));
             println!("  len={}, pcode_ops={}", inst_next - 0x1000, pcode.len());
             for op in &pcode {
                 println!("    {:?}", op);

@@ -350,6 +350,10 @@ impl ConstructorStruct {
 
         match &constructor.execution {
             Some(execution) => {
+                // Empty execution with subtable fields: emit builds for all subtables
+                // This handles constructors like `:^instruction is ... & instruction {}`
+                // where the subtable is implicitly built
+
                 let gen = ExecutionGenerator::new(
                     disassembler,
                     self,
@@ -360,14 +364,24 @@ impl ConstructorStruct {
             }
             None => {
                 let addr_type = &disassembler.addr_type;
-                // No execution → empty lift
+                // No execution → build all subtables
+                let builds: TokenStream = self.table_fields.values().map(|field| {
+                    quote! {
+                        {
+                            let (s_ops, _) = self.#field.lift(#inst_start, #inst_next);
+                            ops.extend(s_ops);
+                        }
+                    }
+                }).collect();
                 quote! {
                     pub fn lift(
                         &self,
                         #inst_start: #addr_type,
                         #inst_next: #addr_type,
-                    ) -> Vec<pcode_ir::PcodeOp> {
-                        Vec::new()
+                    ) -> (Vec<pcode_ir::PcodeOp>, Option<pcode_ir::Varnode>) {
+                        let mut ops = Vec::new();
+                        #builds
+                        (ops, None)
                     }
                 }
             }

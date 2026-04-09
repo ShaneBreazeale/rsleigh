@@ -1,2 +1,6 @@
 /target
 .DS_Store
+main
+sweep.timestamp
+test_include
+test_modules
