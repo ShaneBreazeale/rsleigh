@@ -1,0 +1,8 @@
+[package]
+name = "mips-instr-00"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+pcode-ir = { path = "../../pcode-ir" }
+mips-shared = { path = "../mips-shared" }
+mips-subtables = { path = "../mips-subtables" }

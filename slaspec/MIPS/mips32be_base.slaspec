@@ -1,0 +1,11 @@
+# MIPS32 big-endian without MIPS16/microMIPS extensions
+
+@define ENDIAN "big"
+@define FREGSIZE "4"    
+@define ISA_VARIANT ""
+
+@include "mips.sinc"
+@include "mips32Instructions.sinc"
+# Excluded: mips16.sinc, mipsmicro.sinc (unsolvable size constraints)
+@include "mips_mt.sinc"
+@include "mips_dsp.sinc"

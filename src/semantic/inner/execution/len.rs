@@ -563,8 +563,31 @@ pub fn a_b_generate_c(
     c: &mut dyn FieldSizeMut,
 ) -> Option<bool> {
     let mut modified = false;
-    // both have the same size
-    modified |= intersect_all(&mut [a, b, c])?;
+    // Try intersection first
+    let result = intersect_all(&mut [a, b, c]);
+    if result.is_none() {
+        // Intersection failed — force the larger operand to match the resolved one.
+        // This handles cases like MIPS where a 32-bit variable is AND'd with a
+        // 64-bit constant: the constant gets truncated to 32 bits.
+        let a_val = a.get();
+        let b_val = b.get();
+        if let FieldSize::Value(a_size) = a_val {
+            if b_val.min_bits().map_or(false, |bmin| bmin > a_size) {
+                b.set(FieldSize::Value(a_size))?;
+                modified = true;
+            }
+        }
+        if let FieldSize::Value(b_size) = b_val {
+            if a_val.min_bits().map_or(false, |amin| amin > b_size) {
+                a.set(FieldSize::Value(b_size))?;
+                modified = true;
+            }
+        }
+        // Retry intersection
+        modified |= intersect_all(&mut [a, b, c])?;
+    } else {
+        modified |= result?;
+    }
 
     let a_value = a.get();
     let b_value = b.get();
