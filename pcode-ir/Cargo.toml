@@ -3,7 +3,7 @@ name = "pcode-ir"
 version = "0.1.0"
 edition = "2021"
 description = "P-code intermediate representation types for SLEIGH-generated decoders"
-license = "MIT"
+license = "Apache-2.0"
 
 # Zero runtime dependencies by design.
 # The generated code should only depend on pcode-ir.

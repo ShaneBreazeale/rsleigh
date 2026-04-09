@@ -48,4 +48,4 @@ Requires Rust 1.70+.
 
 ## License
 
-MIT
+Apache 2.0
