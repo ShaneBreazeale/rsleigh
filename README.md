@@ -28,7 +28,7 @@ rsleigh reads the same `.slaspec` files that ship with Ghidra (Apache 2.0) and g
 | x86-64 | 5700+ | full | 33 MB | ~3.5 min |
 | AARCH64 | 3500+ | NEON + SVE | 34 MB | ~11 sec |
 | RISC-V (RV64) | 500+ | F/D/B/K/P/Q/V/C | 5 MB | ~2.6 sec |
-| MIPS32 (BE) | 400+ | FPU + DSP | 4 MB | ~1.7 sec |
+| MIPS32 (BE) | 900+ | FPU + DSP + MIPS16 + microMIPS | 8 MB | ~3.2 sec |
 
 ## Workspace
 
