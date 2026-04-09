@@ -97,6 +97,11 @@ impl ExecutionBuilder for Builder<'_> {
             {
                 Ok(ReadScope::Table(table_id))
             }
+            // Allow non-exporting tables in pcodeop arguments (e.g. NEON_bfdot)
+            // These tables are used for their pattern-matched register selection
+            Table(table_id) => {
+                Ok(ReadScope::Table(table_id))
+            }
             _ => Err(Box::new(ExecutionError::InvalidRef(src.clone()))),
         }
     }

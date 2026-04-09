@@ -19,7 +19,7 @@ fn main() {
             ),
             "aarch64" | "arm64" => generate_arch(
                 "aarch64",
-                Path::new("slaspec/AARCH64/AARCH64_base.slaspec"),
+                Path::new("slaspec/AARCH64/AARCH64.slaspec"),
                 "aarch64",
                 200,
                 4,

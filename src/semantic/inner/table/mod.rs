@@ -394,13 +394,16 @@ impl Table {
 
 impl FieldSizeMut for &Table {
     fn get(&self) -> FieldSize {
-        //TODO expect
-        *self.export.borrow().as_ref().unwrap().size().unwrap()
+        match self.export.borrow().as_ref().and_then(|x| x.size()) {
+            Some(size) => *size,
+            None => FieldSize::default(),
+        }
     }
 
     fn set(&mut self, size: FieldSize) -> Option<bool> {
         let mut self_export = self.export.borrow_mut();
-        let self_ref = self_export.as_mut().unwrap().size_mut().unwrap();
+        let Some(export) = self_export.as_mut() else { return Some(false) };
+        let Some(self_ref) = export.size_mut() else { return Some(false) };
         let modify = *self_ref != size;
         if modify {
             let _ = std::mem::replace(self_ref, size);
