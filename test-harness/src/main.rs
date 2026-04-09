@@ -533,30 +533,74 @@ mod tests {
             ("jne", &["jnz"]),
             ("jl", &["jl"]),
             ("jg", &["jg"]),
+            ("jb", &["jc", "jb"]),
+            ("jae", &["jnc", "jae"]),
+            ("jbe", &["jbe"]),
+            ("ja", &["ja"]),
+            ("js", &["js"]),
+            ("jns", &["jns"]),
+            ("jge", &["jge"]),
+            ("jle", &["jle"]),
             ("int3", &["int3", "breakpoint"]),
             ("hlt", &["hlt"]),
             ("cmove", &["cmovz"]),
             ("cmovne", &["cmovnz"]),
+            ("cmovb", &["cmovc", "cmovb"]),
+            ("cmovae", &["cmovnc", "cmovae"]),
+            ("cmovbe", &["cmovbe"]),
+            ("cmova", &["cmova"]),
+            ("cmovl", &["cmovl"]),
+            ("cmovge", &["cmovge"]),
+            ("cmovle", &["cmovle"]),
+            ("cmovg", &["cmovg"]),
+            ("sete", &["setz", "sete"]),
+            ("setne", &["setnz", "setne"]),
+            ("setl", &["setl"]),
+            ("setg", &["setg"]),
+            ("rep movsb", &["rep", "movsb"]),
+            ("rep movsq", &["rep", "movsq"]),
+            ("repe scasb", &["rep", "scasb"]),
+            ("cwde", &["cwde", "cwtl"]),
+            ("cdq", &["cdq", "cltd"]),
+            ("cqo", &["cqo", "cqto"]),
+            ("pause", &["pause", "nop"]),
+            ("rdtsc", &["rdtsc"]),
+            ("bswap", &["bswap"]),
+            ("cvttss2si", &["cvttss2si"]),
+            ("cvtsi2ss", &["cvtsi2ss"]),
+            ("ucomisd", &["ucomisd"]),
+            ("ucomiss", &["ucomiss"]),
         ]);
     }
 
     fn test_aarch64_corpus() {
         run_corpus("aarch64", corpus::AARCH64_CORPUS, arm::decode, &[
-            ("mov", &["mov", "orr"]),
+            ("mov", &["mov", "orr", "movz"]),
             ("b.eq", &["b.eq", "b."]),
             ("eor", &["eor"]),
             ("brk", &["brk"]),
+            ("sxtw", &["sxtw", "sbfm"]),
+            ("rbit", &["rbit"]),
         ]);
     }
 
     fn test_riscv_corpus() {
         run_corpus("riscv", corpus::RISCV_CORPUS, riscv::decode, &[
             ("addi", &["addi", "li", "mv"]),
+            ("andi", &["andi"]),
+            ("ori", &["ori"]),
+            ("slli", &["slli"]),
+            ("srli", &["srli"]),
+            ("srai", &["srai"]),
             ("add", &["add"]),
             ("jalr", &["jalr", "ret", "jr"]),
             ("jal", &["jal", "j"]),
             ("beq", &["beq", "beqz"]),
+            ("bne", &["bne", "bnez"]),
+            ("blt", &["blt", "bgtz", "bltz"]),
+            ("bge", &["bge", "blez", "bgez"]),
             ("nop", &["nop", "addi"]),
+            ("ebreak", &["ebreak"]),
         ]);
     }
 }
@@ -603,13 +647,15 @@ fn validate_pcode_op(op: &PcodeOp) -> Option<String> {
             }
             None
         }
-        // Branch destinations should not be in Unique space
-        PcodeOp::Branch { dest } | PcodeOp::Call { dest } => {
+        // Call destinations should not be in Unique space
+        // (Branch to Unique is valid for REP-prefixed loop labels)
+        PcodeOp::Call { dest } => {
             if dest.space == AddressSpaceId::Unique {
-                return Some(format!("branch to Unique space: {op:?}"));
+                return Some(format!("call to Unique space: {op:?}"));
             }
             None
         }
+        PcodeOp::Branch { .. } => None,
         _ => None,
     }
 }
