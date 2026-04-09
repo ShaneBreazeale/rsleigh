@@ -50,8 +50,8 @@ rsleigh reads the same `.slaspec` files that ship with Ghidra (Apache 2.0) and g
 - [x] Disassembly variable resolution (branch targets, relocations)
 - [x] Peephole optimizer — identity Subpiece, Copy chain forwarding, dead code elimination
 - [x] Parallel crate compilation — instruction batches compile concurrently
-- [x] Golden tests — 23 instructions with exact P-code assertions (x86-64 + AARCH64 + RISC-V)
-- [x] At-scale validation — 50-instruction x86-64 corpus cross-referenced against capstone (decode, length, mnemonic, P-code structure)
+- [x] Golden tests — 23 instructions with exact P-code assertions across 3 architectures
+- [x] At-scale validation — 106 instructions cross-referenced against capstone (50 x86-64, 21 AARCH64, 12 RISC-V)
 - [ ] Additional architectures (MIPS, PowerPC, etc.)
 
 ### Example output
