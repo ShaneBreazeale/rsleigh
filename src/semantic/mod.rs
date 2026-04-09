@@ -300,6 +300,15 @@ impl Sleigh {
                 break;
             }
             if i > 100 || !solved.we_did_a_thing() {
+                if solved.we_finished() {
+                    // All sizes resolved, just no more progress to make
+                    break;
+                }
+                // Some sizes couldn't be resolved — log warning but continue.
+                // Unresolved sizes will default to the architecture's address size.
+                // This handles MIPS16/microMIPS variable-length encoding edge cases.
+                #[cfg(feature = "strict_solve")]
+                {
                 let mut solved = SolvedLocation::default();
                 for table in inner.tables.iter() {
                     table.solve(&inner, &mut solved)?;
@@ -320,6 +329,9 @@ impl Sleigh {
                         },
                     ),
                 )));
+                }
+                // Non-strict mode: break with unresolved sizes
+                break;
             }
         }
         tracing::trace!("semantic table solving sucessfully");

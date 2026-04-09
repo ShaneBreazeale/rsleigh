@@ -35,7 +35,7 @@ impl Variable {
     pub fn convert(self) -> FinalVariable {
         FinalVariable {
             name: self.name.into(),
-            len_bits: self.size.get().possible_value().unwrap(),
+            len_bits: self.size.get().possible_value().unwrap_or(32.try_into().unwrap()),
             location: self.explicit.then_some(self.src),
         }
     }

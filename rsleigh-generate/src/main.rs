@@ -26,7 +26,7 @@ fn main() {
             ),
             "mips" | "mips32" => generate_arch(
                 "mips32",
-                Path::new("slaspec/MIPS/mips32be_base.slaspec"),
+                Path::new("slaspec/MIPS/mips32be.slaspec"),
                 "mips",
                 200,
                 2,

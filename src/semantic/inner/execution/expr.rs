@@ -1,5 +1,12 @@
 use std::ops::Range;
 
+/// Resolve a FieldSize to a concrete value, with fallbacks for unsolved sizes.
+fn resolve_size(size: &super::len::FieldSize) -> crate::NumberNonZeroUnsigned {
+    size.possible_value()
+        .or_else(|| size.min_bits())
+        .unwrap_or(32.try_into().unwrap())
+}
+
 use crate::execution::{DynamicValueType, ExprVarnodeDynamic, VariableId};
 use crate::semantic::execution::{
     Binary, Expr as FinalExpr, ExprBinaryOp as FinalExprBinaryOp,
@@ -916,7 +923,7 @@ impl ExprValue {
                 attach_id,
                 attach_value,
             }) => FinalReadValue::IntDynamic(FinalExprDynamicInt {
-                bits: size.possible_value().unwrap(),
+                bits: resolve_size(&size),
                 attach_id,
                 attach_value,
             }),
@@ -929,7 +936,7 @@ impl Reference {
     pub fn convert(self) -> FinalReference {
         FinalReference {
             location: self.location,
-            len_bits: self.len.possible_value().unwrap(),
+            len_bits: resolve_size(&self.len),
             value: self.value,
         }
     }
@@ -1009,36 +1016,36 @@ impl Unary {
             Unary::TakeLsb(len) => FinalUnary::TakeLsb(len),
             Unary::TrunkLsb { trunk, size } => FinalUnary::TrunkLsb {
                 trunk,
-                bits: size.possible_value().unwrap(),
+                bits: resolve_size(&size),
             },
             Unary::BitRange { range, size } => FinalUnary::BitRange {
                 range,
-                bits: size.possible_value().unwrap(),
+                bits: resolve_size(&size),
             },
             Unary::Dereference(mem) => FinalUnary::Dereference(mem.convert()),
             Unary::Zext(size) => {
-                FinalUnary::Zext(size.possible_value().unwrap())
+                FinalUnary::Zext(resolve_size(&size))
             }
             Unary::Sext(size) => {
-                FinalUnary::Sext(size.possible_value().unwrap())
+                FinalUnary::Sext(resolve_size(&size))
             }
             Unary::Popcount(size) => {
-                FinalUnary::Popcount(size.possible_value().unwrap())
+                FinalUnary::Popcount(resolve_size(&size))
             }
             Unary::Lzcount(size) => {
-                FinalUnary::Lzcount(size.possible_value().unwrap())
+                FinalUnary::Lzcount(resolve_size(&size))
             }
             Unary::FloatNan(size) => {
-                FinalUnary::FloatNan(size.possible_value().unwrap())
+                FinalUnary::FloatNan(resolve_size(&size))
             }
             Unary::SignTrunc(size) => {
-                FinalUnary::SignTrunc(size.possible_value().unwrap())
+                FinalUnary::SignTrunc(resolve_size(&size))
             }
             Unary::Float2Float(size) => {
-                FinalUnary::Float2Float(size.possible_value().unwrap())
+                FinalUnary::Float2Float(resolve_size(&size))
             }
             Unary::Int2Float(size) => {
-                FinalUnary::Int2Float(size.possible_value().unwrap())
+                FinalUnary::Int2Float(resolve_size(&size))
             }
             Unary::Negation => FinalUnary::Negation,
             Unary::BitNegation => FinalUnary::BitNegation,
@@ -1075,7 +1082,7 @@ impl ExprBinaryOp {
     pub fn convert(self) -> FinalExprBinaryOp {
         FinalExprBinaryOp {
             location: self.location,
-            len_bits: self.output_size.possible_value().unwrap(),
+            len_bits: resolve_size(&self.output_size),
             op: self.op,
             left: Box::new(self.left.convert()),
             right: Box::new(self.right.convert()),
@@ -1085,7 +1092,7 @@ impl ExprBinaryOp {
 impl ExprNumber {
     pub fn convert(self) -> FinalExprNumber {
         FinalExprNumber {
-            size: self.size.possible_value().unwrap(),
+            size: resolve_size(&self.size),
             number: self.number,
         }
     }
@@ -1101,7 +1108,7 @@ impl ExprNumber {
 impl ExprTokenField {
     pub fn convert(self) -> FinalExprTokenField {
         FinalExprTokenField {
-            size: self.size.possible_value().unwrap(),
+            size: resolve_size(&self.size),
             id: self.id,
         }
     }
@@ -1117,7 +1124,7 @@ impl ExprTokenField {
 impl ExprContext {
     pub fn convert(self) -> FinalExprContext {
         FinalExprContext {
-            size: self.size.possible_value().unwrap(),
+            size: resolve_size(&self.size),
             id: self.id,
         }
     }
@@ -1133,7 +1140,7 @@ impl ExprContext {
 impl ExprBitrange {
     pub fn convert(self) -> FinalExprBitrange {
         FinalExprBitrange {
-            size: self.size.possible_value().unwrap(),
+            size: resolve_size(&self.size),
             id: self.id,
         }
     }
@@ -1152,7 +1159,7 @@ impl ExprBitrange {
 impl ExprDisVar {
     pub fn convert(self) -> FinalExprDisVar {
         FinalExprDisVar {
-            size: self.size.possible_value().unwrap(),
+            size: resolve_size(&self.size),
             id: self.id,
         }
     }

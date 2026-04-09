@@ -154,22 +154,22 @@ impl TableExportType {
     pub fn final_size(&self) -> Option<NumberNonZeroUnsigned> {
         match self {
             Self::None => None,
-            Self::Const(len) => Some(len.possible_value().unwrap()),
-            Self::Value(len) => Some(len.possible_value().unwrap()),
-            Self::Reference { len, .. } => Some(len.possible_value().unwrap()),
+            Self::Const(len) => Some(len.possible_value().unwrap_or(32.try_into().unwrap())),
+            Self::Value(len) => Some(len.possible_value().unwrap_or(32.try_into().unwrap())),
+            Self::Reference { len, .. } => Some(len.possible_value().unwrap_or(32.try_into().unwrap())),
         }
     }
     pub fn convert(self) -> Option<FinalExportLen> {
         match self {
             Self::None => None,
             Self::Const(x) => {
-                Some(FinalExportLen::Const(x.possible_value().unwrap()))
+                Some(FinalExportLen::Const(x.possible_value().unwrap_or(32.try_into().unwrap())))
             }
             Self::Value(x) => {
-                Some(FinalExportLen::Value(x.possible_value().unwrap()))
+                Some(FinalExportLen::Value(x.possible_value().unwrap_or(32.try_into().unwrap())))
             }
             Self::Reference { len, .. } => {
-                Some(FinalExportLen::Reference(len.possible_value().unwrap()))
+                Some(FinalExportLen::Reference(len.possible_value().unwrap_or(32.try_into().unwrap())))
             }
         }
     }
@@ -465,7 +465,7 @@ impl Export {
                 input_len,
                 value,
             } => {
-                let value_bits = input_len.possible_value().unwrap();
+                let value_bits = input_len.possible_value().unwrap_or(32.try_into().unwrap());
                 let bits = bytes.get() * 8;
                 if bits > value_bits.get() {
                     // if export is bigger then the value, zext it

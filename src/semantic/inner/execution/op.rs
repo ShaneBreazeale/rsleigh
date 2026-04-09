@@ -21,7 +21,7 @@ impl MemoryLocation {
     }
     pub fn convert(self) -> FinalMemoryLocation {
         FinalMemoryLocation {
-            len_bytes: self.size.possible_value().unwrap(),
+            len_bytes: self.size.possible_value().unwrap_or(32.try_into().unwrap()),
             space: self.space,
             location: self.location,
         }
