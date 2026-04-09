@@ -222,6 +222,8 @@ mod tests {
         eprintln!("  23 golden tests passed");
         // Scale validation
         test_x86_64_corpus();
+        test_aarch64_corpus();
+        test_riscv_corpus();
         eprintln!("all tests passed");
     }
 
@@ -468,15 +470,19 @@ mod tests {
 
     // ── Scale validation ─────────────────────────────────────────────
 
-    fn test_x86_64_corpus() {
+    fn run_corpus(
+        arch: &str,
+        corpus: &[(&[u8], u64, &str)],
+        decoder: fn(&[u8], u64) -> (u64, String, Vec<PcodeOp>),
+        mnemonic_aliases: &[(&str, &[&str])],
+    ) {
         let mut passed = 0;
         let mut failed = Vec::new();
 
-        for (bytes, expected_len, capstone_mnemonic) in corpus::X86_64_CORPUS {
-            let result = std::panic::catch_unwind(|| x86::decode(bytes, 0x1000));
+        for (bytes, expected_len, capstone_mnemonic) in corpus {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decoder(bytes, 0x1000)));
             match result {
                 Ok((len, disasm, pcode)) => {
-                    // Validate instruction length matches capstone
                     if len != *expected_len {
                         failed.push(format!(
                             "{}: len mismatch: got {len}, expected {expected_len} (disasm: {disasm})",
@@ -485,29 +491,19 @@ mod tests {
                         continue;
                     }
 
-                    // Validate disassembly mnemonic (case-insensitive, Ghidra may use different names)
                     let disasm_lower = disasm.to_lowercase();
                     let mnemonic_matches = disasm_lower.starts_with(capstone_mnemonic)
-                        || match *capstone_mnemonic {
-                            "je" => disasm_lower.starts_with("jz"),
-                            "jne" => disasm_lower.starts_with("jnz"),
-                            "jl" => disasm_lower.starts_with("jl"),
-                            "jg" => disasm_lower.starts_with("jg"),
-                            "int3" => disasm_lower.contains("int3") || disasm_lower.contains("breakpoint"),
-                            "hlt" => disasm_lower.contains("hlt"),
-                            "cmove" => disasm_lower.starts_with("cmovz"),
-                            "cmovne" => disasm_lower.starts_with("cmovnz"),
-                            _ => false,
-                        };
+                        || mnemonic_aliases.iter().any(|(cap, aliases)| {
+                            *cap == *capstone_mnemonic && aliases.iter().any(|a| disasm_lower.starts_with(a))
+                        });
                     if !mnemonic_matches {
                         failed.push(format!(
-                            "{}: mnemonic mismatch: got '{disasm}', expected starts with '{capstone_mnemonic}'",
+                            "{}: mnemonic mismatch: got '{disasm}', expected '{capstone_mnemonic}'",
                             capstone_mnemonic
                         ));
                         continue;
                     }
 
-                    // Validate P-code structural properties
                     for (i, op) in pcode.iter().enumerate() {
                         if let Some(err) = validate_pcode_op(op) {
                             failed.push(format!(
@@ -516,7 +512,6 @@ mod tests {
                             ));
                         }
                     }
-
                     passed += 1;
                 }
                 Err(_) => {
@@ -526,19 +521,43 @@ mod tests {
         }
 
         if !failed.is_empty() {
-            for f in &failed {
-                eprintln!("  FAIL: {f}");
-            }
-            panic!(
-                "{} of {} corpus tests failed",
-                failed.len(),
-                corpus::X86_64_CORPUS.len()
-            );
+            for f in &failed { eprintln!("  FAIL: {f}"); }
+            panic!("{arch}: {} of {} corpus tests failed", failed.len(), corpus.len());
         }
-        eprintln!(
-            "  corpus: {passed}/{} instructions validated",
-            corpus::X86_64_CORPUS.len()
-        );
+        eprintln!("  {arch} corpus: {passed}/{} validated", corpus.len());
+    }
+
+    fn test_x86_64_corpus() {
+        run_corpus("x86-64", corpus::X86_64_CORPUS, x86::decode, &[
+            ("je", &["jz"]),
+            ("jne", &["jnz"]),
+            ("jl", &["jl"]),
+            ("jg", &["jg"]),
+            ("int3", &["int3", "breakpoint"]),
+            ("hlt", &["hlt"]),
+            ("cmove", &["cmovz"]),
+            ("cmovne", &["cmovnz"]),
+        ]);
+    }
+
+    fn test_aarch64_corpus() {
+        run_corpus("aarch64", corpus::AARCH64_CORPUS, arm::decode, &[
+            ("mov", &["mov", "orr"]),
+            ("b.eq", &["b.eq", "b."]),
+            ("eor", &["eor"]),
+            ("brk", &["brk"]),
+        ]);
+    }
+
+    fn test_riscv_corpus() {
+        run_corpus("riscv", corpus::RISCV_CORPUS, riscv::decode, &[
+            ("addi", &["addi", "li", "mv"]),
+            ("add", &["add"]),
+            ("jalr", &["jalr", "ret", "jr"]),
+            ("jal", &["jal", "j"]),
+            ("beq", &["beq", "beqz"]),
+            ("nop", &["nop", "addi"]),
+        ]);
     }
 }
 
