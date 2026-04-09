@@ -19,7 +19,7 @@ Generated Rust crate
 parse_instruction(bytes) -> (length, display, Vec<PcodeOp>)
 ```
 
-rsleigh reads the same `.slaspec` files that ship with Ghidra (Apache 2.0) and generates a standalone Rust crate that can decode any instruction for that architecture. The generated code depends only on `pcode-ir`, a zero-dependency crate defining `PcodeOp` and `Varnode` types.
+rsleigh reads the same `.slaspec` files that ship with Ghidra and generates a standalone Rust crate that can decode any instruction for that architecture. The generated code depends only on `pcode-ir`, a zero-dependency crate defining `PcodeOp` and `Varnode` types.
 
 ## Workspace
 
