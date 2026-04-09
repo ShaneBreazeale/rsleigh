@@ -19,6 +19,13 @@ members = [
     "generated/x86-instr-06",
     "generated/x86-instr-07",
     "generated/x86-root",
+    "generated/aarch64-shared",
+    "generated/aarch64-subtables",
+    "generated/aarch64-instr-00",
+    "generated/aarch64-instr-01",
+    "generated/aarch64-instr-02",
+    "generated/aarch64-instr-03",
+    "generated/aarch64-root",
 ]
 resolver = "2"
 

@@ -1,23 +1,41 @@
-use x86_root::*;
 use pcode_ir::{PcodeOp, Varnode, AddressSpaceId};
 
-fn context_x86_64() -> ContextMemory {
-    let mut ctx = ContextMemory::default();
-    ctx.write_longMode(1);
-    ctx.write_addrsize(2);
-    ctx.write_opsize(1);
-    ctx
+mod x86 {
+    use super::*;
+
+    pub fn context() -> x86_root::ContextMemory {
+        let mut ctx = x86_root::ContextMemory::default();
+        ctx.write_longMode(1);
+        ctx.write_addrsize(2);
+        ctx.write_opsize(1);
+        ctx
+    }
+
+    pub fn decode(bytes: &[u8], addr: u64) -> (u64, String, Vec<PcodeOp>) {
+        let mut ctx = context();
+        let mut gs = x86_root::GlobalSet::new(context());
+        let (inst_next, display, mut pcode) =
+            x86_root::parse_instruction(bytes, &mut ctx, addr, &mut gs)
+                .expect("failed to decode");
+        pcode_ir::optimize(&mut pcode);
+        let disasm: Vec<String> = display.iter().map(|d| format!("{}", d)).collect();
+        (inst_next - addr, disasm.join(""), pcode)
+    }
 }
 
-fn decode(bytes: &[u8], addr: u64) -> (u64, String, Vec<PcodeOp>) {
-    let mut ctx = context_x86_64();
-    let mut gs = GlobalSet::new(context_x86_64());
-    let (inst_next, display, mut pcode) =
-        parse_instruction(bytes, &mut ctx, addr, &mut gs)
-            .expect("failed to decode");
-    pcode_ir::optimize(&mut pcode);
-    let disasm: Vec<String> = display.iter().map(|d| format!("{}", d)).collect();
-    (inst_next - addr, disasm.join(""), pcode)
+mod arm {
+    use super::*;
+
+    pub fn decode(bytes: &[u8], addr: u64) -> (u64, String, Vec<PcodeOp>) {
+        let mut ctx = aarch64_root::ContextMemory::default();
+        let mut gs = aarch64_root::GlobalSet::new(aarch64_root::ContextMemory::default());
+        let (inst_next, display, mut pcode) =
+            aarch64_root::parse_instruction(bytes, &mut ctx, addr, &mut gs)
+                .expect("failed to decode");
+        pcode_ir::optimize(&mut pcode);
+        let disasm: Vec<String> = display.iter().map(|d| format!("{}", d)).collect();
+        (inst_next - addr, disasm.join(""), pcode)
+    }
 }
 
 fn main() {
@@ -41,13 +59,39 @@ fn main() {
         (&[0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00], "MOV rax, 1"),
     ];
 
+    println!("=== x86-64 ===\n");
     for (bytes, name) in tests {
-        let (len, disasm, pcode) = decode(bytes, 0x1000);
+        let (len, disasm, pcode) = x86::decode(bytes, 0x1000);
         println!("{name}:");
         println!("  decoded: {disasm}");
         println!("  len={len}, pcode_ops={}", pcode.len());
         for op in &pcode {
             println!("    {op:?}");
+        }
+        println!();
+    }
+
+    // ARM64 test instructions (little-endian 4-byte fixed width)
+    let arm_tests: &[(&[u8], &str)] = &[
+        (&[0xe0, 0x03, 0x01, 0xaa], "MOV x0, x1"),       // mov x0, x1
+        (&[0x20, 0x00, 0x02, 0x8b], "ADD x0, x1, x2"),    // add x0, x1, x2
+        (&[0xc0, 0x03, 0x5f, 0xd6], "RET"),                // ret
+        (&[0x00, 0x00, 0x00, 0x14], "B ."),                 // b .
+        (&[0x20, 0x00, 0x20, 0xd4], "BRK #1"),             // brk #1
+    ];
+
+    println!("=== aarch64 ===\n");
+    for (bytes, name) in arm_tests {
+        match std::panic::catch_unwind(|| arm::decode(bytes, 0x1000)) {
+            Ok((len, disasm, pcode)) => {
+                println!("{name}:");
+                println!("  decoded: {disasm}");
+                println!("  len={len}, pcode_ops={}", pcode.len());
+                for op in &pcode {
+                    println!("    {op:?}");
+                }
+            }
+            Err(_) => println!("{name}: FAILED to decode"),
         }
         println!();
     }
@@ -97,6 +141,11 @@ fn assert_pcode_contains(pcode: &[PcodeOp], disasm: &str, checks: &[fn(&PcodeOp)
 mod tests {
     use super::*;
 
+    // Alias for x86 in tests
+    fn decode(bytes: &[u8], addr: u64) -> (u64, String, Vec<PcodeOp>) {
+        x86::decode(bytes, addr)
+    }
+
     #[test]
     fn x86_64_golden() {
         let t = std::thread::Builder::new()
@@ -123,7 +172,12 @@ mod tests {
         test_lea();
         test_mov_mem_reg();
         test_mov_reg_imm();
-        eprintln!("all 16 golden tests passed");
+        // ARM64 tests
+        test_arm_mov_reg();
+        test_arm_add_reg();
+        test_arm_ret();
+        test_arm_branch();
+        eprintln!("all 20 golden tests passed");
     }
 
     fn test_mov_reg_reg() {
@@ -291,10 +345,50 @@ mod tests {
         let (len, disasm, pcode) = decode(&[0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00], 0x1000);
         assert_eq!(len, 7);
         assert!(disasm.contains("MOV") && disasm.contains("RAX"), "expected MOV RAX,imm got {disasm}");
-        // Should Copy constant 1 to RAX
         assert_pcode_contains(&pcode, &disasm, &[
             |op| matches!(op, PcodeOp::Copy { out, input }
                 if *out == reg(RAX, 8) && input.space == AddressSpaceId::Const && input.offset == 1),
+        ]);
+    }
+
+    // ── ARM64 tests ──────────────────────────────────────────────────
+
+    fn test_arm_mov_reg() {
+        // MOV X0, X1 = ORR X0, XZR, X1 = 0xaa0103e0
+        let (len, disasm, pcode) = arm::decode(&[0xe0, 0x03, 0x01, 0xaa], 0x1000);
+        assert_eq!(len, 4);
+        assert!(disasm.contains("mov") || disasm.contains("MOV") || disasm.contains("orr") || disasm.contains("ORR"),
+            "expected mov/orr, got {disasm}");
+    }
+
+    fn test_arm_add_reg() {
+        // ADD X0, X1, X2 = 0x8b020020
+        let (len, disasm, pcode) = arm::decode(&[0x20, 0x00, 0x02, 0x8b], 0x1000);
+        assert_eq!(len, 4);
+        assert!(disasm.contains("add") || disasm.contains("ADD"), "expected ADD, got {disasm}");
+        // Should contain an IntAdd
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::IntAdd { .. }),
+        ]);
+    }
+
+    fn test_arm_ret() {
+        // RET = 0xd65f03c0
+        let (len, disasm, pcode) = arm::decode(&[0xc0, 0x03, 0x5f, 0xd6], 0x1000);
+        assert_eq!(len, 4);
+        assert!(disasm.contains("ret") || disasm.contains("RET"), "expected RET, got {disasm}");
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::Return { .. }),
+        ]);
+    }
+
+    fn test_arm_branch() {
+        // B . (branch to self) = 0x14000000
+        let (len, disasm, pcode) = arm::decode(&[0x00, 0x00, 0x00, 0x14], 0x1000);
+        assert_eq!(len, 4);
+        assert!(disasm.contains("b") || disasm.contains("B"), "expected B, got {disasm}");
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::Branch { .. }),
         ]);
     }
 }

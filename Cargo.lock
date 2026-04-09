@@ -3,6 +3,70 @@
 version = 4
 
 [[package]]
+name = "aarch64-instr-00"
+version = "0.1.0"
+dependencies = [
+ "aarch64-shared",
+ "aarch64-subtables",
+ "pcode-ir",
+]
+
+[[package]]
+name = "aarch64-instr-01"
+version = "0.1.0"
+dependencies = [
+ "aarch64-shared",
+ "aarch64-subtables",
+ "pcode-ir",
+]
+
+[[package]]
+name = "aarch64-instr-02"
+version = "0.1.0"
+dependencies = [
+ "aarch64-shared",
+ "aarch64-subtables",
+ "pcode-ir",
+]
+
+[[package]]
+name = "aarch64-instr-03"
+version = "0.1.0"
+dependencies = [
+ "aarch64-shared",
+ "aarch64-subtables",
+ "pcode-ir",
+]
+
+[[package]]
+name = "aarch64-root"
+version = "0.1.0"
+dependencies = [
+ "aarch64-instr-00",
+ "aarch64-instr-01",
+ "aarch64-instr-02",
+ "aarch64-instr-03",
+ "aarch64-shared",
+ "aarch64-subtables",
+ "pcode-ir",
+]
+
+[[package]]
+name = "aarch64-shared"
+version = "0.1.0"
+dependencies = [
+ "pcode-ir",
+]
+
+[[package]]
+name = "aarch64-subtables"
+version = "0.1.0"
+dependencies = [
+ "aarch64-shared",
+ "pcode-ir",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -152,6 +216,7 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 name = "test-harness"
 version = "0.1.0"
 dependencies = [
+ "aarch64-root",
  "pcode-ir",
  "x86-root",
 ]

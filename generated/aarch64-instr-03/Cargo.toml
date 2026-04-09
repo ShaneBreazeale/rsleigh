@@ -1,0 +1,9 @@
+[package]
+name = "aarch64-instr-03"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pcode-ir = { path = "../../pcode-ir" }
+aarch64-shared = { path = "../aarch64-shared" }
+aarch64-subtables = { path = "../aarch64-subtables" }
