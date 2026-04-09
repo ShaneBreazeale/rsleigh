@@ -11,6 +11,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 /// Identifies an address space in the P-code model.
+///
+/// `Ord` is derived for use as `BTreeMap` keys in the peephole optimizer (no_std
+/// precludes `HashMap`). The derived ordering is arbitrary and should not be relied
+/// upon for semantic comparisons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AddressSpaceId {
     /// CPU registers (offset = Ghidra register offset).
@@ -24,6 +28,9 @@ pub enum AddressSpaceId {
 }
 
 /// A triple (space, offset, size) identifying a storage location or constant.
+///
+/// `Ord` is derived for use as `BTreeMap` keys in the peephole optimizer.
+/// The derived lexicographic ordering is not semantically meaningful.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Varnode {
     pub space: AddressSpaceId,
@@ -172,9 +179,25 @@ fn optimize_once(ops: &mut Vec<PcodeOp>) {
         }
     }
 
+    // Pass 1: eliminate identity Subpiece
+    for op in ops.iter_mut() {
+        if let PcodeOp::Subpiece { out, input, lsb: 0 } = op {
+            if out.size == input.size {
+                *op = PcodeOp::Copy {
+                    out: *out,
+                    input: *input,
+                };
+            }
+        }
+    }
+
+    // Compute unique-varnode analysis once. Passes below share and recompute only
+    // after structural mutations (removals). Indices in NextAccess::Read are
+    // invalidated by any removal, so we must recompute after each ops.remove().
+    let mut analysis = analyze_unique_outputs(ops);
+
     // Pass 1a: redundant IntAnd — if IntAnd{out1, x, mask} followed by IntAnd{out2, out1, mask}
     // with same mask and out1 used only once, remove the second
-    let mut unique_analysis = analyze_unique_outputs(ops);
     let mut i = 0;
     while i + 1 < ops.len() {
         let collapse = if let PcodeOp::IntAnd {
@@ -191,11 +214,13 @@ fn optimize_once(ops: &mut Vec<PcodeOp>) {
                 } = &ops[i + 1]
                 {
                     if *in2 == *out1 && *mask2 == *mask1 {
-                        let total_reads = unique_analysis
-                            .get(i)
-                            .and_then(|entry| entry.as_ref())
-                            .map(|entry| entry.future_reads)
-                            .unwrap_or(0);
+                        // out1 is Unique (checked above), so analysis[i] is always Some.
+                        // Use pattern match to be explicit rather than unwrap_or which
+                        // would silently treat non-Unique outputs as zero reads.
+                        let total_reads = match analysis.get(i) {
+                            Some(Some(info)) => info.future_reads,
+                            _ => usize::MAX, // conservative: don't collapse if unknown
+                        };
                         if total_reads == 1 {
                             Some(*out2)
                         } else {
@@ -215,104 +240,75 @@ fn optimize_once(ops: &mut Vec<PcodeOp>) {
         };
 
         if let Some(new_out) = collapse {
-            // Rewrite first IntAnd to output directly to second's dest
             if let PcodeOp::IntAnd { out, .. } = &mut ops[i] {
                 *out = new_out;
             }
             ops.remove(i + 1);
-            unique_analysis = analyze_unique_outputs(ops);
+            analysis = analyze_unique_outputs(ops);
             continue;
         }
         i += 1;
     }
 
-    // Pass 1: eliminate identity Subpiece
-    for op in ops.iter_mut() {
-        if let PcodeOp::Subpiece { out, input, lsb: 0 } = op {
-            if out.size == input.size {
-                *op = PcodeOp::Copy {
-                    out: *out,
-                    input: *input,
-                };
-            }
-        }
-    }
-
-    // Pass 2: forward-substitute single-use Copy chains
+    // Pass 2: forward-substitute single-use Copy chains.
     // If ops[i] is Copy { out: A, input: B } and A is Unique,
     // and exactly one later op reads A, replace that read with B.
-    unique_analysis = analyze_unique_outputs(ops);
+    // Analysis is still valid from pass 1a (no in-place mutations between).
     let mut i = 0;
     while i < ops.len() {
         if let PcodeOp::Copy { out, input } = &ops[i] {
             if out.space == AddressSpaceId::Unique {
                 let target = *out;
                 let replacement = *input;
-                let entry = unique_analysis.get(i).and_then(|entry| entry.as_ref());
+                let entry = analysis.get(i).and_then(|entry| entry.as_ref());
                 if let Some(UniqueOutputInfo {
                     future_reads: 1,
                     next_access: Some(NextAccess::Read(read_idx)),
                 }) = entry
                 {
-                    // Replace the read and remove this Copy
                     replace_reads(&mut ops[*read_idx], &target, &replacement);
                     ops.remove(i);
-                    unique_analysis = analyze_unique_outputs(ops);
-                    continue; // don't increment i
+                    analysis = analyze_unique_outputs(ops);
+                    continue;
                 }
             }
         }
         i += 1;
     }
 
-    // Pass 2b: remove writes to Unique varnodes that are overwritten before any read.
-    unique_analysis = analyze_unique_outputs(ops);
-    let mut i = 0;
-    while i < ops.len() {
-        if matches!(
-            unique_analysis.get(i).and_then(|entry| entry.as_ref()),
-            Some(UniqueOutputInfo {
-                next_access: Some(NextAccess::Write),
-                ..
-            })
-        ) {
-            ops.remove(i);
-            unique_analysis = analyze_unique_outputs(ops);
-            continue;
+    // Pass 2b + 3: overwrite elimination and dead code elimination.
+    // Remove ops that write to Unique varnodes that are either overwritten before
+    // any read (2b) or never read at all (3). These removals are independent —
+    // removing a dead/overwritten op cannot make another op live — so we collect
+    // all indices in one scan and batch-remove in reverse order.
+    // Analysis is still valid from pass 2 (no in-place mutations between).
+    {
+        let mut to_remove = Vec::new();
+        for (i, entry) in analysis.iter().enumerate() {
+            if let Some(info) = entry {
+                if info.future_reads == 0
+                    || matches!(info.next_access, Some(NextAccess::Write))
+                {
+                    to_remove.push(i);
+                }
+            }
         }
-
-        i += 1;
+        for &idx in to_remove.iter().rev() {
+            ops.remove(idx);
+        }
     }
 
-    // Pass 3: dead code elimination
-    // Remove ops that write to a Unique varnode that is never read afterwards.
-    unique_analysis = analyze_unique_outputs(ops);
-    let mut i = 0;
-    while i < ops.len() {
-        if matches!(
-            unique_analysis.get(i).and_then(|entry| entry.as_ref()),
-            Some(UniqueOutputInfo {
-                future_reads: 0,
-                ..
-            })
-        ) {
-            ops.remove(i);
-            unique_analysis = analyze_unique_outputs(ops);
-            continue;
-        }
-        i += 1;
-    }
-
-    // Pass 4: sink unique outputs into subsequent Copy destinations
+    // Pass 4: sink unique outputs into subsequent Copy destinations.
     // If ops[i] writes to Unique(X) and some later ops[j] is Copy { out: dest, input: Unique(X) },
     // and Unique(X) is read exactly once (by that Copy), and dest is not written or read between
     // i and j, rewrite ops[i] to output directly to dest and remove the Copy.
-    unique_analysis = analyze_unique_outputs(ops);
+    // Must recompute — batch removal above invalidated indices.
+    analysis = analyze_unique_outputs(ops);
     let mut i = 0;
     while i < ops.len() {
         let should_sink = match (
             get_output(&ops[i]),
-            unique_analysis.get(i).and_then(|entry| entry.as_ref()),
+            analysis.get(i).and_then(|entry| entry.as_ref()),
         ) {
             (
                 Some(out),
@@ -350,7 +346,7 @@ fn optimize_once(ops: &mut Vec<PcodeOp>) {
                 *out = new_dest;
             }
             ops.remove(copy_idx);
-            unique_analysis = analyze_unique_outputs(ops);
+            analysis = analyze_unique_outputs(ops);
             continue;
         }
         i += 1;
