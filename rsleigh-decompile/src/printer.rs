@@ -7,11 +7,17 @@ const RSP_OFFSET: u64 = 32;
 const RIP_OFFSET: u64 = 648;
 
 /// Print structured statements as C-like pseudocode.
-pub fn print_c(stmts: &[StructuredStmt], ssa: &SsaCfg, arch: Architecture) -> String {
+pub fn print_c(stmts: &[StructuredStmt], ssa: &SsaCfg, arch: Architecture, binary: Option<&[u8]>) -> String {
     let mut out = String::new();
+    let ctx = PrintCtx { arch, binary };
     let filtered = filter_boilerplate(stmts, ssa);
-    print_stmts(&filtered, ssa, arch, 0, &mut out);
+    print_stmts(&filtered, ssa, &ctx, 0, &mut out);
     out
+}
+
+struct PrintCtx<'a> {
+    arch: Architecture,
+    binary: Option<&'a [u8]>,
 }
 
 /// Remove prologue/epilogue boilerplate from the top level.
@@ -109,13 +115,13 @@ fn is_body_empty(stmts: &[StructuredStmt], ssa: &SsaCfg) -> bool {
     true
 }
 
-fn print_stmts(stmts: &[StructuredStmt], ssa: &SsaCfg, arch: Architecture, indent: usize, out: &mut String) {
+fn print_stmts(stmts: &[StructuredStmt], ssa: &SsaCfg, ctx: &PrintCtx, indent: usize, out: &mut String) {
     for stmt in stmts {
-        print_stmt(stmt, ssa, arch, indent, out);
+        print_stmt(stmt, ssa, ctx, indent, out);
     }
 }
 
-fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, arch: Architecture, indent: usize, out: &mut String) {
+fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, indent: usize, out: &mut String) {
     let pad: String = "    ".repeat(indent);
 
     match stmt {
@@ -130,13 +136,13 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, arch: Architecture, indent: u
             // (they're shown inline in the call's argument list)
             if is_arg_consumed_by_call(*lhs, ssa) { return; }
 
-            let name = var_name(&vdef.varnode, arch);
-            let rhs = format_expr(&vdef.expr, ssa, arch);
+            let name = var_name(&vdef.varnode, ctx);
+            let rhs = format_expr(&vdef.expr, ssa, ctx);
             out.push_str(&format!("{}{} = {};\n", pad, name, rhs));
         }
         StructuredStmt::Store { addr, val } => {
-            let addr_str = format_addr(*addr, ssa, arch);
-            let val_expr = format_var(*val, ssa, arch);
+            let addr_str = format_addr(*addr, ssa, ctx);
+            let val_expr = format_var(*val, ssa, ctx);
             let size = ssa.var(*val).size;
             let type_name = size_to_type(size);
 
@@ -148,17 +154,17 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, arch: Architecture, indent: u
             }
         }
         StructuredStmt::Call { target, args, out: call_out } => {
-            let target_name = format_call_target(target, ssa, arch);
+            let target_name = format_call_target(target, ssa, ctx);
             // Show argument VALUES (the expression assigned to the arg register)
             let args_str: Vec<String> = args.iter()
                 .map(|a| {
                     let vdef = ssa.var(*a);
                     // Show the RHS of the arg register assignment, not "RDI"
-                    format_expr(&vdef.expr, ssa, arch)
+                    format_expr(&vdef.expr, ssa, ctx)
                 })
                 .collect();
             if let Some(out_var) = call_out {
-                let name = var_name(&ssa.var(*out_var).varnode, arch);
+                let name = var_name(&ssa.var(*out_var).varnode, ctx);
                 out.push_str(&format!("{}{} = {}({});\n", pad, name, target_name, args_str.join(", ")));
             } else {
                 out.push_str(&format!("{}{}({});\n", pad, target_name, args_str.join(", ")));
@@ -168,14 +174,14 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, arch: Architecture, indent: u
             if let Some(v) = val {
                 let vdef = ssa.var(*v);
                 // Show the expression, not just "RAX"
-                let expr = format_expr(&vdef.expr, ssa, arch);
+                let expr = format_expr(&vdef.expr, ssa, ctx);
                 out.push_str(&format!("{}return {};\n", pad, expr));
             } else {
                 out.push_str(&format!("{}return;\n", pad));
             }
         }
         StructuredStmt::IfElse { cond, then_body, else_body } => {
-            let cond_expr = format_condition(*cond, ssa, arch);
+            let cond_expr = format_condition(*cond, ssa, ctx);
             let then_filtered = filter_boilerplate(then_body, ssa);
             let else_filtered = filter_boilerplate(else_body, ssa);
             let then_empty = is_body_empty(&then_filtered, ssa);
@@ -184,23 +190,23 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, arch: Architecture, indent: u
             if then_empty && else_empty { return; }
             if then_empty && !else_empty {
                 out.push_str(&format!("{}if (!{}) {{\n", pad, cond_expr));
-                print_stmts(&else_filtered, ssa, arch, indent + 1, out);
+                print_stmts(&else_filtered, ssa, ctx, indent + 1, out);
                 out.push_str(&format!("{}}}\n", pad));
             } else {
                 out.push_str(&format!("{}if ({}) {{\n", pad, cond_expr));
-                print_stmts(&then_filtered, ssa, arch, indent + 1, out);
+                print_stmts(&then_filtered, ssa, ctx, indent + 1, out);
                 if !else_empty {
                     out.push_str(&format!("{}}} else {{\n", pad));
-                    print_stmts(&else_filtered, ssa, arch, indent + 1, out);
+                    print_stmts(&else_filtered, ssa, ctx, indent + 1, out);
                 }
                 out.push_str(&format!("{}}}\n", pad));
             }
         }
         StructuredStmt::While { cond, body } => {
-            let cond_expr = format_condition(*cond, ssa, arch);
+            let cond_expr = format_condition(*cond, ssa, ctx);
             let body_filtered = filter_boilerplate(body, ssa);
             out.push_str(&format!("{}while ({}) {{\n", pad, cond_expr));
-            print_stmts(&body_filtered, ssa, arch, indent + 1, out);
+            print_stmts(&body_filtered, ssa, ctx, indent + 1, out);
             out.push_str(&format!("{}}}\n", pad));
         }
         StructuredStmt::Goto(addr) => {
@@ -215,14 +221,14 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, arch: Architecture, indent: u
 // ---- Condition formatting ----
 
 /// Format a condition, trying to show the comparison rather than a flag name.
-fn format_condition(id: VarId, ssa: &SsaCfg, arch: Architecture) -> String {
+fn format_condition(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
     let vdef = ssa.var(id);
 
     // If this is a comparison expression, format it directly
     if let Expr::BinOp(kind, left, right) = &vdef.expr {
         if is_comparison(*kind) {
-            let l = format_var(*left, ssa, arch);
-            let r = format_var(*right, ssa, arch);
+            let l = format_var(*left, ssa, ctx);
+            let r = format_var(*right, ssa, ctx);
             return format!("{} {} {}", l, binop_str(*kind), r);
         }
     }
@@ -237,7 +243,7 @@ fn format_condition(id: VarId, ssa: &SsaCfg, arch: Architecture) -> String {
         }
     }
 
-    format_var(id, ssa, arch)
+    format_var(id, ssa, ctx)
 }
 
 fn is_comparison(kind: BinOpKind) -> bool {
@@ -284,7 +290,7 @@ fn get_const_val(id: VarId, ssa: &SsaCfg) -> Option<u64> {
 
 // ---- Address formatting ----
 
-fn format_addr(id: VarId, ssa: &SsaCfg, arch: Architecture) -> String {
+fn format_addr(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
     // Try stack variable first
     if let Some(offset) = get_rbp_offset(id, ssa) {
         return format!("RBP - 0x{:x}", offset);
@@ -300,7 +306,7 @@ fn format_addr(id: VarId, ssa: &SsaCfg, arch: Architecture) -> String {
         }
     }
 
-    format_var(id, ssa, arch)
+    format_var(id, ssa, ctx)
 }
 
 fn format_rbp_offset(val: u64) -> String {
@@ -314,43 +320,43 @@ fn format_rbp_offset(val: u64) -> String {
 
 // ---- Call target formatting ----
 
-fn format_call_target(target: &CallTarget, _ssa: &SsaCfg, arch: Architecture) -> String {
+fn format_call_target(target: &CallTarget, _ssa: &SsaCfg, ctx: &PrintCtx) -> String {
     match target {
         CallTarget::Direct(addr) => format!("func_{:x}", addr),
         CallTarget::Indirect(vn) => {
             // Try to resolve: if the target is a Load from a constant address,
             // show it as a function pointer dereference
             // The varnode here is from the original CFG, not an SSA var
-            format!("(*{})", var_name(vn, arch))
+            format!("(*{})", var_name(vn, ctx))
         }
     }
 }
 
 // ---- Variable formatting ----
 
-fn format_var(id: VarId, ssa: &SsaCfg, arch: Architecture) -> String {
+fn format_var(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
     let vdef = ssa.var(id);
 
     // Inline Unique-space temporaries
     if vdef.varnode.space == AddressSpaceId::Unique {
-        return format_expr(&vdef.expr, ssa, arch);
+        return format_expr(&vdef.expr, ssa, ctx);
     }
 
     // Inline constants
     if let Expr::Const(val, sz) = &vdef.expr {
-        return format_const(*val, *sz);
+        return format_const_ctx(*val, *sz, ctx);
     }
 
-    var_name(&vdef.varnode, arch)
+    var_name(&vdef.varnode, ctx)
 }
 
-fn format_expr(expr: &Expr, ssa: &SsaCfg, arch: Architecture) -> String {
+fn format_expr(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
     match expr {
-        Expr::Var(id) => format_var(*id, ssa, arch),
-        Expr::Const(val, sz) => format_const(*val, *sz),
+        Expr::Var(id) => format_var(*id, ssa, ctx),
+        Expr::Const(val, sz) => format_const_ctx(*val, *sz, ctx),
         Expr::BinOp(kind, left, right) => {
-            let l = format_var(*left, ssa, arch);
-            let r = format_var(*right, ssa, arch);
+            let l = format_var(*left, ssa, ctx);
+            let r = format_var(*right, ssa, ctx);
             let op = binop_str(*kind);
             // Detect negative constant on right side of add
             if matches!(kind, BinOpKind::Add) {
@@ -365,7 +371,7 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, arch: Architecture) -> String {
             format!("{} {} {}", l, op, r)
         }
         Expr::UnaryOp(kind, input) => {
-            let i = format_var(*input, ssa, arch);
+            let i = format_var(*input, ssa, ctx);
             match kind {
                 UnaryOpKind::Neg => format!("-{}", i),
                 UnaryOpKind::Not => format!("~{}", i),
@@ -380,22 +386,33 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, arch: Architecture) -> String {
             if let Some(offset) = get_rbp_offset(*ptr, ssa) {
                 return format!("var_{:x}", offset);
             }
-            let p = format_addr(*ptr, ssa, arch);
+            let p = format_addr(*ptr, ssa, ctx);
             format!("*({})", p)
         }
         Expr::Phi(inputs) => {
-            if inputs.len() == 1 { return format_var(inputs[0], ssa, arch); }
-            let args: Vec<String> = inputs.iter().map(|i| format_var(*i, ssa, arch)).collect();
+            if inputs.len() == 1 { return format_var(inputs[0], ssa, ctx); }
+            let args: Vec<String> = inputs.iter().map(|i| format_var(*i, ssa, ctx)).collect();
             format!("phi({})", args.join(", "))
         }
         Expr::Unknown => "?".to_string(),
     }
 }
 
+fn format_const_ctx(val: u64, size: u32, ctx: &PrintCtx) -> String {
+    if val == 0 { return "0".to_string(); }
+    if val < 10 { return format!("{}", val); }
+    // Try string literal
+    if size >= 4 && val > 0x1000 {
+        if let Some(s) = try_read_string(val, ctx) {
+            return format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"));
+        }
+    }
+    format_const(val, size)
+}
+
 fn format_const(val: u64, size: u32) -> String {
     if val == 0 { return "0".to_string(); }
     if val < 10 { return format!("{}", val); }
-    // Detect negative values
     let sign_bit = match size {
         1 => 0x80, 2 => 0x8000, 4 => 0x80000000, 8 => 0x8000000000000000, _ => 0,
     };
@@ -407,10 +424,50 @@ fn format_const(val: u64, size: u32) -> String {
     format!("0x{:x}", val)
 }
 
-fn var_name(vn: &Varnode, arch: Architecture) -> String {
+fn try_read_string(va: u64, ctx: &PrintCtx) -> Option<String> {
+    let binary = ctx.binary?;
+    let obj = goblin::Object::parse(binary).ok()?;
+    let file_offset = match &obj {
+        goblin::Object::Mach(goblin::mach::Mach::Binary(macho)) => {
+            macho.segments.iter().find_map(|seg| {
+                if va >= seg.vmaddr && va < seg.vmaddr + seg.vmsize {
+                    Some((seg.fileoff + (va - seg.vmaddr)) as usize)
+                } else { None }
+            })?
+        }
+        goblin::Object::Elf(elf) => {
+            elf.section_headers.iter().find_map(|sh| {
+                if sh.sh_addr != 0 && va >= sh.sh_addr && va < sh.sh_addr + sh.sh_size {
+                    Some((sh.sh_offset + (va - sh.sh_addr)) as usize)
+                } else { None }
+            })?
+        }
+        goblin::Object::PE(pe) => {
+            let rva = va.checked_sub(pe.image_base as u64)? as u64;
+            pe.sections.iter().find_map(|s| {
+                let sr = s.virtual_address as u64;
+                if rva >= sr && rva < sr + s.virtual_size as u64 {
+                    Some((s.pointer_to_raw_data as u64 + (rva - sr)) as usize)
+                } else { None }
+            })?
+        }
+        _ => return None,
+    };
+    if file_offset >= binary.len() { return None; }
+    let max = 80.min(binary.len() - file_offset);
+    let slice = &binary[file_offset..file_offset + max];
+    let null_pos = slice.iter().position(|&b| b == 0)?;
+    if null_pos < 2 { return None; }
+    let s = std::str::from_utf8(&slice[..null_pos]).ok()?;
+    if s.chars().all(|c| c.is_ascii_graphic() || c == ' ' || c == '\n' || c == '\t') {
+        Some(s.to_string())
+    } else { None }
+}
+
+fn var_name(vn: &Varnode, ctx: &PrintCtx) -> String {
     match vn.space {
         AddressSpaceId::Register => {
-            arch.register_name(vn.offset, vn.size).unwrap_or("?reg").to_string()
+            ctx.arch.register_name(vn.offset, vn.size).unwrap_or("?reg").to_string()
         }
         AddressSpaceId::Unique => format!("tmp_{:x}", vn.offset),
         AddressSpaceId::Ram => format!("mem_{:x}", vn.offset),

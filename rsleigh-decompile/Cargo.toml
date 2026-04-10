@@ -7,3 +7,4 @@ description = "P-code decompiler — turns rsleigh P-code IR into C-like pseudoc
 [dependencies]
 pcode-ir = { path = "../pcode-ir" }
 rsleigh-api = { path = "../rsleigh-api" }
+goblin = "0.9"
