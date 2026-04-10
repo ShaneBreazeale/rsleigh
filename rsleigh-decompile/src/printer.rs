@@ -134,30 +134,53 @@ fn print_stmts(stmts: &[StructuredStmt], ssa: &SsaCfg, ctx: &PrintCtx, indent: u
 struct RegTracker {
     /// Map: (register offset, size) → VarId of the source value
     reg_source: std::collections::HashMap<(u64, u32), VarId>,
+    /// Map: (register offset, size) → formatted expression string (for call returns)
+    reg_expr_str: std::collections::HashMap<(u64, u32), String>,
 }
 
 impl RegTracker {
-    fn new() -> Self { Self { reg_source: std::collections::HashMap::new() } }
-
-    /// Record that a register now holds the value from `source`.
-    fn set(&mut self, offset: u64, size: u32, source: VarId) {
-        self.reg_source.insert((offset, size), source);
+    fn new() -> Self {
+        Self {
+            reg_source: std::collections::HashMap::new(),
+            reg_expr_str: std::collections::HashMap::new(),
+        }
     }
 
-    /// Look up what a register currently holds. Returns the original source VarId
-    /// if the register was assigned from a simple copy.
+    fn set(&mut self, offset: u64, size: u32, source: VarId) {
+        self.reg_source.insert((offset, size), source);
+        self.reg_expr_str.remove(&(offset, size));
+    }
+
+    /// Record that a register holds a call return value with the given expression string.
+    fn set_call_return(&mut self, offset: u64, size: u32, expr_str: String) {
+        self.reg_expr_str.insert((offset, size), expr_str);
+        self.reg_source.remove(&(offset, size));
+    }
+
     fn get(&self, offset: u64, size: u32) -> Option<VarId> {
         self.reg_source.get(&(offset, size)).copied()
     }
 
-    /// Invalidate a register (it was overwritten by a computation, not a copy).
-    fn invalidate(&mut self, offset: u64, size: u32) {
-        self.reg_source.remove(&(offset, size));
+    /// Get the formatted expression string for a register (call return value).
+    fn get_expr_str(&self, offset: u64, size: u32) -> Option<&str> {
+        self.reg_expr_str.get(&(offset, size)).map(|s| s.as_str())
     }
 
-    /// Invalidate all registers (after a call).
+    fn invalidate(&mut self, offset: u64, size: u32) {
+        self.reg_source.remove(&(offset, size));
+        self.reg_expr_str.remove(&(offset, size));
+    }
+
     fn invalidate_all(&mut self) {
         self.reg_source.clear();
+        // Keep call return expressions — they survive across the call boundary
+        // because the call itself produces them
+    }
+
+    /// Invalidate all, including call return expressions.
+    fn invalidate_everything(&mut self) {
+        self.reg_source.clear();
+        self.reg_expr_str.clear();
     }
 
     /// Resolve a VarId through the tracker: if the var is a register that
@@ -192,10 +215,14 @@ fn print_stmt_tracked(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, inden
                 if let Expr::Var(src_id) = &vdef.expr {
                     let src = ssa.var(*src_id);
                     if src.varnode.space == AddressSpaceId::Register {
+                        // Check if source register has an inlined call return expression
+                        if let Some(expr_str) = tracker.get_expr_str(src.varnode.offset, src.varnode.size) {
+                            let s = expr_str.to_string();
+                            tracker.set_call_return(vdef.varnode.offset, vdef.varnode.size, s);
+                            return; // Elided: call return propagated through register copy
+                        }
                         let resolved = tracker.resolve(*src_id, ssa);
                         tracker.set(vdef.varnode.offset, vdef.varnode.size, resolved);
-                        // Skip reg-to-reg copies that just shuffle values around
-                        // Only skip if the source is a non-register (stack/param) value
                         let resolved_var = ssa.var(resolved);
                         if resolved_var.varnode.space != AddressSpaceId::Register
                             || resolved_var.param_name.is_some()
@@ -207,10 +234,12 @@ fn print_stmt_tracked(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, inden
                     }
                 } else if let Expr::Load(ptr) = &vdef.expr {
                     // REG = Load(addr): track so later uses resolve to the stack var
+                    let had_call_return = tracker.get_expr_str(vdef.varnode.offset, vdef.varnode.size).is_some();
                     tracker.set(vdef.varnode.offset, vdef.varnode.size, *lhs);
                     // Skip printing if this register is just used as an intermediate
-                    // to pass a stack value to another assignment or call
-                    if vdef.use_count <= 1 && get_rbp_offset(*ptr, ssa).is_some() {
+                    // to pass a stack value to another assignment or call.
+                    // But DON'T skip if this overwrites a call return — the restore is important.
+                    if vdef.use_count <= 1 && get_rbp_offset(*ptr, ssa).is_some() && !had_call_return {
                         return; // Elided: value available via tracker as var_N
                     }
                 } else {
@@ -244,14 +273,23 @@ fn print_stmt_tracked(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, inden
                     format_expr_tracked(&vdef.expr, ssa, ctx, tracker)
                 })
                 .collect();
-            if let Some(out_var) = call_out {
-                let name = var_name(&ssa.var(*out_var).varnode, ctx);
-                out.push_str(&format!("{}{} = {}({});\n", pad, name, target_name, args_str.join(", ")));
-            } else {
-                out.push_str(&format!("{}{}({});\n", pad, target_name, args_str.join(", ")));
-            }
+            let call_expr = format!("{}({})", target_name, args_str.join(", "));
+
             // Calls clobber all registers
             tracker.invalidate_all();
+
+            if let Some(out_var) = call_out {
+                let name = var_name(&ssa.var(*out_var).varnode, ctx);
+                out.push_str(&format!("{}{} = {};\n", pad, name, call_expr));
+            } else {
+                // Track RAX/EAX as holding the call return expression.
+                // If the return value is used, it will be inlined at the use site.
+                // The call itself is still printed as a statement (for side effects).
+                out.push_str(&format!("{}{};\n", pad, call_expr));
+                // Set call return expression for potential inlining
+                tracker.set_call_return(0, 8, call_expr.clone()); // RAX
+                tracker.set_call_return(0, 4, call_expr);         // EAX
+            }
         }
         StructuredStmt::Return(val) => {
             if let Some(v) = val {
@@ -304,22 +342,26 @@ fn print_stmt_tracked(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, inden
 /// Format a VarId with register tracking — resolves register copies to their source.
 fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> String {
     let vdef = ssa.var(id);
-    // Only resolve through tracker if the register is actually tracked
+    // Inline Unique-space through the tracked formatter (not the plain one)
+    if vdef.varnode.space == AddressSpaceId::Unique {
+        return format_expr_tracked(&vdef.expr, ssa, ctx, tracker);
+    }
     if vdef.varnode.space == AddressSpaceId::Register {
+        // Check for inlined expression string (call return value)
+        if let Some(expr_str) = tracker.get_expr_str(vdef.varnode.offset, vdef.varnode.size) {
+            return expr_str.to_string();
+        }
+        // Check for tracked VarId source
         if let Some(tracked_id) = tracker.get(vdef.varnode.offset, vdef.varnode.size) {
-            // Register is tracked — resolve to the tracked source
             let tracked_vdef = ssa.var(tracked_id);
-            // If tracked to a Load (stack var), show the stack var name
             if let Expr::Load(ptr) = &tracked_vdef.expr {
                 if let Some(offset) = get_rbp_offset(*ptr, ssa) {
                     return format!("var_{:x}", offset);
                 }
             }
-            // If tracked to a non-register source, use it
             if tracked_vdef.varnode.space != AddressSpaceId::Register {
                 return format_var(tracked_id, ssa, ctx);
             }
-            // If tracked to another register, use the tracked value
             if tracked_id != id {
                 return format_var(tracked_id, ssa, ctx);
             }
@@ -345,6 +387,23 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
                 }
             }
             format!("{} {} {}", l, op, r)
+        }
+        Expr::UnaryOp(kind, input) => {
+            let i = format_var_tracked(*input, ssa, ctx, tracker);
+            match kind {
+                UnaryOpKind::Neg => format!("-{}", i),
+                UnaryOpKind::Not => format!("~{}", i),
+                UnaryOpKind::BoolNot => format!("!{}", i),
+                UnaryOpKind::Zext => format!("(uint64_t){}", i),
+                UnaryOpKind::Sext => format!("(int64_t){}", i),
+                _ => format!("{}({})", unaryop_str(*kind), i),
+            }
+        }
+        Expr::Load(ptr) => {
+            if let Some(offset) = get_rbp_offset(*ptr, ssa) {
+                return format!("var_{:x}", offset);
+            }
+            format_expr(expr, ssa, ctx)
         }
         _ => format_expr(expr, ssa, ctx),
     }
