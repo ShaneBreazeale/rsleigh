@@ -10,7 +10,8 @@ fn main() {
 }
 
 fn run() {
-    let binary_path = "/tmp/compare_test";
+    let binary_path = std::env::args().nth(1).unwrap_or_else(|| "/tmp/compare_test".to_string());
+    let binary_path = binary_path.as_str();
     let data = match std::fs::read(binary_path) {
         Ok(d) => d,
         Err(e) => {
@@ -99,22 +100,20 @@ fn run() {
         )
     };
 
-    let target_funcs = [
-        "add",
-        "sub",
-        "factorial",
-        "sum_array",
-        "string_length",
-        "manhattan_distance",
-        "day_name",
-        "list_sum",
-        "binary_search",
-        "apply",
-        "main",
-    ];
+    // If specific functions are named on the command line, use those.
+    // Otherwise decompile all non-underscore symbols.
+    let cli_funcs: Vec<String> = std::env::args().skip(2).collect();
+    let target_funcs: Vec<String> = if cli_funcs.is_empty() {
+        symbols.iter()
+            .filter(|(_, n)| !n.starts_with('_') && !n.starts_with("dyld") && !n.is_empty())
+            .map(|(_, n)| n.clone())
+            .collect()
+    } else {
+        cli_funcs
+    };
 
     for name in &target_funcs {
-        if let Some((addr, _)) = symbols.iter().find(|(_, n)| n == name) {
+        if let Some((addr, _)) = symbols.iter().find(|(_, n)| n == name.as_str()) {
             let output = decompile_func(*addr, &mut dec);
             println!("=== {} ({} instructions) ===", name,
                 /* count instructions in the function */
