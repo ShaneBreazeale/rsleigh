@@ -1,0 +1,9 @@
+[package]
+name = "rsleigh-decompile"
+version = "0.1.0"
+edition = "2021"
+description = "P-code decompiler — turns rsleigh P-code IR into C-like pseudocode"
+
+[dependencies]
+pcode-ir = { path = "../pcode-ir" }
+rsleigh-api = { path = "../rsleigh-api" }

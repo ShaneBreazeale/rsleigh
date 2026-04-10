@@ -418,7 +418,7 @@ fn analyze_unique_outputs(ops: &[PcodeOp]) -> Vec<Option<UniqueOutputInfo>> {
     result
 }
 
-fn get_output(op: &PcodeOp) -> Option<Varnode> {
+pub fn get_output(op: &PcodeOp) -> Option<Varnode> {
     match op {
         PcodeOp::Copy { out, .. }
         | PcodeOp::Load { out, .. }
@@ -536,7 +536,7 @@ fn get_output_mut(op: &mut PcodeOp) -> Option<&mut Varnode> {
     }
 }
 
-fn writes_to(op: &PcodeOp, target: &Varnode) -> bool {
+pub fn writes_to(op: &PcodeOp, target: &Varnode) -> bool {
     match op {
         PcodeOp::Copy { out, .. }
         | PcodeOp::Load { out, .. }
@@ -596,7 +596,7 @@ fn writes_to(op: &PcodeOp, target: &Varnode) -> bool {
     }
 }
 
-fn count_reads(op: &PcodeOp, target: &Varnode) -> usize {
+pub fn count_reads(op: &PcodeOp, target: &Varnode) -> usize {
     let mut n = 0;
     visit_reads(op, &mut |v| {
         if v == target {
@@ -617,7 +617,7 @@ fn replace_reads(op: &mut PcodeOp, target: &Varnode, replacement: &Varnode) -> b
     found
 }
 
-fn visit_reads(op: &PcodeOp, f: &mut impl FnMut(&Varnode)) {
+pub fn visit_reads(op: &PcodeOp, f: &mut impl FnMut(&Varnode)) {
     match op {
         PcodeOp::Copy { input, .. } => f(input),
         PcodeOp::Load { ptr, .. } => f(ptr),
