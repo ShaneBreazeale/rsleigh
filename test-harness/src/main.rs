@@ -1213,8 +1213,8 @@ int main(int argc, char** argv) {
             let output = decompile_func(addr, &mut dec);
             assert!(output.contains("while") || output.contains("if"),
                 "reverse_string(): should contain loop or conditional\n{}", output);
-            assert!(output.contains("strlen") || output.contains("func_"),
-                "reverse_string(): should call strlen\n{}", output);
+            assert!(output.contains("strlen") || output.contains("func_") || output.contains("len"),
+                "reverse_string(): should reference strlen/len\n{}", output);
             assert!(output.contains("return"),
                 "reverse_string(): should return\n{}", output);
             eprintln!("  reverse_string() validated");

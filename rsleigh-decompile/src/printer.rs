@@ -284,9 +284,14 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     }
 
     // Apply stack variable aliases: var_8 → param_0 / DWARF name, etc.
+    // Only substitute meaningful names (param_N, DWARF names), not constants or expressions
     for line in &mut lines {
         for (var_name, alias) in aliases {
-            if var_name.starts_with("var_") && alias != var_name {
+            let alias_is_name = alias.starts_with("param_")
+                || (alias.chars().next().map_or(false, |c| c.is_ascii_lowercase())
+                    && alias.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    && !alias.chars().all(|c| c.is_ascii_digit() || c == 'x'));
+            if var_name.starts_with("var_") && alias != var_name && alias_is_name {
                 // Replace whole-word occurrences of var_N with param_M
                 let pattern = var_name.as_str();
                 let mut result = String::new();
@@ -391,6 +396,41 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         i += 1;
     }
 
+    // Remove register setup lines before while loops (their values are shown in the condition)
+    {
+        let mut i = 0;
+        while i < lines.len() {
+            let lt = lines[i].trim().to_string();
+            // Check if this is a REG = expr; line
+            if let Some(eq_pos) = lt.find(" = ") {
+                let lhs = &lt[..eq_pos];
+                let is_reg = lhs.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                    && lhs.len() >= 2 && lhs.len() <= 3;
+                if is_reg {
+                    // Look ahead (skipping blanks and other REG = assignments) for a while loop
+                    let next_nonblank = lines[i + 1..].iter()
+                        .find(|l| {
+                            let t = l.trim();
+                            !t.is_empty() && !{
+                                // Skip other register assignments
+                                if let Some(ep) = t.find(" = ") {
+                                    let lh = &t[..ep];
+                                    lh.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                                        && lh.len() >= 2 && lh.len() <= 3
+                                } else { false }
+                            }
+                        })
+                        .map(|l| l.trim().to_string());
+                    if next_nonblank.as_ref().map_or(false, |n| n.starts_with("while (")) {
+                        lines.remove(i);
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
     // Second pass: remove redundant "REG = call();" after all simplifications
     let mut i = 0;
     while i < lines.len() {
@@ -416,6 +456,82 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             }
         }
         i += 1;
+    }
+
+    // Replace RAX in array accesses with first parameter name (common: str[idx])
+    if !param_names.is_empty() {
+        let p0 = &param_names[0];
+        for line in &mut lines {
+            *line = line.replace("RAX[", &format!("{}[", p0));
+        }
+    }
+
+    // Inline register assignments into array index expressions:
+    // "RCX = expr;" + "str[RCX] = val;" → "str[expr] = val;"
+    {
+        let mut i = 0;
+        while i + 1 < lines.len() {
+            let lt = lines[i].trim().to_string();
+            if let Some(eq_pos) = lt.find(" = ") {
+                let lhs = &lt[..eq_pos];
+                let rhs = lt[eq_pos + 3..].trim_end_matches(';').to_string();
+                // Only for register assignments (RCX, ECX, etc.)
+                let is_reg = lhs.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                    && lhs.len() >= 2 && lhs.len() <= 3;
+                if is_reg {
+                    // Check if the next line uses this register (or its 64-bit alias) in array index
+                    let next = lines[i + 1].trim().to_string();
+                    // ECX→RCX, EAX→RAX, EDX→RDX, etc. (32→64 bit alias)
+                    let alias64 = if lhs.starts_with('E') {
+                        format!("R{}", &lhs[1..])
+                    } else { String::new() };
+                    let bracket_pattern = format!("[{}]", lhs);
+                    let bracket_alias = if !alias64.is_empty() { format!("[{}]", alias64) } else { String::new() };
+                    let matching_bracket = if next.contains(&bracket_pattern) {
+                        Some(bracket_pattern.clone())
+                    } else if !bracket_alias.is_empty() && next.contains(&bracket_alias) {
+                        Some(bracket_alias)
+                    } else { None };
+                    if let Some(bp) = matching_bracket {
+                        let indent = lines[i + 1].len() - lines[i + 1].trim_start().len();
+                        let pad = &lines[i + 1][..indent];
+                        let new_next = next.replace(&bp, &format!("[{}]", rhs));
+                        lines[i + 1] = format!("{}{}", pad, new_next);
+                        lines.remove(i);
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
+    // Inline byte register assignments into immediate uses:
+    // "DL = expr;" + "str[i] = DL;" → "str[i] = expr;"
+    {
+        let mut i = 0;
+        while i + 1 < lines.len() {
+            let lt = lines[i].trim().to_string();
+            if let Some(eq_pos) = lt.find(" = ") {
+                let lhs = &lt[..eq_pos];
+                let rhs = lt[eq_pos + 3..].trim_end_matches(';').to_string();
+                // Only for byte registers (AL, BL, CL, DL)
+                if matches!(lhs, "AL" | "BL" | "CL" | "DL") {
+                    let next = lines[i + 1].trim().to_string();
+                    // Check if next line uses this register as a value (not as an index)
+                    let pattern = format!(" = {};", lhs);
+                    if next.ends_with(&pattern) {
+                        let indent = lines[i + 1].len() - lines[i + 1].trim_start().len();
+                        let pad = &lines[i + 1][..indent];
+                        let new_next = next.replace(&pattern, &format!(" = {};", rhs));
+                        lines[i + 1] = format!("{}{}", pad, new_next);
+                        lines.remove(i);
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
     }
 
     // Infer return value for bare "return;" at end of function
@@ -1242,18 +1358,63 @@ fn format_cond_operand(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTra
         return name.clone();
     }
     // If the expression is a stack Load, use the stack variable name
+    // For conditions, only resolve to DWARF names or param names, NOT to
+    // computed store aliases (which reflect initial values, not loop iteration values)
     if let Expr::Load(ptr) = &vdef.expr {
         if let Some(offset) = get_rbp_offset(*ptr, ssa) {
             let name = format!("var_{:x}", offset);
-            return resolve_stack_alias(&name, tracker);
+            let resolved = resolve_stack_alias(&name, tracker);
+            // Accept: DWARF names (starts with lowercase letter) and param_N
+            let is_good_name = resolved.starts_with("param_")
+                || (resolved != name && !resolved.contains('(') && !resolved.contains(' ')
+                    && resolved.chars().next().map_or(false, |c| c.is_ascii_lowercase())
+                    && !resolved.chars().all(|c| c.is_ascii_digit() || c == 'x') // reject "0", "0x1f"
+                    && resolved.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+            if is_good_name {
+                return resolved;
+            }
+            return name; // Fallback: raw var_N
         }
     }
     // For non-trivial expressions (BinOp, etc.), render directly from SSA
-    if matches!(&vdef.expr, Expr::BinOp(_, _, _)) {
-        return format_expr_tracked(&vdef.expr, ssa, ctx, tracker);
+    if let Expr::BinOp(kind, l, r) = &vdef.expr {
+        // Detect PIECE pattern: Or(Lsl(hi, 0x20), lo) → just render lo
+        // This is the x86 EDX:EAX concatenation for IDIV
+        if matches!(kind, BinOpKind::Or) {
+            let lv = ssa.var(*l);
+            if let Expr::BinOp(BinOpKind::Lsl, _, shift) = &lv.expr {
+                let sv = ssa.var(*shift);
+                if matches!(&sv.expr, Expr::Const(0x20, _)) {
+                    // This is X << 0x20 | Y — just show Y (the low part)
+                    return format_cond_operand(*r, ssa, ctx, tracker);
+                }
+            }
+        }
+        let ls = format_cond_operand(*l, ssa, ctx, tracker);
+        let rs = format_cond_operand(*r, ssa, ctx, tracker);
+        return format!("{} {} {}", ls, binop_str(*kind), rs);
     }
-    // Default: use tracked resolution
-    format_var_tracked(id, ssa, ctx, tracker)
+    if let Expr::UnaryOp(kind, inner) = &vdef.expr {
+        let is = format_cond_operand(*inner, ssa, ctx, tracker);
+        return match kind {
+            UnaryOpKind::Sext | UnaryOpKind::Zext => is,
+            _ => format!("{}({})", unaryop_str(*kind), is),
+        };
+    }
+    // For constants, render directly
+    if let Expr::Const(val, sz) = &vdef.expr {
+        return format_const_ctx(*val, *sz, ctx);
+    }
+    // For Var references, recurse to get the underlying expression
+    if let Expr::Var(inner) = &vdef.expr {
+        let iv = ssa.var(*inner);
+        // If the inner var has a meaningful expression, use it
+        if iv.param_name.is_some() || matches!(&iv.expr, Expr::Load(_) | Expr::BinOp(_, _, _) | Expr::Const(_, _)) {
+            return format_cond_operand(*inner, ssa, ctx, tracker);
+        }
+    }
+    // Default: show variable via standard formatting
+    format_var(id, ssa, ctx)
 }
 
 /// Find matching closing paren for an opening paren at `pos`.
