@@ -183,7 +183,7 @@ fn generate_arch(
     let root_dir = out_dir.join(format!("{prefix}-root/out"));
     std::fs::create_dir_all(&root_dir).unwrap();
     let root = modules.iter().find(|m| m.filename == "root.rs").unwrap();
-    let mut parse_fn = if let Some(raw) = &root.raw_code {
+    let parse_fn = if let Some(raw) = &root.raw_code {
         let mut result = String::new();
         if let Some(idx) = raw.find("pub fn parse_instruction") {
             result.push_str(&raw[idx..]);
