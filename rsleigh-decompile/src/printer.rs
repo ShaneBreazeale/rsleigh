@@ -266,10 +266,14 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
             if name.starts_with("var_") && vdef.use_count == 0 {
                 return; // Dead store
             }
-            // If next statement is Return, skip this store — return will show the value
-            if name.starts_with("var_") {
-                if let Some(StructuredStmt::Return(_)) = stmts.get(stmt_idx + 1) {
-                    return; // Store before return — elided
+            // Skip stack stores where the value is a register (likely dead result store)
+            // These are patterns like var_4 = EAX before return
+            if name.starts_with("var_") && rhs != name {
+                // Check if a Return exists later in the block
+                let has_later_return = stmts[stmt_idx + 1..].iter().any(|s|
+                    matches!(s, StructuredStmt::Return(_)));
+                if has_later_return {
+                    return; // Store before return — value captured by return
                 }
             }
             out.push_str(&format!("{}{} = {};\n", pad, name, rhs));
@@ -294,6 +298,25 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                 if val_expr.starts_with("param_") || val_expr.starts_with("var_") {
                     return; // Tracked alias — available via stack_alias at use sites
                 }
+                // Skip stores before return: check if the next VISIBLE statement
+                // (skipping hidden Assigns for Unique/flag/etc) is a Return
+                let next_visible_is_return = stmts[stmt_idx + 1..].iter().any(|s| {
+                    match s {
+                        StructuredStmt::Return(_) => true,
+                        StructuredStmt::Assign { lhs, .. } => {
+                            // Check if this Assign would be visible
+                            let v = ssa.var(*lhs);
+                            if v.varnode.space == AddressSpaceId::Unique { return false; } // hidden
+                            if v.varnode.space == AddressSpaceId::Register && is_flag(v.varnode.offset) { return false; }
+                            true // visible Assign before Return — don't skip Store
+                        }
+                        StructuredStmt::Store { .. } | StructuredStmt::Call { .. } => true, // visible
+                        _ => false, // keep looking
+                    }
+                });
+                if next_visible_is_return {
+                    return; // Store before return
+                }
                 out.push_str(&format!("{}{} = {};\n", pad, stack_name, val_expr));
             } else {
                 out.push_str(&format!("{}*({}*)({}) = {};\n", pad, type_name, addr_str, val_expr));
@@ -316,40 +339,27 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                 let name = var_name(&ssa.var(*out_var).varnode, ctx);
                 out.push_str(&format!("{}{} = {};\n", pad, name, call_expr));
             } else {
-                // Check if the return value (EAX/RAX) is read by any subsequent
-                // statement in this block. If so, the call will be inlined at the
-                // use site — don't print it standalone.
-                let return_consumed = stmts.iter().skip(stmt_idx + 1).any(|s| {
-                    match s {
-                        StructuredStmt::Assign { lhs, .. } => {
-                            let v = ssa.var(*lhs);
-                            // Check if this reads EAX (call return)
-                            if let Expr::Var(src) = &v.expr {
-                                let sv = ssa.var(*src);
-                                sv.varnode.space == AddressSpaceId::Register
-                                    && sv.varnode.offset == 0
-                                    && sv.call_return
-                            } else { false }
-                        }
-                        StructuredStmt::Store { val, .. } => {
-                            let v = ssa.var(*val);
-                            v.varnode.space == AddressSpaceId::Register
-                                && v.varnode.offset == 0
-                                && v.call_return
-                        }
-                        _ => false,
-                    }
-                });
-
-                // Set call return expression for inlining
+                // Set call return expression for potential inlining
                 tracker.set_call_return(0, 8, call_expr.clone()); // RAX
                 tracker.set_call_return(0, 4, call_expr.clone()); // EAX
 
-                if !return_consumed {
-                    // Void call or return not used — print standalone
+                // Check if the NEXT statement reads EAX and is an arg setup
+                // for another call. If so, the call appears inlined — suppress standalone.
+                let next_reads_eax = stmts.get(stmt_idx + 1).map_or(false, |s| {
+                    if let StructuredStmt::Assign { lhs, .. } = s {
+                        let v = ssa.var(*lhs);
+                        if let Expr::Var(src) = &v.expr {
+                            let sv = ssa.var(*src);
+                            sv.varnode.space == AddressSpaceId::Register
+                                && sv.varnode.offset == 0
+                                && is_arg_consumed_by_call(*lhs, ssa)
+                        } else { false }
+                    } else { false }
+                });
+
+                if !next_reads_eax {
                     out.push_str(&format!("{}{};\n", pad, call_expr));
                 }
-                // If consumed, the call appears inlined at the use site
             }
         }
         StructuredStmt::Return(val) => {
