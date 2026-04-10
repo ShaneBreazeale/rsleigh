@@ -18,13 +18,50 @@ pub fn print_c(
     let mut out = String::new();
     let ctx = PrintCtx { arch, binary, imports };
     let filtered = filter_boilerplate(stmts, ssa);
-    print_stmts(&filtered, ssa, &ctx, 0, &mut out);
-    post_process(&mut out);
+    let mut tracker = RegTracker::new();
+    // Pre-scan: collect stack aliases from Stores in the top-level stmts
+    // This captures var_8 = param_0 etc. that are elided
+    collect_store_aliases(&filtered, ssa, &ctx, &mut tracker);
+
+    print_stmts_with_tracker(&filtered, ssa, &ctx, 0, &mut out, &mut tracker);
+    post_process(&mut out, &tracker.stack_alias);
     out
 }
 
+fn collect_store_aliases(stmts: &[StructuredStmt], ssa: &SsaCfg, ctx: &PrintCtx, tracker: &mut RegTracker) {
+    for stmt in stmts {
+        if let StructuredStmt::Store { addr, val } = stmt {
+            if let Some(stack_name) = try_stack_var_name(*addr, ssa) {
+                let val_expr = format_var_tracked(*val, ssa, ctx, tracker);
+                tracker.stack_alias.insert(stack_name, val_expr);
+            }
+        }
+        // Also check Assigns that write to arg registers
+        if let StructuredStmt::Assign { lhs, .. } = stmt {
+            let vdef = ssa.var(*lhs);
+            if vdef.varnode.space == AddressSpaceId::Register {
+                if let Expr::Var(src) | Expr::Load(src) = &vdef.expr {
+                    tracker.set(vdef.varnode.offset, vdef.varnode.size, *lhs);
+                }
+                if let Some(ref name) = vdef.param_name {
+                    tracker.set(vdef.varnode.offset, vdef.varnode.size, *lhs);
+                }
+            }
+        }
+    }
+}
+
+fn print_stmts_with_tracker(stmts: &[StructuredStmt], ssa: &SsaCfg, ctx: &PrintCtx, indent: usize, out: &mut String, _parent_tracker: &mut RegTracker) {
+    let mut tracker = RegTracker::new();
+    // Copy aliases from parent
+    tracker.stack_alias = _parent_tracker.stack_alias.clone();
+    for (i, stmt) in stmts.iter().enumerate() {
+        print_stmt_tracked(stmt, stmts, i, ssa, ctx, indent, out, &mut tracker);
+    }
+}
+
 /// Text-level post-processing to clean up common patterns.
-fn post_process(out: &mut String) {
+fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, String>) {
     let mut lines: Vec<String> = out.lines().map(|l| l.to_string()).collect();
     let mut i = 0;
     while i < lines.len() {
@@ -112,13 +149,38 @@ fn post_process(out: &mut String) {
         i += 1;
     }
 
-    // Strip verbose casts: (int64_t)x * (int64_t)y → x * y
+    // Strip verbose casts
     for line in &mut lines {
-        // Remove (int64_t) and (uint64_t) casts that just add noise
         *line = line.replace("(int64_t)", "").replace("(uint64_t)", "");
-        // Clean up double spaces from removal
         while line.contains("  ") && !line.starts_with("  ") {
             *line = line.replace("  ", " ");
+        }
+    }
+
+    // Apply stack variable aliases: var_8 → param_0, etc.
+    for line in &mut lines {
+        for (var_name, alias) in aliases {
+            if var_name.starts_with("var_") && alias.starts_with("param_") {
+                // Replace whole-word occurrences of var_N with param_M
+                let pattern = var_name.as_str();
+                let mut result = String::new();
+                let mut rest = line.as_str();
+                while let Some(pos) = rest.find(pattern) {
+                    result.push_str(&rest[..pos]);
+                    // Check word boundary
+                    let before_ok = pos == 0 || !rest.as_bytes()[pos - 1].is_ascii_alphanumeric();
+                    let after = pos + pattern.len();
+                    let after_ok = after >= rest.len() || !rest.as_bytes()[after].is_ascii_alphanumeric();
+                    if before_ok && after_ok {
+                        result.push_str(alias);
+                    } else {
+                        result.push_str(pattern);
+                    }
+                    rest = &rest[after..];
+                }
+                result.push_str(rest);
+                *line = result;
+            }
         }
     }
 
