@@ -1043,9 +1043,11 @@ impl<'a> ExecutionGenerator<'a> {
                 let sz = Self::bytes_from_bits(dv.size.get()) as u32;
                 match self.constructor.dis_fields.get(&dv.id) {
                     Some(name) => {
-                        // Use the local recomputed variable (shadowed from self)
+                        // Use the local recomputed variable (shadowed from self).
+                        // DisVars are i128 — cast through i64 to preserve sign extension
+                        // for negative values (e.g., backward branch displacements).
                         (
-                            quote! { pcode_ir::Varnode::constant(#name as u64, #sz) },
+                            quote! { pcode_ir::Varnode::constant((#name as i64) as u64, #sz) },
                             quote! {},
                         )
                     }

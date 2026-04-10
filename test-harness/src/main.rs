@@ -2780,18 +2780,16 @@ mod tests {
 
         // ── RISC-V: sign extension for all immediate formats ──
 
-        // B-type: BEQ x0, x0, -4 (branch backward)
-        // Use assembler-verified encoding: 0xFE000CE3
+        // B-type: BEQ x0, x0, backward (13-bit signed offset)
         {
-            let bytes = &[0xe3, 0x0c, 0x00, 0xfe]; // BEQ x0, x0, -8
+            let bytes = &[0xe3, 0x0c, 0x00, 0xfe]; // BEQ x0, x0, negative offset
             let result = std::panic::catch_unwind(|| riscv::decode(bytes, 0x1000));
             if let Ok((_len, disasm, pcode)) = result {
                 if disasm.to_lowercase().contains("beq") {
                     let has_backward = pcode.iter().any(|op| matches!(op, PcodeOp::CBranch { dest, .. }
                         if dest.offset < 0x1000));
-                    if !has_backward {
-                        eprintln!("[BUG_PROBE] RISC-V BEQ backward may have wrong target: {pcode:#?}");
-                    }
+                    assert!(has_backward,
+                        "RISC-V BEQ backward should branch before 0x1000\n{pcode:#?}");
                 }
             }
         }
@@ -2802,25 +2800,16 @@ mod tests {
             assert!(disasm.to_lowercase().contains("lui"), "expected lui, got {disasm}");
         }
 
-        // J-type: JAL x1, negative offset (20-bit signed)
+        // J-type: JAL x1, negative offset (21-bit signed)
         {
-            let result = std::panic::catch_unwind(|| riscv::decode(&[0xef, 0xf0, 0xdf, 0xff], 0x1000));
-            if let Ok((_len, disasm, pcode)) = result {
-                if disasm.to_lowercase().contains("jal") || disasm.to_lowercase().contains("call") {
-                    let has_backward = pcode.iter().any(|op| match op {
-                        PcodeOp::Call { dest } | PcodeOp::Branch { dest } => dest.offset < 0x1000,
-                        _ => false,
-                    });
-                    if !has_backward {
-                        let target = pcode.iter().find_map(|op| match op {
-                            PcodeOp::Call { dest } | PcodeOp::Branch { dest } => Some(dest.offset),
-                            _ => None,
-                        });
-                        eprintln!("[BUG] RISC-V JAL backward: target={:?} (expected < 0x1000) — J-type 20-bit imm not sign-extended",
-                            target.map(|t| format!("0x{:x}", t)));
-                    }
-                }
-            }
+            let (_len, disasm, pcode) = riscv::decode(&[0xef, 0xf0, 0xdf, 0xff], 0x1000);
+            assert!(disasm.to_lowercase().contains("jal") || disasm.to_lowercase().contains("call"),
+                "expected jal, got {disasm}");
+            let has_backward = pcode.iter().any(|op| match op {
+                PcodeOp::Call { dest } | PcodeOp::Branch { dest } => dest.offset < 0x1000,
+                _ => false,
+            });
+            assert!(has_backward, "RISC-V JAL backward should target before 0x1000\npcode: {pcode:#?}");
         }
 
         // I-type: ADDI x1, x1, -2048 (minimum 12-bit signed = 0x800)
