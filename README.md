@@ -27,7 +27,7 @@ let inst = dec.decode(&[0x48, 0x89, 0xd8], 0x1000).unwrap();
 println!("{} ({} bytes)", inst.disassembly, inst.len);
 // MOV RAX,RBX (3 bytes)
 
-// Decompile with string literal + import resolution + DWARF debug info
+// Decompile with string literals, imports, and DWARF debug info
 let binary = std::fs::read("my_binary").unwrap();
 let instructions: Vec<(u64, _)> = /* decode a function's bytes */;
 let pseudocode = rsleigh_decompile::decompile_with_binary(
@@ -42,53 +42,76 @@ Given a real compiled C program:
 ```c
 int add(int a, int b) { return a + b; }
 int factorial(int n) { if (n <= 1) return 1; return n * factorial(n - 1); }
-
+char* reverse_string(char* str) {
+    int len = strlen(str);
+    for (int i = 0; i < len / 2; i++) {
+        char tmp = str[i]; str[i] = str[len-1-i]; str[len-1-i] = tmp;
+    }
+    return str;
+}
 int main() {
     printf("add(3, 4) = %d\n", add(3, 4));
     printf("factorial(5) = %d\n", factorial(5));
-    strcpy(buf, "hello world");
+    char buf[32]; strcpy(buf, "hello world");
     printf("reversed: %s\n", reverse_string(buf));
+    return 0;
 }
 ```
 
-rsleigh produces:
+rsleigh produces (with DWARF debug info):
 
 ```
-printf("add(3, 4) = %d\n", add(3, 4));
-factorial(5);
-printf("factorial(5) = %d\n", factorial(5));
-__strcpy_chk(RBP + 0xd0, "hello world", 0x20);
-printf("reversed: %s\n", reverse_string(RBP + 0xd0));
-```
+// add()
+return a + b;
 
-For factorial:
-
-```
-if (1 < var_8) {
-    factorial(var_8 - 1);
-    EAX = (int64_t)EAX * (int64_t)factorial(var_8 - 1);
-    return;
+// factorial()
+if (n > 1) {
+    return n * factorial(n - 1);
 } else {
-    var_4 = 1;
+    return 1;
 }
+
+// reverse_string()
+while (len / 2 > i) {
+    str[i] = str[(len - 1) - i];
+    str[(len - 1) - i] = str[i];
+}
+return str;
+
+// main()
+printf("add(3, 4) = %d\n", add(3, 4));
+printf("factorial(5) = %d\n", factorial(5));
+strcpy(buf, "hello world");
+printf("reversed: %s\n", reverse_string(buf));
+return 0;
 ```
 
-The decompiler pipeline: P-code → CFG → SSA → expression folding → structure recovery → C printer.
+The decompiler pipeline: P-code -> CFG -> SSA -> expression folding -> structure recovery -> C printer.
 
 What it does:
 - Prologue/epilogue elimination (push/pop/leave/ret hidden)
 - Stack variable naming (`var_8` instead of `*(RBP - 0x8)`)
-- Parameter detection (`param_0`, `param_1` from ABI registers)
-- DWARF debug info recovery (`param_0` → `a`, `param_1` → `b` from `.debug_info` / macOS `.dSYM`)
-- Condition recovery (x86 flags → comparisons, ARM64 NG/ZR/OV → comparisons)
-- If/else and while loop recovery from CFG back-edges
+- Parameter detection from ABI registers, with DWARF name recovery (`param_0` -> `a`)
+- DWARF local variable recovery (`var_10` -> `i`, `var_c` -> `len`)
+- Condition recovery (x86 flag patterns -> comparisons, ARM64 NG/ZR/OV -> comparisons)
+- Condition canonicalization (`1 < n` -> `n > 1`)
+- While loop negation (exit conditions properly inverted)
+- If/else and while loop recovery from CFG back-edges and dominators
 - Call return value inlining (`printf("...", add(3, 4))`)
 - Function argument display (`factorial(5)` not `factorial()`)
-- Import name resolution (PLT/GOT stubs → `printf`, `strlen`)
-- String literal detection (`0x100000624` → `"hello world"`)
+- Return value inference for non-void functions
+- Import name resolution (PLT/GOT stubs -> `printf`, `strlen`)
+- `__chk` suffix stripping (`__strcpy_chk` -> `strcpy`)
+- String literal detection (`0x100000624` -> `"hello world"`)
+- Array access syntax (`*(uint8_t*)(base + idx)` -> `base[idx]`)
 - Dead code elimination (unused flag writes, register shuffling)
+- Stack canary preamble/epilogue detection and removal
 - Save/restore elision (register spills across calls hidden)
-- Register copy tracking at print time (no SSA modification)
+- Register copy tracking and inlining at print time
+- Sequential register assignment chaining (`ECX = len - 1; ECX = ECX - i` -> `ECX = (len - 1) - i`)
+- Swap pattern detection (`str[i] = str[j]; str[j] = AL` -> `str[j] = str[i]`)
+- IDIV dividend noise removal (`EDX << 0x20 | X` -> `X`)
+- Constant propagation for loop-invariant register values
 
 ## Architectures
 
@@ -116,11 +139,17 @@ rsleigh/
 
 ## Tests
 
-4 test suites:
-- **Golden tests** — 23 exact P-code assertions + 301 corpus instructions across 5 architectures
-- **Fuzz tests** — 5000 random decode attempts (empty, truncated, garbage), zero panics
-- **Register resolution** — offset→name mapping verification
-- **Decompiler validation** — compiles C source, decompiles with rsleigh, asserts string literals, import names, conditions, function calls
+8 test categories, ~6000 total assertions:
+
+- **Golden P-code tests** — 145 exact assertions across all 5 architectures (x86: 43, ARM64: 24, ARM32: 21, RISC-V: 21, MIPS: 21). Verify decode length, disassembly text, and P-code op semantics.
+- **Stress tests** — boundary value probes: sign-extension at every bit width (8/12/16/20/32), `i8::MIN` overflow, backward branch targets, REX prefix edge cases, SIB addressing, 64-bit immediates.
+- **Functional tests** — 14 multi-instruction sequence tests: function prologues/epilogues, stack locals with sign-extended displacements, call conventions, compare-and-branch, loops, array access, RIP-relative data, sign-extend chains, ADRP+ADD pairs, conditional select.
+- **Bug probes** — ~55 semantic correctness checks: all 16 x86 Jcc branch targets, IDIV quotient+remainder, MUL widening to RDX:RAX, MOVZX/MOVSX load sizes, LEA vs MOV distinction, ARM64 LDR size variants (1/2/4/8 byte), ADDS flag setting, and more.
+- **Compiled code patterns** — real compiler output: stack canary (FS:[0x28]), stack alignment (AND RSP,-16), indirect calls/jumps, switch tables, SETcc, REP MOVSB, LOCK XADD, SSE2 ADDSD/MOVSD, SYSCALL, PLT/GOT sequences, TBZ/TBNZ, CSET/CSINC, post-index loads, memory barriers, thread pointer reads.
+- **Ghidra differential fixtures** — ~300 instructions compared against Ghidra's P-code output
+- **Corpus validation** — 278 real instructions across all architectures, decode without panic
+- **Fuzz tests** — 5000 random byte sequences (empty, truncated, garbage), zero panics
+- **Decompiler validation** — compiles C source with `-g`, decompiles with rsleigh, asserts string literals, import names, DWARF parameter names, conditions, function calls, return values
 
 ## Spectra integration
 
