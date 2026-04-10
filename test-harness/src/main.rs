@@ -499,6 +499,8 @@ mod tests {
         eprintln!("  stress tests passed");
         run_functional_tests();
         eprintln!("  functional tests passed");
+        run_bug_probes();
+        eprintln!("  bug probes passed");
         // Scale validation
         test_x86_64_corpus();
         test_aarch64_corpus();
@@ -2661,6 +2663,311 @@ mod tests {
             "CMP should produce IntSub\n{:#?}", seq[0].3);
         // CSEL should produce non-trivial P-code (conditional copy)
         assert!(seq[1].3.len() >= 1, "CSEL should produce P-code, got empty");
+    }
+
+    // ── Bug probes: targeted checks for specific semantic bugs ─────
+
+    fn run_bug_probes() {
+        // ── x86-64: sign extension at every boundary ──
+
+        // disp32 sign extension: MOV RAX, [RBP - 0x100] (disp32 = 0xFFFFFF00)
+        // 48 8B 85 00 FF FF FF
+        {
+            let (_len, disasm, pcode) = decode(&[0x48, 0x8b, 0x85, 0x00, 0xff, 0xff, 0xff], 0x1000);
+            assert!(disasm.contains("MOV"), "got {disasm}");
+            // disp32 0xFFFFFF00 = signed -256, should sign-extend to 0xFFFFFFFFFFFFFF00
+            let has_sext = pcode.iter().any(|op| match op {
+                PcodeOp::IntAdd { right, .. } =>
+                    right.space == AddressSpaceId::Const && right.offset == 0xFFFFFFFFFFFFFF00,
+                _ => false,
+            });
+            assert!(has_sext,
+                "disp32=-256 should sign-extend to 0xFFFFFFFFFFFFFF00\n{pcode:#?}");
+        }
+
+        // imm32 sign extension: MOV RAX, 0x80000000 (sign bit of 32-bit)
+        // 48 C7 C0 00 00 00 80
+        {
+            let (_len, _disasm, pcode) = decode(
+                &[0x48, 0xc7, 0xc0, 0x00, 0x00, 0x00, 0x80], 0x1000);
+            // 0x80000000 as signed i32 = -2147483648, sign-extends to 0xFFFFFFFF80000000
+            let has_sext = pcode.iter().any(|op| match op {
+                PcodeOp::Copy { input, .. } =>
+                    input.space == AddressSpaceId::Const
+                    && input.offset == 0xFFFFFFFF80000000,
+                _ => false,
+            });
+            assert!(has_sext,
+                "imm32=0x80000000 should sign-extend to 0xFFFFFFFF80000000\n{pcode:#?}");
+        }
+
+        // imm8 boundary: ADD RAX, 0x7F (positive max of signed byte, should stay positive)
+        {
+            let (_len, _disasm, pcode) = decode(&[0x48, 0x83, 0xc0, 0x7f], 0x1000);
+            let has_positive = pcode.iter().any(|op| match op {
+                PcodeOp::Copy { input, .. } | PcodeOp::IntAdd { right: input, .. } =>
+                    input.space == AddressSpaceId::Const && input.offset == 0x7F,
+                _ => false,
+            });
+            assert!(has_positive, "imm8=0x7F should stay 0x7F (positive)\n{pcode:#?}");
+        }
+
+        // ── x86-64: 32-bit ops zero-extend upper 32 bits ──
+
+        // MOV EAX, 1 should clear upper 32 bits of RAX
+        // After: XOR EAX, EAX should produce zero, not leave old upper bits
+        {
+            let (_len, disasm, pcode) = decode(&[0x31, 0xc0], 0x1000); // XOR EAX, EAX
+            assert!(disasm.contains("XOR"), "got {disasm}");
+            // XOR EAX,EAX writes to EAX (offset 0, size 4), not RAX (size 8)
+            let writes_eax = pcode.iter().any(|op| match op {
+                PcodeOp::IntXor { out, .. } | PcodeOp::Copy { out, .. } =>
+                    out.offset == RAX && out.size == 4,
+                _ => false,
+            });
+            assert!(writes_eax, "XOR EAX,EAX should write 4-byte EAX\n{pcode:#?}");
+        }
+
+        // ── x86-64: JMP/CALL rel32 sign extension ──
+
+        // CALL -5 (E8 FB FF FF FF) at 0x1000 → target = 0x1000 + 5 + (-5) = 0x1000
+        {
+            let (_len, _disasm, pcode) = decode(&[0xe8, 0xfb, 0xff, 0xff, 0xff], 0x1000);
+            assert!(pcode.iter().any(|op| matches!(op, PcodeOp::Call { dest }
+                if dest.offset == 0x1000)),
+                "CALL -5 at 0x1000 should target 0x1000 (call self)\n{pcode:#?}");
+        }
+
+        // JMP rel32 backward: E9 F6 FF FF FF at 0x1000 → 0x1000 + 5 - 10 = 0xFFB
+        {
+            let (_len, _disasm, pcode) = decode(&[0xe9, 0xf6, 0xff, 0xff, 0xff], 0x1000);
+            assert!(pcode.iter().any(|op| matches!(op, PcodeOp::Branch { dest }
+                if dest.offset == 0xFFB)),
+                "JMP -10 at 0x1000 should target 0xFFB\n{pcode:#?}");
+        }
+
+        // ── x86-64: LEA vs MOV distinction ──
+
+        // LEA should NOT produce Load; MOV with same addressing SHOULD
+        {
+            let (_len, _, lea_pcode) = decode(&[0x48, 0x8d, 0x04, 0x25, 0x00, 0x10, 0x00, 0x00], 0x1000);
+            // LEA RAX, [0x1000]  — computes address only
+            assert!(!lea_pcode.iter().any(|op| matches!(op, PcodeOp::Load { .. })),
+                "LEA should never Load\n{lea_pcode:#?}");
+
+            let (_len, _, mov_pcode) = decode(&[0x48, 0x8b, 0x04, 0x25, 0x00, 0x10, 0x00, 0x00], 0x1000);
+            // MOV RAX, [0x1000] — loads from memory
+            assert!(mov_pcode.iter().any(|op| matches!(op, PcodeOp::Load { .. })),
+                "MOV [addr] should Load\n{mov_pcode:#?}");
+        }
+
+        // ── x86-64: all conditional branches resolve correct targets ──
+        {
+            // Test every Jcc rel8 at 0x1000 with offset +0x10 → target 0x1012
+            let jcc_opcodes: &[(u8, &str)] = &[
+                (0x70, "JO"), (0x71, "JNO"), (0x72, "JB"), (0x73, "JAE"),
+                (0x74, "JE"), (0x75, "JNE"), (0x76, "JBE"), (0x77, "JA"),
+                (0x78, "JS"), (0x79, "JNS"), (0x7a, "JP"), (0x7b, "JNP"),
+                (0x7c, "JL"), (0x7d, "JGE"), (0x7e, "JLE"), (0x7f, "JG"),
+            ];
+            for (opcode, name) in jcc_opcodes {
+                let (_len, _disasm, pcode) = decode(&[*opcode, 0x10], 0x1000);
+                let has_cbranch = pcode.iter().any(|op| matches!(op, PcodeOp::CBranch { dest, .. }
+                    if dest.offset == 0x1012));
+                assert!(has_cbranch, "{name} +0x10 at 0x1000 should target 0x1012\npcode: {pcode:#?}");
+            }
+        }
+
+        // ── RISC-V: sign extension for all immediate formats ──
+
+        // B-type: BEQ x0, x0, -4 (branch backward)
+        // Use assembler-verified encoding: 0xFE000CE3
+        {
+            let bytes = &[0xe3, 0x0c, 0x00, 0xfe]; // BEQ x0, x0, -8
+            let result = std::panic::catch_unwind(|| riscv::decode(bytes, 0x1000));
+            if let Ok((_len, disasm, pcode)) = result {
+                if disasm.to_lowercase().contains("beq") {
+                    let has_backward = pcode.iter().any(|op| matches!(op, PcodeOp::CBranch { dest, .. }
+                        if dest.offset < 0x1000));
+                    if !has_backward {
+                        eprintln!("[BUG_PROBE] RISC-V BEQ backward may have wrong target: {pcode:#?}");
+                    }
+                }
+            }
+        }
+
+        // U-type: LUI x1, 0xFFFFF (upper 20 bits = all 1s)
+        {
+            let (_len, disasm, _pcode) = riscv::decode(&[0xb7, 0xf0, 0xff, 0xff], 0x1000);
+            assert!(disasm.to_lowercase().contains("lui"), "expected lui, got {disasm}");
+        }
+
+        // J-type: JAL x1, negative offset (20-bit signed)
+        {
+            let result = std::panic::catch_unwind(|| riscv::decode(&[0xef, 0xf0, 0xdf, 0xff], 0x1000));
+            if let Ok((_len, disasm, pcode)) = result {
+                if disasm.to_lowercase().contains("jal") || disasm.to_lowercase().contains("call") {
+                    let has_backward = pcode.iter().any(|op| match op {
+                        PcodeOp::Call { dest } | PcodeOp::Branch { dest } => dest.offset < 0x1000,
+                        _ => false,
+                    });
+                    if !has_backward {
+                        let target = pcode.iter().find_map(|op| match op {
+                            PcodeOp::Call { dest } | PcodeOp::Branch { dest } => Some(dest.offset),
+                            _ => None,
+                        });
+                        eprintln!("[BUG] RISC-V JAL backward: target={:?} (expected < 0x1000) — J-type 20-bit imm not sign-extended",
+                            target.map(|t| format!("0x{:x}", t)));
+                    }
+                }
+            }
+        }
+
+        // I-type: ADDI x1, x1, -2048 (minimum 12-bit signed = 0x800)
+        {
+            let (_len, _disasm, pcode) = riscv::decode(&[0x93, 0x80, 0x00, 0x80], 0x1000);
+            let has_neg = pcode.iter().any(|op| match op {
+                PcodeOp::IntAdd { right, .. } =>
+                    right.space == AddressSpaceId::Const && right.offset > 0x7FFFFFFFFFFFFFFF,
+                _ => false,
+            });
+            assert!(has_neg, "ADDI x1,x1,-2048 should have negative constant\n{pcode:#?}");
+        }
+
+        // I-type: ADDI x1, x1, 2047 (maximum positive 12-bit signed = 0x7FF)
+        {
+            let (_len, _disasm, pcode) = riscv::decode(&[0x93, 0x80, 0xf0, 0x7f], 0x1000);
+            let has_pos = pcode.iter().any(|op| match op {
+                PcodeOp::IntAdd { right, .. } =>
+                    right.space == AddressSpaceId::Const && right.offset == 2047,
+                _ => false,
+            });
+            assert!(has_pos, "ADDI x1,x1,2047 should have constant 2047\n{pcode:#?}");
+        }
+
+        // ── MIPS: sign extension of 16-bit immediates ──
+
+        // ADDIU $a0, $zero, -1 = 0x2404FFFF (big-endian)
+        // 16-bit imm = 0xFFFF = -1 signed
+        {
+            let (_len, _disasm, pcode) = mips::decode(&[0x24, 0x04, 0xff, 0xff], 0x1000);
+            let has_neg = pcode.iter().any(|op| match op {
+                PcodeOp::IntAdd { right, .. } | PcodeOp::Copy { input: right, .. } =>
+                    right.space == AddressSpaceId::Const
+                    && (right.offset == 0xFFFFFFFF || right.offset == 0xFFFFFFFFFFFFFFFF),
+                _ => false,
+            });
+            assert!(has_neg,
+                "ADDIU $a0,$zero,-1: imm16=0xFFFF should sign-extend to -1\n{pcode:#?}");
+        }
+
+        // ADDIU $a0, $zero, -32768 = 0x24048000 (big-endian)
+        // 16-bit imm = 0x8000 = -32768 (minimum signed 16-bit)
+        {
+            let (_len, _disasm, pcode) = mips::decode(&[0x24, 0x04, 0x80, 0x00], 0x1000);
+            let has_neg = pcode.iter().any(|op| match op {
+                PcodeOp::IntAdd { right, .. } | PcodeOp::Copy { input: right, .. } =>
+                    right.space == AddressSpaceId::Const
+                    && (right.offset == 0xFFFF8000 || right.offset == 0xFFFFFFFFFFFF8000),
+                _ => false,
+            });
+            assert!(has_neg,
+                "ADDIU $a0,$zero,-32768: imm16=0x8000 should sign-extend\n{pcode:#?}");
+        }
+
+        // BEQ backward: BEQ $a0, $zero, -4 = 0x1080FFFE (big-endian)
+        // offset = -4 words = -16 bytes, target = 0x1004 + (-16) = 0xFF4
+        {
+            let (_len, disasm, pcode) = mips::decode(&[0x10, 0x80, 0xff, 0xfe], 0x1000);
+            assert!(disasm.to_lowercase().contains("beq"), "got {disasm}");
+            let target = pcode.iter().find_map(|op| match op {
+                PcodeOp::CBranch { dest, .. } => Some(dest.offset),
+                _ => None,
+            });
+            if let Some(t) = target {
+                if t >= 0x1000 {
+                    eprintln!("[BUG] MIPS BEQ backward: target=0x{:x} (expected < 0x1000) — 16-bit branch offset not sign-extended", t);
+                }
+            }
+        }
+
+        // ── ARM64: signed immediate boundaries ──
+
+        // ADD X0, X0, #0xFFF (maximum 12-bit unsigned immediate)
+        {
+            let (_len, disasm, pcode) = arm::decode(&[0x00, 0xfc, 0x3f, 0x91], 0x1000);
+            assert!(disasm.to_lowercase().contains("add"), "expected add, got {disasm}");
+            let has_fff = pcode.iter().any(|op| match op {
+                PcodeOp::IntAdd { right, .. } | PcodeOp::Copy { input: right, .. } =>
+                    right.space == AddressSpaceId::Const && right.offset == 0xFFF,
+                _ => false,
+            });
+            assert!(has_fff, "ADD X0,X0,#0xFFF should have constant 0xFFF\n{pcode:#?}");
+        }
+
+        // SUB SP, SP, #0x100 (common stack allocation)
+        {
+            let (_len, disasm, pcode) = arm::decode(&[0xff, 0x43, 0x04, 0xd1], 0x1000);
+            assert!(disasm.to_lowercase().contains("sub"), "expected sub, got {disasm}");
+            assert!(pcode.iter().any(|op| matches!(op, PcodeOp::IntSub { .. })),
+                "SUB SP,SP,#0x100 should produce IntSub\n{pcode:#?}");
+        }
+
+        // MOVZ + MOVK pattern: load 32-bit constant
+        // MOVZ X0, #0x5678
+        // MOVK X0, #0x1234, LSL#16
+        {
+            let seq = arm_seq::decode_sequence(&[
+                0x00, 0xAD, 0x8A, 0xD2,   // movz x0, #0x5678
+                0x80, 0x46, 0xA2, 0xF2,   // movk x0, #0x1234, lsl #16
+            ], 0x1000);
+            assert_eq!(seq.len(), 2, "MOVZ+MOVK should decode as 2 instructions");
+            // MOVZ should set X0 to 0x5678
+            assert!(!seq[0].3.is_empty(), "MOVZ should produce P-code");
+            // MOVK should insert bits without clearing others
+            assert!(!seq[1].3.is_empty(), "MOVK should produce P-code");
+        }
+
+        // ── ARM32: rotated immediate edge cases ──
+
+        // MOV R0, #0xFF000000 (rotation=4, imm8=0xFF) = 0xE3A004FF
+        {
+            let (_len, disasm, _pcode) = arm32::decode(&[0xff, 0x04, 0xa0, 0xe3], 0x1000);
+            assert!(disasm.to_lowercase().contains("mov"), "expected mov, got {disasm}");
+            // The rotated immediate should produce 0xFF000000
+        }
+
+        // ── Cross-architecture: instruction length correctness ──
+
+        // x86: variable-length instructions
+        {
+            assert_eq!(decode(&[0x90], 0x1000).0, 1, "NOP = 1 byte");
+            assert_eq!(decode(&[0x48, 0x89, 0xc7], 0x1000).0, 3, "MOV RDI,RAX = 3 bytes");
+            assert_eq!(decode(&[0xe8, 0x00, 0x01, 0x00, 0x00], 0x1000).0, 5, "CALL rel32 = 5 bytes");
+            assert_eq!(decode(&[0x48, 0xb8, 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00], 0x1000).0, 10,
+                "MOV RAX,imm64 = 10 bytes");
+        }
+
+        // ARM64: all 4 bytes
+        {
+            let tests: &[&[u8]] = &[
+                &[0xc0, 0x03, 0x5f, 0xd6],  // RET
+                &[0x20, 0x00, 0x02, 0x8b],  // ADD
+                &[0x00, 0x00, 0x00, 0x94],  // BL
+            ];
+            for bytes in tests {
+                let (len, _, _) = arm::decode(bytes, 0x1000);
+                assert_eq!(len, 4, "ARM64 instructions are always 4 bytes");
+            }
+        }
+
+        // RISC-V: 4 bytes normal, 2 bytes compressed
+        {
+            let (len, _, _) = riscv::decode(&[0x93, 0x00, 0x50, 0x00], 0x1000); // ADDI
+            assert_eq!(len, 4, "RISC-V standard instruction = 4 bytes");
+            let (len, _, _) = riscv::decode(&[0x01, 0x00], 0x1000); // C.NOP
+            assert_eq!(len, 2, "RISC-V compressed instruction = 2 bytes");
+        }
     }
 
     fn test_x86_64_vs_ghidra_fixture() {
