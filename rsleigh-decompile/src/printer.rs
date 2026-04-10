@@ -243,7 +243,7 @@ fn print_stmt_tracked(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, inden
                     // Skip printing if this register is just used as an intermediate
                     // to pass a stack value to another assignment or call.
                     // But DON'T skip if this overwrites a call return — the restore is important.
-                    if vdef.use_count <= 1 && get_rbp_offset(*ptr, ssa).is_some() && !had_call_return {
+                    if get_rbp_offset(*ptr, ssa).is_some() && (vdef.use_count <= 1 || had_call_return) {
                         return; // Elided: value available via tracker as var_N
                     }
                 } else {
@@ -254,8 +254,11 @@ fn print_stmt_tracked(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, inden
             // For non-register assigns (stack vars), resolve the RHS through tracker
             let name = var_name(&vdef.varnode, ctx);
             let rhs = format_expr_tracked(&vdef.expr, ssa, ctx, tracker);
-            // Skip if the resolved RHS is the same as the LHS name (self-assign after resolution)
             if rhs == name { return; }
+            // Skip stack stores that are immediately returned (var_4 = expr; return;)
+            if name.starts_with("var_") && vdef.use_count == 0 {
+                return; // Dead store — value not read
+            }
             out.push_str(&format!("{}{} = {};\n", pad, name, rhs));
         }
         StructuredStmt::Store { addr, val } => {
@@ -263,7 +266,24 @@ fn print_stmt_tracked(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, inden
             let val_expr = format_var_tracked(*val, ssa, ctx, tracker);
             let size = ssa.var(*val).size;
             let type_name = size_to_type(size);
+
+            // Skip save-pattern stores: var_c = var_8 where var_c is only used
+            // for a restore later (same register value roundtrip)
             if let Some(stack_name) = try_stack_var_name(*addr, ssa) {
+                // Check if the stored value is just another stack variable or parameter
+                // If so, this is a save pattern — skip it
+                let is_save = {
+                    let vdef = ssa.var(*val);
+                    // Value came from a register that was tracked to a stack var
+                    if vdef.varnode.space == AddressSpaceId::Register {
+                        tracker.get(vdef.varnode.offset, vdef.varnode.size).is_some()
+                    } else {
+                        false
+                    }
+                };
+                if is_save && val_expr.starts_with("var_") || val_expr.starts_with("param_") {
+                    return; // Elided: save pattern (var_c = var_8)
+                }
                 out.push_str(&format!("{}{} = {};\n", pad, stack_name, val_expr));
             } else {
                 out.push_str(&format!("{}*({}*)({}) = {};\n", pad, type_name, addr_str, val_expr));
@@ -363,12 +383,25 @@ fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTrac
                 // Also resolve through regular tracking
                 if let Some(tracked_id) = tracker.get(iv.varnode.offset, iv.varnode.size) {
                     let tv = ssa.var(tracked_id);
+                    // If tracked to a Load (stack var), show the stack var name
                     if let Expr::Load(ptr) = &tv.expr {
                         if let Some(offset) = get_rbp_offset(*ptr, ssa) {
                             return match kind {
                                 UnaryOpKind::Sext => format!("(int64_t)var_{:x}", offset),
                                 UnaryOpKind::Zext => format!("(uint64_t)var_{:x}", offset),
                                 _ => format!("var_{:x}", offset),
+                            };
+                        }
+                    }
+                    // If tracked to a Var (copy of another var), resolve that
+                    if let Expr::Var(src) = &tv.expr {
+                        let sv = ssa.var(*src);
+                        if sv.param_name.is_some() || sv.varnode.space != AddressSpaceId::Register {
+                            let name = format_var(*src, ssa, ctx);
+                            return match kind {
+                                UnaryOpKind::Sext => format!("(int64_t){}", name),
+                                UnaryOpKind::Zext => format!("(uint64_t){}", name),
+                                _ => name,
                             };
                         }
                     }
