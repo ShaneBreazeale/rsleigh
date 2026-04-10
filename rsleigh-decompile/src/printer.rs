@@ -350,6 +350,7 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
     }
 }
 
+#[allow(dead_code)]
 fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, indent: usize, out: &mut String) {
     let pad: String = "    ".repeat(indent);
 

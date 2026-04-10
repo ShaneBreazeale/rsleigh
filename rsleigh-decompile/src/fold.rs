@@ -723,6 +723,7 @@ pub(crate) fn recount_uses(ssa: &mut SsaCfg) {
 // Example: EAX = var_8; var_c = EAX → var_c = var_8 (because EAX holds var_8)
 //          Later: EAX = var_c → EAX = var_8 (because var_c holds var_8)
 
+#[allow(dead_code)]
 fn forward_substitute_block(ssa: &mut SsaCfg) {
     for bi in 0..ssa.blocks.len() {
         // Map: (register offset, size) → the VarId of the value it currently holds
@@ -825,6 +826,7 @@ fn forward_substitute_block(ssa: &mut SsaCfg) {
 // Replace Y's expression with X directly, eliminating the roundtrip.
 // Also: A = X; ... ; B = A where B has same register as X → B = X
 
+#[allow(dead_code)]
 fn eliminate_save_restore(ssa: &mut SsaCfg) {
     // First: look for the specific pattern REG = stack_var where
     // stack_var.expr = Var(same_REG) — this is a restore.
@@ -929,6 +931,7 @@ fn eliminate_save_restore(ssa: &mut SsaCfg) {
 }
 
 /// Compute the RBP-relative offset for an address var, if it's RBP + const.
+#[allow(dead_code)]
 fn compute_rbp_offset(addr_id: VarId, vars: &[VarDef]) -> Option<u64> {
     let v = &vars[addr_id.0 as usize];
     match &v.expr {
@@ -1020,6 +1023,7 @@ fn propagate_call_returns(ssa: &mut SsaCfg) {
 //   EAX = var_8; var_c = EAX  →  var_c = var_8
 //   ECX = EAX (after call)    →  ECX = call_return
 
+#[allow(dead_code)]
 fn collapse_copy_chains(ssa: &mut SsaCfg) {
     // Build a map: VarId → its Var(source) if it's a safe copy to collapse.
     // Only collapse register copies where the source is a stack variable (Unique load)
@@ -1055,6 +1059,7 @@ fn collapse_copy_chains(ssa: &mut SsaCfg) {
     }
 }
 
+#[allow(dead_code)]
 fn substitute_copies(expr: &Expr, copy_map: &[Option<VarId>]) -> Expr {
     match expr {
         Expr::Var(id) => {
@@ -1086,6 +1091,7 @@ fn substitute_copies(expr: &Expr, copy_map: &[Option<VarId>]) -> Expr {
     }
 }
 
+#[allow(dead_code)]
 fn resolve_copy(id: VarId, copy_map: &[Option<VarId>]) -> VarId {
     if let Some(Some(src)) = copy_map.get(id.0 as usize) {
         if let Some(Some(src2)) = copy_map.get(src.0 as usize) {
