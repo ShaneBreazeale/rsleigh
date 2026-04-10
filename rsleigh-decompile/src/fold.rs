@@ -1,8 +1,13 @@
 use pcode_ir::AddressSpaceId;
 use crate::ir::*;
 
-/// x86 flag register offsets (Ghidra register space).
-const FLAG_OFFSETS: &[u64] = &[512, 513, 514, 518, 519, 521, 523];
+/// Flag register offsets (Ghidra register space).
+/// x86: CF=512, F1=513, PF=514, ZF=518, SF=519, DF=521, OF=523
+/// ARM64: NG=256, ZR=257, CY=258, OV=259, tmpNG=263, tmpZR=264, tmpCY=261, tmpOV=262
+const FLAG_OFFSETS: &[u64] = &[
+    512, 513, 514, 518, 519, 521, 523,       // x86
+    256, 257, 258, 259, 261, 262, 263, 264,   // ARM64
+];
 
 const RSP_OFFSET: u64 = 32;
 const RIP_OFFSET: u64 = 648;
@@ -140,17 +145,9 @@ fn propagate_register_copies(ssa: &mut SsaCfg) {
                     {
                         // Look up what that register was previously assigned to
                         if let Some((prev_id, prev_expr)) = reg_expr.get(&key) {
-                            match prev_expr {
-                                Expr::Var(_src) | Expr::Load(_src) => {
-                                    let src_id = match prev_expr {
-                                        Expr::Var(s) => *s,
-                                        Expr::Load(_s) => *prev_id, // keep the load as-is
-                                        _ => unreachable!(),
-                                    };
-                                    replacements.push((i, Expr::BinOp(*kind, src_id, *right)));
-                                }
-                                _ => {}
-                            }
+                            // Substitute the previous assignment's VarId as the left operand
+                            // This handles: EAX = X; EAX = EAX + Y → EAX = X + Y
+                            replacements.push((i, Expr::BinOp(*kind, *prev_id, *right)));
                         }
                     }
                 }
@@ -398,26 +395,37 @@ fn try_recover_condition(cond_id: VarId, block_idx: usize, ssa: &mut SsaCfg) -> 
 }
 
 /// Find the CMP/SUB/TEST operands by tracing from the flag definitions.
-/// Looks for the SUB/AND that produced the result used by ZF/SF flags.
+/// Searches the specified block first, then all blocks as fallback.
 fn find_cmp_operands(block_idx: usize, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
-    let block = &ssa.blocks[block_idx];
+    // Try the specified block first
+    if let Some(result) = find_cmp_in_block(block_idx, ssa) {
+        return Some(result);
+    }
+    // Fallback: search all blocks (for cases where the CMP is in a predecessor)
+    for bi in (0..ssa.blocks.len()).rev() {
+        if bi == block_idx { continue; }
+        if let Some(result) = find_cmp_in_block(bi, ssa) {
+            return Some(result);
+        }
+    }
+    None
+}
 
-    // Strategy: find ZF assignment (IntEq(result, 0)), then trace `result` back
-    // to the SUB/AND that produced it.
+fn find_cmp_in_block(block_idx: usize, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
+    let block = &ssa.blocks[block_idx];
     for stmt in block.stmts.iter().rev() {
         if let Stmt::Assign(vid) = stmt {
             let v = &ssa.vars[vid.0 as usize];
-            // ZF = IntEq(sub_result, 0) — the sub_result comes from CMP's SUB
+            // ZF = IntEq(sub_result, 0)
             if v.varnode.space == AddressSpaceId::Register && v.varnode.offset == 518 {
                 if let Expr::BinOp(BinOpKind::Eq, result_id, zero_id) = &v.expr {
                     let zero = &ssa.vars[zero_id.0 as usize];
                     if matches!(&zero.expr, Expr::Const(0, _)) {
-                        // Trace result_id back to a SUB or AND
                         return trace_to_cmp(*result_id, ssa);
                     }
                 }
             }
-            // Also check: IntSLess(result, 0) for SF
+            // SF = IntSLess(result, 0)
             if v.varnode.space == AddressSpaceId::Register && v.varnode.offset == 519 {
                 if let Expr::BinOp(BinOpKind::SLess, result_id, zero_id) = &v.expr {
                     let zero = &ssa.vars[zero_id.0 as usize];
@@ -426,14 +434,31 @@ fn find_cmp_operands(block_idx: usize, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
                     }
                 }
             }
-            // IntCarry/IntSCarry for CF/OF — trace their operands directly
+            // CF/OF (x86) or CY/OV (ARM64) — trace operands directly
             if v.varnode.space == AddressSpaceId::Register
-                && (v.varnode.offset == 512 || v.varnode.offset == 523) // CF or OF
+                && matches!(v.varnode.offset, 512 | 523 | 258 | 259 | 261 | 262)
             {
                 if let Expr::BinOp(BinOpKind::Carry | BinOpKind::SCarry | BinOpKind::SBorrow
                     | BinOpKind::Less, left, right) = &v.expr
                 {
                     return Some((*left, *right));
+                }
+            }
+            // ARM64: NG/ZR from tmp flag writes
+            if v.varnode.space == AddressSpaceId::Register && v.varnode.offset == 257 { // ZR (ARM64)
+                if let Expr::BinOp(BinOpKind::Eq, result_id, zero_id) = &v.expr {
+                    let zero = &ssa.vars[zero_id.0 as usize];
+                    if matches!(&zero.expr, Expr::Const(0, _)) {
+                        return trace_to_cmp(*result_id, ssa);
+                    }
+                }
+            }
+            if v.varnode.space == AddressSpaceId::Register && v.varnode.offset == 256 { // NG (ARM64)
+                if let Expr::BinOp(BinOpKind::SLess, result_id, zero_id) = &v.expr {
+                    let zero = &ssa.vars[zero_id.0 as usize];
+                    if matches!(&zero.expr, Expr::Const(0, _)) {
+                        return trace_to_cmp(*result_id, ssa);
+                    }
                 }
             }
         }
@@ -458,61 +483,66 @@ fn trace_to_cmp(result_id: VarId, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
 fn classify_jcc_condition(cond_id: VarId, ssa: &SsaCfg) -> Option<(BinOpKind, bool)> {
     let vdef = &ssa.vars[cond_id.0 as usize];
 
-    match &vdef.expr {
-        // ZF directly → JE → a == b
-        _ if is_flag_ref(cond_id, 518, ssa) => Some((BinOpKind::Eq, false)),
+    // Helper: check ZF (x86=518) or ZR (ARM64=257)
+    let is_zf = |id: VarId| is_flag_ref(id, 518, ssa) || is_flag_ref(id, 257, ssa);
+    // Helper: check CF (x86=512) or CY (ARM64=258)
+    let is_cf = |id: VarId| is_flag_ref(id, 512, ssa) || is_flag_ref(id, 258, ssa);
+    // Helper: check OF (x86=523) or OV (ARM64=259)
+    let is_of = |id: VarId| is_flag_ref(id, 523, ssa) || is_flag_ref(id, 259, ssa);
+    // Helper: check SF (x86=519) or NG (ARM64=256)
+    let is_sf = |id: VarId| is_flag_ref(id, 519, ssa) || is_flag_ref(id, 256, ssa);
 
-        // BoolNot(ZF) → JNE → a != b
-        Expr::UnaryOp(UnaryOpKind::BoolNot, inner) if is_flag_ref(*inner, 518, ssa) => {
+    match &vdef.expr {
+        // ZF/ZR directly → JE/BEQ → a == b
+        _ if is_zf(cond_id) => Some((BinOpKind::Eq, false)),
+
+        // BoolNot(ZF/ZR) → JNE/BNE → a != b
+        Expr::UnaryOp(UnaryOpKind::BoolNot, inner) if is_zf(*inner) => {
             Some((BinOpKind::NotEq, false))
         }
 
-        // CF directly → JB → a < b (unsigned)
-        _ if is_flag_ref(cond_id, 512, ssa) => Some((BinOpKind::Less, false)),
+        // CF/CY directly → JB/BLO → a < b (unsigned)
+        _ if is_cf(cond_id) => Some((BinOpKind::Less, false)),
 
-        // BoolNot(CF) → JAE → a >= b (unsigned) = !(a < b) = b <= a? No: use LessEq swapped
-        Expr::UnaryOp(UnaryOpKind::BoolNot, inner) if is_flag_ref(*inner, 512, ssa) => {
-            Some((BinOpKind::LessEq, true)) // a >= b = b <= a
+        // BoolNot(CF/CY) → JAE/BHS → a >= b (unsigned) = b <= a
+        Expr::UnaryOp(UnaryOpKind::BoolNot, inner) if is_cf(*inner) => {
+            Some((BinOpKind::LessEq, true))
         }
 
-        // IntEq(OF, SF) → JGE → a >= b (signed) = b <= a (signed)
+        // IntEq(OF, SF) or IntEq(OV, NG) → JGE/BGE → a >= b (signed) = b <= a
         Expr::BinOp(BinOpKind::Eq, left, right)
-            if is_flag_ref(*left, 523, ssa) && is_flag_ref(*right, 519, ssa) =>
+            if (is_of(*left) && is_sf(*right)) || (is_sf(*left) && is_of(*right)) =>
         {
-            Some((BinOpKind::SLessEq, true)) // a >= b = b <= a
+            Some((BinOpKind::SLessEq, true))
         }
 
-        // SF directly or through Var → if it's IntSLess → JL → a < b (signed)
-        _ if is_flag_ref(cond_id, 519, ssa) => {
-            // SF set = result was negative = a < b for CMP
+        // SF/NG directly → JL/BLT → a < b (signed)
+        _ if is_sf(cond_id) => {
             Some((BinOpKind::SLess, false))
         }
 
-        // BoolAnd(BoolNot(ZF), IntEq(OF, SF)) → JG → a > b (signed) = b < a
+        // BoolAnd(BoolNot(ZF/ZR), IntEq(OF/OV, SF/NG)) → JG/BGT → a > b = b < a
         Expr::BinOp(BinOpKind::BoolAnd, left, right) => {
             let left_def = &ssa.vars[left.0 as usize];
             let right_def = &ssa.vars[right.0 as usize];
 
             let left_is_not_zf = matches!(&left_def.expr,
-                Expr::UnaryOp(UnaryOpKind::BoolNot, inner) if is_flag_ref(*inner, 518, ssa));
+                Expr::UnaryOp(UnaryOpKind::BoolNot, inner) if is_zf(*inner));
             let right_is_sf_eq_of = matches!(&right_def.expr,
                 Expr::BinOp(BinOpKind::Eq, a, b)
-                    if is_flag_ref(*a, 523, ssa) && is_flag_ref(*b, 519, ssa));
+                    if (is_of(*a) && is_sf(*b)) || (is_sf(*a) && is_of(*b)));
 
             if left_is_not_zf && right_is_sf_eq_of {
-                // JG: a > b = b < a (swap operands, use SLess)
-                Some((BinOpKind::SLess, true))
+                Some((BinOpKind::SLess, true)) // JG/BGT: a > b = b < a
             } else {
-                // BoolAnd(BoolNot(CF), BoolNot(ZF)) → JA → a > b (unsigned) = b < a
                 let left_is_not_cf = matches!(&left_def.expr,
-                    Expr::UnaryOp(UnaryOpKind::BoolNot, inner) if is_flag_ref(*inner, 512, ssa));
+                    Expr::UnaryOp(UnaryOpKind::BoolNot, inner) if is_cf(*inner));
                 let right_is_not_zf = matches!(&right_def.expr,
-                    Expr::UnaryOp(UnaryOpKind::BoolNot, inner) if is_flag_ref(*inner, 518, ssa));
+                    Expr::UnaryOp(UnaryOpKind::BoolNot, inner) if is_zf(*inner));
 
                 if left_is_not_cf && right_is_not_zf {
-                    Some((BinOpKind::Less, true)) // JA: a > b unsigned = b < a
+                    Some((BinOpKind::Less, true)) // JA/BHI: unsigned b < a
                 } else if left_is_not_zf {
-                    // Partial match — at least it's a JNE variant
                     Some((BinOpKind::NotEq, false))
                 } else {
                     None
