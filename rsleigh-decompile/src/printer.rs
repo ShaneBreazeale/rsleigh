@@ -1079,18 +1079,13 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                     return;
                 }
             }
-            // Skip dead stores and stores immediately before return
+            // Skip truly dead stores: var_X with use_count 0 AND a simple value.
+            // Don't skip computed expressions (they may feed back through a loop).
             if name.starts_with("var_") && vdef.use_count == 0 {
-                return; // Dead store
-            }
-            // Skip stack stores where the value is a register (likely dead result store)
-            // These are patterns like var_4 = EAX before return
-            if name.starts_with("var_") && rhs != name {
-                // Check if a Return exists later in the block
-                let has_later_return = stmts[stmt_idx + 1..].iter().any(|s|
-                    matches!(s, StructuredStmt::Return(_)));
-                if has_later_return {
-                    return; // Store before return — value captured by return
+                let is_simple_dead = !rhs.contains('+') && !rhs.contains('-')
+                    && !rhs.contains('*') && !rhs.contains('[') && !rhs.contains('(');
+                if is_simple_dead {
+                    return; // Dead store of a simple value
                 }
             }
             out.push_str(&format!("{}{} = {};\n", pad, name, rhs));
@@ -1112,32 +1107,22 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                 if val_expr == stack_name {
                     return; // Self-assign
                 }
-                // Hide parameter/variable stores — these are tracked aliases
-                // (resolved at use sites via stack_alias map)
+                // Hide simple parameter/variable alias stores (e.g., var_8 = param_0)
+                // but NOT register stores or computed expressions
                 let is_param = val_expr.starts_with("param_")
                     || ssa.var(*val).param_name.is_some();
-                if is_param || val_expr.starts_with("var_") {
-                    return; // Tracked alias — available via stack_alias at use sites
+                let is_var_alias = val_expr.starts_with("var_") && !val_expr.contains(' ');
+                let is_dwarf_name = !val_expr.starts_with("var_") && !val_expr.starts_with("param_")
+                    && val_expr.chars().next().map_or(false, |c| c.is_ascii_lowercase())
+                    && val_expr.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    && !val_expr.chars().all(|c| c.is_ascii_digit() || c == 'x');
+                // Only hide alias stores at the top level (indent=0).
+                // Inside loops/ifs (indent>0), these are real assignments.
+                if indent == 0 && (is_param || is_var_alias || is_dwarf_name) {
+                    return; // Simple alias at function entry — tracked for later use
                 }
-                // Skip stores before return: check if the next VISIBLE statement
-                // (skipping hidden Assigns for Unique/flag/etc) is a Return
-                let next_visible_is_return = stmts[stmt_idx + 1..].iter().any(|s| {
-                    match s {
-                        StructuredStmt::Return(_) => true,
-                        StructuredStmt::Assign { lhs, .. } => {
-                            // Check if this Assign would be visible
-                            let v = ssa.var(*lhs);
-                            if v.varnode.space == AddressSpaceId::Unique { return false; } // hidden
-                            if v.varnode.space == AddressSpaceId::Register && is_flag(v.varnode.offset) { return false; }
-                            true // visible Assign before Return — don't skip Store
-                        }
-                        StructuredStmt::Store { .. } | StructuredStmt::Call { .. } => true, // visible
-                        _ => false, // keep looking
-                    }
-                });
-                if next_visible_is_return {
-                    return; // Store before return
-                }
+                // Don't skip stores to stack variables that have computed values —
+                // these are real assignments that update loop state or function locals
                 out.push_str(&format!("{}{} = {};\n", pad, stack_name, val_expr));
             } else {
                 out.push_str(&format!("{}*({}*)({}) = {};\n", pad, type_name, addr_str, val_expr));

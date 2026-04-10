@@ -1,44 +1,53 @@
-=== add ===
+=== add (17 instructions) ===
   return a + b;
 ---
-=== sub ===
+=== sub (30 instructions) ===
   return a - b;
 ---
-=== factorial ===
+=== factorial (43 instructions) ===
   if (n > 1) {
+      var_c = n;
       return n * factorial(n - 1);
+      var_4 = factorial(n - 1);
+      return;
   } else {
       return 1;
   }
 ---
-=== sum_array ===
+=== sum_array (40 instructions) ===
+  total = 0;
+  i = 0;
   while (len > i) {
       RCX = i;
       EAX = (arr[RCX * 4]) + total;
+      total = arr;
+      return arr;
   }
   return arr;
 ---
-=== string_length ===
+=== string_length (47 instructions) ===
+  len = 0;
   while (EAX != 0) {
+      len = EAX;
       return RAX;
   }
   return s;
 ---
-=== manhattan_distance ===
+=== manhattan_distance (28 instructions) ===
   EAX = (a[4]) - RCX[4];
-  dy = a;
   if (!a >= 0) {
       dx = 0 - dx;
       if (!dy >= 0) {
-          EAX = 0 - dy;
+          dy = 0 - dy;
           return dx + EAX;
       }
   }
 ---
-=== day_name ===
+=== day_name (39 instructions) ===
   RAX = day - 6;
   if (!CF || ZF) {
       RAX = "Unknown";
+      var_8 = "Unknown";
       return;
   } else {
       RCX = 0x1000006b4;
@@ -46,19 +55,25 @@
       return "Sunday";
   }
 ---
-=== list_sum ===
+=== list_sum (66 instructions) ===
+  sum = 0;
   while (head != 0) {
       EAX = *(RAX) + sum;
+      sum = head;
       RAX = head[8];
       return RAX;
   }
   return head;
 ---
-=== binary_search ===
+=== binary_search (62 instructions) ===
+  lo = 0;
+  hi = len - 1;
   while (hi >= lo) {
+      hi = lo;
       EAX = EAX / 2;
       EDX = EAX % 2;
-      RCX = lo + EAX;
+      mid = lo + EAX;
+      RCX = EAX;
       if (EAX != target) {
           RCX = mid;
           EAX = arr[RCX * 4];
@@ -68,23 +83,37 @@
               return EAX;
           }
       } else {
+          var_4 = mid;
           return;
       }
   }
   var_4 = -0x1;
 ---
-=== apply ===
-  (*RAX)(a, b);
-  return op;
+=== apply (101 instructions) ===
+  var_8 = "search(23) = %d\n";
+  var_c = 0xa;
+  var_10 = 0x17;
+  (*RAX)(0xa, 0x17);
+  return;
 ---
-=== main ===
+=== main (93 instructions) ===
+  var_8 = RAX;
+  var_54 = 0;
+  sorted = 0xa19;
+  var_60 = 0xa;
   printf("add(3,4) = %d\n", add(3, 4));
   printf("factorial(6) = %d\n", factorial(6));
+  RAX = *(0x100000a30);
+  nums = printf("factorial(6) = %d\n", factorial(6));
   RAX = *(0x100000a38);
-  EAX = *(0x100000a40);
+  var_18 = printf("factorial(6) = %d\n", factorial(6));
+  var_10 = *(0x100000a40);
   printf("sum = %d\n", sum_array(nums, 5));
   printf("strlen = %d\n", string_length("hello world"));
+  RAX = *(0x100000a78);
+  a = printf("strlen = %d\n", string_length("hello world"));
   RAX = *(0x100000a80);
+  b = printf("strlen = %d\n", string_length("hello world"));
   printf("manhattan = %d\n", manhattan_distance(a, b));
   printf("day = %s\n", day_name(3));
   printf("apply(add,5,6) = %d\n", apply(0x1000004c0, 5, 6));
