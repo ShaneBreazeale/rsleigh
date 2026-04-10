@@ -144,13 +144,18 @@ impl Decoder {
     /// possible instruction (15 for x86, 4 for fixed-width ISAs). Extra bytes
     /// are ignored.
     pub fn decode(&mut self, bytes: &[u8], addr: u64) -> Result<Instruction, DecodeError> {
+        // Each instruction gets a fresh copy of context. SLEIGH context changes
+        // during pattern matching (e.g. REX prefix bits) are local to each
+        // instruction and must not leak to the next decode call. Only globalset
+        // changes (stored in GlobalSet, not ContextMemory) persist across instructions.
         match &mut self.inner {
             DecoderInner::X86_64 {
                 context,
                 global_set,
             } => {
+                let mut ctx = *context;
                 let (inst_next, display, mut ops) =
-                    x86_root::parse_instruction(bytes, context, addr, global_set)
+                    x86_root::parse_instruction(bytes, &mut ctx, addr, global_set)
                         .ok_or(DecodeError::UnknownInstruction)?;
                 pcode_ir::optimize(&mut ops);
                 Ok(Instruction {
@@ -163,8 +168,9 @@ impl Decoder {
                 context,
                 global_set,
             } => {
+                let mut ctx = *context;
                 let (inst_next, display, mut ops) =
-                    aarch64_root::parse_instruction(bytes, context, addr, global_set)
+                    aarch64_root::parse_instruction(bytes, &mut ctx, addr, global_set)
                         .ok_or(DecodeError::UnknownInstruction)?;
                 pcode_ir::optimize(&mut ops);
                 Ok(Instruction {
@@ -177,9 +183,10 @@ impl Decoder {
                 context,
                 global_set,
             } => {
+                let mut ctx = *context;
                 let addr32 = addr as u32;
                 let (inst_next, display, mut ops) =
-                    arm32_root::parse_instruction(bytes, context, addr32, global_set)
+                    arm32_root::parse_instruction(bytes, &mut ctx, addr32, global_set)
                         .ok_or(DecodeError::UnknownInstruction)?;
                 pcode_ir::optimize(&mut ops);
                 Ok(Instruction {
@@ -192,9 +199,10 @@ impl Decoder {
                 context,
                 global_set,
             } => {
+                let mut ctx = *context;
                 let addr32 = addr as u32;
                 let (inst_next, display, mut ops) =
-                    mips_root::parse_instruction(bytes, context, addr32, global_set)
+                    mips_root::parse_instruction(bytes, &mut ctx, addr32, global_set)
                         .ok_or(DecodeError::UnknownInstruction)?;
                 pcode_ir::optimize(&mut ops);
                 Ok(Instruction {
@@ -207,8 +215,9 @@ impl Decoder {
                 context,
                 global_set,
             } => {
+                let mut ctx = *context;
                 let (inst_next, display, mut ops) =
-                    riscv_root::parse_instruction(bytes, context, addr, global_set)
+                    riscv_root::parse_instruction(bytes, &mut ctx, addr, global_set)
                         .ok_or(DecodeError::UnknownInstruction)?;
                 pcode_ir::optimize(&mut ops);
                 Ok(Instruction {
