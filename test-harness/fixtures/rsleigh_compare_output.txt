@@ -30,7 +30,7 @@
   return s;
 ---
 === manhattan_distance (28 instructions) ===
-  EAX = (a[4]) - RCX[4];
+  EAX = (a->field4) - b->field4;
   if (!a >= 0) {
       EAX = 0 - dx;
       dx = 0 - dx;
@@ -58,7 +58,7 @@
   while (head != 0) {
       EAX = *(RAX) + sum;
       sum = EAX + sum;
-      RAX = head[8];
+      RAX = head->field8;
   }
   return head;
 ---

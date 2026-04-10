@@ -461,6 +461,61 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Struct field access: ptr[4] → ptr->field4, ptr[8] → ptr->field8
+    // Small constant offsets from pointers are struct field accesses, not array indices.
+    // Convert base[N] to base->fieldN when N is a small constant (0-64).
+    for line in &mut lines {
+        let mut pos = 0;
+        while let Some(br_start) = line[pos..].find('[') {
+            let abs_start = pos + br_start;
+            if let Some(br_end) = line[abs_start..].find(']') {
+                let abs_end = abs_start + br_end;
+                let idx = &line[abs_start + 1..abs_end];
+                // Check if the index is a small decimal constant (struct field offset)
+                if let Ok(offset) = idx.parse::<u64>() {
+                    if offset <= 64 && offset > 0 && offset % 4 == 0 {
+                        // This looks like a struct field access (4-byte aligned small offset)
+                        let field_name = format!("->field{:x}", offset);
+                        *line = format!("{}{}{}", &line[..abs_start], field_name, &line[abs_end + 1..]);
+                        continue; // Re-scan
+                    }
+                }
+                // Also: hex constant like 0x10
+                if idx.starts_with("0x") {
+                    if let Ok(offset) = u64::from_str_radix(&idx[2..], 16) {
+                        if offset <= 64 && offset > 0 && offset % 4 == 0 {
+                            let field_name = format!("->field{:x}", offset);
+                            *line = format!("{}{}{}", &line[..abs_start], field_name, &line[abs_end + 1..]);
+                            continue;
+                        }
+                    }
+                }
+                pos = abs_end + 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    // Replace register names before -> with parameter names in struct accesses.
+    // RAX->field4 → a->field4 when a is a known parameter.
+    // Different registers map to different params by occurrence order.
+    if !param_names.is_empty() {
+        for line in &mut lines {
+            if !line.contains("->") { continue; }
+            let mut param_idx = 0;
+            let reg_names = ["RAX", "RCX", "RDX", "RBX", "RSI", "RDI", "R8", "R9"];
+            for reg in &reg_names {
+                let arrow = format!("{}->", reg);
+                while line.contains(&arrow) && param_idx < param_names.len() {
+                    let replacement = format!("{}->", param_names[param_idx]);
+                    *line = line.replacen(&arrow, &replacement, 1);
+                    param_idx += 1;
+                }
+            }
+        }
+    }
+
     // Final cleanup pass after alias substitution: identity ops and self-assignments
     let mut i = 0;
     while i < lines.len() {
