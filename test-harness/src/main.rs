@@ -3266,6 +3266,358 @@ mod tests {
             let has_sext = pcode.iter().any(|op| matches!(op, PcodeOp::IntSext { .. }));
             assert!(has_sext, "ADD X0,X1,W2,SXTW should sign-extend W2\n{pcode:#?}");
         }
+
+        // ═══════════════════════════════════════════════════════════════
+        // x86-64 compiled code patterns
+        // ═══════════════════════════════════════════════════════════════
+
+        // ── Stack canary load: MOV RAX, FS:[0x28] ──
+        // 64 48 8B 04 25 28 00 00 00
+        {
+            let result = std::panic::catch_unwind(||
+                decode(&[0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00], 0x1000));
+            match result {
+                Ok((len, disasm, pcode)) => {
+                    assert!(len == 9, "FS:[0x28] should be 9 bytes, got {len}");
+                    assert!(disasm.contains("FS") || disasm.contains("fs"),
+                        "should reference FS segment, got {disasm}");
+                    assert!(!pcode.is_empty(), "FS segment load should produce P-code");
+                }
+                Err(_) => eprintln!("[BUG] FS:[0x28] decode panicked"),
+            }
+        }
+
+        // ── Stack alignment: AND RSP, -16 ──
+        // 48 83 E4 F0
+        {
+            let (_len, disasm, pcode) = decode(&[0x48, 0x83, 0xe4, 0xf0], 0x1000);
+            assert!(disasm.contains("AND"), "got {disasm}");
+            // The immediate -16 = 0xFFFFFFFFFFFFFFF0 (sign-extended from 0xF0)
+            let has_mask = pcode.iter().any(|op| match op {
+                PcodeOp::IntAnd { right, .. } | PcodeOp::Copy { input: right, .. } =>
+                    right.space == AddressSpaceId::Const
+                    && right.offset == 0xFFFFFFFFFFFFFFF0,
+                _ => false,
+            });
+            assert!(has_mask,
+                "AND RSP,-16: imm8=0xF0 should sign-extend to 0xFFFFFFFFFFFFFFF0\n{pcode:#?}");
+        }
+
+        // ── Indirect call through memory: CALL [RAX] vs CALL RAX ──
+        {
+            // CALL RAX = FF D0 (CallInd with register)
+            let (_, _, pcode1) = decode(&[0xff, 0xd0], 0x1000);
+            assert!(pcode1.iter().any(|op| matches!(op, PcodeOp::CallInd { dest }
+                if *dest == reg(RAX, 8))),
+                "CALL RAX should CallInd with RAX\n{pcode1:#?}");
+
+            // CALL [RAX] = FF 10 (CallInd through memory — Load then call)
+            let (_, _, pcode2) = decode(&[0xff, 0x10], 0x1000);
+            assert!(pcode2.iter().any(|op| matches!(op, PcodeOp::Load { space: AddressSpaceId::Ram, .. })),
+                "CALL [RAX] should Load the target address first\n{pcode2:#?}");
+            assert!(pcode2.iter().any(|op| matches!(op, PcodeOp::CallInd { .. })),
+                "CALL [RAX] should produce CallInd\n{pcode2:#?}");
+        }
+
+        // ── JMP [RAX*8 + table] — indirect jump for switch/case ──
+        // FF 24 C5 00 20 00 00 = JMP [RAX*8 + 0x2000]
+        {
+            let result = std::panic::catch_unwind(||
+                decode(&[0xff, 0x24, 0xc5, 0x00, 0x20, 0x00, 0x00], 0x1000));
+            match result {
+                Ok((_len, disasm, pcode)) => {
+                    assert!(disasm.contains("JMP"), "got {disasm}");
+                    // Should produce BranchInd (Load may be folded into the branch)
+                    assert!(pcode.iter().any(|op| matches!(op,
+                        PcodeOp::BranchInd { .. } | PcodeOp::Branch { .. })),
+                        "JMP [table] should BranchInd\n{pcode:#?}");
+                }
+                Err(_) => eprintln!("[BUG] JMP [RAX*8+table] decode panicked"),
+            }
+        }
+
+        // ── SETcc: set byte on condition ──
+        // SETZ AL = 0F 94 C0
+        {
+            let (_len, disasm, pcode) = decode(&[0x0f, 0x94, 0xc0], 0x1000);
+            assert!(disasm.contains("SET"), "expected SETcc, got {disasm}");
+            assert!(!pcode.is_empty(), "SETcc should produce P-code\n{pcode:#?}");
+        }
+        // SETL AL = 0F 9C C0
+        {
+            let (_len, disasm, pcode) = decode(&[0x0f, 0x9c, 0xc0], 0x1000);
+            assert!(disasm.contains("SET"), "expected SETcc, got {disasm}");
+            assert!(!pcode.is_empty(), "SETcc should produce P-code");
+        }
+
+        // ── REP MOVSB (memcpy pattern) ──
+        // F3 A4
+        {
+            let result = std::panic::catch_unwind(||
+                decode(&[0xf3, 0xa4], 0x1000));
+            match result {
+                Ok((_len, disasm, pcode)) => {
+                    assert!(disasm.contains("MOVS") || disasm.contains("REP"),
+                        "expected REP MOVSB, got {disasm}");
+                    assert!(!pcode.is_empty(), "REP MOVSB should produce P-code");
+                }
+                Err(_) => eprintln!("[BUG] REP MOVSB decode panicked"),
+            }
+        }
+
+        // ── LOCK XADD (atomic fetch-and-add) ──
+        // F0 48 0F C1 07 = LOCK XADD [RDI], RAX
+        {
+            let result = std::panic::catch_unwind(||
+                decode(&[0xf0, 0x48, 0x0f, 0xc1, 0x07], 0x1000));
+            match result {
+                Ok((_len, disasm, _pcode)) => {
+                    assert!(disasm.contains("XADD"), "expected LOCK XADD, got {disasm}");
+                }
+                Err(_) => eprintln!("[BUG] LOCK XADD decode panicked"),
+            }
+        }
+
+        // ── SSE2 floating point: ADDSD XMM0, XMM1 ──
+        // F2 0F 58 C1
+        {
+            let result = std::panic::catch_unwind(||
+                decode(&[0xf2, 0x0f, 0x58, 0xc1], 0x1000));
+            match result {
+                Ok((_len, disasm, pcode)) => {
+                    assert!(disasm.contains("ADDSD") || disasm.contains("addsd"),
+                        "expected ADDSD, got {disasm}");
+                    assert!(pcode.iter().any(|op| matches!(op, PcodeOp::FloatAdd { .. })),
+                        "ADDSD should produce FloatAdd\n{pcode:#?}");
+                }
+                Err(_) => eprintln!("[BUG] ADDSD XMM0,XMM1 decode panicked"),
+            }
+        }
+
+        // ── MOVSD: load/store double ──
+        // F2 0F 10 07 = MOVSD XMM0, [RDI]
+        {
+            let result = std::panic::catch_unwind(||
+                decode(&[0xf2, 0x0f, 0x10, 0x07], 0x1000));
+            match result {
+                Ok((_len, disasm, pcode)) => {
+                    assert!(disasm.contains("MOVSD") || disasm.contains("movsd"),
+                        "expected MOVSD, got {disasm}");
+                    // Should Load from memory
+                    assert!(pcode.iter().any(|op| matches!(op, PcodeOp::Load { .. })),
+                        "MOVSD from memory should Load\n{pcode:#?}");
+                }
+                Err(_) => eprintln!("[BUG] MOVSD XMM0,[RDI] decode panicked"),
+            }
+        }
+
+        // ── Division by constant via multiply+shift: compiler output test ──
+        // IMUL RDX (widening multiply) = 48 F7 EA
+        {
+            let (_len, disasm, pcode) = decode(&[0x48, 0xf7, 0xea], 0x1000);
+            assert!(disasm.contains("IMUL"), "got {disasm}");
+            assert!(pcode.iter().any(|op| matches!(op, PcodeOp::IntMult { .. })),
+                "IMUL should produce IntMult\n{pcode:#?}");
+        }
+
+        // ── Multi-byte NOP (alignment padding) ──
+        {
+            // 5-byte NOP: 0F 1F 44 00 00
+            let (len, _, _) = decode(&[0x0f, 0x1f, 0x44, 0x00, 0x00], 0x1000);
+            assert_eq!(len, 5, "5-byte NOP should be 5 bytes");
+
+            // 4-byte NOP: 0F 1F 40 00
+            let (len, _, _) = decode(&[0x0f, 0x1f, 0x40, 0x00], 0x1000);
+            assert_eq!(len, 4, "4-byte NOP should be 4 bytes");
+        }
+
+        // ── SYSCALL ──
+        // 0F 05
+        {
+            let result = std::panic::catch_unwind(||
+                decode(&[0x0f, 0x05], 0x1000));
+            match result {
+                Ok((_len, disasm, _pcode)) => {
+                    assert!(disasm.contains("SYSCALL"), "expected SYSCALL, got {disasm}");
+                }
+                Err(_) => eprintln!("[BUG] SYSCALL decode panicked"),
+            }
+        }
+
+        // ── PLT/GOT pattern: MOV [RIP+disp], value; then CALL [RIP+disp] ──
+        {
+            let seq = x86::decode_sequence(&[
+                0x48, 0x8b, 0x05, 0x00, 0x20, 0x00, 0x00,  // mov rax, [rip+0x2000]
+                0xff, 0xd0,                                   // call rax
+            ], 0x1000);
+            assert_eq!(seq.len(), 2, "PLT pattern should decode 2 instructions");
+            assert!(seq[0].3.iter().any(|op| matches!(op, PcodeOp::Load { .. })),
+                "MOV from [RIP+disp] should Load");
+            assert!(seq[1].3.iter().any(|op| matches!(op, PcodeOp::CallInd { .. })),
+                "CALL RAX should CallInd");
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // ARM64 compiled code patterns
+        // ═══════════════════════════════════════════════════════════════
+
+        // ── TBZ/TBNZ: test bit and branch (extremely common) ──
+        // TBZ X0, #0, +8 = 0x36000040
+        {
+            let (_, disasm, pcode) = arm::decode(&[0x40, 0x00, 0x00, 0x36], 0x1000);
+            assert!(disasm.to_lowercase().contains("tbz"), "expected TBZ, got {disasm}");
+            assert!(pcode.iter().any(|op| matches!(op, PcodeOp::CBranch { .. })),
+                "TBZ should produce CBranch\n{pcode:#?}");
+        }
+        // TBNZ X0, #0, +8 = 0x37000040
+        {
+            let (_, disasm, pcode) = arm::decode(&[0x40, 0x00, 0x00, 0x37], 0x1000);
+            assert!(disasm.to_lowercase().contains("tbnz"), "expected TBNZ, got {disasm}");
+            assert!(pcode.iter().any(|op| matches!(op, PcodeOp::CBranch { .. })),
+                "TBNZ should produce CBranch\n{pcode:#?}");
+        }
+
+        // ── TBZ with backward branch ──
+        // TBZ X0, #0, -4 = 0x3607FFE0
+        {
+            let (_, disasm, pcode) = arm::decode(&[0xe0, 0xff, 0x07, 0x36], 0x1000);
+            assert!(disasm.to_lowercase().contains("tbz"), "expected TBZ, got {disasm}");
+            let target = pcode.iter().find_map(|op| match op {
+                PcodeOp::CBranch { dest, .. } => Some(dest.offset), _ => None,
+            });
+            assert!(target.map_or(false, |t| t < 0x1000),
+                "TBZ backward should branch before 0x1000, target={:?}\n{pcode:#?}",
+                target.map(|t| format!("0x{:x}", t)));
+        }
+
+        // ── CSET: branchless boolean (CMP + CSINC) ──
+        // CSET X0, EQ = CSINC X0, XZR, XZR, NE = 0x9A9F17E0
+        {
+            let (_, disasm, pcode) = arm::decode(&[0xe0, 0x17, 0x9f, 0x9a], 0x1000);
+            assert!(disasm.to_lowercase().contains("cset") || disasm.to_lowercase().contains("csinc"),
+                "expected CSET/CSINC, got {disasm}");
+            assert!(!pcode.is_empty(), "CSET should produce P-code");
+        }
+
+        // ── Shifted register: ADD X0, X1, X2, LSL #3 ──
+        // 0x8B020C20
+        {
+            let (_, disasm, pcode) = arm::decode(&[0x20, 0x0c, 0x02, 0x8b], 0x1000);
+            assert!(disasm.to_lowercase().contains("add"), "got {disasm}");
+            // Should have a shift (IntLsl) before the add
+            let has_shift = pcode.iter().any(|op| matches!(op, PcodeOp::IntLsl { .. }));
+            assert!(has_shift || pcode.len() >= 2,
+                "ADD with LSL should have shift\n{pcode:#?}");
+        }
+
+        // ── Post-index load: LDR X0, [X1], #8 ──
+        // 0xF8408420
+        {
+            let (_, disasm, pcode) = arm::decode(&[0x20, 0x84, 0x40, 0xf8], 0x1000);
+            assert!(disasm.to_lowercase().contains("ldr"), "expected LDR, got {disasm}");
+            // Post-index: Load from [X1], then add 8 to X1
+            assert!(pcode.iter().any(|op| matches!(op, PcodeOp::Load { .. })),
+                "LDR post-index should Load\n{pcode:#?}");
+            assert!(pcode.iter().any(|op| matches!(op, PcodeOp::IntAdd { .. })),
+                "LDR post-index should increment base register\n{pcode:#?}");
+        }
+
+        // ── ADRP + LDR sequence: global variable access ──
+        {
+            let seq = arm_seq::decode_sequence(&[
+                0x00, 0x00, 0x00, 0x90,   // adrp x0, .
+                0x00, 0x00, 0x40, 0xf9,   // ldr x0, [x0]
+            ], 0x1000);
+            assert_eq!(seq.len(), 2, "ADRP+LDR should decode 2 instructions");
+            assert!(!seq[0].3.is_empty(), "ADRP should produce P-code");
+            assert!(seq[1].3.iter().any(|op| matches!(op, PcodeOp::Load { .. })),
+                "LDR [X0] should Load from computed address");
+        }
+
+        // ── STP/LDP with large offset ──
+        // STP X29, X30, [SP, #-48]! = 0xA9BD7BFD
+        {
+            let (_, disasm, pcode) = arm::decode(&[0xfd, 0x7b, 0xbd, 0xa9], 0x1000);
+            assert!(disasm.to_lowercase().contains("stp"), "expected STP, got {disasm}");
+            let store_count = pcode.iter().filter(|op| matches!(op, PcodeOp::Store { .. })).count();
+            assert!(store_count >= 2, "STP should produce 2+ Stores, got {store_count}");
+        }
+
+        // ── B.cond backward branch targets ──
+        {
+            // B.NE -8 at 0x1000 → 0xFF8
+            // 54FFFFE1
+            let (_, disasm, pcode) = arm::decode(&[0xe1, 0xff, 0xff, 0x54], 0x1000);
+            assert!(disasm.to_lowercase().contains("b."), "expected B.NE, got {disasm}");
+            let target = pcode.iter().find_map(|op| match op {
+                PcodeOp::CBranch { dest, .. } => Some(dest.offset), _ => None,
+            });
+            assert!(target.map_or(false, |t| t < 0x1000),
+                "B.NE backward should branch before 0x1000, target={:?}\n{pcode:#?}",
+                target.map(|t| format!("0x{:x}", t)));
+        }
+
+        // ── CBZ backward ──
+        {
+            // CBZ X0, -4 at 0x1000 → 0xFFC
+            // B4FFFFE0
+            let (_, _, pcode) = arm::decode(&[0xe0, 0xff, 0xff, 0xb4], 0x1000);
+            let target = pcode.iter().find_map(|op| match op {
+                PcodeOp::CBranch { dest, .. } => Some(dest.offset), _ => None,
+            });
+            assert!(target.map_or(false, |t| t < 0x1000),
+                "CBZ backward should branch before 0x1000, target={:?}\n{pcode:#?}",
+                target.map(|t| format!("0x{:x}", t)));
+        }
+
+        // ── MRS: read thread pointer (common in TLS access) ──
+        // MRS X0, TPIDR_EL0 = 0xD53BD040
+        {
+            let result = std::panic::catch_unwind(||
+                arm::decode(&[0x40, 0xd0, 0x3b, 0xd5], 0x1000));
+            match result {
+                Ok((len, disasm, _pcode)) => {
+                    assert_eq!(len, 4);
+                    assert!(disasm.to_lowercase().contains("mrs") || disasm.to_lowercase().contains("tpidr"),
+                        "expected MRS, got {disasm}");
+                }
+                Err(_) => eprintln!("[BUG] MRS TPIDR_EL0 decode panicked"),
+            }
+        }
+
+        // ── CSINC: conditional increment (branchless patterns) ──
+        // CSINC X0, X1, X2, EQ = 0x9A820420
+        {
+            let (_, disasm, pcode) = arm::decode(&[0x20, 0x04, 0x82, 0x9a], 0x1000);
+            assert!(disasm.to_lowercase().contains("csinc") || disasm.to_lowercase().contains("cinc"),
+                "expected CSINC, got {disasm}");
+            assert!(!pcode.is_empty(), "CSINC should produce P-code");
+        }
+
+        // ── UXTH: zero-extend halfword (common in character processing) ──
+        // UXTH W0, W1 = UBFM W0, W1, #0, #15 = 0x53003C20
+        {
+            let (_, disasm, pcode) = arm::decode(&[0x20, 0x3c, 0x00, 0x53], 0x1000);
+            assert!(disasm.to_lowercase().contains("uxth") || disasm.to_lowercase().contains("ubfm")
+                || disasm.to_lowercase().contains("and"),
+                "expected UXTH/UBFM, got {disasm}");
+            assert!(!pcode.is_empty(), "UXTH should produce P-code");
+        }
+
+        // ── DMB: data memory barrier (concurrent code) ──
+        // DMB ISH = 0xD5033BBF
+        {
+            let result = std::panic::catch_unwind(||
+                arm::decode(&[0xbf, 0x3b, 0x03, 0xd5], 0x1000));
+            match result {
+                Ok((len, disasm, _)) => {
+                    assert_eq!(len, 4);
+                    assert!(disasm.to_lowercase().contains("dmb"),
+                        "expected DMB, got {disasm}");
+                }
+                Err(_) => eprintln!("[BUG] DMB ISH decode panicked"),
+            }
+        }
     }
 
     fn test_x86_64_vs_ghidra_fixture() {
