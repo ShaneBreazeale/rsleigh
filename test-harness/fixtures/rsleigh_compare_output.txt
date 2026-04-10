@@ -78,17 +78,17 @@
   return op;
 ---
 === main ===
-  __stack_chk_guard("add(3,4) = %d\n", add(3, 4));
-  __stack_chk_guard("factorial(6) = %d\n", factorial(6));
+  printf("add(3,4) = %d\n", add(3, 4));
+  printf("factorial(6) = %d\n", factorial(6));
   RAX = *(0x100000a38);
   EAX = *(0x100000a40);
-  __stack_chk_guard("sum = %d\n", sum_array(nums, 5));
-  __stack_chk_guard("strlen = %d\n", string_length("hello world"));
+  printf("sum = %d\n", sum_array(nums, 5));
+  printf("strlen = %d\n", string_length("hello world"));
   RAX = *(0x100000a80);
-  __stack_chk_guard("manhattan = %d\n", manhattan_distance(a, b));
-  __stack_chk_guard("day = %s\n", day_name(3));
-  __stack_chk_guard("apply(add,5,6) = %d\n", apply(0x1000004c0, 5, 6));
+  printf("manhattan = %d\n", manhattan_distance(a, b));
+  printf("day = %s\n", day_name(3));
+  printf("apply(add,5,6) = %d\n", apply(0x1000004c0, 5, 6));
   memcpy(sorted, 0x100000a50, 0x28);
-  __stack_chk_guard("search(23) = %d\n", binary_search(sorted, 0xa, 0x17));
+  printf("search(23) = %d\n", binary_search(sorted, 0xa, 0x17));
   return 0;
 ---

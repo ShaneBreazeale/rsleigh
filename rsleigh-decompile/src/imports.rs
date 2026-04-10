@@ -48,127 +48,147 @@ fn resolve_elf(elf: &goblin::elf::Elf, map: &mut HashMap<u64, String>) {
 }
 
 fn resolve_macho(macho: &goblin::mach::MachO, binary: &[u8], map: &mut HashMap<u64, String>) {
-    // Collect named symbols
+    // Collect named symbols (defined functions)
+    let mut all_symbols: Vec<(String, u64, u8)> = Vec::new();
     for sym in macho.symbols() {
         if let Ok((name, nlist)) = sym {
-            if nlist.n_type & 0x0e == 0x0e && nlist.n_value != 0 {
-                let clean = name.strip_prefix('_').unwrap_or(name);
-                if !clean.is_empty() {
-                    map.insert(nlist.n_value, clean.to_string());
+            let clean = name.strip_prefix('_').unwrap_or(name);
+            all_symbols.push((clean.to_string(), nlist.n_value, nlist.n_type));
+            // Defined symbols (type 0x0e = N_SECT)
+            if nlist.n_type & 0x0e == 0x0e && nlist.n_value != 0 && !clean.is_empty() {
+                map.insert(nlist.n_value, clean.to_string());
+            }
+        }
+    }
+
+    // Parse indirect symbol table to map stubs → import names.
+    // The Mach-O indirect symbol table (from LC_DYSYMTAB) maps each GOT/stub
+    // entry to a symbol index in the main symbol table.
+
+    // Find LC_DYSYMTAB: indirect symbol table offset and count
+    let mut indirect_symoff = 0u32;
+    let mut n_indirect_syms = 0u32;
+    for lc in &macho.load_commands {
+        if let goblin::mach::load_command::CommandVariant::Dysymtab(dysym) = &lc.command {
+            indirect_symoff = dysym.indirectsymoff;
+            n_indirect_syms = dysym.nindirectsyms;
+            break;
+        }
+    }
+
+    if indirect_symoff == 0 || n_indirect_syms == 0 { return; }
+
+    // Read the indirect symbol table: array of u32 symbol indices
+    let indirect_table: Vec<u32> = {
+        let off = indirect_symoff as usize;
+        let count = n_indirect_syms as usize;
+        if off + count * 4 > binary.len() { return; }
+        (0..count).map(|i| {
+            u32::from_le_bytes([
+                binary[off + i*4], binary[off + i*4 + 1],
+                binary[off + i*4 + 2], binary[off + i*4 + 3],
+            ])
+        }).collect()
+    };
+
+    // Find __stubs, __got, __la_symbol_ptr sections with their reserved1 field.
+    // reserved1 gives the index into the indirect symbol table for this section.
+    // goblin doesn't expose reserved1, so we parse it from the raw section headers.
+    #[derive(Default)]
+    struct SectionInfo { addr: u64, size: u64, offset: u64, reserved1: u32 }
+    let mut stubs = SectionInfo::default();
+    let mut got = SectionInfo::default();
+    let mut la_sym = SectionInfo::default();
+
+    // Parse section headers from raw binary to get reserved1
+    // Mach-O 64-bit section_64 struct: 80 bytes each, reserved1 at offset 60
+    for lc in &macho.load_commands {
+        if let goblin::mach::load_command::CommandVariant::Segment64(seg) = &lc.command {
+            let sections_start = lc.offset + 72; // LC_SEGMENT_64 header is 72 bytes
+            for i in 0..seg.nsects {
+                let sect_off = sections_start + (i as usize) * 80;
+                if sect_off + 80 > binary.len() { break; }
+                let sectname = std::str::from_utf8(&binary[sect_off..sect_off+16])
+                    .unwrap_or("").trim_end_matches('\0');
+                let addr = u64::from_le_bytes(binary[sect_off+32..sect_off+40].try_into().unwrap_or([0;8]));
+                let size = u64::from_le_bytes(binary[sect_off+40..sect_off+48].try_into().unwrap_or([0;8]));
+                let offset = u32::from_le_bytes(binary[sect_off+48..sect_off+52].try_into().unwrap_or([0;4]));
+                let reserved1 = u32::from_le_bytes(binary[sect_off+60..sect_off+64].try_into().unwrap_or([0;4]));
+
+                match sectname {
+                    "__stubs" => { stubs = SectionInfo { addr, size, offset: offset as u64, reserved1 }; }
+                    "__got" => { got = SectionInfo { addr, size, offset: offset as u64, reserved1 }; }
+                    "__la_symbol_ptr" => { la_sym = SectionInfo { addr, size, offset: offset as u64, reserved1 }; }
+                    _ => {}
                 }
             }
         }
     }
 
-    // Resolve __stubs → import names via indirect symbol table.
-    // Each stub is a JMP [rip+offset] (x86) or BR (arm64) to a GOT entry.
-    // The GOT entries are mapped to symbols via the indirect symbol table.
-    // Build GOT address → symbol name map first, then resolve stubs through it.
-    let _got_to_name: HashMap<u64, String> = HashMap::new();
-
-    // Parse indirect symbol table entries for __got section
-    // The indirect symbols array (from LC_DYSYMTAB) + section's reserved1 field
-    // gives us the mapping. Since goblin doesn't expose reserved1, we parse
-    // the __got section's indirect entries by position.
-    // Alternative: read the Mach-O load commands directly for the indirect table.
-
-    // Simpler approach: use undefined symbols. Each undefined external symbol
-    // corresponds to an import. We can match stub JMP targets to GOT entries,
-    // and GOT entries to symbols by their order in the indirect symbol table.
-    // Since otool -Iv shows this mapping, we reconstruct it:
-
-    // 1. Find all undefined external symbols (imports)
-    // These have n_value == 0 and n_type indicates undefined
-    let mut undef_syms: Vec<(usize, String)> = Vec::new();
-    for (idx, sym_result) in macho.symbols().enumerate() {
-        if let Ok((name, nlist)) = sym_result {
-            // Undefined symbols: value is 0 and not in any section
-            let is_undefined = nlist.n_value == 0 && (nlist.n_type & 0x0e) == 0;
-            if is_undefined && !name.is_empty() {
-                let clean = name.strip_prefix('_').unwrap_or(name);
-                undef_syms.push((idx, clean.to_string()));
+    // Map GOT entries → symbol names via indirect symbol table
+    let mut got_to_name: HashMap<u64, String> = HashMap::new();
+    if got.addr != 0 {
+        let n_got = got.size / 8;
+        for i in 0..n_got {
+            let ind_idx = got.reserved1 as usize + i as usize;
+            if ind_idx < indirect_table.len() {
+                let sym_idx = indirect_table[ind_idx] as usize;
+                // 0x80000000 = INDIRECT_SYMBOL_LOCAL, 0x40000000 = INDIRECT_SYMBOL_ABS
+                if sym_idx < all_symbols.len() {
+                    let entry_addr = got.addr + i * 8;
+                    got_to_name.insert(entry_addr, all_symbols[sym_idx].0.clone());
+                }
             }
         }
     }
 
-    // 2. Find __stubs and __got sections and their stub/GOT entry sizes
-    let mut stubs_addr = 0u64;
-    let mut stubs_size = 0u64;
-    let mut stubs_fo = 0u64;
-    let mut got_addr = 0u64;
-    let mut got_size = 0u64;
-
-    for seg in &macho.segments {
-        for (sect, _data) in seg.sections().unwrap_or_default() {
-            let name = std::str::from_utf8(&sect.sectname).unwrap_or("").trim_end_matches('\0');
-            match name {
-                "__stubs" => {
-                    stubs_addr = sect.addr;
-                    stubs_size = sect.size;
-                    stubs_fo = sect.offset as u64;
+    // Map lazy symbol pointer entries → symbol names
+    if la_sym.addr != 0 {
+        let n_la = la_sym.size / 8;
+        for i in 0..n_la {
+            let ind_idx = la_sym.reserved1 as usize + i as usize;
+            if ind_idx < indirect_table.len() {
+                let sym_idx = indirect_table[ind_idx] as usize;
+                if sym_idx < all_symbols.len() {
+                    let entry_addr = la_sym.addr + i * 8;
+                    got_to_name.insert(entry_addr, all_symbols[sym_idx].0.clone());
                 }
-                "__got" => {
-                    got_addr = sect.addr;
-                    got_size = sect.size;
-                }
-                _ => {}
             }
         }
     }
 
-    if stubs_addr == 0 || got_addr == 0 { return; }
+    if stubs.addr == 0 { return; }
 
-    // 3. Determine stub entry size from architecture:
-    //    x86-64: 6 bytes (FF 25 disp32)
-    //    AArch64: 12 bytes (ADRP+LDR+BR)
-    let stub_size = if stubs_size > 0 && stubs_fo as usize + 2 <= binary.len() {
-        let off = stubs_fo as usize;
-        if binary[off] == 0xff && binary[off + 1] == 0x25 {
-            6u64 // x86-64 JMP [rip+disp32]
-        } else {
-            12u64 // AArch64 ADRP+LDR+BR
-        }
+    // Determine stub entry size: x86-64 = 6 bytes, AArch64 = 12 bytes
+    let stub_size = if stubs.offset as usize + 2 <= binary.len() {
+        let off = stubs.offset as usize;
+        if binary[off] == 0xff && binary[off + 1] == 0x25 { 6u64 }
+        else { 12u64 }
     } else { 6 };
 
-    let n_stubs = if stub_size > 0 { stubs_size / stub_size } else { 0 };
+    let n_stubs = if stub_size > 0 { stubs.size / stub_size } else { 0 };
 
-    // 4. For each stub, decode the JMP target to find which GOT entry it uses
-    let mut stub_to_got: Vec<(u64, u64)> = Vec::new();
+    // Map each stub directly via the __stubs section's indirect symbol table entries.
+    // stub i → indirect_table[stubs.reserved1 + i] → symbol_table[sym_idx] → name
     for i in 0..n_stubs {
-        let stub_va = stubs_addr + i * stub_size;
-        let file_off = (stubs_fo + i * stub_size) as usize;
-
-        if stub_size == 6 && file_off + 6 <= binary.len() {
-            // x86-64: FF 25 disp32
-            if binary[file_off] == 0xff && binary[file_off + 1] == 0x25 {
-                let disp = i32::from_le_bytes([
-                    binary[file_off + 2], binary[file_off + 3],
-                    binary[file_off + 4], binary[file_off + 5],
-                ]);
-                let got_entry = (stub_va + 6).wrapping_add(disp as u64);
-                stub_to_got.push((stub_va, got_entry));
+        let stub_va = stubs.addr + i * stub_size;
+        let ind_idx = stubs.reserved1 as usize + i as usize;
+        if ind_idx < indirect_table.len() {
+            let sym_idx = indirect_table[ind_idx] as usize;
+            if sym_idx < all_symbols.len() {
+                let name = &all_symbols[sym_idx].0;
+                if !name.is_empty() {
+                    map.insert(stub_va, name.clone());
+                }
             }
-        } else if stub_size == 12 && file_off + 12 <= binary.len() {
-            // AArch64: ADRP+LDR+BR — GOT entry is computed from ADRP page + LDR offset
-            // For simplicity, map by position: stub i → GOT entry i
-            let got_entry = got_addr + i * 8;
-            stub_to_got.push((stub_va, got_entry));
         }
     }
 
-    // 5. Map stubs to import names via GOT index.
-    // Each stub jumps to a GOT entry. The GOT entries are in the same order as
-    // the undefined symbols. GOT entry i → undef_syms[i].
-    for (stub_va, got_entry) in &stub_to_got {
-        if *got_entry >= got_addr && *got_entry < got_addr + got_size {
-            let got_idx = ((*got_entry - got_addr) / 8) as usize;
-            // The GOT entry at index `got_idx` corresponds to undef_syms[got_idx]
-            if got_idx < undef_syms.len() {
-                let name = &undef_syms[got_idx].1;
-                if !name.is_empty() {
-                    map.insert(*stub_va, name.clone());
-                }
-            }
+    // Also map GOT entries directly for non-lazy bindings (called via GOT, no stub)
+    for (got_entry, name) in &got_to_name {
+        if !name.is_empty() && !map.values().any(|v| v == name) {
+            // No stub for this import — it's called via GOT directly
+            map.insert(*got_entry, name.clone());
         }
     }
 }
