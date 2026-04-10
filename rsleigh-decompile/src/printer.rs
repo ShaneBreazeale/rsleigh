@@ -254,14 +254,46 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                         return; // Elided: stack Load tracked
                     }
                 } else {
-                    tracker.invalidate(vdef.varnode.offset, vdef.varnode.size);
+                    // Format BEFORE invalidating so the expression can resolve
+                    // the old register values through the tracker
                 }
             }
 
-            // For non-register assigns (stack vars), resolve the RHS through tracker
+            // Format RHS BEFORE any invalidation of this register
             let name = var_name(&vdef.varnode, ctx);
             let rhs = format_expr_tracked(&vdef.expr, ssa, ctx, tracker);
+
+            // NOW invalidate if this was a computed expression (not a copy/load)
+            if vdef.varnode.space == AddressSpaceId::Register {
+                if !matches!(&vdef.expr, Expr::Var(_) | Expr::Load(_)) {
+                    tracker.invalidate(vdef.varnode.offset, vdef.varnode.size);
+                }
+            }
             if rhs == name { return; }
+
+            // Fold "REG = expr; return;" into "return expr;" when this is the
+            // last visible assignment before a Return in the same statement list
+            if vdef.varnode.space == AddressSpaceId::Register
+                && vdef.varnode.offset == 0 // RAX/EAX — return value register
+            {
+                let next_is_return = stmts[stmt_idx + 1..].iter().all(|s| {
+                    match s {
+                        StructuredStmt::Return(_) => true,
+                        StructuredStmt::Assign { lhs, .. } => {
+                            let v = ssa.var(*lhs);
+                            v.varnode.space == AddressSpaceId::Unique
+                                || (v.varnode.space == AddressSpaceId::Register && is_flag(v.varnode.offset))
+                        }
+                        _ => false,
+                    }
+                });
+                if next_is_return {
+                    out.push_str(&format!("{}return {};\n", pad, rhs));
+                    // Mark that we've printed the return
+                    tracker.set_call_return(0, 0, "<<returned>>".to_string());
+                    return;
+                }
+            }
             // Skip dead stores and stores immediately before return
             if name.starts_with("var_") && vdef.use_count == 0 {
                 return; // Dead store
@@ -363,6 +395,10 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
             }
         }
         StructuredStmt::Return(val) => {
+            // Skip if the return was already folded into a preceding assignment
+            if tracker.get_expr_str(0, 0).map_or(false, |s| s == "<<returned>>") {
+                return;
+            }
             if let Some(v) = val {
                 let resolved = tracker.resolve(*v, ssa);
                 let vdef = ssa.var(resolved);
@@ -458,15 +494,21 @@ fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTrac
                 }
             }
         }
-        // Also check BinOp whose operands are Uniques wrapping tracked registers
+        // Check BinOp whose operands have tracked registers (Unique or direct)
         if let Expr::BinOp(kind, left, right) = &vdef.expr {
             let lv = ssa.var(*left);
             let rv = ssa.var(*right);
-            let l_has_tracked = lv.varnode.space == AddressSpaceId::Unique
-                && expr_has_tracked_reg(&lv.expr, ssa, tracker);
-            let r_has_tracked = rv.varnode.space == AddressSpaceId::Unique
-                && expr_has_tracked_reg(&rv.expr, ssa, tracker);
-            if l_has_tracked || r_has_tracked {
+            let l_tracked = (lv.varnode.space == AddressSpaceId::Register
+                    && (tracker.get(lv.varnode.offset, lv.varnode.size).is_some()
+                        || tracker.get_expr_str(lv.varnode.offset, lv.varnode.size).is_some()))
+                || (lv.varnode.space == AddressSpaceId::Unique
+                    && expr_has_tracked_reg(&lv.expr, ssa, tracker));
+            let r_tracked = (rv.varnode.space == AddressSpaceId::Register
+                    && (tracker.get(rv.varnode.offset, rv.varnode.size).is_some()
+                        || tracker.get_expr_str(rv.varnode.offset, rv.varnode.size).is_some()))
+                || (rv.varnode.space == AddressSpaceId::Unique
+                    && expr_has_tracked_reg(&rv.expr, ssa, tracker));
+            if l_tracked || r_tracked {
                 let l = format_var_tracked(*left, ssa, ctx, tracker);
                 let r = format_var_tracked(*right, ssa, ctx, tracker);
                 return format!("{} {} {}", l, binop_str(*kind), r);
@@ -474,16 +516,37 @@ fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTrac
         }
         return format_expr(&vdef.expr, ssa, ctx);
     }
-    // Check register tracking
+    // Check register tracking (try exact size, then sub-register sizes)
     if vdef.varnode.space == AddressSpaceId::Register {
         if let Some(expr_str) = tracker.get_expr_str(vdef.varnode.offset, vdef.varnode.size) {
             return expr_str.to_string();
         }
-        if let Some(tracked_id) = tracker.get(vdef.varnode.offset, vdef.varnode.size) {
+        // Also check smaller sizes at same offset (RAX → EAX tracking)
+        if tracker.get_expr_str(vdef.varnode.offset, vdef.varnode.size).is_none() {
+            for sz in [4u32, 8, 2, 1] {
+                if sz == vdef.varnode.size { continue; }
+                if let Some(expr_str) = tracker.get_expr_str(vdef.varnode.offset, sz) {
+                    return expr_str.to_string();
+                }
+            }
+        }
+        let tracked_id = tracker.get(vdef.varnode.offset, vdef.varnode.size)
+            .or_else(|| {
+                // Try sub-register sizes
+                for sz in [4u32, 8, 2, 1] {
+                    if sz == vdef.varnode.size { continue; }
+                    if let Some(id) = tracker.get(vdef.varnode.offset, sz) {
+                        return Some(id);
+                    }
+                }
+                None
+            });
+        if let Some(tracked_id) = tracked_id {
             let tracked_vdef = ssa.var(tracked_id);
             if let Expr::Load(ptr) = &tracked_vdef.expr {
                 if let Some(offset) = get_rbp_offset(*ptr, ssa) {
-                    return format!("var_{:x}", offset);
+                    let name = format!("var_{:x}", offset);
+                    return resolve_stack_alias(&name, tracker);
                 }
             }
             if tracked_vdef.varnode.space != AddressSpaceId::Register {
@@ -576,7 +639,8 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
         }
         Expr::Load(ptr) => {
             if let Some(offset) = get_rbp_offset(*ptr, ssa) {
-                return format!("var_{:x}", offset);
+                let name = format!("var_{:x}", offset);
+                return resolve_stack_alias(&name, tracker);
             }
             format_expr(expr, ssa, ctx)
         }

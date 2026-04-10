@@ -1164,9 +1164,9 @@ int main(int argc, char** argv) {
         // --- Validate add() ---
         if let Some(addr) = find_addr("add") {
             let output = decompile_func(addr, &mut dec);
-            assert!(output.contains("var_4") || output.contains("EDI"),
+            assert!(output.contains("var_4") || output.contains("EDI") || output.contains("param_0"),
                 "add(): should reference first argument\n{}", output);
-            assert!(output.contains("var_8") || output.contains("ESI"),
+            assert!(output.contains("var_8") || output.contains("ESI") || output.contains("param_1"),
                 "add(): should reference second argument\n{}", output);
             assert!(output.contains("+"),
                 "add(): should contain addition operator\n{}", output);
