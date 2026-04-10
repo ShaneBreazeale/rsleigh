@@ -1,0 +1,94 @@
+=== add ===
+  return a + b;
+---
+=== sub ===
+  return a - b;
+---
+=== factorial ===
+  if (n > 1) {
+      return n * factorial(n - 1);
+  } else {
+      return 1;
+  }
+---
+=== sum_array ===
+  while (len > i) {
+      RCX = i;
+      EAX = (arr[RCX * 4]) + total;
+  }
+  return arr;
+---
+=== string_length ===
+  while (EAX != 0) {
+      return RAX;
+  }
+  return s;
+---
+=== manhattan_distance ===
+  EAX = (a[4]) - RCX[4];
+  dy = a;
+  if (!a >= 0) {
+      dx = 0 - dx;
+      if (!dy >= 0) {
+          EAX = 0 - dy;
+          return dx + EAX;
+      }
+  }
+---
+=== day_name ===
+  RAX = day - 6;
+  if (!CF || ZF) {
+      RAX = "Unknown";
+      return;
+  } else {
+      RCX = 0x1000006b4;
+      RAX = "Sunday";
+      return "Sunday";
+  }
+---
+=== list_sum ===
+  while (head != 0) {
+      EAX = *(RAX) + sum;
+      RAX = head[8];
+      return RAX;
+  }
+  return head;
+---
+=== binary_search ===
+  while (hi >= lo) {
+      EAX = EAX / 2;
+      EDX = EAX % 2;
+      RCX = lo + EAX;
+      if (EAX != target) {
+          RCX = mid;
+          EAX = arr[RCX * 4];
+          if (target <= EAX) {
+              hi = mid - 1;
+          } else {
+              return EAX;
+          }
+      } else {
+          return;
+      }
+  }
+  var_4 = -0x1;
+---
+=== apply ===
+  (*RAX)(a, b);
+  return op;
+---
+=== main ===
+  __stack_chk_guard("add(3,4) = %d\n", add(3, 4));
+  __stack_chk_guard("factorial(6) = %d\n", factorial(6));
+  RAX = *(0x100000a38);
+  EAX = *(0x100000a40);
+  __stack_chk_guard("sum = %d\n", sum_array(nums, 5));
+  __stack_chk_guard("strlen = %d\n", string_length("hello world"));
+  RAX = *(0x100000a80);
+  __stack_chk_guard("manhattan = %d\n", manhattan_distance(a, b));
+  __stack_chk_guard("day = %s\n", day_name(3));
+  __stack_chk_guard("apply(add,5,6) = %d\n", apply(0x1000004c0, 5, 6));
+  memcpy(sorted, 0x100000a50, 0x28);
+  __stack_chk_guard("search(23) = %d\n", binary_search(sorted, 0xa, 0x17));
+  return 0;
+---

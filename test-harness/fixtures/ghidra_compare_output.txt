@@ -1,0 +1,236 @@
+=== add ===
+  
+  int add(int a,int b)
+  
+  {
+    int b_local;
+    int a_local;
+    
+    return a + b;
+  }
+---
+=== sub ===
+  
+  int sub(int a,int b)
+  
+  {
+    int b_local;
+    int a_local;
+    
+    return a - b;
+  }
+---
+=== factorial ===
+  
+  int factorial(int n)
+  
+  {
+    int n_local;
+    undefined4 local_c;
+    
+    if (n < 2) {
+      local_c = 1;
+    }
+    else {
+      local_c = factorial(n + -1);
+      local_c = n * local_c;
+    }
+    return local_c;
+  }
+---
+=== sum_array ===
+  
+  int sum_array(int *arr,int len)
+  
+  {
+    int i;
+    int total;
+    int len_local;
+    int *arr_local;
+    
+    total = 0;
+    for (i = 0; i < len; i = i + 1) {
+      total = arr[i] + total;
+    }
+    return total;
+  }
+---
+=== string_length ===
+  
+  int string_length(char *s)
+  
+  {
+    int len;
+    char *s_local;
+    
+    len = 0;
+    for (s_local = s; *s_local != '\0'; s_local = s_local + 1) {
+      len = len + 1;
+    }
+    return len;
+  }
+---
+=== manhattan_distance ===
+  
+  int manhattan_distance(Point *a,Point *b)
+  
+  {
+    int dy;
+    int dx;
+    Point *b_local;
+    Point *a_local;
+    
+    dx = a->x - b->x;
+    dy = a->y - b->y;
+    if (dx < 0) {
+      dx = -dx;
+    }
+    if (dy < 0) {
+      dy = -dy;
+    }
+    return dx + dy;
+  }
+---
+=== day_name ===
+  
+  char * day_name(int day)
+  
+  {
+    int day_local;
+    char *local_10;
+    
+    switch(day) {
+    case 0:
+      local_10 = "Sunday";
+      break;
+    case 1:
+      local_10 = "Monday";
+      break;
+    case 2:
+      local_10 = "Tuesday";
+      break;
+    case 3:
+      local_10 = "Wednesday";
+      break;
+    case 4:
+      local_10 = "Thursday";
+      break;
+    case 5:
+      local_10 = "Friday";
+      break;
+    case 6:
+      local_10 = "Saturday";
+      break;
+    default:
+      local_10 = "Unknown";
+    }
+    return local_10;
+  }
+---
+=== list_sum ===
+  
+  int list_sum(Node *head)
+  
+  {
+    int sum;
+    Node *head_local;
+    
+    sum = 0;
+    for (head_local = head; head_local != (Node *)0x0; head_local = head_local->next) {
+      sum = head_local->value + sum;
+    }
+    return sum;
+  }
+---
+=== binary_search ===
+  
+  int binary_search(int *arr,int len,int target)
+  
+  {
+    int iVar1;
+    int mid;
+    int hi;
+    int lo;
+    int target_local;
+    int len_local;
+    int *arr_local;
+    
+    lo = 0;
+    hi = len + -1;
+    while( true ) {
+      if (hi < lo) {
+        return -1;
+      }
+      iVar1 = lo + (hi - lo) / 2;
+      if (arr[iVar1] == target) break;
+      if (arr[iVar1] < target) {
+        lo = iVar1 + 1;
+      }
+      else {
+        hi = iVar1 + -1;
+      }
+    }
+    return iVar1;
+  }
+---
+=== apply ===
+  
+  int apply(BinOp op,int a,int b)
+  
+  {
+    int iVar1;
+    int b_local;
+    int a_local;
+    BinOp op_local;
+    
+    iVar1 = (*op)(a,b);
+    return iVar1;
+  }
+---
+=== main ===
+  
+  int main(int argc,char **argv)
+  
+  {
+    long lVar1;
+    uint uVar2;
+    char *pcVar3;
+    Point b;
+    Point a;
+    char **argv_local;
+    int argc_local;
+    int sorted [10];
+    int nums [5];
+    
+    lVar1 = *(long *)PTR____stack_chk_guard_100001000;
+    uVar2 = add(3,4);
+    _printf("add(3,4) = %d\n",(ulong)uVar2);
+    uVar2 = factorial(6);
+    _printf("factorial(6) = %d\n",(ulong)uVar2);
+    nums[0] = (int)DAT_100000a30;
+    nums[1] = DAT_100000a30._4_4_;
+    nums[2] = (int)DAT_100000a38;
+    nums[3] = DAT_100000a38._4_4_;
+    nums[4] = DAT_100000a40;
+    uVar2 = sum_array(nums,5);
+    _printf("sum = %d\n",(ulong)uVar2);
+    uVar2 = string_length("hello world");
+    _printf("strlen = %d\n",(ulong)uVar2);
+    a = DAT_100000a78;
+    b = DAT_100000a80;
+    uVar2 = manhattan_distance(&a,&b);
+    _printf("manhattan = %d\n",(ulong)uVar2);
+    pcVar3 = day_name(3);
+    _printf("day = %s\n",pcVar3);
+    uVar2 = apply(add,5,6);
+    _printf("apply(add,5,6) = %d\n",(ulong)uVar2);
+    _memcpy(sorted,&DAT_100000a50,0x28);
+    uVar2 = binary_search(sorted,10,0x17);
+    _printf("search(23) = %d\n",(ulong)uVar2);
+    if (*(long *)PTR____stack_chk_guard_100001000 == lVar1) {
+      return 0;
+    }
+                      /* WARNING: Subroutine does not return */
+    ___stack_chk_fail();
+  }
+---
