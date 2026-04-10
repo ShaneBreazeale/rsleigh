@@ -131,6 +131,7 @@ pub enum StructuredStmt {
     },
     While {
         cond: VarId,
+        negate: bool,
         body: Vec<StructuredStmt>,
     },
     Goto(u64),

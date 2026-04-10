@@ -66,36 +66,50 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     let mut i = 0;
     while i < lines.len() {
         // #4: Hide stack canary boilerplate
-        // Pattern: RAX = *(0x...); RAX = *(RAX); ... if (!RAX != RCX/var_8)
-        if lines[i].trim().starts_with("RAX = *(0x") && lines[i].contains("1008") {
-            // Look ahead for the canary check pattern
+        // Preamble: RAX = *(0x...); RAX = *(RAX); (global canary pointer load)
+        // Epilogue: RAX = *(0x...); RAX = *(RAX); RCX = ...; if (...)  { ... }
+        if lines[i].trim().starts_with("RAX = *(0x") {
+            // Look ahead: canary preamble is RAX = *(addr); RAX = *(RAX); followed by real code
+            // Canary epilogue is RAX = *(addr); RAX = *(RAX); ...; if (...) { ... }
             let mut j = i + 1;
             let mut canary_end = None;
+            let mut saw_deref = false;
+            let mut extracted_return = None;
             while j < lines.len() {
                 let lt = lines[j].trim();
-                if lt.starts_with("if (") && (lt.contains("!= RCX") || lt.contains("!= var_")) {
-                    // Find the closing brace
-                    let mut k = j + 1;
+                if lt == "RAX = *(RAX);" { saw_deref = true; j += 1; continue; }
+                if lt.starts_with("RCX = ") || lt.starts_with("RDX = ") { j += 1; continue; }
+                // If we see an if after the canary load, it's the epilogue check
+                if saw_deref && lt.starts_with("if (") {
+                    let mut depth = 0;
+                    let mut k = j;
                     while k < lines.len() {
-                        if lines[k].trim() == "}" { canary_end = Some(k); break; }
+                        if lines[k].trim().starts_with("return") && depth == 1 {
+                            extracted_return = Some(lines[k].trim().to_string());
+                        }
+                        if lines[k].contains('{') { depth += 1; }
+                        if lines[k].contains('}') { depth -= 1; if depth == 0 { canary_end = Some(k); break; } }
                         k += 1;
                     }
                     break;
                 }
-                if lt.starts_with("printf") || lt.starts_with("func_") || lt.contains("strlen")
-                    || lt.starts_with("add") || lt.starts_with("factorial") || lt.starts_with("reverse")
-                    || lt.starts_with("__") || lt.starts_with("while") || lt.starts_with("if (1")
-                {
-                    break; // Not a canary — real code
+                // If we hit real code after RAX = *(RAX), this is a preamble
+                if saw_deref {
+                    canary_end = Some(j - 1);
+                    break;
                 }
-                j += 1;
+                break;
             }
             if let Some(end) = canary_end {
-                // Remove lines i..=end
                 for idx in (i..=end).rev() {
                     lines.remove(idx);
                 }
-                continue; // Don't increment i
+                // Re-insert any return that was inside the canary check
+                if let Some(ret) = extracted_return {
+                    lines.insert(i, ret);
+                    i += 1;
+                }
+                continue;
             }
         }
 
@@ -104,12 +118,37 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         if i + 1 < lines.len() {
             let current = lines[i].trim();
             if current.ends_with("();") || current.ends_with(");") {
-                // Extract the call expression (without semicolon and indent)
                 let call = current.trim_end_matches(';');
                 let next = lines[i + 1].trim();
                 if next.contains(call) && next != current {
                     lines.remove(i);
                     continue;
+                }
+            }
+        }
+
+        // #2b: Remove "REG = call();" when the same call appears again on a later line
+        // Pattern: "EAX = strlen(str);" where strlen(str) appears elsewhere — redundant display
+        {
+            let lt = lines[i].trim();
+            if let Some(eq_pos) = lt.find(" = ") {
+                let lhs = &lt[..eq_pos];
+                let rhs = &lt[eq_pos + 3..lt.len().saturating_sub(1)]; // strip ;
+                let is_reg_lhs = lhs.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+                let is_call_rhs = rhs.contains('(') && rhs.contains(')');
+                if is_reg_lhs && is_call_rhs {
+                    // Check if this call result is already represented by another line
+                    let mut is_redundant = false;
+                    for j in (0..i).chain(i+1..lines.len()) {
+                        if lines[j].trim().contains(rhs) {
+                            is_redundant = true;
+                            break;
+                        }
+                    }
+                    if is_redundant {
+                        lines.remove(i);
+                        continue;
+                    }
                 }
             }
         }
@@ -133,16 +172,39 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             }
         }
 
-        // #6: Hide "EAX = var_X;" or "EDI = var_X;" when the next line uses the same var
-        // These are register loads that are tracked by the printer
+        // #6: Hide simple register assignments that are intermediates
         {
-            let lt = lines[i].trim();
-            if (lt.starts_with("EAX = var_") || lt.starts_with("EDI = var_") || lt.starts_with("EAX = param_"))
-                && lt.ends_with(';')
-                && !lt.contains('+') && !lt.contains('*') && !lt.contains('-')
-            {
-                lines.remove(i);
-                continue;
+            let lt = lines[i].trim().to_string();
+            if let Some(eq_pos) = lt.find(" = ") {
+                let lhs = lt[..eq_pos].to_string();
+                let rhs = lt[eq_pos + 3..].trim_end_matches(';').to_string();
+                let is_reg = lhs.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                    && lhs.len() >= 2 && lhs.len() <= 3;
+                if is_reg && lt.ends_with(';') {
+                    // Remove: REG = simple_value (var, param, DWARF name, another REG, constant 0)
+                    let is_simple = rhs.starts_with("var_") || rhs.starts_with("param_")
+                        || rhs == "0"
+                        || (rhs.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) && rhs.len() <= 3)
+                        || (!rhs.contains(' ') && !rhs.contains('(')
+                            && rhs.chars().next().map_or(false, |c| c.is_ascii_lowercase()));
+                    if is_simple {
+                        lines.remove(i);
+                        continue;
+                    }
+                    // Simplify: REG = expr - 0; → REG = expr;
+                    let rhs = if rhs.ends_with(" - 0") {
+                        rhs.trim_end_matches(" - 0").to_string()
+                    } else if rhs.starts_with("0 + ") {
+                        rhs[4..].to_string()
+                    } else {
+                        rhs.clone()
+                    };
+                    // Remove self-assignment: REG = REG;
+                    if rhs == lhs {
+                        lines.remove(i);
+                        continue;
+                    }
+                }
             }
         }
 
@@ -157,9 +219,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
-    // Replace EAX in expressions with the first param when it's a
-    // save/restore pattern: EAX = EAX * ... → return param_0 * ...
-    if aliases.values().any(|v| v == "param_0") {
+    // Replace "EAX = EAX op expr; return;" → "return param op expr;"
+    // Find the first parameter name from aliases
+    let first_param = aliases.values().find(|v| {
+        v.starts_with("param_") || v.chars().next().map_or(false, |c| c.is_ascii_lowercase())
+    }).cloned();
+    if let Some(param_name) = first_param {
         let mut i = 0;
         while i < lines.len() {
             let lt = lines[i].trim().to_string();
@@ -167,7 +232,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let indent = lines[i].len() - lines[i].trim_start().len();
                 let pad = &lines[i][..indent];
                 let expr = lt.trim_start_matches("EAX = EAX ").trim_end_matches(';');
-                lines[i] = format!("{}return param_0 {};", pad, expr);
+                lines[i] = format!("{}return {} {};", pad, param_name, expr);
                 // Remove the following "return;" if it exists
                 if i + 1 < lines.len() && lines[i + 1].trim() == "return;" {
                     lines.remove(i + 1);
@@ -177,10 +242,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
-    // Apply stack variable aliases: var_8 → param_0, etc.
+    // Apply stack variable aliases: var_8 → param_0 / DWARF name, etc.
     for line in &mut lines {
         for (var_name, alias) in aliases {
-            if var_name.starts_with("var_") && alias.starts_with("param_") {
+            if var_name.starts_with("var_") && alias != var_name {
                 // Replace whole-word occurrences of var_N with param_M
                 let pattern = var_name.as_str();
                 let mut result = String::new();
@@ -202,6 +267,34 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 *line = result;
             }
         }
+    }
+
+    // Final cleanup pass after alias substitution: identity ops and self-assignments
+    let mut i = 0;
+    while i < lines.len() {
+        let lt = lines[i].trim().to_string();
+        // REG = REG - 0; → remove (identity)
+        if lt.ends_with(" - 0;") || lt.ends_with(" + 0;") {
+            if let Some(eq_pos) = lt.find(" = ") {
+                let lhs = &lt[..eq_pos];
+                let rhs = lt[eq_pos + 3..].trim_end_matches(';')
+                    .trim_end_matches(" - 0").trim_end_matches(" + 0");
+                if lhs == rhs {
+                    lines.remove(i);
+                    continue;
+                }
+            }
+        }
+        // REG = REG; → remove (self-assign)
+        if let Some(eq_pos) = lt.find(" = ") {
+            let lhs = &lt[..eq_pos];
+            let rhs = lt[eq_pos + 3..].trim_end_matches(';');
+            if lhs == rhs {
+                lines.remove(i);
+                continue;
+            }
+        }
+        i += 1;
     }
 
     // Remove consecutive blank lines
@@ -522,7 +615,11 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                 if val_expr == stack_name {
                     return; // Self-assign
                 }
-                if val_expr.starts_with("param_") || val_expr.starts_with("var_") {
+                // Hide parameter/variable stores — these are tracked aliases
+                // (resolved at use sites via stack_alias map)
+                let is_param = val_expr.starts_with("param_")
+                    || ssa.var(*val).param_name.is_some();
+                if is_param || val_expr.starts_with("var_") {
                     return; // Tracked alias — available via stack_alias at use sites
                 }
                 // Skip stores before return: check if the next VISIBLE statement
@@ -624,10 +721,15 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                 out.push_str(&format!("{}}}\n", pad));
             }
         }
-        StructuredStmt::While { cond, body } => {
+        StructuredStmt::While { cond, negate, body } => {
             let cond_expr = format_condition_tracked(*cond, ssa, ctx, tracker);
+            let display_cond = if *negate {
+                negate_condition(&cond_expr)
+            } else {
+                cond_expr
+            };
             let body_filtered = filter_boilerplate(body, ssa);
-            out.push_str(&format!("{}while ({}) {{\n", pad, cond_expr));
+            out.push_str(&format!("{}while ({}) {{\n", pad, display_cond));
             print_stmts(&body_filtered, ssa, ctx, indent + 1, out);
             out.push_str(&format!("{}}}\n", pad));
         }
@@ -935,10 +1037,11 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, indent: usize
                 out.push_str(&format!("{}}}\n", pad));
             }
         }
-        StructuredStmt::While { cond, body } => {
+        StructuredStmt::While { cond, negate, body } => {
             let cond_expr = format_condition(*cond, ssa, ctx);
+            let display_cond = if *negate { negate_condition(&cond_expr) } else { cond_expr };
             let body_filtered = filter_boilerplate(body, ssa);
-            out.push_str(&format!("{}while ({}) {{\n", pad, cond_expr));
+            out.push_str(&format!("{}while ({}) {{\n", pad, display_cond));
             print_stmts(&body_filtered, ssa, ctx, indent + 1, out);
             out.push_str(&format!("{}}}\n", pad));
         }
@@ -963,8 +1066,19 @@ fn format_condition_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &R
 
     if let Expr::BinOp(kind, left, right) = &vdef.expr {
         if is_comparison(*kind) {
-            let l = format_var_tracked(*left, ssa, ctx, tracker);
-            let r = format_var_tracked(*right, ssa, ctx, tracker);
+            // For conditions, render operands via their SSA expression first,
+            // falling back to tracker. This avoids the tracker aliasing both
+            // operands to the same register name.
+            let l = format_cond_operand(*left, ssa, ctx, tracker);
+            let r = format_cond_operand(*right, ssa, ctx, tracker);
+            // Canonicalize: if LHS is a constant, swap operands and use swapped operator string
+            let lv = ssa.var(*left);
+            let l_is_const = matches!(&lv.expr, Expr::Const(_, _));
+            if l_is_const {
+                if let Some(swapped_op) = swap_comparison_str(*kind) {
+                    return format!("{} {} {}", r, swapped_op, l);
+                }
+            }
             return format!("{} {} {}", l, binop_str(*kind), r);
         }
     }
@@ -985,6 +1099,56 @@ fn format_condition_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &R
 fn is_comparison(kind: BinOpKind) -> bool {
     matches!(kind, BinOpKind::Eq | BinOpKind::NotEq | BinOpKind::Less
         | BinOpKind::LessEq | BinOpKind::SLess | BinOpKind::SLessEq)
+}
+
+/// Format a condition operand, preferring the SSA expression over the tracker.
+/// This avoids cases where both operands alias to the same register name.
+fn format_cond_operand(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> String {
+    let vdef = ssa.var(id);
+    // If the var has a param name, use it
+    if let Some(ref name) = vdef.param_name {
+        return name.clone();
+    }
+    // If the expression is a stack Load, use the stack variable name
+    if let Expr::Load(ptr) = &vdef.expr {
+        if let Some(offset) = get_rbp_offset(*ptr, ssa) {
+            let name = format!("var_{:x}", offset);
+            return resolve_stack_alias(&name, tracker);
+        }
+    }
+    // For non-trivial expressions (BinOp, etc.), render directly from SSA
+    if matches!(&vdef.expr, Expr::BinOp(_, _, _)) {
+        return format_expr_tracked(&vdef.expr, ssa, ctx, tracker);
+    }
+    // Default: use tracked resolution
+    format_var_tracked(id, ssa, ctx, tracker)
+}
+
+/// Negate a condition string for while loop display.
+/// "a <= b" → "a > b", "a == b" → "a != b", etc.
+fn negate_condition(cond: &str) -> String {
+    // Try to find and flip the operator
+    for (op, neg) in [(" <= ", " > "), (" >= ", " < "), (" < ", " >= "), (" > ", " <= "),
+                       (" == ", " != "), (" != ", " == ")] {
+        if let Some(pos) = cond.find(op) {
+            return format!("{}{}{}", &cond[..pos], neg, &cond[pos + op.len()..]);
+        }
+    }
+    format!("!({})", cond)
+}
+
+/// Get the display string for a comparison with swapped operands.
+/// a < b → b > a, a <= b → b >= a, etc.
+fn swap_comparison_str(kind: BinOpKind) -> Option<&'static str> {
+    match kind {
+        BinOpKind::Eq => Some("=="),
+        BinOpKind::NotEq => Some("!="),
+        BinOpKind::Less => Some(">"),
+        BinOpKind::LessEq => Some(">="),
+        BinOpKind::SLess => Some(">"),
+        BinOpKind::SLessEq => Some(">="),
+        _ => None,
+    }
 }
 
 // ---- Stack variable naming ----

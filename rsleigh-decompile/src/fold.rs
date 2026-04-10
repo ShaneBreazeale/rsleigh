@@ -310,9 +310,11 @@ fn recover_conditions(ssa: &mut SsaCfg) {
     for (bi, block) in ssa.blocks.iter().enumerate() {
         if let SsaTerminator::CBranch { cond, .. } = &block.terminator {
             let vdef = &ssa.vars[cond.0 as usize];
-            // Accept: flag registers, Unique-space compound expressions, anything not already a comparison
             let dominated_by_flags = is_flag_derived(*cond, ssa);
-            let already_comparison = matches!(&vdef.expr, Expr::BinOp(k, _, _) if is_comparison(*k));
+            // A comparison is only "already recovered" if its operands are NOT flags
+            let already_comparison = if let Expr::BinOp(k, l, r) = &vdef.expr {
+                is_comparison(*k) && !is_flag_derived(*l, ssa) && !is_flag_derived(*r, ssa)
+            } else { false };
             if dominated_by_flags && !already_comparison {
                 to_recover.push((bi, *cond));
             }
@@ -354,9 +356,11 @@ fn is_flag_derived_depth(id: VarId, ssa: &SsaCfg, depth: u32) -> bool {
 fn try_recover_condition(cond_id: VarId, block_idx: usize, ssa: &mut SsaCfg) -> Option<VarId> {
     let vdef = &ssa.vars[cond_id.0 as usize];
 
-    // If already a comparison, use it
-    if let Expr::BinOp(kind, _, _) = &vdef.expr {
-        if is_comparison(*kind) { return Some(cond_id); }
+    // If already a comparison with non-flag operands, use it
+    if let Expr::BinOp(kind, l, r) = &vdef.expr {
+        if is_comparison(*kind) && !is_flag_derived(*l, ssa) && !is_flag_derived(*r, ssa) {
+            return Some(cond_id);
+        }
     }
 
     // Detect compound flag patterns from x86 Jcc instructions:
@@ -384,16 +388,20 @@ fn try_recover_condition(cond_id: VarId, block_idx: usize, ssa: &mut SsaCfg) -> 
         return Some(new_var);
     }
 
-    // Fallback: check if it's a simple flag with a direct comparison expr
+    // Fallback: check if it's a simple flag with a direct comparison expr (non-flag operands)
     let vdef = &ssa.vars[cond_id.0 as usize];
     if let Expr::Var(inner_id) = &vdef.expr {
         let inner = &ssa.vars[inner_id.0 as usize];
-        if let Expr::BinOp(kind, _, _) = &inner.expr {
-            if is_comparison(*kind) { return Some(*inner_id); }
+        if let Expr::BinOp(kind, l, r) = &inner.expr {
+            if is_comparison(*kind) && !is_flag_derived(*l, ssa) && !is_flag_derived(*r, ssa) {
+                return Some(*inner_id);
+            }
         }
     }
-    if let Expr::BinOp(kind, _, _) = &vdef.expr {
-        if is_comparison(*kind) { return Some(cond_id); }
+    if let Expr::BinOp(kind, l, r) = &vdef.expr {
+        if is_comparison(*kind) && !is_flag_derived(*l, ssa) && !is_flag_derived(*r, ssa) {
+            return Some(cond_id);
+        }
     }
 
     None
@@ -472,14 +480,54 @@ fn find_cmp_in_block(block_idx: usize, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
 }
 
 /// Trace a SUB/AND result variable back to find the CMP operands.
+/// Follows register copies and Loads to find the underlying values.
 fn trace_to_cmp(result_id: VarId, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
     let v = &ssa.vars[result_id.0 as usize];
     match &v.expr {
-        Expr::BinOp(BinOpKind::Sub, left, right) => Some((*left, *right)),
-        Expr::BinOp(BinOpKind::And, left, right) => Some((*left, *right)),
-        Expr::Var(inner) => trace_to_cmp(*inner, ssa), // one level of indirection
+        Expr::BinOp(BinOpKind::Sub, left, right) => {
+            Some((resolve_cmp_operand(*left, ssa), resolve_cmp_operand(*right, ssa)))
+        }
+        Expr::BinOp(BinOpKind::And, left, right) => {
+            Some((resolve_cmp_operand(*left, ssa), resolve_cmp_operand(*right, ssa)))
+        }
+        Expr::Var(inner) => trace_to_cmp(*inner, ssa),
         _ => None,
     }
+}
+
+/// Resolve a CMP operand through register copies to find the underlying value.
+/// REG = Var(other_reg) → follow; REG = Load(stack) → use the Load.
+fn resolve_cmp_operand(id: VarId, ssa: &SsaCfg) -> VarId {
+    let v = &ssa.vars[id.0 as usize];
+    // Follow register-to-register copies
+    if v.varnode.space == AddressSpaceId::Register {
+        if let Expr::Var(src) = &v.expr {
+            let sv = &ssa.vars[src.0 as usize];
+            // If source is a stack Load or has a param name, prefer it
+            if matches!(&sv.expr, Expr::Load(_)) || sv.param_name.is_some() {
+                return *src;
+            }
+            // If source is another register, follow one more level
+            if sv.varnode.space == AddressSpaceId::Register {
+                if let Expr::Var(inner) = &sv.expr {
+                    let iv = &ssa.vars[inner.0 as usize];
+                    if matches!(&iv.expr, Expr::Load(_)) || iv.param_name.is_some() {
+                        return *inner;
+                    }
+                }
+                if let Expr::Load(_) = &sv.expr { return *src; }
+            }
+            return *src;
+        }
+        if let Expr::Load(_) = &v.expr { return id; }
+    }
+    // Follow Unique space vars
+    if v.varnode.space == AddressSpaceId::Unique {
+        if let Expr::Var(src) = &v.expr {
+            return resolve_cmp_operand(*src, ssa);
+        }
+    }
+    id
 }
 
 /// Classify a Jcc condition expression into a comparison kind.

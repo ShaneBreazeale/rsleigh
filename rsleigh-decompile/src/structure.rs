@@ -85,18 +85,11 @@ fn emit_region(
                     let mut body = Vec::new();
                     emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body);
 
-                    if negate {
-                        // The condition was for the exit, so negate for the loop
-                        out.push(StructuredStmt::While {
-                            cond: *cond, // printer will handle negation via context
-                            body,
-                        });
-                    } else {
-                        out.push(StructuredStmt::While {
-                            cond: *cond,
-                            body,
-                        });
-                    }
+                    out.push(StructuredStmt::While {
+                        cond: *cond,
+                        negate,
+                        body,
+                    });
                     current = exit;
                     continue;
                 }
