@@ -6,10 +6,7 @@
 ---
 === factorial (43 instructions) ===
   if (n > 1) {
-      var_c = n;
       return n * factorial(n - 1);
-      var_4 = factorial(n - 1);
-      return;
   } else {
       return 1;
   }
@@ -18,10 +15,9 @@
   total = 0;
   i = 0;
   while (len > i) {
-      RCX = i;
-      EAX = (arr[RCX * 4]) + total;
+      EAX = (arr[i]) + total;
       total = EAX + total;
-      return EAX + 1;
+      i = EAX + 1;
   }
   return arr;
 ---
@@ -29,7 +25,7 @@
   len = 0;
   while (EAX != 0) {
       len = EAX + 1;
-      return RAX + 1;
+      s = RAX + 1;
   }
   return s;
 ---
@@ -63,31 +59,26 @@
       EAX = *(RAX) + sum;
       sum = EAX + sum;
       RAX = head[8];
-      return RAX;
   }
   return head;
 ---
 === binary_search (62 instructions) ===
   lo = 0;
-  hi = len - 1;
   while (hi >= lo) {
-      hi = lo;
       EAX = EAX / 2;
       EDX = EAX % 2;
       EAX = lo + EAX;
       mid = EAX + ECX;
       RCX = EAX + ECX;
       if (EAX != target) {
-          RCX = mid;
-          EAX = arr[RCX * 4];
+          EAX = arr[mid];
           if (target <= EAX) {
               EAX = mid - 1;
               hi = EAX - 1;
           } else {
-              return EAX + 1;
+              lo = EAX + 1;
           }
       } else {
-          var_4 = mid;
           return;
       }
   }
@@ -98,23 +89,16 @@
   return op;
 ---
 === main (93 instructions) ===
-  var_8 = RAX;
   var_54 = 0;
   sorted = 0xa19;
   var_60 = 0xa;
   printf("add(3,4) = %d\n", add(3, 4));
   printf("factorial(6) = %d\n", factorial(6));
-  RAX = *(0x100000a30);
-  nums = printf("factorial(6) = %d\n", factorial(6));
   RAX = *(0x100000a38);
-  var_18 = printf("factorial(6) = %d\n", factorial(6));
-  var_10 = *(0x100000a40);
+  EAX = *(0x100000a40);
   printf("sum = %d\n", sum_array(nums, 5));
   printf("strlen = %d\n", string_length("hello world"));
-  RAX = *(0x100000a78);
-  a = printf("strlen = %d\n", string_length("hello world"));
   RAX = *(0x100000a80);
-  b = printf("strlen = %d\n", string_length("hello world"));
   printf("manhattan = %d\n", manhattan_distance(a, b));
   printf("day = %s\n", day_name(3));
   printf("apply(add,5,6) = %d\n", apply(0x1000004c0, 5, 6));

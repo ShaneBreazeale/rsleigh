@@ -163,16 +163,24 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             }
         }
 
-        // #5: "var_N = expr;" at end of else block → "return expr;"
-        // Detect: line is "    var_X = expr;" and next line is "}"
+        // #5: "var_N = expr;" at end of if/else block → "return expr;"
+        // Only apply inside if/else blocks, NOT while loops
         if i + 1 < lines.len() {
             let lt = lines[i].trim();
             let next_t = lines[i + 1].trim();
             if lt.starts_with("var_") && lt.ends_with(';') && lt.contains(" = ") && next_t == "}" {
-                // Check if this is inside an else block (there's a matching if)
                 let indent = lines[i].len() - lines[i].trim_start().len();
-                if indent > 0 {
-                    // Replace with return
+                // Check that we're inside an if/else, not a while
+                let in_if_else = indent > 0 && lines[..i].iter().rev().any(|l| {
+                    let lt = l.trim();
+                    lt.starts_with("if (") || lt.starts_with("} else {")
+                        || lt.ends_with("} else {")
+                });
+                let in_while = indent > 0 && lines[..i].iter().rev().any(|l| {
+                    let lt = l.trim();
+                    lt.starts_with("while (")
+                });
+                if in_if_else && !in_while {
                     let expr = lt.split(" = ").nth(1).unwrap_or("").trim_end_matches(';');
                     if !expr.is_empty() {
                         let pad = &lines[i][..indent];
@@ -227,6 +235,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         *line = line.replace("(int64_t)", "").replace("(uint64_t)", "");
         // * 1 in address expressions is identity
         *line = line.replace(" * 1)", ")").replace(" * 1 ", " ");
+        // (Array scaling cleanup happens after array syntax conversion below)
         // __chk suffix: __strcpy_chk(a, b, size) → strcpy(a, b)
         while let Some(pos) = line.find("__") {
             if let Some(chk) = line[pos..].find("_chk(") {
@@ -331,19 +340,27 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     }
 
     // Replace "EAX = EAX op expr; return;" → "return param op expr;"
+    // Only at the top level (not inside while/if bodies) to avoid
+    // converting loop increments like i = i + 1 into false returns
     let first_param = param_names.first().cloned();
     if let Some(param_name) = first_param {
         let mut i = 0;
         while i < lines.len() {
             let lt = lines[i].trim().to_string();
-            if lt.starts_with("EAX = EAX ") {
-                let indent = lines[i].len() - lines[i].trim_start().len();
-                let pad = &lines[i][..indent];
-                let expr = lt.trim_start_matches("EAX = EAX ").trim_end_matches(';');
-                lines[i] = format!("{}return {} {};", pad, param_name, expr);
-                // Remove the following "return;" if it exists
-                if i + 1 < lines.len() && lines[i + 1].trim() == "return;" {
-                    lines.remove(i + 1);
+            let indent_level = lines[i].len() - lines[i].trim_start().len();
+            // Only apply at indent 0 or 4 (top level or first nesting level)
+            if lt.starts_with("EAX = EAX ") && indent_level <= 4 {
+                // Verify the next non-blank line is "return;" or end of function
+                let next_is_return = lines[i + 1..].iter()
+                    .find(|l| !l.trim().is_empty())
+                    .map_or(false, |l| l.trim() == "return;");
+                if next_is_return {
+                    let pad = &lines[i][..indent_level];
+                    let expr = lt.trim_start_matches("EAX = EAX ").trim_end_matches(';');
+                    lines[i] = format!("{}return {} {};", pad, param_name, expr);
+                    if i + 1 < lines.len() && lines[i + 1].trim() == "return;" {
+                        lines.remove(i + 1);
+                    }
                 }
             }
             i += 1;
@@ -432,6 +449,15 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 }
             }
             break;
+        }
+    }
+
+    // Array element scaling: arr[idx * 4] → arr[idx] for int/ptr arrays
+    for line in &mut lines {
+        for scale in [" * 4]", " * 8]", " * 2]"] {
+            while line.contains(scale) {
+                *line = line.replace(scale, "]");
+            }
         }
     }
 
@@ -1095,13 +1121,12 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
         }
         StructuredStmt::Store { addr, val } => {
             let addr_str = format_addr(*addr, ssa, ctx);
-            // For Store values, prefer the SSA expression over the tracker when
-            // the expression is a computation (BinOp, etc). The tracker can
-            // resolve EAX to a stale alias (e.g., "arr" instead of "arr[i]+total").
             let vdef = ssa.var(*val);
-            let val_expr = if indent > 0 && matches!(&vdef.expr, Expr::BinOp(_, _, _)) {
-                // Inside loops/ifs, render computed values directly from SSA
-                // to avoid stale tracker aliases (e.g., EAX → arr instead of arr[i]+total)
+            // Inside loop bodies (indent > 0), the tracker has stale aliases
+            // from the function entry. Use the SSA expression directly for
+            // register values to show the actual computation.
+            let val_expr = if indent > 0 && vdef.varnode.space == AddressSpaceId::Register {
+                // For registers inside loops, show the SSA expression
                 format_expr(&vdef.expr, ssa, ctx)
             } else {
                 format_var_tracked(*val, ssa, ctx, tracker)
@@ -1129,10 +1154,18 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                     && val_expr.chars().next().map_or(false, |c| c.is_ascii_lowercase())
                     && val_expr.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
                     && !val_expr.chars().all(|c| c.is_ascii_digit() || c == 'x');
-                // Only hide alias stores at the top level (indent=0).
-                // Inside loops/ifs (indent>0), these are real assignments.
-                if indent == 0 && (is_param || is_var_alias || is_dwarf_name) {
-                    return; // Simple alias at function entry — tracked for later use
+                // Hide simple alias stores and register saves.
+                // These are tracked for resolution at use sites.
+                if is_param || is_var_alias || is_dwarf_name {
+                    return; // Simple alias — tracked for later use
+                }
+                // Hide var_X = REG stores (register holding a tracked value)
+                let val_is_reg = val_expr.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                    && val_expr.len() >= 2 && val_expr.len() <= 3;
+                // Hide var_X = expr stores where expr is a function call (possibly with args)
+                let val_is_call = val_expr.contains('(') && val_expr.contains(')');
+                if val_is_reg || val_is_call {
+                    return; // Tracked — will be resolved at use site
                 }
                 // Don't skip stores to stack variables that have computed values —
                 // these are real assignments that update loop state or function locals
