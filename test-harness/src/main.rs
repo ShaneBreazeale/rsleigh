@@ -327,12 +327,28 @@ mod tests {
         // ARM64 tests
         test_arm_mov_reg();
         test_arm_add_reg();
+        test_arm_sub();
+        test_arm_and();
+        test_arm_orr();
+        test_arm_eor();
+        test_arm_mul();
+        test_arm_sdiv();
+        test_arm_movz();
         test_arm_ret();
         test_arm_branch();
+        test_arm_bl();
+        test_arm_b_cond();
         test_arm_ldr();
         test_arm_str();
+        test_arm_ldr_w_offset();
+        test_arm_ldrb();
+        test_arm_strb();
+        test_arm_stp();
+        test_arm_ldp();
         test_arm_cmp();
         test_arm_cbz();
+        test_arm_cbnz();
+        test_arm_add_imm();
         // RISC-V tests
         test_riscv_addi();
         test_riscv_add();
@@ -350,7 +366,7 @@ mod tests {
         test_arm32_b();
         test_x86_64_vs_ghidra_fixture();
         test_aarch64_vs_ghidra_fixture();
-        eprintln!("  46 golden tests passed");
+        eprintln!("  62 golden tests passed");
         // Scale validation
         test_x86_64_corpus();
         test_aarch64_corpus();
@@ -755,6 +771,172 @@ mod tests {
             &disasm,
             &[|op| matches!(op, PcodeOp::Branch { .. })],
         );
+    }
+
+    fn test_arm_sub() {
+        // SUB X0, X1, X2
+        let (len, disasm, pcode) = arm::decode(&[0x20, 0x00, 0x02, 0xcb], 0x1000);
+        assert_eq!(len, 4);
+        assert!(disasm.to_lowercase().contains("sub"), "expected sub, got {disasm}");
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::IntSub { .. }),
+        ]);
+    }
+
+    fn test_arm_and() {
+        // AND X0, X1, X2
+        let (len, disasm, pcode) = arm::decode(&[0x20, 0x00, 0x02, 0x8a], 0x1000);
+        assert_eq!(len, 4);
+        assert!(disasm.to_lowercase().contains("and"), "expected and, got {disasm}");
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::IntAnd { .. }),
+        ]);
+    }
+
+    fn test_arm_orr() {
+        // ORR X0, X1, X2
+        let (len, disasm, pcode) = arm::decode(&[0x20, 0x00, 0x02, 0xaa], 0x1000);
+        assert_eq!(len, 4);
+        assert!(disasm.to_lowercase().contains("orr") || disasm.to_lowercase().contains("mov"),
+            "expected orr/mov, got {disasm}");
+        // ORR or Copy (if one operand is XZR, Ghidra may display as MOV)
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::IntOr { .. } | PcodeOp::Copy { .. }),
+        ]);
+    }
+
+    fn test_arm_eor() {
+        // EOR X0, X1, X2
+        let (len, disasm, pcode) = arm::decode(&[0x20, 0x00, 0x02, 0xca], 0x1000);
+        assert_eq!(len, 4);
+        assert!(disasm.to_lowercase().contains("eor"), "expected eor, got {disasm}");
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::IntXor { .. }),
+        ]);
+    }
+
+    fn test_arm_mul() {
+        // MUL X0, X1, X2
+        let (len, disasm, pcode) = arm::decode(&[0x20, 0x7c, 0x02, 0x9b], 0x1000);
+        assert_eq!(len, 4);
+        assert!(disasm.to_lowercase().contains("mul") || disasm.to_lowercase().contains("madd"),
+            "expected mul/madd, got {disasm}");
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::IntMult { .. }),
+        ]);
+    }
+
+    fn test_arm_sdiv() {
+        // SDIV X0, X1, X2
+        let (len, disasm, pcode) = arm::decode(&[0x20, 0x0c, 0xc2, 0x9a], 0x1000);
+        assert_eq!(len, 4);
+        assert!(disasm.to_lowercase().contains("sdiv"), "expected sdiv, got {disasm}");
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::IntSDiv { .. }),
+        ]);
+    }
+
+    fn test_arm_movz() {
+        // MOVZ X0, #0x42
+        let (len, disasm, pcode) = arm::decode(&[0x40, 0x08, 0x80, 0xd2], 0x1000);
+        assert_eq!(len, 4);
+        assert!(disasm.to_lowercase().contains("mov"), "expected mov/movz, got {disasm}");
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::Copy { input, .. }
+                if input.space == AddressSpaceId::Const && input.offset == 0x42),
+        ]);
+    }
+
+    fn test_arm_bl() {
+        // BL . (branch and link = call)
+        let (len, disasm, pcode) = arm::decode(&[0x00, 0x00, 0x00, 0x94], 0x1000);
+        assert_eq!(len, 4);
+        assert!(disasm.to_lowercase().contains("bl"), "expected bl, got {disasm}");
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::Call { .. }),
+        ]);
+    }
+
+    fn test_arm_b_cond() {
+        // B.EQ . (conditional branch)
+        let (len, disasm, pcode) = arm::decode(&[0x00, 0x00, 0x00, 0x54], 0x1000);
+        assert_eq!(len, 4);
+        assert!(disasm.to_lowercase().contains("b."), "expected b.eq, got {disasm}");
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::CBranch { .. }),
+        ]);
+    }
+
+    fn test_arm_cbnz() {
+        // CBNZ X0, .
+        let (len, disasm, pcode) = arm::decode(&[0x00, 0x00, 0x00, 0xb5], 0x1000);
+        assert_eq!(len, 4);
+        assert!(disasm.to_lowercase().contains("cbnz"), "expected cbnz, got {disasm}");
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::CBranch { .. }),
+        ]);
+    }
+
+    fn test_arm_stp() {
+        // STP X29, X30, [SP, #-16]! (push frame)
+        let (len, disasm, pcode) = arm::decode(&[0xfd, 0x7b, 0xbf, 0xa9], 0x1000);
+        assert_eq!(len, 4);
+        assert!(disasm.to_lowercase().contains("stp"), "expected stp, got {disasm}");
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::Store { space: AddressSpaceId::Ram, .. }),
+        ]);
+    }
+
+    fn test_arm_ldp() {
+        // LDP X29, X30, [SP], #16 (pop frame)
+        let (len, disasm, pcode) = arm::decode(&[0xfd, 0x7b, 0xc1, 0xa8], 0x1000);
+        assert_eq!(len, 4);
+        assert!(disasm.to_lowercase().contains("ldp"), "expected ldp, got {disasm}");
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::Load { space: AddressSpaceId::Ram, .. }),
+        ]);
+    }
+
+    fn test_arm_add_imm() {
+        // ADD X0, X0, #0x10
+        let (len, disasm, pcode) = arm::decode(&[0x00, 0x40, 0x00, 0x91], 0x1000);
+        assert_eq!(len, 4);
+        assert!(disasm.to_lowercase().contains("add"), "expected add, got {disasm}");
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::IntAdd { .. }),
+        ]);
+    }
+
+    fn test_arm_ldr_w_offset() {
+        // LDR W0, [X1, #4]
+        let (len, disasm, pcode) = arm::decode(&[0x20, 0x10, 0x40, 0xb9], 0x1000);
+        assert_eq!(len, 4);
+        assert!(disasm.to_lowercase().contains("ldr"), "expected ldr, got {disasm}");
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::Load { out, space: AddressSpaceId::Ram, .. }
+                if out.size == 4),
+        ]);
+    }
+
+    fn test_arm_strb() {
+        // STRB W0, [X1]
+        let (len, disasm, pcode) = arm::decode(&[0x20, 0x00, 0x00, 0x39], 0x1000);
+        assert_eq!(len, 4);
+        assert!(disasm.to_lowercase().contains("strb"), "expected strb, got {disasm}");
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::Store { space: AddressSpaceId::Ram, .. }),
+        ]);
+    }
+
+    fn test_arm_ldrb() {
+        // LDRB W0, [X1]
+        let (len, disasm, pcode) = arm::decode(&[0x20, 0x00, 0x40, 0x39], 0x1000);
+        assert_eq!(len, 4);
+        assert!(disasm.to_lowercase().contains("ldrb"), "expected ldrb, got {disasm}");
+        assert_pcode_contains(&pcode, &disasm, &[
+            |op| matches!(op, PcodeOp::Load { out, space: AddressSpaceId::Ram, .. }
+                if out.size == 1),
+        ]);
     }
 
     fn test_arm_ldr() {
