@@ -88,6 +88,39 @@ fn is_rsp_expr(expr: &Expr, ssa: &SsaCfg) -> bool {
     }
 }
 
+/// Check if a body would produce no visible output after filtering.
+fn is_body_empty(stmts: &[StructuredStmt], ssa: &SsaCfg) -> bool {
+    for stmt in stmts {
+        match stmt {
+            StructuredStmt::Assign { lhs, .. } => {
+                let vdef = ssa.var(*lhs);
+                if vdef.varnode.space == AddressSpaceId::Unique { continue; }
+                if vdef.varnode.space == AddressSpaceId::Register && is_flag(vdef.varnode.offset) { continue; }
+                if matches!(&vdef.expr, Expr::Phi(_)) { continue; }
+                if vdef.varnode.space == AddressSpaceId::Register {
+                    if let Expr::UnaryOp(UnaryOpKind::Zext, inner_id) = &vdef.expr {
+                        let inner = ssa.var(*inner_id);
+                        if inner.varnode.space == AddressSpaceId::Register
+                            && inner.varnode.offset == vdef.varnode.offset
+                            && inner.varnode.size < vdef.varnode.size { continue; }
+                    }
+                }
+                return false;
+            }
+            StructuredStmt::Return(_) | StructuredStmt::Store { .. }
+            | StructuredStmt::Call { .. } | StructuredStmt::While { .. }
+            | StructuredStmt::Goto(_) => return false,
+            StructuredStmt::IfElse { then_body, else_body, .. } => {
+                if !is_body_empty(then_body, ssa) || !is_body_empty(else_body, ssa) {
+                    return false;
+                }
+            }
+            StructuredStmt::Label(_) => {}
+        }
+    }
+    true
+}
+
 fn print_stmts(stmts: &[StructuredStmt], ssa: &SsaCfg, arch: Architecture, indent: usize, out: &mut String) {
     for stmt in stmts {
         print_stmt(stmt, ssa, arch, indent, out);
@@ -100,13 +133,37 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, arch: Architecture, indent: u
     match stmt {
         StructuredStmt::Assign { lhs, .. } => {
             let vdef = ssa.var(*lhs);
-            // Skip all Unique-space vars (they're temporaries — inline or drop)
+            // Skip all Unique-space vars
             if vdef.varnode.space == AddressSpaceId::Unique {
                 return;
             }
             // Skip flag register assignments
             if vdef.varnode.space == AddressSpaceId::Register && is_flag(vdef.varnode.offset) {
                 return;
+            }
+            // Skip phi nodes in output
+            if matches!(&vdef.expr, Expr::Phi(_)) {
+                return;
+            }
+            // Skip sub-register zero-extension artifacts:
+            // e.g. RAX = (uint64_t)EAX after a 32-bit op on x86
+            if vdef.varnode.space == AddressSpaceId::Register {
+                if let Expr::UnaryOp(UnaryOpKind::Zext, inner_id) = &vdef.expr {
+                    let inner = ssa.var(*inner_id);
+                    if inner.varnode.space == AddressSpaceId::Register
+                        && inner.varnode.offset == vdef.varnode.offset
+                        && inner.varnode.size < vdef.varnode.size
+                    {
+                        return; // RAX = zext(EAX) is implicit on x86-64
+                    }
+                }
+            }
+            // Skip self-assignments (Copy of same register)
+            if let Expr::Var(src_id) = &vdef.expr {
+                let src = ssa.var(*src_id);
+                if src.varnode == vdef.varnode {
+                    return;
+                }
             }
             let name = var_name(&vdef.varnode, arch);
             let rhs = format_expr(&vdef.expr, ssa, arch);
@@ -122,7 +179,10 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, arch: Architecture, indent: u
         StructuredStmt::Call { target, args, out: call_out } => {
             let target_name = match target {
                 CallTarget::Direct(addr) => format!("func_{:x}", addr),
-                CallTarget::Indirect(vn) => format!("(*{})", var_name(vn, arch)),
+                CallTarget::Indirect(vn) => {
+                    // Try to resolve through Load to show the actual target address
+                    format!("(*{})", var_name(vn, arch))
+                }
             };
             let args_str: Vec<String> = args.iter()
                 .map(|a| format_var(*a, ssa, arch))
@@ -146,13 +206,27 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, arch: Architecture, indent: u
             let cond_expr = format_var(*cond, ssa, arch);
             let then_filtered = filter_boilerplate(then_body, ssa);
             let else_filtered = filter_boilerplate(else_body, ssa);
-            out.push_str(&format!("{}if ({}) {{\n", pad, cond_expr));
-            print_stmts(&then_filtered, ssa, arch, indent + 1, out);
-            if !else_filtered.is_empty() {
-                out.push_str(&format!("{}}} else {{\n", pad));
+
+            let then_empty = is_body_empty(&then_filtered, ssa);
+            let else_empty = is_body_empty(&else_filtered, ssa);
+
+            if then_empty && else_empty {
+                // Both empty after filtering — skip entirely
+                return;
+            } else if then_empty && !else_empty {
+                // Negate: if (cond) {} else { body } → if (!cond) { body }
+                out.push_str(&format!("{}if (!{}) {{\n", pad, cond_expr));
                 print_stmts(&else_filtered, ssa, arch, indent + 1, out);
+                out.push_str(&format!("{}}}\n", pad));
+            } else {
+                out.push_str(&format!("{}if ({}) {{\n", pad, cond_expr));
+                print_stmts(&then_filtered, ssa, arch, indent + 1, out);
+                if !else_empty {
+                    out.push_str(&format!("{}}} else {{\n", pad));
+                    print_stmts(&else_filtered, ssa, arch, indent + 1, out);
+                }
+                out.push_str(&format!("{}}}\n", pad));
             }
-            out.push_str(&format!("{}}}\n", pad));
         }
         StructuredStmt::While { cond, body } => {
             let cond_expr = format_var(*cond, ssa, arch);
