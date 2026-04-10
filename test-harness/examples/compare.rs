@@ -72,6 +72,11 @@ fn run() {
         let bytes = &data[off as usize..off as usize + max];
         let mut io = 0usize;
         let mut insts = Vec::new();
+        // Decode all instructions in the function. Don't stop at the first
+        // Return — functions have multiple return paths (early returns,
+        // conditional returns). Stop when we hit a known different function
+        // or exceed a reasonable limit.
+        let mut saw_return = false;
         while io < max {
             match dec.decode(&bytes[io..], fa + io as u64) {
                 Ok(inst) => {
@@ -83,7 +88,16 @@ fn run() {
                     insts.push((fa + io as u64, inst));
                     io += l;
                     if r {
-                        break;
+                        if saw_return {
+                            // Second return — likely end of function
+                            break;
+                        }
+                        saw_return = true;
+                        // Check if the next address is a different known symbol
+                        let next_addr = fa + io as u64;
+                        if symbols.iter().any(|(a, _)| *a == next_addr) {
+                            break; // Hit another function
+                        }
                     }
                 }
                 Err(_) => break,
@@ -114,7 +128,31 @@ fn run() {
     for name in &target_funcs {
         if let Some((addr, _)) = symbols.iter().find(|(_, n)| n == name) {
             let output = decompile_func(*addr, &mut dec);
-            println!("=== {} ===", name);
+            println!("=== {} ({} instructions) ===", name,
+                /* count instructions in the function */
+                {
+                    let off = segs.iter().find_map(|(va, sz, fo)| {
+                        if *addr >= *va && *addr < va+sz { Some(fo+(addr-va)) } else { None }
+                    }).unwrap_or(0);
+                    let max = 2048.min(data.len() - off as usize);
+                    let bytes = &data[off as usize..off as usize + max];
+                    let mut cnt = 0usize;
+                    let mut io2 = 0usize;
+                    let mut dec2 = rsleigh_api::Decoder::new(rsleigh_api::Architecture::X86_64);
+                    let mut saw_ret = false;
+                    while io2 < max {
+                        if let Ok(inst) = dec2.decode(&bytes[io2..], addr + io2 as u64) {
+                            let r = inst.ops.iter().any(|o| matches!(o, rsleigh_api::PcodeOp::Return{..}));
+                            io2 += inst.len as usize;
+                            cnt += 1;
+                            if r { if saw_ret { break; } saw_ret = true;
+                                let na = addr + io2 as u64;
+                                if symbols.iter().any(|(a,_)| *a == na) { break; }
+                            }
+                        } else { break; }
+                    }
+                    cnt
+                });
             for line in output.lines() {
                 if !line.trim().is_empty() {
                     println!("  {}", line);
