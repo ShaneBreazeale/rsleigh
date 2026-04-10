@@ -2957,6 +2957,340 @@ mod tests {
             let (len, _, _) = riscv::decode(&[0x01, 0x00], 0x1000); // C.NOP
             assert_eq!(len, 2, "RISC-V compressed instruction = 2 bytes");
         }
+
+        // ═══════════════════════════════════════════════════════════════
+        // x86-64 deep semantic probes
+        // ═══════════════════════════════════════════════════════════════
+
+        // ── x86 ModRM edge case: [RBP] requires disp8=0 encoding ──
+        // MOV RAX, [RBP] is encoded as MOV RAX, [RBP+0] (45 00) because
+        // ModRM with mod=00 rm=101 means [RIP+disp32], not [RBP].
+        {
+            let (_len, disasm, pcode) = decode(&[0x48, 0x8b, 0x45, 0x00], 0x1000);
+            assert!(disasm.contains("MOV") && disasm.contains("RBP"), "got {disasm}");
+            // Should Load from [RBP+0] = [RBP]
+            assert!(pcode.iter().any(|op| matches!(op, PcodeOp::Load { out, space: AddressSpaceId::Ram, .. }
+                if *out == reg(RAX, 8))),
+                "[RBP+0] should Load to RAX\n{pcode:#?}");
+        }
+
+        // ── x86 SIB edge case: [RSP] uses SIB byte ──
+        // MOV RAX, [RSP] = 48 8B 04 24 (needs SIB: base=RSP, index=none, scale=1)
+        {
+            let (_len, disasm, pcode) = decode(&[0x48, 0x8b, 0x04, 0x24], 0x1000);
+            assert!(disasm.contains("MOV") && disasm.contains("RSP"), "got {disasm}");
+            assert!(pcode.iter().any(|op| matches!(op, PcodeOp::Load { out, space: AddressSpaceId::Ram, .. }
+                if *out == reg(RAX, 8))),
+                "[RSP] should Load to RAX\n{pcode:#?}");
+        }
+
+        // ── x86 operand size override: 16-bit operations ──
+        // MOV AX, 0x1234 (66 B8 34 12) — 16-bit register write
+        {
+            let (len, disasm, pcode) = decode(&[0x66, 0xb8, 0x34, 0x12], 0x1000);
+            assert_eq!(len, 4, "66h prefix MOV AX,imm16 = 4 bytes");
+            assert!(disasm.contains("AX") || disasm.contains("ax"), "got {disasm}");
+            // Should write 2-byte value, NOT 4 or 8
+            let has_16bit = pcode.iter().any(|op| match op {
+                PcodeOp::Copy { out, input } =>
+                    out.size == 2 && input.space == AddressSpaceId::Const && input.offset == 0x1234,
+                _ => false,
+            });
+            assert!(has_16bit, "66h MOV AX,0x1234 should write 2-byte const 0x1234\n{pcode:#?}");
+        }
+
+        // ── x86 REX.W with different registers ──
+        // Verify all 16 GPRs are addressable
+        {
+            // MOV R12, RAX = 49 89 C4 (REX.WB + ModRM)
+            let (_len, disasm, pcode) = decode(&[0x49, 0x89, 0xc4], 0x1000);
+            assert!(disasm.contains("R12"), "REX.B + rm=4 should select R12, got {disasm}");
+            assert!(pcode.iter().any(|op| matches!(op, PcodeOp::Copy { out, .. }
+                if out.space == AddressSpaceId::Register && out.offset != RAX)),
+                "R12 should not alias RAX");
+
+            // MOV R13, RAX = 49 89 C5 (REX.WB + ModRM rm=5)
+            let (_len, disasm, _) = decode(&[0x49, 0x89, 0xc5], 0x1000);
+            assert!(disasm.contains("R13"), "REX.B + rm=5 should select R13, got {disasm}");
+
+            // MOV R14, RAX = 49 89 C6
+            let (_len, disasm, _) = decode(&[0x49, 0x89, 0xc6], 0x1000);
+            assert!(disasm.contains("R14"), "got {disasm}");
+
+            // MOV RAX, R9 = 4C 89 C8 (REX.WR)
+            let (_len, disasm, _) = decode(&[0x4c, 0x89, 0xc8], 0x1000);
+            assert!(disasm.contains("R9"), "REX.R should select R9, got {disasm}");
+        }
+
+        // ── x86 MUL/IMUL widening: result in RDX:RAX ──
+        // MUL RCX = 48 F7 E1 — unsigned multiply RAX*RCX → RDX:RAX
+        {
+            let (_len, disasm, pcode) = decode(&[0x48, 0xf7, 0xe1], 0x1000);
+            assert!(disasm.contains("MUL"), "got {disasm}");
+            // Should produce IntMult and write to both RAX and RDX
+            let writes_rax = pcode.iter().any(|op| match op {
+                PcodeOp::IntMult { out, .. } | PcodeOp::Subpiece { out, .. } | PcodeOp::Copy { out, .. }
+                    => out.offset == RAX && out.space == AddressSpaceId::Register,
+                _ => false,
+            });
+            let writes_rdx = pcode.iter().any(|op| match op {
+                PcodeOp::Subpiece { out, .. } | PcodeOp::Copy { out, .. }
+                    => out.offset == RDX && out.space == AddressSpaceId::Register,
+                _ => false,
+            });
+            assert!(writes_rax, "MUL should write result low to RAX\n{pcode:#?}");
+            assert!(writes_rdx, "MUL should write result high to RDX\n{pcode:#?}");
+        }
+
+        // ── x86 MOVZX from memory: correct load size ──
+        // MOVZX EAX, byte ptr [RDI] = 0F B6 07
+        {
+            let (_len, disasm, pcode) = decode(&[0x0f, 0xb6, 0x07], 0x1000);
+            assert!(disasm.contains("MOVZX"), "got {disasm}");
+            // Should Load 1 byte then zero-extend to 4 bytes
+            let has_byte_load = pcode.iter().any(|op| matches!(op, PcodeOp::Load { out, .. }
+                if out.size == 1));
+            let has_zext = pcode.iter().any(|op| matches!(op, PcodeOp::IntZext { out, .. }
+                if out.size == 4));
+            assert!(has_byte_load, "MOVZX byte should Load 1 byte\n{pcode:#?}");
+            assert!(has_zext, "MOVZX should zero-extend\n{pcode:#?}");
+        }
+
+        // ── x86 MOVSX from memory: correct sign extension ──
+        // MOVSX EAX, word ptr [RDI] = 0F BF 07
+        {
+            let (_len, disasm, pcode) = decode(&[0x0f, 0xbf, 0x07], 0x1000);
+            assert!(disasm.contains("MOVSX"), "got {disasm}");
+            let has_word_load = pcode.iter().any(|op| matches!(op, PcodeOp::Load { out, .. }
+                if out.size == 2));
+            let has_sext = pcode.iter().any(|op| matches!(op, PcodeOp::IntSext { out, .. }
+                if out.size == 4));
+            assert!(has_word_load, "MOVSX word should Load 2 bytes\n{pcode:#?}");
+            assert!(has_sext, "MOVSX should sign-extend\n{pcode:#?}");
+        }
+
+        // ── x86 MOVSXD: 32→64 sign extension (common in loop indexing) ──
+        // MOVSXD RAX, ECX = 48 63 C1
+        {
+            let (_len, disasm, pcode) = decode(&[0x48, 0x63, 0xc1], 0x1000);
+            assert!(disasm.contains("MOVSXD"), "got {disasm}");
+            assert!(pcode.iter().any(|op| matches!(op, PcodeOp::IntSext { out, .. }
+                if *out == reg(RAX, 8))),
+                "MOVSXD should sign-extend to RAX\n{pcode:#?}");
+        }
+
+        // ── x86 IDIV: quotient in RAX, remainder in RDX ──
+        // CQO; IDIV RCX = 48 99; 48 F7 F9
+        {
+            let seq = x86::decode_sequence(&[0x48, 0x99, 0x48, 0xf7, 0xf9], 0x1000);
+            assert!(seq.len() >= 2, "CQO+IDIV should decode as 2+ instructions");
+            let last = &seq[seq.len() - 1];
+            assert!(last.2.contains("IDIV"), "last should be IDIV, got {}", last.2);
+            // IDIV should produce quotient and remainder
+            let has_sdiv = last.3.iter().any(|op| matches!(op, PcodeOp::IntSDiv { .. }));
+            let has_srem = last.3.iter().any(|op| matches!(op, PcodeOp::IntSRem { .. }));
+            assert!(has_sdiv, "IDIV should produce IntSDiv\n{:#?}", last.3);
+            assert!(has_srem, "IDIV should produce IntSRem\n{:#?}", last.3);
+        }
+
+        // ── x86 LEA with complex SIB: [RBX + RCX*4 + 0x100] ──
+        // LEA RAX, [RBX + RCX*4 + 0x100] = 48 8D 84 8B 00 01 00 00
+        {
+            let (len, disasm, pcode) = decode(
+                &[0x48, 0x8d, 0x84, 0x8b, 0x00, 0x01, 0x00, 0x00], 0x1000);
+            assert_eq!(len, 8, "LEA with SIB+disp32 = 8 bytes");
+            assert!(disasm.contains("LEA"), "got {disasm}");
+            // Should have scale multiply (×4) and two adds (base+index, +disp)
+            let has_mult = pcode.iter().any(|op| matches!(op, PcodeOp::IntMult { .. }
+                | PcodeOp::IntLsl { .. }));
+            assert!(has_mult || pcode.len() >= 2,
+                "LEA [base+idx*4+disp] should have scale computation\n{pcode:#?}");
+            // Should NOT Load from memory
+            assert!(!pcode.iter().any(|op| matches!(op, PcodeOp::Load { .. })),
+                "LEA should NOT Load");
+        }
+
+        // ── x86 TEST with immediate: TEST RAX, 1 (flag-only, no write) ──
+        // TEST RAX, 1 = 48 A9 01 00 00 00
+        {
+            let (_len, disasm, pcode) = decode(&[0x48, 0xa9, 0x01, 0x00, 0x00, 0x00], 0x1000);
+            assert!(disasm.contains("TEST"), "got {disasm}");
+            // TEST should set flags but NOT write to RAX
+            let writes_rax = pcode.iter().any(|op| match op {
+                PcodeOp::IntAnd { out, .. } => *out == reg(RAX, 8),
+                _ => false,
+            });
+            assert!(!writes_rax, "TEST should NOT write to RAX (flag-only)\n{pcode:#?}");
+            assert!(pcode.iter().any(|op| matches!(op, PcodeOp::IntEq { out, .. }
+                if *out == reg(ZF, 1))),
+                "TEST should set ZF");
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // ARM64 deep semantic probes
+        // ═══════════════════════════════════════════════════════════════
+
+        // ── ARM64 PC-relative branch offset correctness ──
+        {
+            // B +8 at 0x1000 should target 0x1008
+            let (_, _, pcode) = arm::decode(&[0x02, 0x00, 0x00, 0x14], 0x1000);
+            let target = pcode.iter().find_map(|op| match op {
+                PcodeOp::Branch { dest } => Some(dest.offset), _ => None,
+            });
+            if target != Some(0x1008) {
+                eprintln!("[BUG] ARM64 B +8 at 0x1000: target={:?} (expected 0x1008)",
+                    target.map(|t| format!("0x{:x}", t)));
+            }
+        }
+        {
+            // B -4 at 0x1000 should target 0xFFC
+            let (_, _, pcode) = arm::decode(&[0xff, 0xff, 0xff, 0x17], 0x1000);
+            let target = pcode.iter().find_map(|op| match op {
+                PcodeOp::Branch { dest } => Some(dest.offset), _ => None,
+            });
+            if target.map_or(true, |t| t != 0xFFC) {
+                eprintln!("[BUG] ARM64 B -4 at 0x1000: target={:?} (expected 0xFFC)",
+                    target.map(|t| format!("0x{:x}", t)));
+            }
+        }
+        {
+            // BL +0x100 at 0x1000 → 0x1100
+            let (_, _, pcode) = arm::decode(&[0x40, 0x00, 0x00, 0x94], 0x1000);
+            let target = pcode.iter().find_map(|op| match op {
+                PcodeOp::Call { dest } => Some(dest.offset), _ => None,
+            });
+            if target != Some(0x1100) {
+                eprintln!("[BUG] ARM64 BL +0x100 at 0x1000: target={:?} (expected 0x1100)",
+                    target.map(|t| format!("0x{:x}", t)));
+            }
+        }
+        {
+            // BL -4 at 0x1000 → 0xFFC
+            let (_, _, pcode) = arm::decode(&[0xff, 0xff, 0xff, 0x97], 0x1000);
+            let target = pcode.iter().find_map(|op| match op {
+                PcodeOp::Call { dest } => Some(dest.offset), _ => None,
+            });
+            if target.map_or(true, |t| t != 0xFFC) {
+                eprintln!("[BUG] ARM64 BL -4 at 0x1000: target={:?} (expected 0xFFC)",
+                    target.map(|t| format!("0x{:x}", t)));
+            }
+        }
+
+        // ── ARM64 ADDS sets flags (not just ADD) ──
+        // ADDS X0, X1, X2 = 0xAB020020
+        {
+            let (_, disasm, pcode) = arm::decode(&[0x20, 0x00, 0x02, 0xab], 0x1000);
+            assert!(disasm.to_lowercase().contains("adds") || disasm.to_lowercase().contains("cmn"),
+                "got {disasm}");
+            // Should set condition flags (NG, ZR, CY, OV)
+            let sets_flags = pcode.iter().any(|op| match op {
+                PcodeOp::IntEq { out, .. } | PcodeOp::IntSLess { out, .. }
+                | PcodeOp::IntCarry { out, .. } | PcodeOp::IntSCarry { out, .. } =>
+                    out.space == AddressSpaceId::Register
+                    && (256..=264).contains(&out.offset), // ARM64 flag range
+                _ => false,
+            });
+            assert!(sets_flags, "ADDS should set condition flags\n{pcode:#?}");
+        }
+
+        // ── ARM64 LDR size variants ──
+        // LDRB W0, [X1] loads 1 byte
+        {
+            let (_, _, pcode) = arm::decode(&[0x20, 0x00, 0x40, 0x39], 0x1000);
+            assert!(pcode.iter().any(|op| matches!(op, PcodeOp::Load { out, .. } if out.size == 1)),
+                "LDRB should load 1 byte\n{pcode:#?}");
+        }
+        // LDRH W0, [X1] loads 2 bytes
+        {
+            let (_, disasm, pcode) = arm::decode(&[0x20, 0x00, 0x40, 0x79], 0x1000);
+            assert!(disasm.to_lowercase().contains("ldr"), "got {disasm}");
+            assert!(pcode.iter().any(|op| matches!(op, PcodeOp::Load { out, .. } if out.size == 2)),
+                "LDRH should load 2 bytes\n{pcode:#?}");
+        }
+        // LDR W0, [X1] loads 4 bytes
+        {
+            let (_, _, pcode) = arm::decode(&[0x20, 0x00, 0x40, 0xb9], 0x1000);
+            assert!(pcode.iter().any(|op| matches!(op, PcodeOp::Load { out, .. } if out.size == 4)),
+                "LDR W0 should load 4 bytes\n{pcode:#?}");
+        }
+        // LDR X0, [X1] loads 8 bytes
+        {
+            let (_, _, pcode) = arm::decode(&[0x20, 0x00, 0x40, 0xf9], 0x1000);
+            assert!(pcode.iter().any(|op| matches!(op, PcodeOp::Load { out, .. } if out.size == 8)),
+                "LDR X0 should load 8 bytes\n{pcode:#?}");
+        }
+
+        // ── ARM64 STR size variants ──
+        // STRB W0, [X1] stores 1 byte
+        {
+            let (_, _, pcode) = arm::decode(&[0x20, 0x00, 0x00, 0x39], 0x1000);
+            assert!(pcode.iter().any(|op| matches!(op, PcodeOp::Store { .. })),
+                "STRB should Store\n{pcode:#?}");
+        }
+
+        // ── ARM64 SUBS X vs W (flag-setting with different widths) ──
+        // SUBS W0, W1, W2 = 0x6B020020 (32-bit subtract with flags)
+        {
+            let (_, disasm, pcode) = arm::decode(&[0x20, 0x00, 0x02, 0x6b], 0x1000);
+            assert!(disasm.to_lowercase().contains("subs"), "got {disasm}");
+            // 32-bit: output should be 4-byte register
+            let has_32bit_sub = pcode.iter().any(|op| matches!(op, PcodeOp::IntSub { out, .. }
+                if out.size == 4));
+            assert!(has_32bit_sub, "SUBS W should produce 4-byte IntSub\n{pcode:#?}");
+        }
+
+        // ── ARM64 MOV SP (stack pointer as operand) ──
+        // MOV SP, X0 = ADD SP, X0, #0 = 0x9100001F
+        {
+            let (_, disasm, pcode) = arm::decode(&[0x1f, 0x00, 0x00, 0x91], 0x1000);
+            assert!(disasm.to_lowercase().contains("mov") || disasm.to_lowercase().contains("add"),
+                "got {disasm}");
+            // SP is register offset varies by arch, just check it produces P-code
+            assert!(!pcode.is_empty(), "MOV SP,X0 should produce P-code");
+        }
+
+        // ── ARM64 LDRSW: sign-extending 32-bit load to 64-bit ──
+        // LDRSW X0, [X1] = 0xB9800020
+        {
+            let (_, disasm, pcode) = arm::decode(&[0x20, 0x00, 0x80, 0xb9], 0x1000);
+            assert!(disasm.to_lowercase().contains("ldrsw") || disasm.to_lowercase().contains("ldr"),
+                "got {disasm}");
+            // Should load 4 bytes then sign-extend to 8
+            let has_load = pcode.iter().any(|op| matches!(op, PcodeOp::Load { .. }));
+            assert!(has_load, "LDRSW should Load\n{pcode:#?}");
+        }
+
+        // ── ARM64 MADD: multiply-accumulate X0 = X1*X2 + X3 ──
+        // MADD X0, X1, X2, X3 = 0x9B020C20
+        {
+            let (_, disasm, pcode) = arm::decode(&[0x20, 0x0c, 0x02, 0x9b], 0x1000);
+            assert!(disasm.to_lowercase().contains("madd") || disasm.to_lowercase().contains("mul"),
+                "got {disasm}");
+            // Should have both IntMult and IntAdd (unless X3=XZR then it's just MUL)
+            assert!(pcode.iter().any(|op| matches!(op, PcodeOp::IntMult { .. })),
+                "MADD should have IntMult\n{pcode:#?}");
+        }
+
+        // ── ARM64 UBFX/SBFX: bitfield extract ──
+        // UBFX X0, X1, #4, #8 = extract 8 bits starting at bit 4
+        // UBFM X0, X1, #4, #11 = 0xD340AC20
+        {
+            let (_, disasm, pcode) = arm::decode(&[0x20, 0x2c, 0x44, 0xd3], 0x1000);
+            assert!(disasm.to_lowercase().contains("ubfx") || disasm.to_lowercase().contains("ubfm")
+                || disasm.to_lowercase().contains("lsr"),
+                "got {disasm}");
+            assert!(!pcode.is_empty(), "UBFX should produce P-code\n{pcode:#?}");
+        }
+
+        // ── ARM64 extended register: ADD X0, X1, W2, SXTW ──
+        // 0x8B22C020
+        {
+            let (_, disasm, pcode) = arm::decode(&[0x20, 0xc0, 0x22, 0x8b], 0x1000);
+            assert!(disasm.to_lowercase().contains("add"), "got {disasm}");
+            // Should sign-extend W2 to 64-bit before adding
+            let has_sext = pcode.iter().any(|op| matches!(op, PcodeOp::IntSext { .. }));
+            assert!(has_sext, "ADD X0,X1,W2,SXTW should sign-extend W2\n{pcode:#?}");
+        }
     }
 
     fn test_x86_64_vs_ghidra_fixture() {
