@@ -267,9 +267,14 @@ impl<'a> ExecutionGenerator<'a> {
                 #inst_start: #addr_type,
                 #inst_next: #addr_type,
             ) -> (Vec<pcode_ir::PcodeOp>, Option<pcode_ir::Varnode>, Option<(pcode_ir::AddressSpaceId, pcode_ir::Varnode, u32)>) {
-                // Offset unique_base past subtable ranges to avoid collision
-                // Subtables use offsets (1..N)*0x10000, parent uses N*0x10000+
-                let unique_base: u64 = (#inst_start as u64).wrapping_shl(16) + #num_fields as u64 * 0x10000;
+                // Offset unique_base past subtable ranges to avoid collision.
+                // Subtable i gets offset (i+1)*0x10000, but each subtable also has its
+                // own internal unique_base = inst_start<<16 + own_num_fields*0x10000.
+                // After the parent's offset, the effective subtable range is:
+                //   inst_start<<16 + own_internal_base + parent_offset
+                // To avoid collision, the parent's unique_base must be above all
+                // subtable ranges. Use 2*(num_fields+1)*0x10000 as a safe margin.
+                let unique_base: u64 = (#inst_start as u64).wrapping_shl(16) + ((#num_fields as u64) * 2 + 2) * 0x10000;
                 let mut export_varnode: Option<pcode_ir::Varnode> = None;
                 let mut export_ref: Option<(pcode_ir::AddressSpaceId, pcode_ir::Varnode, u32)> = None;
                 // Lift all subtables once and cache results
@@ -955,14 +960,20 @@ impl<'a> ExecutionGenerator<'a> {
                             quote! { #var_name },
                             quote! {
                                 let #var_name = if let Some((ref_space, ref_ptr, ref_size)) = #cache_ref {
-                                    let loaded = pcode_ir::Varnode::unique(
-                                        unique_base + (ops.len() as u64 + 0x8000),
-                                        ref_size,
-                                    );
-                                    ops.push(pcode_ir::PcodeOp::Load {
-                                        out: loaded.clone(), space: ref_space, ptr: ref_ptr,
-                                    });
-                                    loaded
+                                    if ref_space == pcode_ir::AddressSpaceId::Const {
+                                        // Const-space reference: the "address" IS the value.
+                                        // No need to emit a Load — use it as a constant directly.
+                                        pcode_ir::Varnode::constant(ref_ptr.offset, ref_size)
+                                    } else {
+                                        let loaded = pcode_ir::Varnode::unique(
+                                            unique_base + (ops.len() as u64 + 0x8000),
+                                            ref_size,
+                                        );
+                                        ops.push(pcode_ir::PcodeOp::Load {
+                                            out: loaded.clone(), space: ref_space, ptr: ref_ptr,
+                                        });
+                                        loaded
+                                    }
                                 } else {
                                     #cache_exp.unwrap_or(pcode_ir::Varnode::constant(0, #sz))
                                 };
