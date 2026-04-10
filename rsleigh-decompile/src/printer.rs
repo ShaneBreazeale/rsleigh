@@ -124,6 +124,32 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
 
         // #2: Remove standalone calls that appear again inlined on the next line
+        // Hide data segment loads: RAX = *(0x1000...); EAX = *(0x1000...);
+        // These are array/struct initialization from read-only data, not useful to display.
+        {
+            let lt = lines[i].trim();
+            if (lt.starts_with("RAX = *(0x") || lt.starts_with("EAX = *(0x"))
+                && lt.ends_with(");")
+                && !lt.contains("+") && !lt.contains("-")
+            {
+                lines.remove(i);
+                continue;
+            }
+            // Hide simple top-level stack variable initializations: var_N = small_const;
+            if lt.starts_with("var_") && lt.ends_with(';') {
+                if let Some(eq_pos) = lt.find(" = ") {
+                    let rhs = &lt[eq_pos + 3..lt.len() - 1];
+                    let is_small_const = rhs.starts_with("0x") && rhs.len() <= 6
+                        || rhs.parse::<i64>().map_or(false, |v| v.abs() < 256);
+                    let indent = lines[i].len() - lines[i].trim_start().len();
+                    if is_small_const && indent == 0 {
+                        lines.remove(i);
+                        continue;
+                    }
+                }
+            }
+        }
+
         // Pattern: "    func();" followed by "    printf("...", func());"
         if i + 1 < lines.len() {
             let current = lines[i].trim();

@@ -12,8 +12,6 @@
   }
 ---
 === sum_array (40 instructions) ===
-  total = 0;
-  i = 0;
   while (len > i) {
       total = arr[i] + total;
       i = i + 1;
@@ -21,12 +19,11 @@
   return total;
 ---
 === string_length (47 instructions) ===
-  len = 0;
   while (EAX != 0) {
       len = len + 1;
       s = s + 1;
   }
-  return len;
+  return s;
 ---
 === manhattan_distance (28 instructions) ===
   EAX = (a->field4) - b->field4;
@@ -49,7 +46,6 @@
   }
 ---
 === list_sum (66 instructions) ===
-  sum = 0;
   while (head != 0) {
       sum = *(EAX) + sum;
       head = head->field8;
@@ -57,7 +53,6 @@
   return sum;
 ---
 === binary_search (62 instructions) ===
-  lo = 0;
   while (hi >= lo) {
       EAX = EAX / 2;
       EDX = EAX % 2;
@@ -79,16 +74,10 @@
   return op;
 ---
 === main (93 instructions) ===
-  var_54 = 0;
-  sorted = 0xa19;
-  var_60 = 0xa;
   printf("add(3,4) = %d\n", add(3, 4));
   printf("factorial(6) = %d\n", factorial(6));
-  RAX = *(0x100000a38);
-  EAX = *(0x100000a40);
   printf("sum = %d\n", sum_array(nums, 5));
   printf("strlen = %d\n", string_length("hello world"));
-  RAX = *(0x100000a80);
   printf("manhattan = %d\n", manhattan_distance(a, b));
   printf("day = %s\n", day_name(3));
   printf("apply(add,5,6) = %d\n", apply(0x1000004c0, 5, 6));
