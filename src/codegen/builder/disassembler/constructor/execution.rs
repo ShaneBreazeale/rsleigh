@@ -357,7 +357,22 @@ impl<'a> ExecutionGenerator<'a> {
                         quote! { i128::from(#inst_next) }
                     }
                     ReadScope::TokenField(tf) => match self.constructor.ass_fields.get(tf) {
-                        Some(n) => quote! { i128::from(self.#n) },
+                        Some(n) => {
+                            // Check if the token field is signed — if so, cast to
+                            // signed type before widening to i128 for correct sign extension
+                            let token_field = self.disassembler.sleigh.token_field(*tf);
+                            let bits = token_field.bits.len().get();
+                            if token_field.raw_value_is_signed() {
+                                match bits {
+                                    1..=8 => quote! { i128::from(self.#n as i8) },
+                                    9..=16 => quote! { i128::from(self.#n as i16) },
+                                    17..=32 => quote! { i128::from(self.#n as i32) },
+                                    _ => quote! { i128::from(self.#n as i64) },
+                                }
+                            } else {
+                                quote! { i128::from(self.#n) }
+                            }
+                        }
                         None => quote! { 0i128 },
                     },
                     ReadScope::Context(_) => quote! { 0i128 },
