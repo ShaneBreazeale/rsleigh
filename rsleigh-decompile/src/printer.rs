@@ -140,6 +140,13 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, indent: usize
             if matches!(&vdef.expr, Expr::Phi(_)) { return; }
             if is_zext_artifact(vdef, ssa) { return; }
             if is_self_assign(vdef, ssa) { return; }
+            // Skip call return value captures (e.g., ECX = EAX after a call)
+            // when the var is only used once — it will be inlined at the use site
+            if vdef.call_return && vdef.use_count <= 1 { return; }
+            // Skip parameter setup in entry block (e.g., var_8 = param_0)
+            if let Expr::Var(src) = &vdef.expr {
+                if ssa.var(*src).param_name.is_some() { return; }
+            }
             // Skip argument register assignments that are consumed by a call
             // (they're shown inline in the call's argument list)
             if is_arg_consumed_by_call(*lhs, ssa) { return; }
@@ -347,6 +354,15 @@ fn format_call_target(target: &CallTarget, _ssa: &SsaCfg, ctx: &PrintCtx) -> Str
 
 fn format_var(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
     let vdef = ssa.var(id);
+
+    // Use parameter name if available
+    if let Some(ref name) = vdef.param_name {
+        return name.clone();
+    }
+
+    // Call return values — if this var holds a call return and is only used once,
+    // the printer at the use site should show the call expression
+    // (handled by the caller checking call_return flag)
 
     // Inline Unique-space temporaries
     if vdef.varnode.space == AddressSpaceId::Unique {

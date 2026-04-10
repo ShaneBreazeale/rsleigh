@@ -22,11 +22,16 @@ pub fn fold(ssa: &mut SsaCfg) {
         let before = count_live_stmts(ssa);
         fold_once(ssa);
         recount_uses(ssa);
+        propagate_call_returns(ssa);
+        collapse_copy_chains(ssa);
+        recount_uses(ssa);
         eliminate_dead(ssa);
         recount_uses(ssa);
         recover_conditions(ssa);
         detect_return_values(ssa);
         collect_call_arguments(ssa);
+        recount_uses(ssa);
+        name_parameters(ssa);
         let after = count_live_stmts(ssa);
         if before == after { break; }
     }
@@ -704,5 +709,196 @@ pub(crate) fn recount_uses(ssa: &mut SsaCfg) {
     }
     for (i, count) in use_counts.into_iter().enumerate() {
         ssa.vars[i].use_count = count;
+    }
+}
+
+// ---- Pass: Return Value Propagation ----
+// After a Call (terminator or statement), the first read of RAX/EAX (x86)
+// or x0/w0 (ARM64) is the call's return value. Replace the assignment
+// with a synthetic "call_return" expression so the printer can inline it.
+
+fn propagate_call_returns(ssa: &mut SsaCfg) {
+    for bi in 0..ssa.blocks.len() {
+        // Check if this block has a Call terminator
+        let has_call_term = matches!(&ssa.blocks[bi].terminator, SsaTerminator::Call { .. });
+
+        // For Call terminators: the fallthrough block's first RAX assignment is the return value
+        if has_call_term {
+            let fallthrough = match &ssa.blocks[bi].terminator {
+                SsaTerminator::Call { fallthrough, .. } => Some(*fallthrough),
+                _ => None,
+            };
+            if let Some(ft) = fallthrough {
+                if ft.0 < ssa.blocks.len() {
+                    // Find the first RAX/EAX assignment in the fallthrough block
+                    for stmt in &ssa.blocks[ft.0].stmts {
+                        if let Stmt::Assign(var_id) = stmt {
+                            let vdef = &ssa.vars[var_id.0 as usize];
+                            if vdef.varnode.space == AddressSpaceId::Register
+                                && (vdef.varnode.offset == RAX_OFFSET)
+                                && matches!(&vdef.expr, Expr::Unknown)
+                            {
+                                ssa.vars[var_id.0 as usize].call_return = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // For Call statements within a block: the next RAX assignment is the return value
+        let stmts = &ssa.blocks[bi].stmts;
+        let mut after_call = false;
+        for i in 0..stmts.len() {
+            if matches!(&stmts[i], Stmt::Call { .. }) {
+                after_call = true;
+                continue;
+            }
+            if after_call {
+                if let Stmt::Assign(var_id) = &stmts[i] {
+                    let vdef = &ssa.vars[var_id.0 as usize];
+                    if vdef.varnode.space == AddressSpaceId::Register
+                        && vdef.varnode.offset == RAX_OFFSET
+                    {
+                        ssa.vars[var_id.0 as usize].call_return = true;
+                        after_call = false;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---- Pass: Copy Chain Collapse ----
+// If A = B (register copy) and A is only used once in an expression,
+// replace that use with B directly. This collapses:
+//   EAX = var_8; var_c = EAX  →  var_c = var_8
+//   ECX = EAX (after call)    →  ECX = call_return
+
+fn collapse_copy_chains(ssa: &mut SsaCfg) {
+    // Build a map: VarId → its Var(source) if it's a safe copy to collapse.
+    // Only collapse register copies where the source is a stack variable (Unique load)
+    // or constant — NOT register-to-register copies, since the source register
+    // might be overwritten between the copy and the use.
+    let copy_map: Vec<Option<VarId>> = (0..ssa.vars.len())
+        .map(|v| {
+            let vdef = &ssa.vars[v];
+            if vdef.call_return { return None; }
+            if vdef.use_count <= 1 && vdef.varnode.space == AddressSpaceId::Register {
+                if let Expr::Var(src) = &vdef.expr {
+                    let src_def = &ssa.vars[src.0 as usize];
+                    if src_def.call_return { return None; }
+                    // Only collapse if source is a stack var, constant, or Unique
+                    // (not another register that might get overwritten)
+                    if src_def.varnode.space != AddressSpaceId::Register {
+                        return Some(*src);
+                    }
+                    // Also collapse if source has a param name (stable identity)
+                    if src_def.param_name.is_some() {
+                        return Some(*src);
+                    }
+                }
+            }
+            None
+        })
+        .collect();
+
+    // Substitute: for each var whose expr references a copy source, replace with the source
+    for v in 0..ssa.vars.len() {
+        let expr = ssa.vars[v].expr.clone();
+        ssa.vars[v].expr = substitute_copies(&expr, &copy_map);
+    }
+}
+
+fn substitute_copies(expr: &Expr, copy_map: &[Option<VarId>]) -> Expr {
+    match expr {
+        Expr::Var(id) => {
+            if let Some(Some(src)) = copy_map.get(id.0 as usize) {
+                // Follow the chain one level
+                if let Some(Some(src2)) = copy_map.get(src.0 as usize) {
+                    Expr::Var(*src2)
+                } else {
+                    Expr::Var(*src)
+                }
+            } else {
+                expr.clone()
+            }
+        }
+        Expr::BinOp(kind, left, right) => {
+            let l = resolve_copy(*left, copy_map);
+            let r = resolve_copy(*right, copy_map);
+            Expr::BinOp(*kind, l, r)
+        }
+        Expr::UnaryOp(kind, input) => {
+            let i = resolve_copy(*input, copy_map);
+            Expr::UnaryOp(*kind, i)
+        }
+        Expr::Load(ptr) => {
+            let p = resolve_copy(*ptr, copy_map);
+            Expr::Load(p)
+        }
+        _ => expr.clone(),
+    }
+}
+
+fn resolve_copy(id: VarId, copy_map: &[Option<VarId>]) -> VarId {
+    if let Some(Some(src)) = copy_map.get(id.0 as usize) {
+        if let Some(Some(src2)) = copy_map.get(src.0 as usize) {
+            *src2
+        } else {
+            *src
+        }
+    } else {
+        id
+    }
+}
+
+// ---- Pass: Parameter Naming ----
+// In the entry block, assignments from argument registers (RDI, RSI, etc.)
+// to stack variables are parameter setup. Name them param_0, param_1, etc.
+
+fn name_parameters(ssa: &mut SsaCfg) {
+    if ssa.blocks.is_empty() { return; }
+    let entry = ssa.entry.0;
+    if entry >= ssa.blocks.len() { return; }
+
+    let mut param_idx = 0u32;
+    let stmts = &ssa.blocks[entry].stmts;
+
+    for stmt in stmts {
+        if let Stmt::Assign(var_id) = stmt {
+            let vdef = &ssa.vars[var_id.0 as usize];
+            // Check if the RHS is an Unknown (function input) from an arg register
+            if let Expr::Unknown = &vdef.expr {
+                if vdef.varnode.space == AddressSpaceId::Register
+                    && ARG_REG_OFFSETS.contains(&vdef.varnode.offset)
+                {
+                    ssa.vars[var_id.0 as usize].param_name = Some(format!("param_{}", param_idx));
+                    param_idx += 1;
+                    continue;
+                }
+            }
+            // Also: stack store from arg register → the stored value is a param
+            // var_8 = EDI → var_8 is param_0
+            if vdef.varnode.space == AddressSpaceId::Register {
+                // Skip — these are intermediate copies, handled by the stack store below
+            }
+        }
+        if let Stmt::Store { val, .. } = stmt {
+            // If the stored value comes from an arg register assignment, name it
+            let vdef = &ssa.vars[val.0 as usize];
+            if vdef.param_name.is_none() {
+                if let Expr::Unknown = &vdef.expr {
+                    if vdef.varnode.space == AddressSpaceId::Register
+                        && ARG_REG_OFFSETS.contains(&vdef.varnode.offset)
+                        && vdef.param_name.is_none()
+                    {
+                        ssa.vars[val.0 as usize].param_name = Some(format!("param_{}", param_idx));
+                        param_idx += 1;
+                    }
+                }
+            }
+        }
     }
 }

@@ -77,6 +77,10 @@ pub struct VarDef {
     pub expr: Expr,
     pub size: u32,
     pub use_count: u32,
+    /// If this var is a function parameter, its name (e.g. "param_0")
+    pub param_name: Option<String>,
+    /// If this var holds a call return value, the call's VarId
+    pub call_return: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -150,6 +154,8 @@ impl SsaCfg {
             expr,
             size,
             use_count: 0,
+            param_name: None,
+            call_return: false,
         });
         id
     }
