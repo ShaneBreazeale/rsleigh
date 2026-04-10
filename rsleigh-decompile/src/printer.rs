@@ -124,8 +124,229 @@ fn is_body_empty(stmts: &[StructuredStmt], ssa: &SsaCfg) -> bool {
 }
 
 fn print_stmts(stmts: &[StructuredStmt], ssa: &SsaCfg, ctx: &PrintCtx, indent: usize, out: &mut String) {
+    let mut tracker = RegTracker::new();
     for stmt in stmts {
-        print_stmt(stmt, ssa, ctx, indent, out);
+        print_stmt_tracked(stmt, ssa, ctx, indent, out, &mut tracker);
+    }
+}
+
+/// Tracks what each register currently holds, for display-time copy elision.
+struct RegTracker {
+    /// Map: (register offset, size) → VarId of the source value
+    reg_source: std::collections::HashMap<(u64, u32), VarId>,
+}
+
+impl RegTracker {
+    fn new() -> Self { Self { reg_source: std::collections::HashMap::new() } }
+
+    /// Record that a register now holds the value from `source`.
+    fn set(&mut self, offset: u64, size: u32, source: VarId) {
+        self.reg_source.insert((offset, size), source);
+    }
+
+    /// Look up what a register currently holds. Returns the original source VarId
+    /// if the register was assigned from a simple copy.
+    fn get(&self, offset: u64, size: u32) -> Option<VarId> {
+        self.reg_source.get(&(offset, size)).copied()
+    }
+
+    /// Invalidate a register (it was overwritten by a computation, not a copy).
+    fn invalidate(&mut self, offset: u64, size: u32) {
+        self.reg_source.remove(&(offset, size));
+    }
+
+    /// Invalidate all registers (after a call).
+    fn invalidate_all(&mut self) {
+        self.reg_source.clear();
+    }
+
+    /// Resolve a VarId through the tracker: if the var is a register that
+    /// currently holds a known source, return that source instead.
+    fn resolve(&self, id: VarId, ssa: &SsaCfg) -> VarId {
+        let vdef = ssa.var(id);
+        if vdef.varnode.space == AddressSpaceId::Register {
+            if let Some(src) = self.get(vdef.varnode.offset, vdef.varnode.size) {
+                return src;
+            }
+        }
+        id
+    }
+}
+
+fn print_stmt_tracked(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, indent: usize, out: &mut String, tracker: &mut RegTracker) {
+    let pad: String = "    ".repeat(indent);
+
+    match stmt {
+        StructuredStmt::Assign { lhs, .. } => {
+            let vdef = ssa.var(*lhs);
+            if vdef.varnode.space == AddressSpaceId::Unique { return; }
+            if vdef.varnode.space == AddressSpaceId::Register && is_flag(vdef.varnode.offset) { return; }
+            if matches!(&vdef.expr, Expr::Phi(_)) { return; }
+            if is_zext_artifact(vdef, ssa) { return; }
+            if is_self_assign(vdef, ssa) { return; }
+            if vdef.call_return && vdef.use_count <= 1 { return; }
+            if is_arg_consumed_by_call(*lhs, ssa) { return; }
+
+            // Track register copies for display-time elision
+            if vdef.varnode.space == AddressSpaceId::Register {
+                if let Expr::Var(src_id) = &vdef.expr {
+                    let src = ssa.var(*src_id);
+                    if src.varnode.space == AddressSpaceId::Register {
+                        let resolved = tracker.resolve(*src_id, ssa);
+                        tracker.set(vdef.varnode.offset, vdef.varnode.size, resolved);
+                        // Skip reg-to-reg copies that just shuffle values around
+                        // Only skip if the source is a non-register (stack/param) value
+                        let resolved_var = ssa.var(resolved);
+                        if resolved_var.varnode.space != AddressSpaceId::Register
+                            || resolved_var.param_name.is_some()
+                        {
+                            return; // Elided: value available via tracker
+                        }
+                    } else {
+                        tracker.set(vdef.varnode.offset, vdef.varnode.size, *src_id);
+                    }
+                } else if let Expr::Load(ptr) = &vdef.expr {
+                    // REG = Load(addr): track so later uses resolve to the stack var
+                    tracker.set(vdef.varnode.offset, vdef.varnode.size, *lhs);
+                    // Skip printing if this register is just used as an intermediate
+                    // to pass a stack value to another assignment or call
+                    if vdef.use_count <= 1 && get_rbp_offset(*ptr, ssa).is_some() {
+                        return; // Elided: value available via tracker as var_N
+                    }
+                } else {
+                    tracker.invalidate(vdef.varnode.offset, vdef.varnode.size);
+                }
+            }
+
+            // For non-register assigns (stack vars), resolve the RHS through tracker
+            let name = var_name(&vdef.varnode, ctx);
+            let rhs = format_expr_tracked(&vdef.expr, ssa, ctx, tracker);
+            // Skip if the resolved RHS is the same as the LHS name (self-assign after resolution)
+            if rhs == name { return; }
+            out.push_str(&format!("{}{} = {};\n", pad, name, rhs));
+        }
+        StructuredStmt::Store { addr, val } => {
+            let addr_str = format_addr(*addr, ssa, ctx);
+            let val_expr = format_var_tracked(*val, ssa, ctx, tracker);
+            let size = ssa.var(*val).size;
+            let type_name = size_to_type(size);
+            if let Some(stack_name) = try_stack_var_name(*addr, ssa) {
+                out.push_str(&format!("{}{} = {};\n", pad, stack_name, val_expr));
+            } else {
+                out.push_str(&format!("{}*({}*)({}) = {};\n", pad, type_name, addr_str, val_expr));
+            }
+        }
+        StructuredStmt::Call { target, args, out: call_out } => {
+            let target_name = format_call_target(target, ssa, ctx);
+            let args_str: Vec<String> = args.iter()
+                .map(|a| {
+                    let vdef = ssa.var(*a);
+                    format_expr_tracked(&vdef.expr, ssa, ctx, tracker)
+                })
+                .collect();
+            if let Some(out_var) = call_out {
+                let name = var_name(&ssa.var(*out_var).varnode, ctx);
+                out.push_str(&format!("{}{} = {}({});\n", pad, name, target_name, args_str.join(", ")));
+            } else {
+                out.push_str(&format!("{}{}({});\n", pad, target_name, args_str.join(", ")));
+            }
+            // Calls clobber all registers
+            tracker.invalidate_all();
+        }
+        StructuredStmt::Return(val) => {
+            if let Some(v) = val {
+                let resolved = tracker.resolve(*v, ssa);
+                let vdef = ssa.var(resolved);
+                let expr = format_expr_tracked(&vdef.expr, ssa, ctx, tracker);
+                out.push_str(&format!("{}return {};\n", pad, expr));
+            } else {
+                out.push_str(&format!("{}return;\n", pad));
+            }
+        }
+        StructuredStmt::IfElse { cond, then_body, else_body } => {
+            let cond_expr = format_condition(*cond, ssa, ctx);
+            let then_filtered = filter_boilerplate(then_body, ssa);
+            let else_filtered = filter_boilerplate(else_body, ssa);
+            let then_empty = is_body_empty(&then_filtered, ssa);
+            let else_empty = is_body_empty(&else_filtered, ssa);
+            if then_empty && else_empty { return; }
+            if then_empty && !else_empty {
+                out.push_str(&format!("{}if (!{}) {{\n", pad, cond_expr));
+                print_stmts(&else_filtered, ssa, ctx, indent + 1, out);
+                out.push_str(&format!("{}}}\n", pad));
+            } else {
+                out.push_str(&format!("{}if ({}) {{\n", pad, cond_expr));
+                print_stmts(&then_filtered, ssa, ctx, indent + 1, out);
+                if !else_empty {
+                    out.push_str(&format!("{}}} else {{\n", pad));
+                    print_stmts(&else_filtered, ssa, ctx, indent + 1, out);
+                }
+                out.push_str(&format!("{}}}\n", pad));
+            }
+        }
+        StructuredStmt::While { cond, body } => {
+            let cond_expr = format_condition(*cond, ssa, ctx);
+            let body_filtered = filter_boilerplate(body, ssa);
+            out.push_str(&format!("{}while ({}) {{\n", pad, cond_expr));
+            print_stmts(&body_filtered, ssa, ctx, indent + 1, out);
+            out.push_str(&format!("{}}}\n", pad));
+        }
+        StructuredStmt::Goto(addr) => {
+            out.push_str(&format!("{}goto label_{:x};\n", pad, addr));
+        }
+        StructuredStmt::Label(addr) => {
+            out.push_str(&format!("label_{:x}:\n", addr));
+        }
+    }
+}
+
+/// Format an expression, resolving register copies through the tracker.
+/// Format a VarId with register tracking — resolves register copies to their source.
+fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> String {
+    let vdef = ssa.var(id);
+    // Only resolve through tracker if the register is actually tracked
+    if vdef.varnode.space == AddressSpaceId::Register {
+        if let Some(tracked_id) = tracker.get(vdef.varnode.offset, vdef.varnode.size) {
+            // Register is tracked — resolve to the tracked source
+            let tracked_vdef = ssa.var(tracked_id);
+            // If tracked to a Load (stack var), show the stack var name
+            if let Expr::Load(ptr) = &tracked_vdef.expr {
+                if let Some(offset) = get_rbp_offset(*ptr, ssa) {
+                    return format!("var_{:x}", offset);
+                }
+            }
+            // If tracked to a non-register source, use it
+            if tracked_vdef.varnode.space != AddressSpaceId::Register {
+                return format_var(tracked_id, ssa, ctx);
+            }
+            // If tracked to another register, use the tracked value
+            if tracked_id != id {
+                return format_var(tracked_id, ssa, ctx);
+            }
+        }
+    }
+    format_var(id, ssa, ctx)
+}
+
+fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> String {
+    match expr {
+        Expr::Var(id) => format_var_tracked(*id, ssa, ctx, tracker),
+        Expr::BinOp(kind, left, right) => {
+            let l = format_var_tracked(*left, ssa, ctx, tracker);
+            let r = format_var_tracked(*right, ssa, ctx, tracker);
+            let op = binop_str(*kind);
+            if matches!(kind, BinOpKind::Add) {
+                let rv = ssa.var(*right);
+                if let Expr::Const(val, sz) = &rv.expr {
+                    if *val > 0x7fffffffffffffff {
+                        let neg = (!*val).wrapping_add(1);
+                        return format!("{} - {}", l, format_const(neg, *sz));
+                    }
+                }
+            }
+            format!("{} {} {}", l, op, r)
+        }
+        _ => format_expr(expr, ssa, ctx),
     }
 }
 
