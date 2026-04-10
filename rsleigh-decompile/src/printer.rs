@@ -250,7 +250,7 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                     // - use_count <= 1: only used once (tracked at use site)
                     // - had_call_return: this is a restore after a call (tracked)
                     // - use_count <= 2 AND all uses are copies to other regs/stack
-                    if get_rbp_offset(*ptr, ssa).is_some() && (vdef.use_count <= 1 || had_call_return) {
+                    if get_rbp_offset(*ptr, ssa).is_some() && (vdef.use_count <= 2 || had_call_return) {
                         return; // Elided: stack Load tracked
                     }
                 } else {
