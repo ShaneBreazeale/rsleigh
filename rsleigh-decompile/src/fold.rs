@@ -23,6 +23,7 @@ pub fn fold(ssa: &mut SsaCfg) {
         fold_once(ssa);
         recount_uses(ssa);
         propagate_call_returns(ssa);
+        // forward_substitute_block: disabled pending liveness analysis
         recount_uses(ssa);
         eliminate_dead(ssa);
         recount_uses(ssa);
@@ -713,6 +714,113 @@ pub(crate) fn recount_uses(ssa: &mut SsaCfg) {
 
 // ---- Pass: Save/Restore Elimination ----
 // Detect the pattern:  A = X; [call]; Y = A
+// ---- Pass: Forward Substitution Within Blocks ----
+// Scan each block linearly. Track what each register currently holds (its
+// "value" — a VarId pointing to the original source). When a register is
+// read, substitute the source. This is safe because we only look within
+// one block and we invalidate on any write.
+//
+// Example: EAX = var_8; var_c = EAX → var_c = var_8 (because EAX holds var_8)
+//          Later: EAX = var_c → EAX = var_8 (because var_c holds var_8)
+
+fn forward_substitute_block(ssa: &mut SsaCfg) {
+    for bi in 0..ssa.blocks.len() {
+        // Map: (register offset, size) → the VarId of the value it currently holds
+        let mut reg_value: std::collections::HashMap<(u64, u32), VarId> = std::collections::HashMap::new();
+        // Map: VarId (stack/unique) → the VarId of its source value
+        let mut alias_map: std::collections::HashMap<u32, VarId> = std::collections::HashMap::new();
+
+        let stmts = &ssa.blocks[bi].stmts;
+        let mut replacements: Vec<(u32, Expr)> = Vec::new();
+
+        for stmt in stmts {
+            match stmt {
+                Stmt::Assign(var_id) => {
+                    let vdef = &ssa.vars[var_id.0 as usize];
+
+                    if vdef.varnode.space == AddressSpaceId::Register {
+                        match &vdef.expr {
+                            // REG = Var(src) — register gets a new value
+                            Expr::Var(src_id) => {
+                                let src = &ssa.vars[src_id.0 as usize];
+                                if src.varnode.space == AddressSpaceId::Register {
+                                    // REG = OTHER_REG: look up what OTHER_REG holds
+                                    let key = (src.varnode.offset, src.varnode.size);
+                                    if let Some(original) = reg_value.get(&key) {
+                                        // Substitute: instead of REG = OTHER_REG,
+                                        // use REG = original_source
+                                        replacements.push((var_id.0, Expr::Var(*original)));
+                                        let my_key = (vdef.varnode.offset, vdef.varnode.size);
+                                        reg_value.insert(my_key, *original);
+                                    } else {
+                                        let my_key = (vdef.varnode.offset, vdef.varnode.size);
+                                        reg_value.insert(my_key, *src_id);
+                                    }
+                                } else {
+                                    // REG = stack_var/unique: look up what the stack var holds
+                                    if let Some(original) = alias_map.get(&src_id.0) {
+                                        replacements.push((var_id.0, Expr::Var(*original)));
+                                        let my_key = (vdef.varnode.offset, vdef.varnode.size);
+                                        reg_value.insert(my_key, *original);
+                                    } else {
+                                        let my_key = (vdef.varnode.offset, vdef.varnode.size);
+                                        reg_value.insert(my_key, *src_id);
+                                    }
+                                }
+                            }
+                            Expr::Load(_) => {
+                                // REG = Load(addr) — register gets a loaded value
+                                // Invalidate this register's tracked value
+                                let my_key = (vdef.varnode.offset, vdef.varnode.size);
+                                reg_value.remove(&my_key);
+                            }
+                            _ => {
+                                // REG = expr — register gets a computed value
+                                let my_key = (vdef.varnode.offset, vdef.varnode.size);
+                                reg_value.remove(&my_key);
+                            }
+                        }
+                    } else {
+                        // Non-register assignment (stack var, unique)
+                        // Track what it holds for later substitution
+                        if let Expr::Var(src_id) = &vdef.expr {
+                            let src = &ssa.vars[src_id.0 as usize];
+                            if src.varnode.space == AddressSpaceId::Register {
+                                let key = (src.varnode.offset, src.varnode.size);
+                                if let Some(original) = reg_value.get(&key) {
+                                    // stack_var = REG where REG holds original
+                                    // → stack_var = original
+                                    replacements.push((var_id.0, Expr::Var(*original)));
+                                    alias_map.insert(var_id.0, *original);
+                                } else {
+                                    alias_map.insert(var_id.0, *src_id);
+                                }
+                            }
+                        }
+                    }
+                }
+                Stmt::Store { .. } => {
+                    // Stores don't affect register tracking
+                }
+                Stmt::Call { .. } => {
+                    // Calls invalidate ALL register values (callee may clobber)
+                    reg_value.clear();
+                }
+            }
+        }
+
+        // Also invalidate on Call terminators
+        if matches!(&ssa.blocks[bi].terminator, SsaTerminator::Call { .. }) {
+            // Already handled — reg_value would be cleared if we had more stmts
+        }
+
+        // Apply replacements
+        for (var_idx, new_expr) in replacements {
+            ssa.vars[var_idx as usize].expr = new_expr;
+        }
+    }
+}
+
 // where A is a stack variable used only for the save+restore.
 // Replace Y's expression with X directly, eliminating the roundtrip.
 // Also: A = X; ... ; B = A where B has same register as X → B = X
