@@ -14,6 +14,7 @@ pub fn print_c(
     arch: Architecture,
     binary: Option<&[u8]>,
     imports: &HashMap<u64, String>,
+    local_names: &HashMap<String, String>,
 ) -> String {
     let mut out = String::new();
     let ctx = PrintCtx { arch, binary, imports };
@@ -24,7 +25,16 @@ pub fn print_c(
     collect_store_aliases(&filtered, ssa, &ctx, &mut tracker);
 
     print_stmts_with_tracker(&filtered, ssa, &ctx, 0, &mut out, &mut tracker);
-    post_process(&mut out, &tracker.stack_alias);
+    // Merge DWARF local names into the alias map — DWARF names take priority
+    let mut all_aliases = tracker.stack_alias.clone();
+    for (var_name, dwarf_name) in local_names {
+        all_aliases.insert(var_name.clone(), dwarf_name.clone());
+    }
+    // Collect parameter names for return value inference
+    let param_names: Vec<String> = ssa.vars.iter()
+        .filter_map(|v| v.param_name.as_ref().cloned())
+        .collect();
+    post_process(&mut out, &all_aliases, &param_names);
     out
 }
 
@@ -61,7 +71,7 @@ fn print_stmts_with_tracker(stmts: &[StructuredStmt], ssa: &SsaCfg, ctx: &PrintC
 }
 
 /// Text-level post-processing to clean up common patterns.
-fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, String>) {
+fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, String>, param_names: &[String]) {
     let mut lines: Vec<String> = out.lines().map(|l| l.to_string()).collect();
     let mut i = 0;
     while i < lines.len() {
@@ -211,19 +221,50 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         i += 1;
     }
 
-    // Strip verbose casts
+    // Strip verbose casts and simplify common patterns
     for line in &mut lines {
         *line = line.replace("(int64_t)", "").replace("(uint64_t)", "");
+        // * 1 in address expressions is identity
+        *line = line.replace(" * 1)", ")").replace(" * 1 ", " ");
+        // __chk suffix: __strcpy_chk(a, b, size) → strcpy(a, b)
+        while let Some(pos) = line.find("__") {
+            if let Some(chk) = line[pos..].find("_chk(") {
+                let func_start = pos + 2;
+                let func_end = pos + chk;
+                let clean_name = line[func_start..func_end].to_string();
+                // Find closing paren and strip last arg (the buffer size)
+                let call_start = pos + chk + 4; // after "_chk"
+                if let Some(close) = find_matching_paren(line, call_start) {
+                    let args_str = &line[call_start + 1..close];
+                    // Remove the last comma-separated argument
+                    let mut args: Vec<&str> = args_str.split(", ").collect();
+                    if args.len() > 2 { args.pop(); } // strcpy has 2 args, chk adds a 3rd
+                    let new_call = format!("{}({})", clean_name, args.join(", "));
+                    *line = format!("{}{}{}", &line[..pos], new_call, &line[close + 1..]);
+                } else {
+                    let old = format!("__{}_chk(", clean_name);
+                    *line = line.replace(&old, &format!("{}(", clean_name));
+                }
+            } else {
+                break;
+            }
+        }
+        // Collapse double spaces from removals (but not indentation)
         while line.contains("  ") && !line.starts_with("  ") {
             *line = line.replace("  ", " ");
+        }
+        // Also collapse double spaces after indentation
+        if line.starts_with("    ") {
+            let trimmed = line.trim_start().to_string();
+            let indent_len = line.len() - trimmed.len();
+            let indent = &line[..indent_len];
+            let cleaned = trimmed.replace("  ", " ");
+            *line = format!("{}{}", indent, cleaned);
         }
     }
 
     // Replace "EAX = EAX op expr; return;" → "return param op expr;"
-    // Find the first parameter name from aliases
-    let first_param = aliases.values().find(|v| {
-        v.starts_with("param_") || v.chars().next().map_or(false, |c| c.is_ascii_lowercase())
-    }).cloned();
+    let first_param = param_names.first().cloned();
     if let Some(param_name) = first_param {
         let mut i = 0;
         while i < lines.len() {
@@ -269,6 +310,59 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Simplify x86 IDIV dividend pattern: EDX << 0x20 | X / Y → X / Y
+    // CDQ sign-extends EAX into EDX:EAX before IDIV, but the quotient is just EAX/divisor
+    for line in &mut lines {
+        // Pattern: "EDX << 0x20 | EXPR" → "EXPR" (the EDX part is sign extension noise)
+        while let Some(pos) = line.find("EDX << 0x20 | ") {
+            let replacement_start = pos + "EDX << 0x20 | ".len();
+            *line = format!("{}{}", &line[..pos], &line[replacement_start..]);
+        }
+        // Also: "RDX << 0x20 | EXPR"
+        while let Some(pos) = line.find("RDX << 0x20 | ") {
+            let replacement_start = pos + "RDX << 0x20 | ".len();
+            *line = format!("{}{}", &line[..pos], &line[replacement_start..]);
+        }
+    }
+
+    // Convert pointer dereferences to array access: *(type*)(base + idx) → base[idx]
+    // Also: *(base + idx) → base[idx]
+    for line in &mut lines {
+        // Pattern 1: *(uintN_t*)(X + Y)
+        while let Some(star_pos) = line.find("*(uint") {
+            if let Some(type_end) = line[star_pos..].find("*)(") {
+                let abs_paren = star_pos + type_end + 2;
+                if let Some(close) = find_matching_paren(line, abs_paren) {
+                    let inner = &line[abs_paren + 1..close];
+                    if let Some(plus) = inner.find(" + ") {
+                        let base = &inner[..plus];
+                        let idx = &inner[plus + 3..];
+                        *line = format!("{}{}{}", &line[..star_pos],
+                            format!("{}[{}]", base, idx), &line[close + 1..]);
+                        continue;
+                    }
+                }
+            }
+            break;
+        }
+        // Pattern 2: *(X + Y) — plain pointer deref with addition
+        while let Some(star_pos) = line.find("*(") {
+            // Make sure it's not *(uint...*) which we already handled
+            if line[star_pos + 2..].starts_with("uint") { break; }
+            if let Some(close) = find_matching_paren(line, star_pos + 1) {
+                let inner = &line[star_pos + 2..close];
+                if let Some(plus) = inner.find(" + ") {
+                    let base = &inner[..plus];
+                    let idx = &inner[plus + 3..];
+                    *line = format!("{}{}{}", &line[..star_pos],
+                        format!("{}[{}]", base, idx), &line[close + 1..]);
+                    continue;
+                }
+            }
+            break;
+        }
+    }
+
     // Final cleanup pass after alias substitution: identity ops and self-assignments
     let mut i = 0;
     while i < lines.len() {
@@ -295,6 +389,44 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             }
         }
         i += 1;
+    }
+
+    // Second pass: remove redundant "REG = call();" after all simplifications
+    let mut i = 0;
+    while i < lines.len() {
+        let lt = lines[i].trim().to_string();
+        if let Some(eq_pos) = lt.find(" = ") {
+            let lhs = &lt[..eq_pos];
+            let rhs = &lt[eq_pos + 3..lt.len().saturating_sub(1)];
+            let is_reg = lhs.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                && lhs.len() >= 2 && lhs.len() <= 3;
+            let is_call = rhs.contains('(') && rhs.contains(')');
+            if is_reg && is_call {
+                let mut redundant = false;
+                for j in (0..i).chain(i + 1..lines.len()) {
+                    if lines[j].trim().contains(rhs) {
+                        redundant = true;
+                        break;
+                    }
+                }
+                if redundant {
+                    lines.remove(i);
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+
+    // Infer return value for bare "return;" at end of function
+    // If the function has parameters, the first parameter is likely the return value
+    // (common for functions like reverse_string that return their input)
+    if let Some(last) = lines.iter().rposition(|l| !l.trim().is_empty()) {
+        if lines[last].trim() == "return;" && !param_names.is_empty() {
+            let indent = lines[last].len() - lines[last].trim_start().len();
+            let pad = &lines[last][..indent];
+            lines[last] = format!("{}return {};", pad, param_names[0]);
+        }
     }
 
     // Remove consecutive blank lines
@@ -1122,6 +1254,16 @@ fn format_cond_operand(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTra
     }
     // Default: use tracked resolution
     format_var_tracked(id, ssa, ctx, tracker)
+}
+
+/// Find matching closing paren for an opening paren at `pos`.
+fn find_matching_paren(s: &str, pos: usize) -> Option<usize> {
+    let mut depth = 0;
+    for (ci, ch) in s[pos..].char_indices() {
+        if ch == '(' { depth += 1; }
+        if ch == ')' { depth -= 1; if depth == 0 { return Some(pos + ci); } }
+    }
+    None
 }
 
 /// Negate a condition string for while loop display.

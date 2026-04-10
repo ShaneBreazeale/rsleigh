@@ -53,9 +53,12 @@ pub fn decompile_with_binary(
         None
     };
 
+    // Build local variable name map from DWARF: var_N → actual_name
+    let mut local_var_names = std::collections::HashMap::new();
     if let Some(ref debug_info) = debug_info {
         let func_addr = instructions[0].0;
         if let Some(info) = debug_info.get(&func_addr) {
+            // Apply parameter names
             for v in &mut ssa.vars {
                 if let Some(ref param_name) = v.param_name {
                     if let Some(idx) = param_name.strip_prefix("param_").and_then(|s| s.parse::<usize>().ok()) {
@@ -65,9 +68,24 @@ pub fn decompile_with_binary(
                     }
                 }
             }
+            // Build local variable name map: DWARF fbreg offset → var_N name
+            for (dwarf_offset, name) in &info.local_names {
+                // DWARF DW_OP_fbreg(N) means RBP + N
+                // For negative offsets: fbreg(-8) → RBP - 8 → var_8
+                if *dwarf_offset < 0 {
+                    let positive = (-dwarf_offset) as u64;
+                    let var_name = format!("var_{:x}", positive);
+                    local_var_names.insert(var_name, name.clone());
+                } else if *dwarf_offset > 0 {
+                    // Positive offset (e.g., function args passed on stack)
+                    // These map to RBP + offset format
+                    let var_name = format!("var_{:x}", *dwarf_offset as u64);
+                    local_var_names.insert(var_name, name.clone());
+                }
+            }
         }
     }
 
     let structured = structure::recover_structure(&ssa, &cfg);
-    printer::print_c(&structured, &ssa, arch, binary, &import_map)
+    printer::print_c(&structured, &ssa, arch, binary, &import_map, &local_var_names)
 }
