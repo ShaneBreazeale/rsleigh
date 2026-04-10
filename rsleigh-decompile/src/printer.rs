@@ -617,6 +617,13 @@ fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTrac
                 return format!("{} {} {}", l, binop_str(*kind), r);
             }
         }
+        // For Loads from stack, resolve through alias chain
+        if let Expr::Load(ptr) = &vdef.expr {
+            if let Some(offset) = get_rbp_offset(*ptr, ssa) {
+                let name = format!("var_{:x}", offset);
+                return resolve_stack_alias(&name, tracker);
+            }
+        }
         return format_expr(&vdef.expr, ssa, ctx);
     }
     // Check register tracking (try exact size, then sub-register sizes)
