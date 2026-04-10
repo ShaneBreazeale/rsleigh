@@ -157,6 +157,26 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Replace EAX in expressions with the first param when it's a
+    // save/restore pattern: EAX = EAX * ... → return param_0 * ...
+    if aliases.values().any(|v| v == "param_0") {
+        let mut i = 0;
+        while i < lines.len() {
+            let lt = lines[i].trim().to_string();
+            if lt.starts_with("EAX = EAX ") {
+                let indent = lines[i].len() - lines[i].trim_start().len();
+                let pad = &lines[i][..indent];
+                let expr = lt.trim_start_matches("EAX = EAX ").trim_end_matches(';');
+                lines[i] = format!("{}return param_0 {};", pad, expr);
+                // Remove the following "return;" if it exists
+                if i + 1 < lines.len() && lines[i + 1].trim() == "return;" {
+                    lines.remove(i + 1);
+                }
+            }
+            i += 1;
+        }
+    }
+
     // Apply stack variable aliases: var_8 → param_0, etc.
     for line in &mut lines {
         for (var_name, alias) in aliases {
