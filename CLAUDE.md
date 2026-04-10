@@ -2,30 +2,39 @@
 
 ## What This Is
 
-A unified Rust crate (merged from `sleigh-rs` + `sleigh2rust`) that parses Ghidra's
-`.slaspec` architecture definitions and generates Rust code that decodes instructions
-and emits P-code IR.
+A unified Rust workspace that:
+1. Parses Ghidra's `.slaspec` architecture definitions
+2. Generates Rust code that decodes instructions and emits P-code IR
+3. Decompiles P-code into C-like pseudocode with string literals, import names, and condition recovery
 
-**Goal:** Pure Rust, zero C++ deps, generate `Vec<PcodeOp>` for any instruction from
-any architecture Ghidra supports, using the same `.slaspec` files Ghidra ships (Apache 2.0).
+**Goal:** Pure Rust, zero C++ deps — a complete disassembly + decompilation pipeline
+using the same `.slaspec` files Ghidra ships (Apache 2.0).
 
-This feeds into Spectra's native analysis backend as a drop-in replacement for the
-Ghidra JVM daemon.
+Wired into Spectra as a native analysis backend replacing the Ghidra JVM daemon.
 
 ---
 
 ## Current Status
 
-**Working end-to-end for 3 architectures:**
+**Working end-to-end for 5 architectures:**
 
-| Architecture | Constructors | Extensions | Generated | Build time |
-|---|---|---|---|---|
-| x86-64 | 5700+ | full | 33 MB | ~3.5 min |
-| AARCH64 | 3500+ | NEON + SVE | 34 MB | ~11 sec |
-| RISC-V (RV64) | 500+ | F/D/B/K/P/Q/V/C | 5 MB | ~2.6 sec |
+| Architecture | Constructors | Extensions |
+|---|---|---|
+| x86-64 | 5700+ | full |
+| AArch64 | 3500+ | NEON + SVE |
+| ARM32 | 1200+ | ARMv7 + Thumb |
+| MIPS32 | 900+ | FPU + DSP + MIPS16 + microMIPS |
+| RISC-V 64 | 500+ | F/D/B/K/P/Q/V/C |
 
-**223 validated instructions** (23 golden with exact P-code assertions + 200 corpus
-cross-referenced against capstone for decode/length/mnemonic/P-code structure).
+**4 test suites:** 23 golden P-code assertions, 301 corpus instructions, 5000 fuzz
+attempts (zero panics), decompiler validation against compiled C source.
+
+**Decompiler output (real binary):**
+```
+printf("add(3, 4) = %d\n", add(3, 4));
+printf("factorial(5) = %d\n", factorial(5));
+printf("reversed: %s\n", reverse_string(RBP + 0xd0));
+```
 
 ---
 
@@ -33,159 +42,128 @@ cross-referenced against capstone for decode/length/mnemonic/P-code structure).
 
 ```
 rsleigh/
-├── Cargo.toml                  ← workspace root (rsleigh lib + members)
-├── CLAUDE.md                   ← this file
-├── Makefile                    ← make generate / make test / make run
-├── src/                        ← rsleigh parser + codegen library
-│   ├── codegen/                ← Rust code generation from SLEIGH
+├── Cargo.toml                  ← workspace root
+├── src/                        ← SLEIGH parser + Rust codegen library
+│   ├── codegen/                ← code generation from SLEIGH
 │   │   └── builder/disassembler/constructor/
-│   │       ├── execution.rs    ← P-code emission (ExecutionGenerator)
-│   │       ├── pattern.rs      ← instruction pattern matching codegen
+│   │       ├── execution.rs    ← P-code emission + dynamic register lookup
+│   │       ├── pattern.rs      ← pattern matching codegen
 │   │       ├── disassembly.rs  ← disassembly variable codegen
-│   │       └── mod.rs          ← ConstructorStruct, gen_display, gen_execution
+│   │       └── mod.rs          ← constructor struct generation
 │   └── semantic/               ← SLEIGH semantic analysis (forked sleigh-rs)
 ├── pcode-ir/                   ← P-code types + peephole optimizer (no_std, zero deps)
-├── rsleigh-generate/           ← Pre-build binary: parses slaspecs, writes generated code
-├── generated/                  ← Generated crate source (gitignored /out/ dirs)
-│   ├── x86-shared/             ← shared types, registers, context (108 KB)
-│   ├── x86-subtables/          ← 236 subtable enums + constructors (3.5 MB)
-│   ├── x86-instr-00..07/       ← 8 instruction constructor batches (3-5 MB each)
-│   ├── x86-root/               ← instruction enum + parse_instruction()
-│   ├── aarch64-*/              ← same pattern, 4 batches
-│   └── riscv-*/                ← same pattern, 2 batches
-├── test-harness/               ← golden tests + corpus validation
-├── slaspec/
-│   ├── x86/                    ← Ghidra x86-64 slaspec (Apache 2.0)
-│   ├── AARCH64/                ← Ghidra AARCH64 slaspec
-│   └── RISCV/                  ← Ghidra RISC-V slaspec
-└── .gitignore
+├── rsleigh-api/                ← High-level Decoder API + register name resolution
+├── rsleigh-decompile/          ← 5-pass decompiler (CFG → SSA → fold → structure → print)
+│   ├── cfg.rs                  ← P-code to basic blocks + control flow graph
+│   ├── ssa.rs                  ← SSA construction with Phi insertion
+│   ├── fold.rs                 ← expression folding, dead code, condition recovery
+│   ├── structure.rs            ← if/else, while loop recovery from dominators
+│   ├── printer.rs              ← C printer with RegTracker for copy elision
+│   └── imports.rs              ← PLT/GOT/stub → import name resolution
+├── rsleigh-generate/           ← CLI: parse slaspecs, write generated crate source
+├── generated/                  ← Output crates (gitignored /out/ dirs)
+│   ├── x86-{shared,subtables,instr-00..07,root}/
+│   ├── aarch64-{shared,subtables,instr-00..03,root}/
+│   ├── arm32-*, mips-*, riscv-*/
+├── test-harness/               ← golden tests, corpus, fuzz, decompiler validation
+└── slaspec/                    ← Ghidra .slaspec files (Apache 2.0)
 ```
 
 ---
 
-## Build Workflow
+## Build
 
 ```bash
 make test                           # generate + build + test (recommended)
-
-# Or manually:
-cargo run -p rsleigh-generate       # parse slaspecs, write generated code (~30s)
-cargo test -p test-harness          # parallel compile + run 223 tests
-
-# Single architecture:
-cargo run -p rsleigh-generate -- x86-64
-cargo run -p rsleigh-generate -- aarch64
-cargo run -p rsleigh-generate -- riscv
+cargo run -p rsleigh-generate       # parse slaspecs (~30s)
+cargo test -p test-harness          # compile + run all tests
 ```
 
 ---
 
-## Pipeline Architecture
+## Pipeline
 
 ```
-.slaspec file
-    ↓
-file_to_sleigh(path) → Sleigh struct              [parser]
-    ↓
-generate_split_disassembler() → GeneratedModule[]  [codegen]
-    ↓
-rsleigh-generate distributes across crates         [multi-crate splitter]
-    ↓
-Generated crates compile in parallel               [cargo]
-    ↓
-parse_instruction(bytes, ctx, addr, gs)
-  → (inst_next, Vec<DisplayElement>, Vec<PcodeOp>)
-    ↓
-pcode_ir::optimize(&mut ops)                       [peephole optimizer]
+.slaspec → parser → codegen → generated Rust crates → compile
+                                                         ↓
+bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<PcodeOp> }
+                                                         ↓
+                    decompile_with_binary() → CFG → SSA → fold → structure → C pseudocode
 ```
-
-### Crate dependency graph (x86-64 shown):
-
-```
-pcode-ir → x86-shared → x86-subtables → x86-instr-00 ─┐
-                                         x86-instr-01 ─┤
-                                         ...           ├→ x86-root → test-harness
-                                         x86-instr-07 ─┘
-```
-
-The 8 instruction batch crates compile in parallel (~500% CPU on M4).
 
 ---
 
 ## Key Implementation Details
 
-### ExecutionGenerator (`src/codegen/builder/disassembler/constructor/execution.rs`)
+### Codegen (`src/codegen/builder/disassembler/constructor/execution.rs`)
 
-Generates the `lift()` function for each constructor. Key design:
+- **Subtable cache:** lift() called once per subtable, results cached
+- **Unique offset scheme:** parent uses `(num_fields*2+2)*0x10000` to avoid collision
+  with subtable exports (fixed a deep bug where CMP operands collided)
+- **Dynamic register lookup:** `dynamic_value_expr()` resolves aliased token fields
+  by bit position (e.g., r32 and r64 share bits 0-2 — fixed a bug where all registers
+  mapped to RAX)
+- **Signed displacements:** `gen_dis_expr_for_lift()` casts signed token fields
+  (simm8, simm16) to the appropriate signed type before widening to i128
+- **Const-space references:** `export *[const]:4 simm8` resolved directly to
+  `Varnode::constant()` instead of emitting a Load
 
-- **Subtable cache:** Each subtable's lift() is called exactly once at the top of
-  the function. Results cached in `{field}_ops/{field}_exp/{field}_ref` variables.
-  All consumers (expressions, assignments, branches, exports) use the cache.
+### Decompiler (`rsleigh-decompile/`)
 
-- **Export propagation:** lift() returns `(Vec<PcodeOp>, Option<Varnode>, Option<RefInfo>)`.
-  The second element is the export value, the third is reference info (space + address)
-  for memory-reference exports.
+5-pass pipeline: CFG → SSA → fold → structure recovery → C printer
 
-- **Reference vs value exports:** Register-space references (e.g. `export ZF`) produce
-  direct Register varnodes. RAM-space references (e.g. `export *[ram]:8 addr`) produce
-  address info — consumers emit Load for value reads, Store for writes, or use the
-  address directly for branches.
+**Fold passes (fold.rs):**
+- Algebraic simplification (x & x → x, x ^ x → 0)
+- Single-use temp inlining
+- Multi-level register copy propagation
+- Dead flag elimination (x86 CF/ZF/SF/OF, ARM64 NG/ZR/CY/OV)
+- Condition recovery: compound Jcc patterns → comparisons
+  (BoolAnd(BoolNot(ZF), IntEq(OF,SF)) → JG → `a > b`)
+- Call return value propagation
+- Parameter naming from ABI registers
+- Call argument collection from arg register writes
 
-- **Disassembly variables:** Stored as `i128` struct fields (e.g. `calc_reloc`).
-  Computed during parse(), recomputed in lift() with correct `inst_next` from the
-  parent instruction.
-
-- **Dynamic lookups:** `VarnodeDynamic`, `IntDynamic`, `DynVarnode` all use
-  `dynamic_value_expr()` + `dynamic_varnode_expr()`/`dynamic_int_expr()` helpers
-  to generate runtime match tables from AttachVarnode/AttachNumber tables.
+**Printer (printer.rs):**
+- RegTracker: per-block register value tracking at print time
+- Call return inlining: `printf("...", add(3, 4))` not `add(); printf("...", add())`
+- Stack alias resolution: var_c → var_8 → param_0 chain
+- Save/restore elision: register spills across calls hidden
+- Store-before-return elision
+- Import name resolution from PLT/GOT stubs
+- String literal detection from binary sections
 
 ### Peephole Optimizer (`pcode-ir/src/lib.rs`)
 
-Three passes:
-1. **Identity Subpiece elimination** — `Subpiece { lsb: 0 }` with same input/output size → Copy
-2. **Copy chain forwarding** — single-use Copy to Unique → substitute and remove
-3. **Dead code elimination** — writes to Unique varnodes never read → remove
-
-### sleigh-rs Fixes
-
-Patches to the forked sleigh-rs semantic layer:
-
-- Allow non-exporting tables as read values in execution expressions
-  (needed for AARCH64 NEON pcodeop arguments)
-- Handle tables without exports in FieldSizeMut (return default instead of panic)
-- Implement write-to-table-export for Const/Value export types
-  (needed for RISC-V float instructions)
+- Identity Subpiece elimination
+- Copy chain forwarding with batch analysis
+- Dead code elimination (batch collection, reverse removal)
+- Overwrite elimination
+- Output sinking (unique → copy dest)
+- Redundant IntAnd collapse
 
 ---
 
-## Remaining Known Limitations
+## Known Limitations
 
-- **ExprValue::Context** — stub returns constant(0). Context fields are never used
-  in P-code execution expressions for any of our 3 architectures. Would need context
-  passed to lift() to properly support.
-
-- **ExprNew / ExprCPool** — stub returns constant(0). Only appears in JVM bytecode
-  and WASM specs, not in x86/ARM/RISC-V.
-
-- **Branch target off-by-one** — subtable `inst_next` computed from local pattern_len,
-  not parent's full instruction length. Partially fixed by recomputing disassembly
-  variables in lift(), but some edge cases may remain for deeply nested subtables.
+- **ExprValue::Context** returns 0 (not used by x86/ARM/RISC-V)
+- **ExprNew / ExprCPool** returns 0 (JVM/WASM only)
+- **Type inference** — all variables are register-width integers
+- **Expression nesting depth** — some redundant register loads remain visible
+- **Loop conditions** — `while (OF == SF)` not always recovered to source comparison
 
 ---
 
-## What We Are NOT Building (scope boundary)
+## Spectra Integration
 
-- **SSA construction** — done in Spectra's analysis layer
-- **Structure recovery** (if/else, loops) — done in Spectra
-- **Type inference** — done in Spectra
-- **Pseudocode generation** — P-code is the output, LLM does the rest
-- **An interpreter** — we generate code, we don't interpret at runtime
+Wired into Spectra via `rsleigh-api` + `rsleigh-decompile`:
+- Settings > Analysis: toggle between "Native (rsleigh)" and "Ghidra"
+- Function discovery: symbol tables + recursive descent from CALL targets
+- ASM view: native disassembly via `get_disasm`
+- P-code view: structured ops via `get_pcode`
+- Code view: decompiled pseudocode with syntax highlighting
+  (registers blue, variables amber, functions clickable, dangerous APIs red)
+- All decode runs on 32MB stack threads (x86 pattern recursion depth)
 
----
+## License
 
-## Next Steps
-
-1. **Spectra integration** — wire `parse_instruction()` as Ghidra JVM replacement
-2. **More architectures** — MIPS, PowerPC, ARM32, SPARC (~15 min each)
-3. **CI** — GitHub Actions `make test` on push
-4. **Generated code size reduction** — share common flag computation patterns
+Apache 2.0

@@ -22,54 +22,71 @@ cargo test -p test-harness             # compile generated crates + run tests
 ```rust
 use rsleigh_api::{Decoder, Architecture};
 
-// Decode
 let mut dec = Decoder::new(Architecture::X86_64);
 let inst = dec.decode(&[0x48, 0x89, 0xd8], 0x1000).unwrap();
 println!("{} ({} bytes)", inst.disassembly, inst.len);
 // MOV RAX,RBX (3 bytes)
 
-// Decompile a function
+// Decompile with string literal + import resolution
+let binary = std::fs::read("my_binary").unwrap();
 let instructions: Vec<(u64, _)> = /* decode a function's bytes */;
-let pseudocode = rsleigh_decompile::decompile(Architecture::X86_64, &instructions);
+let pseudocode = rsleigh_decompile::decompile_with_binary(
+    Architecture::X86_64, &instructions, Some(&binary));
 ```
 
 ## Decompiler output
 
-Given a real compiled C function:
+Given a real compiled C program:
 
 ```c
-int factorial(int n) {
-    if (n <= 1) return 1;
-    return n * factorial(n - 1);
+int add(int a, int b) { return a + b; }
+int factorial(int n) { if (n <= 1) return 1; return n * factorial(n - 1); }
+
+int main() {
+    printf("add(3, 4) = %d\n", add(3, 4));
+    printf("factorial(5) = %d\n", factorial(5));
+    strcpy(buf, "hello world");
+    printf("reversed: %s\n", reverse_string(buf));
 }
 ```
 
 rsleigh produces:
 
 ```
-var_8 = EDI;
-if (!ZF && OF == SF) {
-    EAX = var_8;
-    EDI = var_8;
-    EDI = EDI - 1;
-    func_100000490();
-    EAX = EAX * ECX;
-    var_4 = EAX;
+printf("add(3, 4) = %d\n", add(3, 4));
+factorial(5);
+printf("factorial(5) = %d\n", factorial(5));
+__strcpy_chk(RBP + 0xd0, "hello world", 0x20);
+printf("reversed: %s\n", reverse_string(RBP + 0xd0));
+```
+
+For factorial:
+
+```
+if (1 < var_8) {
+    factorial(var_8 - 1);
+    EAX = (int64_t)EAX * (int64_t)factorial(var_8 - 1);
     return;
 } else {
     var_4 = 1;
 }
 ```
 
-The decompiler pipeline: P-code → CFG → SSA → expression folding → structure recovery → C printer. It handles:
-- Prologue/epilogue elimination
+The decompiler pipeline: P-code → CFG → SSA → expression folding → structure recovery → C printer.
+
+What it does:
+- Prologue/epilogue elimination (push/pop/leave/ret hidden)
 - Stack variable naming (`var_8` instead of `*(RBP - 0x8)`)
-- Flag elimination and condition recovery
-- If/else from conditional branches
-- While loops from back-edges
-- Function call cleanup (argument setup preserved, return address push hidden)
-- Dead code elimination
-- Return value detection
+- Parameter detection (`param_0`, `param_1` from ABI registers)
+- Condition recovery (x86 flags → comparisons, ARM64 NG/ZR/OV → comparisons)
+- If/else and while loop recovery from CFG back-edges
+- Call return value inlining (`printf("...", add(3, 4))`)
+- Function argument display (`factorial(5)` not `factorial()`)
+- Import name resolution (PLT/GOT stubs → `printf`, `strlen`)
+- String literal detection (`0x100000624` → `"hello world"`)
+- Dead code elimination (unused flag writes, register shuffling)
+- Save/restore elision (register spills across calls hidden)
+- Register copy tracking at print time (no SSA modification)
 
 ## Architectures
 
@@ -88,26 +105,24 @@ rsleigh/
   src/                    # SLEIGH parser + Rust codegen library
   pcode-ir/               # PcodeOp, Varnode types + peephole optimizer (no_std, zero deps)
   rsleigh-api/            # Decoder API — decode bytes into instructions + P-code
-  rsleigh-decompile/      # Decompiler — P-code to C-like pseudocode
+  rsleigh-decompile/      # Decompiler — P-code to C-like pseudocode (5-pass pipeline)
   rsleigh-generate/       # CLI: parse .slaspec files, write generated crate source
   generated/              # Output crates (gitignored /out/ dirs, regenerated from slaspecs)
-  test-harness/           # Golden tests, corpus validation, fuzz tests
+  test-harness/           # Golden tests, corpus validation, fuzz tests, decompiler validation
   slaspec/                # Ghidra .slaspec files (Apache 2.0)
 ```
 
-Generated code splits large instruction tables across parallel-compilable crates:
+## Tests
 
-```
-pcode-ir -> x86-shared -> x86-subtables -> x86-instr-00 -+
-                                           x86-instr-01 -+
-                                           ...           +-> x86-root -> rsleigh-api
-                                           x86-instr-07 -+                    |
-                                                              rsleigh-decompile
-```
+4 test suites:
+- **Golden tests** — 23 exact P-code assertions + 301 corpus instructions across 5 architectures
+- **Fuzz tests** — 5000 random decode attempts (empty, truncated, garbage), zero panics
+- **Register resolution** — offset→name mapping verification
+- **Decompiler validation** — compiles C source, decompiles with rsleigh, asserts string literals, import names, conditions, function calls
 
 ## Spectra integration
 
-rsleigh is wired into Spectra as the native analysis backend. In Settings > Analysis, select "Native (rsleigh)" to use it instead of Ghidra. Functions are discovered from symbol tables + recursive descent, disassembly and P-code views are live, and clicking a function shows decompiled pseudocode.
+rsleigh is wired into Spectra as the native analysis backend. In Settings > Analysis, select "Native (rsleigh)" to use it instead of Ghidra. Functions are discovered from symbol tables + recursive descent, disassembly and P-code views are live, and clicking a function shows decompiled pseudocode with syntax highlighting.
 
 ## License
 
