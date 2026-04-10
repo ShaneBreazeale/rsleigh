@@ -29,8 +29,9 @@ Wired into Spectra as a native analysis backend replacing the Ghidra JVM daemon.
 **4 test suites:** 23 golden P-code assertions, 301 corpus instructions, 5000 fuzz
 attempts (zero panics), decompiler validation against compiled C source.
 
-**Decompiler output (real binary):**
+**Decompiler output (real binary, with DWARF debug info):**
 ```
+return a + b;                                    // add() — DWARF param names recovered
 printf("add(3, 4) = %d\n", add(3, 4));
 printf("factorial(5) = %d\n", factorial(5));
 printf("reversed: %s\n", reverse_string(RBP + 0xd0));
@@ -59,7 +60,8 @@ rsleigh/
 │   ├── fold.rs                 ← expression folding, dead code, condition recovery
 │   ├── structure.rs            ← if/else, while loop recovery from dominators
 │   ├── printer.rs              ← C printer with RegTracker for copy elision
-│   └── imports.rs              ← PLT/GOT/stub → import name resolution
+│   ├── imports.rs              ← PLT/GOT/stub → import name resolution
+│   └── dwarf.rs               ← DWARF debug info parsing (gimli) + macOS dSYM
 ├── rsleigh-generate/           ← CLI: parse slaspecs, write generated crate source
 ├── generated/                  ← Output crates (gitignored /out/ dirs)
 │   ├── x86-{shared,subtables,instr-00..07,root}/
@@ -130,6 +132,7 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - Save/restore elision: register spills across calls hidden
 - Store-before-return elision
 - Import name resolution from PLT/GOT stubs
+- DWARF debug info: parameter names from `.debug_info` (DWARF4/5, macOS dSYM auto-discovery)
 - String literal detection from binary sections
 
 ### Peephole Optimizer (`pcode-ir/src/lib.rs`)

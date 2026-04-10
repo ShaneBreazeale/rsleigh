@@ -1079,18 +1079,31 @@ int main(int argc, char** argv) {
 }
 "#;
 
-        // Write source and compile
+        // Write source and compile in two steps so dsymutil can find the .o
         let src_path = "/tmp/test_decompile_validation.c";
+        let obj_path = "/tmp/test_decompile_validation.o";
         std::fs::write(src_path, source).unwrap();
         let compile = std::process::Command::new("cc")
-            .args(["-arch", "x86_64", "-o", binary_path, src_path, "-g"])
+            .args(["-arch", "x86_64", "-g", "-c", "-o", obj_path, src_path])
             .output();
 
         match compile {
-            Ok(output) if output.status.success() => {}
+            Ok(output) if output.status.success() => {
+                let link = std::process::Command::new("cc")
+                    .args(["-arch", "x86_64", "-g", "-o", binary_path, obj_path])
+                    .output();
+                if !matches!(link, Ok(ref o) if o.status.success()) {
+                    if !std::path::Path::new(binary_path).exists() {
+                        eprintln!("  decompiler validation skipped (link failed)");
+                        return;
+                    }
+                }
+                // Generate dSYM for DWARF debug info on macOS
+                let _ = std::process::Command::new("dsymutil")
+                    .arg(binary_path)
+                    .output();
+            }
             _ => {
-                // Can't compile (no x86_64 toolchain, e.g. Linux CI)
-                // Skip test gracefully
                 if !std::path::Path::new(binary_path).exists() {
                     eprintln!("  decompiler validation skipped (no x86_64 cross-compiler)");
                     return;
@@ -1154,7 +1167,8 @@ int main(int argc, char** argv) {
                 }
             }
             rsleigh_decompile::decompile_with_binary(
-                rsleigh_api::Architecture::X86_64, &insts, Some(&data))
+                rsleigh_api::Architecture::X86_64, &insts, Some(&data),
+                Some(std::path::Path::new(binary_path)))
         };
 
         let find_addr = |name: &str| -> Option<u64> {
@@ -1164,14 +1178,19 @@ int main(int argc, char** argv) {
         // --- Validate add() ---
         if let Some(addr) = find_addr("add") {
             let output = decompile_func(addr, &mut dec);
-            assert!(output.contains("var_4") || output.contains("EDI") || output.contains("param_0"),
+            assert!(output.contains("var_4") || output.contains("EDI") || output.contains("param_0") || output.contains(" a"),
                 "add(): should reference first argument\n{}", output);
-            assert!(output.contains("var_8") || output.contains("ESI") || output.contains("param_1"),
+            assert!(output.contains("var_8") || output.contains("ESI") || output.contains("param_1") || output.contains(" b"),
                 "add(): should reference second argument\n{}", output);
             assert!(output.contains("+"),
                 "add(): should contain addition operator\n{}", output);
             assert!(output.contains("return"),
                 "add(): should contain return\n{}", output);
+            // Check DWARF parameter naming when dSYM is available
+            let dsym_exists = std::path::Path::new(&format!("{}.dSYM", binary_path)).exists();
+            if dsym_exists && (output.contains(" a") && output.contains(" b")) {
+                eprintln!("  add() DWARF parameter names resolved (a, b)");
+            }
             eprintln!("  add() validated");
         }
 

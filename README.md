@@ -27,11 +27,12 @@ let inst = dec.decode(&[0x48, 0x89, 0xd8], 0x1000).unwrap();
 println!("{} ({} bytes)", inst.disassembly, inst.len);
 // MOV RAX,RBX (3 bytes)
 
-// Decompile with string literal + import resolution
+// Decompile with string literal + import resolution + DWARF debug info
 let binary = std::fs::read("my_binary").unwrap();
 let instructions: Vec<(u64, _)> = /* decode a function's bytes */;
 let pseudocode = rsleigh_decompile::decompile_with_binary(
-    Architecture::X86_64, &instructions, Some(&binary));
+    Architecture::X86_64, &instructions, Some(&binary),
+    Some(Path::new("my_binary")));  // enables dSYM lookup on macOS
 ```
 
 ## Decompiler output
@@ -78,6 +79,7 @@ What it does:
 - Prologue/epilogue elimination (push/pop/leave/ret hidden)
 - Stack variable naming (`var_8` instead of `*(RBP - 0x8)`)
 - Parameter detection (`param_0`, `param_1` from ABI registers)
+- DWARF debug info recovery (`param_0` → `a`, `param_1` → `b` from `.debug_info` / macOS `.dSYM`)
 - Condition recovery (x86 flags → comparisons, ARM64 NG/ZR/OV → comparisons)
 - If/else and while loop recovery from CFG back-edges
 - Call return value inlining (`printf("...", add(3, 4))`)

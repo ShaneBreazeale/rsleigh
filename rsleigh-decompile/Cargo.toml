@@ -8,3 +8,5 @@ description = "P-code decompiler — turns rsleigh P-code IR into C-like pseudoc
 pcode-ir = { path = "../pcode-ir" }
 rsleigh-api = { path = "../rsleigh-api" }
 goblin = "0.9"
+gimli = "0.31"
+object = "0.36"
