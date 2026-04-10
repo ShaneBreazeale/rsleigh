@@ -125,8 +125,8 @@ fn is_body_empty(stmts: &[StructuredStmt], ssa: &SsaCfg) -> bool {
 
 fn print_stmts(stmts: &[StructuredStmt], ssa: &SsaCfg, ctx: &PrintCtx, indent: usize, out: &mut String) {
     let mut tracker = RegTracker::new();
-    for stmt in stmts {
-        print_stmt_tracked(stmt, ssa, ctx, indent, out, &mut tracker);
+    for (i, stmt) in stmts.iter().enumerate() {
+        print_stmt_tracked(stmt, stmts, i, ssa, ctx, indent, out, &mut tracker);
     }
 }
 
@@ -136,6 +136,8 @@ struct RegTracker {
     reg_source: std::collections::HashMap<(u64, u32), VarId>,
     /// Map: (register offset, size) → formatted expression string (for call returns)
     reg_expr_str: std::collections::HashMap<(u64, u32), String>,
+    /// Map: stack variable name → formatted value string (for Store alias tracking)
+    stack_alias: std::collections::HashMap<String, String>,
 }
 
 impl RegTracker {
@@ -143,6 +145,7 @@ impl RegTracker {
         Self {
             reg_source: std::collections::HashMap::new(),
             reg_expr_str: std::collections::HashMap::new(),
+            stack_alias: std::collections::HashMap::new(),
         }
     }
 
@@ -196,7 +199,7 @@ impl RegTracker {
     }
 }
 
-fn print_stmt_tracked(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, indent: usize, out: &mut String, tracker: &mut RegTracker) {
+fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx: usize, ssa: &SsaCfg, ctx: &PrintCtx, indent: usize, out: &mut String, tracker: &mut RegTracker) {
     let pad: String = "    ".repeat(indent);
 
     match stmt {
@@ -259,9 +262,15 @@ fn print_stmt_tracked(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, inden
             let name = var_name(&vdef.varnode, ctx);
             let rhs = format_expr_tracked(&vdef.expr, ssa, ctx, tracker);
             if rhs == name { return; }
-            // Skip stack stores that are immediately returned (var_4 = expr; return;)
+            // Skip dead stores and stores immediately before return
             if name.starts_with("var_") && vdef.use_count == 0 {
-                return; // Dead store — value not read
+                return; // Dead store
+            }
+            // If next statement is Return, skip this store — return will show the value
+            if name.starts_with("var_") {
+                if let Some(StructuredStmt::Return(_)) = stmts.get(stmt_idx + 1) {
+                    return; // Store before return — elided
+                }
             }
             out.push_str(&format!("{}{} = {};\n", pad, name, rhs));
         }
@@ -272,11 +281,18 @@ fn print_stmt_tracked(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, inden
             let type_name = size_to_type(size);
 
             if let Some(stack_name) = try_stack_var_name(*addr, ssa) {
-                // Skip save-pattern stores where the value is a tracked variable
-                // and the stack var name matches an existing variable (redundant save)
-                let is_redundant_save = val_expr.starts_with("var_") && val_expr == stack_name;
-                if is_redundant_save {
-                    return; // Self-assign to same stack var
+                // Track this stack variable's value for later resolution
+                tracker.stack_alias.insert(stack_name.clone(), val_expr.clone());
+
+                // Skip redundant stores:
+                // - Self-assign (var_8 = var_8)
+                // - Parameter stores (var_4 = param_0) — tracked, resolved at use
+                // - Save patterns (var_c = var_8) — tracked, resolved at restore
+                if val_expr == stack_name {
+                    return; // Self-assign
+                }
+                if val_expr.starts_with("param_") || val_expr.starts_with("var_") {
+                    return; // Tracked alias — available via stack_alias at use sites
                 }
                 out.push_str(&format!("{}{} = {};\n", pad, stack_name, val_expr));
             } else {
@@ -300,13 +316,40 @@ fn print_stmt_tracked(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, inden
                 let name = var_name(&ssa.var(*out_var).varnode, ctx);
                 out.push_str(&format!("{}{} = {};\n", pad, name, call_expr));
             } else {
-                // Track RAX/EAX as holding the call return expression.
-                // If the return value is used, it will be inlined at the use site.
-                // The call itself is still printed as a statement (for side effects).
-                out.push_str(&format!("{}{};\n", pad, call_expr));
-                // Set call return expression for potential inlining
+                // Check if the return value (EAX/RAX) is read by any subsequent
+                // statement in this block. If so, the call will be inlined at the
+                // use site — don't print it standalone.
+                let return_consumed = stmts.iter().skip(stmt_idx + 1).any(|s| {
+                    match s {
+                        StructuredStmt::Assign { lhs, .. } => {
+                            let v = ssa.var(*lhs);
+                            // Check if this reads EAX (call return)
+                            if let Expr::Var(src) = &v.expr {
+                                let sv = ssa.var(*src);
+                                sv.varnode.space == AddressSpaceId::Register
+                                    && sv.varnode.offset == 0
+                                    && sv.call_return
+                            } else { false }
+                        }
+                        StructuredStmt::Store { val, .. } => {
+                            let v = ssa.var(*val);
+                            v.varnode.space == AddressSpaceId::Register
+                                && v.varnode.offset == 0
+                                && v.call_return
+                        }
+                        _ => false,
+                    }
+                });
+
+                // Set call return expression for inlining
                 tracker.set_call_return(0, 8, call_expr.clone()); // RAX
-                tracker.set_call_return(0, 4, call_expr);         // EAX
+                tracker.set_call_return(0, 4, call_expr.clone()); // EAX
+
+                if !return_consumed {
+                    // Void call or return not used — print standalone
+                    out.push_str(&format!("{}{};\n", pad, call_expr));
+                }
+                // If consumed, the call appears inlined at the use site
             }
         }
         StructuredStmt::Return(val) => {
@@ -380,10 +423,13 @@ fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTrac
                     // If tracked to a Load (stack var), show the stack var name
                     if let Expr::Load(ptr) = &tv.expr {
                         if let Some(offset) = get_rbp_offset(*ptr, ssa) {
+                            let var_name = format!("var_{:x}", offset);
+                            // Resolve through stack alias (var_c → var_8 → param_0)
+                            let resolved = resolve_stack_alias(&var_name, tracker);
                             return match kind {
-                                UnaryOpKind::Sext => format!("(int64_t)var_{:x}", offset),
-                                UnaryOpKind::Zext => format!("(uint64_t)var_{:x}", offset),
-                                _ => format!("var_{:x}", offset),
+                                UnaryOpKind::Sext => format!("(int64_t){}", resolved),
+                                UnaryOpKind::Zext => format!("(uint64_t){}", resolved),
+                                _ => resolved,
                             };
                         }
                     }
@@ -472,6 +518,21 @@ fn expr_has_tracked_reg(expr: &Expr, ssa: &SsaCfg, tracker: &RegTracker) -> bool
         }
         _ => false,
     }
+}
+
+/// Resolve a stack variable name through the alias chain.
+/// var_c → var_8 → param_0
+fn resolve_stack_alias(name: &str, tracker: &RegTracker) -> String {
+    let mut current = name.to_string();
+    for _ in 0..5 { // max depth
+        if let Some(alias) = tracker.stack_alias.get(&current) {
+            if alias == &current { break; }
+            current = alias.clone();
+        } else {
+            break;
+        }
+    }
+    current
 }
 
 fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> String {
