@@ -806,10 +806,34 @@ impl<'a> ExecutionGenerator<'a> {
                         // RAM/other space reference (e.g. `export *[ram]:8 addr`):
                         // For value reads, a Load is needed; for branches, use address directly.
                         // Set export_ref so parent can decide.
+                        // If the address varnode is in Unique space (from a Value export of a
+                        // subtable, e.g., export *[const]:8 reloc), resolve the actual constant
+                        // address by scanning ops backward for the write to the Unique.
                         let sp = self.space_id_expr(memory.space);
                         tokens.extend(quote! {
-                            export_varnode = Some(pcode_ir::Varnode { space: #sp, offset: #vn.offset, size: #size });
-                            export_ref = Some((#sp, #vn, #size));
+                            let ref_vn = if #vn.space == pcode_ir::AddressSpaceId::Unique {
+                                // The subtable exported a computed address into a Unique.
+                                // Scan ops to find the Const that was written there.
+                                let mut resolved = #vn;
+                                for op in ops.iter().rev() {
+                                    match op {
+                                        pcode_ir::PcodeOp::Subpiece { out, input, .. }
+                                        | pcode_ir::PcodeOp::Copy { out, input }
+                                            if *out == #vn
+                                            && input.space == pcode_ir::AddressSpaceId::Const =>
+                                        {
+                                            resolved = *input;
+                                            break;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                resolved
+                            } else {
+                                #vn
+                            };
+                            export_varnode = Some(pcode_ir::Varnode { space: #sp, offset: ref_vn.offset, size: #size });
+                            export_ref = Some((#sp, ref_vn, #size));
                         });
                     }
                 }
@@ -861,8 +885,33 @@ impl<'a> ExecutionGenerator<'a> {
                     quote! {
                         let #var_name = if let Some((ref_space, ref_ptr, ref_size)) = #cache_ref {
                             pcode_ir::Varnode { space: ref_space, offset: ref_ptr.offset, size: ref_size }
+                        } else if let Some(exp) = #cache_exp {
+                            // Value export (no reference) — used for export *[const]:N patterns
+                            // (e.g., ARM64 branch address computation via const-space).
+                            // If the export varnode is in Unique space, the actual address
+                            // was written there by a preceding Subpiece/Copy from a constant.
+                            // Scan ops backward to extract the constant address value.
+                            if exp.space == pcode_ir::AddressSpaceId::Unique {
+                                let mut addr = 0u64;
+                                for op in ops.iter().rev() {
+                                    match op {
+                                        pcode_ir::PcodeOp::Subpiece { out, input, .. }
+                                        | pcode_ir::PcodeOp::Copy { out, input }
+                                            if *out == exp
+                                                && input.space == pcode_ir::AddressSpaceId::Const =>
+                                        {
+                                            addr = input.offset;
+                                            break;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                pcode_ir::Varnode { space: pcode_ir::AddressSpaceId::Ram, offset: addr, size: #sz }
+                            } else {
+                                exp
+                            }
                         } else {
-                            #cache_exp.unwrap_or(pcode_ir::Varnode::constant(0, #sz))
+                            pcode_ir::Varnode::constant(0, #sz)
                         };
                     },
                 );

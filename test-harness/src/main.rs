@@ -3134,46 +3134,26 @@ mod tests {
         {
             // B +8 at 0x1000 should target 0x1008
             let (_, _, pcode) = arm::decode(&[0x02, 0x00, 0x00, 0x14], 0x1000);
-            let target = pcode.iter().find_map(|op| match op {
-                PcodeOp::Branch { dest } => Some(dest.offset), _ => None,
-            });
-            if target != Some(0x1008) {
-                eprintln!("[BUG] ARM64 B +8 at 0x1000: target={:?} (expected 0x1008)",
-                    target.map(|t| format!("0x{:x}", t)));
-            }
+            assert!(pcode.iter().any(|op| matches!(op, PcodeOp::Branch { dest } if dest.offset == 0x1008)),
+                "B +8 at 0x1000 should target 0x1008\n{pcode:#?}");
         }
         {
             // B -4 at 0x1000 should target 0xFFC
             let (_, _, pcode) = arm::decode(&[0xff, 0xff, 0xff, 0x17], 0x1000);
-            let target = pcode.iter().find_map(|op| match op {
-                PcodeOp::Branch { dest } => Some(dest.offset), _ => None,
-            });
-            if target.map_or(true, |t| t != 0xFFC) {
-                eprintln!("[BUG] ARM64 B -4 at 0x1000: target={:?} (expected 0xFFC)",
-                    target.map(|t| format!("0x{:x}", t)));
-            }
+            assert!(pcode.iter().any(|op| matches!(op, PcodeOp::Branch { dest } if dest.offset == 0xFFC)),
+                "B -4 at 0x1000 should target 0xFFC\n{pcode:#?}");
         }
         {
             // BL +0x100 at 0x1000 → 0x1100
             let (_, _, pcode) = arm::decode(&[0x40, 0x00, 0x00, 0x94], 0x1000);
-            let target = pcode.iter().find_map(|op| match op {
-                PcodeOp::Call { dest } => Some(dest.offset), _ => None,
-            });
-            if target != Some(0x1100) {
-                eprintln!("[BUG] ARM64 BL +0x100 at 0x1000: target={:?} (expected 0x1100)",
-                    target.map(|t| format!("0x{:x}", t)));
-            }
+            assert!(pcode.iter().any(|op| matches!(op, PcodeOp::Call { dest } if dest.offset == 0x1100)),
+                "BL +0x100 at 0x1000 should Call 0x1100\n{pcode:#?}");
         }
         {
             // BL -4 at 0x1000 → 0xFFC
             let (_, _, pcode) = arm::decode(&[0xff, 0xff, 0xff, 0x97], 0x1000);
-            let target = pcode.iter().find_map(|op| match op {
-                PcodeOp::Call { dest } => Some(dest.offset), _ => None,
-            });
-            if target.map_or(true, |t| t != 0xFFC) {
-                eprintln!("[BUG] ARM64 BL -4 at 0x1000: target={:?} (expected 0xFFC)",
-                    target.map(|t| format!("0x{:x}", t)));
-            }
+            assert!(pcode.iter().any(|op| matches!(op, PcodeOp::Call { dest } if dest.offset == 0xFFC)),
+                "BL -4 at 0x1000 should Call 0xFFC\n{pcode:#?}");
         }
 
         // ── ARM64 ADDS sets flags (not just ADD) ──
