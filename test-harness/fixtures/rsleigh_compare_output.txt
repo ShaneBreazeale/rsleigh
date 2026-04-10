@@ -16,16 +16,16 @@
   i = 0;
   while (len > i) {
       EAX = (arr[i]) + total;
-      total = EAX + total;
-      i = EAX + 1;
+      total = arr[i] + total;
+      i = i + 1;
   }
   return arr;
 ---
 === string_length (47 instructions) ===
   len = 0;
   while (EAX != 0) {
-      len = EAX + 1;
-      s = RAX + 1;
+      len = len + 1;
+      s = s + 1;
   }
   return s;
 ---
@@ -57,26 +57,27 @@
   sum = 0;
   while (head != 0) {
       EAX = *(RAX) + sum;
-      sum = EAX + sum;
-      RAX = head->field8;
+      sum = *(EAX) + sum;
+      head = head->field8;
   }
   return head;
 ---
 === binary_search (62 instructions) ===
   lo = 0;
   while (hi >= lo) {
+      EDX = hi - lo;
       EAX = EAX / 2;
       EDX = EAX % 2;
       EAX = lo + EAX;
-      mid = EAX + ECX;
-      RCX = EAX + ECX;
+      mid = lo + ECX;
+      RCX = lo + ECX;
       if (EAX != target) {
           EAX = arr[mid];
           if (target <= EAX) {
               EAX = mid - 1;
-              hi = EAX - 1;
+              hi = mid - 1;
           } else {
-              lo = EAX + 1;
+              lo = mid + 1;
           }
       } else {
           return;

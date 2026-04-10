@@ -1177,12 +1177,11 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
         StructuredStmt::Store { addr, val } => {
             let addr_str = format_addr(*addr, ssa, ctx);
             let vdef = ssa.var(*val);
-            // Inside loop bodies (indent > 0), the tracker has stale aliases
-            // from the function entry. Use the SSA expression directly for
-            // register values to show the actual computation.
+            // Inside loop bodies (indent > 0), use SSA-based rendering that
+            // resolves registers to their underlying stack variables, avoiding
+            // stale tracker aliases.
             let val_expr = if indent > 0 && vdef.varnode.space == AddressSpaceId::Register {
-                // For registers inside loops, show the SSA expression
-                format_expr(&vdef.expr, ssa, ctx)
+                format_store_val(&vdef.expr, ssa, ctx, tracker)
             } else {
                 format_var_tracked(*val, ssa, ctx, tracker)
             };
@@ -1217,8 +1216,12 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                 // Hide var_X = REG stores (register holding a tracked value)
                 let val_is_reg = val_expr.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
                     && val_expr.len() >= 2 && val_expr.len() <= 3;
-                // Hide var_X = expr stores where expr is a function call (possibly with args)
-                let val_is_call = val_expr.contains('(') && val_expr.contains(')');
+                // Hide var_X = func() stores where the value is a function call result
+                // Don't match pointer dereferences *(addr) — those are array loads
+                let val_is_call = val_expr.contains('(') && val_expr.contains(')')
+                    && !val_expr.starts_with("*(")
+                    && !val_expr.contains(" + *(")
+                    && !val_expr.contains(" - *(");
                 if val_is_reg || val_is_call {
                     return; // Tracked — will be resolved at use site
                 }
@@ -1898,6 +1901,91 @@ fn format_var(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
     }
 
     var_name(&vdef.varnode, ctx)
+}
+
+/// Format a Store value expression, resolving register operands to their
+/// underlying stack variable names. Used inside loop bodies where the tracker
+/// has stale aliases. Resolves EAX→Load(var_c)→len, RAX→Load(var_8)→s, etc.
+fn format_store_val(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> String {
+    match expr {
+        Expr::BinOp(kind, left, right) => {
+            let l = format_store_operand(*left, ssa, ctx, tracker);
+            let r = format_store_operand(*right, ssa, ctx, tracker);
+            format!("{} {} {}", l, binop_str(*kind), r)
+        }
+        Expr::UnaryOp(kind, inner) => {
+            let i = format_store_operand(*inner, ssa, ctx, tracker);
+            match kind {
+                UnaryOpKind::Neg => format!("-{}", i),
+                UnaryOpKind::Not => format!("~{}", i),
+                UnaryOpKind::BoolNot => format!("!{}", i),
+                _ => i, // Drop casts for readability
+            }
+        }
+        Expr::Load(ptr) => {
+            if let Some(offset) = get_rbp_offset(*ptr, ssa) {
+                let name = format!("var_{:x}", offset);
+                return resolve_stack_alias(&name, tracker);
+            }
+            format_expr(expr, ssa, ctx)
+        }
+        _ => format_expr(expr, ssa, ctx),
+    }
+}
+
+/// Format a single operand for a Store value expression.
+/// Resolves registers through their SSA expression to find the underlying variable.
+fn format_store_operand(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> String {
+    let vdef = ssa.var(id);
+    // If it has a param name, use it
+    if let Some(ref name) = vdef.param_name {
+        return name.clone();
+    }
+    // Constants
+    if let Expr::Const(val, sz) = &vdef.expr {
+        return format_const_ctx(*val, *sz, ctx);
+    }
+    // If this is a register that was loaded from a stack variable, show the stack var
+    // If loaded from a non-stack address (array element), show the load expression
+    if vdef.varnode.space == AddressSpaceId::Register {
+        if let Expr::Load(ptr) = &vdef.expr {
+            if let Some(offset) = get_rbp_offset(*ptr, ssa) {
+                let name = format!("var_{:x}", offset);
+                return resolve_stack_alias(&name, tracker);
+            }
+            // Non-stack load (array element, struct field, etc.)
+            // Show as *(addr) or resolve to array syntax
+            let addr = format_store_operand(*ptr, ssa, ctx, tracker);
+            return format!("*({})", addr);
+        }
+        // If the register holds a Var(other_reg), follow one level
+        if let Expr::Var(inner) = &vdef.expr {
+            let iv = ssa.var(*inner);
+            if let Expr::Load(ptr) = &iv.expr {
+                if let Some(offset) = get_rbp_offset(*ptr, ssa) {
+                    let name = format!("var_{:x}", offset);
+                    return resolve_stack_alias(&name, tracker);
+                }
+            }
+            // Follow through Zext/Sext
+            if let Expr::UnaryOp(UnaryOpKind::Zext | UnaryOpKind::Sext, deeper) = &iv.expr {
+                return format_store_operand(*deeper, ssa, ctx, tracker);
+            }
+        }
+        // Follow through Zext/Sext on the register itself
+        if let Expr::UnaryOp(UnaryOpKind::Zext | UnaryOpKind::Sext, inner) = &vdef.expr {
+            return format_store_operand(*inner, ssa, ctx, tracker);
+        }
+        // For BinOp on register, recurse
+        if let Expr::BinOp(_, _, _) = &vdef.expr {
+            return format_store_val(&vdef.expr, ssa, ctx, tracker);
+        }
+    }
+    // Unique space: inline the expression
+    if vdef.varnode.space == AddressSpaceId::Unique {
+        return format_store_val(&vdef.expr, ssa, ctx, tracker);
+    }
+    format_var(id, ssa, ctx)
 }
 
 fn format_expr(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
