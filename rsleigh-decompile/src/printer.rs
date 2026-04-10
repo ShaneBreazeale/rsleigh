@@ -261,6 +261,14 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         *line = line.replace("(int64_t)", "").replace("(uint64_t)", "");
         // * 1 in address expressions is identity
         *line = line.replace(" * 1)", ")").replace(" * 1 ", " ");
+        // 0 - x → -x (negation)
+        *line = line.replace("0 - ", "-");
+        // x + -y → x - y
+        *line = line.replace(" + -", " - ");
+        // Hide IDIV remainder: EDX = ... % ... (almost never useful to display)
+        if line.contains("EDX = ") && line.contains(" % ") {
+            *line = String::new();
+        }
         // (Array scaling cleanup happens after array syntax conversion below)
         // __chk suffix: __strcpy_chk(a, b, size) → strcpy(a, b)
         while let Some(pos) = line.find("__") {
@@ -957,6 +965,49 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Fold "var_N = expr;" at end of function into "return expr;"
+    // Also handles: var_N = expr; return [var_N];
+    {
+        let mut i = 0;
+        while i + 1 < lines.len() {
+            let lt = lines[i].trim().to_string();
+            let next = lines[i + 1].trim().to_string();
+            if lt.contains(" = ") && lt.ends_with(';') {
+                if let Some(eq_pos) = lt.find(" = ") {
+                    let var_name = &lt[..eq_pos];
+                    let expr = lt[eq_pos + 3..].trim_end_matches(';');
+                    let is_return_var = next == format!("return {};", var_name);
+                    let is_return_bare = next == "return;";
+                    if (is_return_bare || is_return_var) && !expr.is_empty() {
+                        let indent = lines[i].len() - lines[i].trim_start().len();
+                        let pad = " ".repeat(indent);
+                        lines[i] = format!("{}return {};", pad, expr);
+                        lines.remove(i + 1);
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+        // Also: if the last non-blank line is "var_N = expr;" with no return after,
+        // convert to "return expr;" (the function implicitly returns via EAX)
+        if let Some(last) = lines.iter().rposition(|l| !l.trim().is_empty()) {
+            let lt = lines[last].trim().to_string();
+            if lt.starts_with("var_") && lt.contains(" = ") && lt.ends_with(';')
+                && !lt.starts_with("var_8 =") // Don't convert stack canary stores
+            {
+                if let Some(eq_pos) = lt.find(" = ") {
+                    let expr = &lt[eq_pos + 3..lt.len() - 1];
+                    if !expr.is_empty() {
+                        let indent = lines[last].len() - lines[last].trim_start().len();
+                        let pad = " ".repeat(indent);
+                        lines[last] = format!("{}return {};", pad, expr);
+                    }
+                }
+            }
+        }
+    }
+
     // Remove consecutive blank lines
     let mut result = String::new();
     let mut prev_blank = false;
@@ -1447,7 +1498,8 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
             let else_empty = is_body_empty(&else_filtered, ssa);
             if then_empty && else_empty { return; }
             if then_empty && !else_empty {
-                out.push_str(&format!("{}if (!{}) {{\n", pad, cond_expr));
+                let neg_cond = negate_condition(&cond_expr);
+                out.push_str(&format!("{}if ({}) {{\n", pad, neg_cond));
                 print_stmts(&else_filtered, ssa, ctx, indent + 1, out);
                 out.push_str(&format!("{}}}\n", pad));
             } else {
@@ -1763,7 +1815,8 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, indent: usize
 
             if then_empty && else_empty { return; }
             if then_empty && !else_empty {
-                out.push_str(&format!("{}if (!{}) {{\n", pad, cond_expr));
+                let neg_cond = negate_condition(&cond_expr);
+                out.push_str(&format!("{}if ({}) {{\n", pad, neg_cond));
                 print_stmts(&else_filtered, ssa, ctx, indent + 1, out);
                 out.push_str(&format!("{}}}\n", pad));
             } else {

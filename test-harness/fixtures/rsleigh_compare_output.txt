@@ -27,19 +27,18 @@
 ---
 === manhattan_distance (28 instructions) ===
   EAX = (a->field4) - b->field4;
-  if (!a >= 0) {
-      dx = 0 - dx;
-      if (!dy >= 0) {
-          dy = 0 - dy;
-          return dx + 0 - dy;
+  if (a < 0) {
+      dx = -dx;
+      if (dy < 0) {
+          dy = -dy;
+          return dx - dy;
       }
   }
 ---
 === day_name (39 instructions) ===
   RAX = day - 6;
   if (!CF || ZF) {
-      var_8 = "Unknown";
-      return;
+      return "Unknown";
   } else {
       RCX = 0x1000006b4;
       return "Sunday";
@@ -55,7 +54,6 @@
 === binary_search (62 instructions) ===
   while (hi >= lo) {
       EAX = EAX / 2;
-      EDX = EAX % 2;
       mid = lo + ECX;
       if (EAX != target) {
           if (target <= EAX) {
@@ -67,7 +65,7 @@
           return;
       }
   }
-  var_4 = -0x1;
+  return -0x1;
 ---
 === apply (101 instructions) ===
   (*RAX)(a, b);
