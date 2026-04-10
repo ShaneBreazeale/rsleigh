@@ -18,7 +18,7 @@
       total = arr[i] + total;
       i = i + 1;
   }
-  return arr;
+  return total;
 ---
 === string_length (47 instructions) ===
   len = 0;
@@ -26,7 +26,7 @@
       len = len + 1;
       s = s + 1;
   }
-  return s;
+  return len;
 ---
 === manhattan_distance (28 instructions) ===
   EAX = (a->field4) - b->field4;
@@ -54,7 +54,7 @@
       sum = *(EAX) + sum;
       head = head->field8;
   }
-  return head;
+  return sum;
 ---
 === binary_search (62 instructions) ===
   lo = 0;

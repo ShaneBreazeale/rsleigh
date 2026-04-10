@@ -892,14 +892,42 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
-    // Infer return value for bare "return;" at end of function
-    // If the function has parameters, the first parameter is likely the return value
-    // (common for functions like reverse_string that return their input)
+    // Infer return value for bare "return;" at end of function.
+    // Find the last variable that was assigned inside the function body —
+    // that's likely what was stored in EAX before the return.
     if let Some(last) = lines.iter().rposition(|l| !l.trim().is_empty()) {
-        if lines[last].trim() == "return;" && !param_names.is_empty() {
-            let indent = lines[last].len() - lines[last].trim_start().len();
-            let pad = &lines[last][..indent];
-            lines[last] = format!("{}return {};", pad, param_names[0]);
+        if lines[last].trim() == "return;" {
+            // Scan backward through ALL lines for the last variable assignment.
+            // This looks inside while/if bodies to find accumulator variables.
+            let mut return_var = None;
+            for j in (0..last).rev() {
+                let lt = lines[j].trim();
+                if let Some(eq_pos) = lt.find(" = ") {
+                    let lhs = &lt[..eq_pos];
+                    let is_var = lhs.chars().next().map_or(false, |c| c.is_ascii_lowercase())
+                        && lhs.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                    // Skip loop counter increments: i = i + 1
+                    let rhs = &lt[eq_pos + 3..].trim_end_matches(';');
+                    let is_increment = rhs.ends_with("+ 1")
+                        && rhs.starts_with(lhs);
+                    // Skip pointer increments: s = s + 1, head = head->field8
+                    let is_ptr_advance = rhs.contains("->") || (rhs.ends_with("+ 1") && rhs.starts_with(lhs));
+                    if is_var && !is_increment && !is_ptr_advance {
+                        return_var = Some(lhs.to_string());
+                        break;
+                    }
+                }
+            }
+            // If we found a local variable assignment, use that.
+            // Otherwise fall back to the first parameter.
+            let ret_val = return_var
+                .or_else(|| param_names.first().cloned())
+                .unwrap_or_default();
+            if !ret_val.is_empty() {
+                let indent = lines[last].len() - lines[last].trim_start().len();
+                let pad = &lines[last][..indent];
+                lines[last] = format!("{}return {};", pad, ret_val);
+            }
         }
     }
 
@@ -1352,9 +1380,34 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                 return;
             }
             if let Some(v) = val {
-                let resolved = tracker.resolve(*v, ssa);
-                let vdef = ssa.var(resolved);
-                let expr = format_expr_tracked(&vdef.expr, ssa, ctx, tracker);
+                let vdef = ssa.var(*v);
+                
+                // For return values, resolve through the SSA expression to find
+                // the actual stack variable being returned, not the tracker alias.
+                let expr = if let Expr::Load(ptr) = &vdef.expr {
+                    // Return value loaded from stack: show the stack variable name
+                    if let Some(offset) = get_rbp_offset(*ptr, ssa) {
+                        let name = format!("var_{:x}", offset);
+                        resolve_stack_alias(&name, tracker)
+                    } else {
+                        format_expr_tracked(&vdef.expr, ssa, ctx, tracker)
+                    }
+                } else if let Expr::Var(inner) = &vdef.expr {
+                    // Follow one level of Var indirection
+                    let iv = ssa.var(*inner);
+                    if let Expr::Load(ptr) = &iv.expr {
+                        if let Some(offset) = get_rbp_offset(*ptr, ssa) {
+                            let name = format!("var_{:x}", offset);
+                            resolve_stack_alias(&name, tracker)
+                        } else {
+                            format_expr_tracked(&vdef.expr, ssa, ctx, tracker)
+                        }
+                    } else {
+                        format_expr_tracked(&vdef.expr, ssa, ctx, tracker)
+                    }
+                } else {
+                    format_expr_tracked(&vdef.expr, ssa, ctx, tracker)
+                };
                 out.push_str(&format!("{}return {};\n", pad, expr));
             } else {
                 out.push_str(&format!("{}return;\n", pad));
