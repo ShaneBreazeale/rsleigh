@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use pcode_ir::{Varnode, AddressSpaceId};
 use rsleigh_api::Architecture;
 use crate::ir::*;
@@ -7,9 +8,15 @@ const RSP_OFFSET: u64 = 32;
 const RIP_OFFSET: u64 = 648;
 
 /// Print structured statements as C-like pseudocode.
-pub fn print_c(stmts: &[StructuredStmt], ssa: &SsaCfg, arch: Architecture, binary: Option<&[u8]>) -> String {
+pub fn print_c(
+    stmts: &[StructuredStmt],
+    ssa: &SsaCfg,
+    arch: Architecture,
+    binary: Option<&[u8]>,
+    imports: &HashMap<u64, String>,
+) -> String {
     let mut out = String::new();
-    let ctx = PrintCtx { arch, binary };
+    let ctx = PrintCtx { arch, binary, imports };
     let filtered = filter_boilerplate(stmts, ssa);
     print_stmts(&filtered, ssa, &ctx, 0, &mut out);
     out
@@ -18,6 +25,7 @@ pub fn print_c(stmts: &[StructuredStmt], ssa: &SsaCfg, arch: Architecture, binar
 struct PrintCtx<'a> {
     arch: Architecture,
     binary: Option<&'a [u8]>,
+    imports: &'a HashMap<u64, String>,
 }
 
 /// Remove prologue/epilogue boilerplate from the top level.
@@ -322,11 +330,14 @@ fn format_rbp_offset(val: u64) -> String {
 
 fn format_call_target(target: &CallTarget, _ssa: &SsaCfg, ctx: &PrintCtx) -> String {
     match target {
-        CallTarget::Direct(addr) => format!("func_{:x}", addr),
+        CallTarget::Direct(addr) => {
+            // Try import map first
+            if let Some(name) = ctx.imports.get(addr) {
+                return name.clone();
+            }
+            format!("func_{:x}", addr)
+        }
         CallTarget::Indirect(vn) => {
-            // Try to resolve: if the target is a Load from a constant address,
-            // show it as a function pointer dereference
-            // The varnode here is from the original CFG, not an SSA var
             format!("(*{})", var_name(vn, ctx))
         }
     }
