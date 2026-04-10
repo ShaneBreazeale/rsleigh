@@ -88,6 +88,7 @@ pub fn decompile_with_binary(
         }
     }
 
+    // Debug: dump call args for main
     let structured = structure::recover_structure(&ssa, &cfg);
     printer::print_c(&structured, &ssa, arch, binary, &import_map, &local_var_names)
 }

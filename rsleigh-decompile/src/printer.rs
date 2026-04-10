@@ -192,7 +192,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     && lhs.len() >= 2 && lhs.len() <= 3;
                 if is_reg && lt.ends_with(';') {
                     // Remove: REG = simple_value (var, param, DWARF name, another REG, constant 0)
-                    let is_simple = rhs.starts_with("var_") || rhs.starts_with("param_")
+                    let is_simple = (rhs.starts_with("var_") && !rhs.contains(' '))
+                        || (rhs.starts_with("param_") && !rhs.contains(' '))
                         || rhs == "0"
                         || (rhs.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) && rhs.len() <= 3)
                         || (!rhs.contains(' ') && !rhs.contains('(')
@@ -260,6 +261,72 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let indent = &line[..indent_len];
             let cleaned = trimmed.replace("  ", " ");
             *line = format!("{}{}", indent, cleaned);
+        }
+    }
+
+    // Remove loop increment lines inside while bodies: EAX = i + 1; (implicit in the loop)
+    {
+        let mut in_while = false;
+        let mut depth = 0u32;
+        let mut i = 0;
+        while i < lines.len() {
+            let lt = lines[i].trim();
+            if lt.starts_with("while (") { in_while = true; depth = 0; }
+            if in_while {
+                if lt.contains('{') { depth += 1; }
+                if lt.contains('}') { if depth > 0 { depth -= 1; } if depth == 0 { in_while = false; } }
+                // Remove: REG = var + 1; (loop counter increment)
+                if depth > 0 {
+                    if let Some(eq_pos) = lt.find(" = ") {
+                        let lhs = &lt[..eq_pos];
+                        let rhs = lt[eq_pos + 3..].trim_end_matches(';');
+                        let is_reg = lhs.len() >= 2 && lhs.len() <= 3
+                            && lhs.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+                        if is_reg && rhs.ends_with(" + 1") {
+                            lines.remove(i);
+                            continue;
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
+    // Chain sequential register assignments (after casts are stripped):
+    // REG = expr; REG = REG op X → REG = expr op X
+    // REG = X; REG = Y → REG = Y (dead store)
+    {
+        let mut i = 0;
+        while i + 1 < lines.len() {
+            let l1 = lines[i].trim().to_string();
+            let l2 = lines[i + 1].trim().to_string();
+            if let (Some(eq1), Some(eq2)) = (l1.find(" = "), l2.find(" = ")) {
+                let lhs1 = l1[..eq1].to_string();
+                let rhs1 = l1[eq1 + 3..].trim_end_matches(';').to_string();
+                let lhs2 = l2[..eq2].to_string();
+                let rhs2 = l2[eq2 + 3..].trim_end_matches(';').to_string();
+                if lhs1 == lhs2 {
+                    if rhs2.starts_with(&format!("{} ", lhs1)) {
+                        let suffix = &rhs2[lhs1.len()..];
+                        let expr = if rhs1.contains(' ') {
+                            format!("({}){}", rhs1, suffix)
+                        } else {
+                            format!("{}{}", rhs1, suffix)
+                        };
+                        let indent = lines[i].len() - lines[i].trim_start().len();
+                        let pad = " ".repeat(indent);
+                        lines[i] = format!("{}{} = {};", pad, lhs1, expr);
+                        lines.remove(i + 1);
+                        continue;
+                    } else {
+                        // Dead store
+                        lines.remove(i);
+                        continue;
+                    }
+                }
+            }
+            i += 1;
         }
     }
 
@@ -396,23 +463,23 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         i += 1;
     }
 
-    // Remove register setup lines before while loops (their values are shown in the condition)
+    // Remove register setup lines before while loops, but record the mappings
+    // so we can substitute inside the loop body (e.g., ECX = len - 1 → use in str[ECX - i])
+    let mut loop_reg_values: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     {
         let mut i = 0;
         while i < lines.len() {
             let lt = lines[i].trim().to_string();
-            // Check if this is a REG = expr; line
             if let Some(eq_pos) = lt.find(" = ") {
-                let lhs = &lt[..eq_pos];
+                let lhs = lt[..eq_pos].to_string();
+                let rhs = lt[eq_pos + 3..].trim_end_matches(';').to_string();
                 let is_reg = lhs.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
                     && lhs.len() >= 2 && lhs.len() <= 3;
                 if is_reg {
-                    // Look ahead (skipping blanks and other REG = assignments) for a while loop
                     let next_nonblank = lines[i + 1..].iter()
                         .find(|l| {
                             let t = l.trim();
                             !t.is_empty() && !{
-                                // Skip other register assignments
                                 if let Some(ep) = t.find(" = ") {
                                     let lh = &t[..ep];
                                     lh.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
@@ -422,12 +489,52 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         })
                         .map(|l| l.trim().to_string());
                     if next_nonblank.as_ref().map_or(false, |n| n.starts_with("while (")) {
+                        // Record the register value for use inside the loop
+                        // Only record meaningful expressions (not other registers or constants)
+                        if rhs.contains("var_") || rhs.contains("len") || rhs.contains("param")
+                            || rhs.contains("str") || (rhs.contains(' ') && !rhs.starts_with("0x"))
+                        {
+                            loop_reg_values.insert(lhs, rhs);
+                        }
                         lines.remove(i);
                         continue;
                     }
                 }
             }
             i += 1;
+        }
+    }
+
+    // Apply loop register values: substitute REG with its pre-loop expression inside while bodies
+    if !loop_reg_values.is_empty() {
+        let mut in_while = false;
+        let mut depth = 0u32;
+        for line in &mut lines {
+            let lt = line.trim();
+            if lt.starts_with("while (") {
+                in_while = true;
+                depth = 0;
+            }
+            if in_while {
+                if lt.contains('{') { depth += 1; }
+                if lt.contains('}') {
+                    if depth > 0 { depth -= 1; }
+                    if depth == 0 { in_while = false; continue; }
+                }
+                // Substitute register names in array indices: [REG - expr] → [value - expr]
+                for (reg, val) in &loop_reg_values {
+                    // Only substitute inside brackets to avoid changing the LHS of assignments
+                    let bracket_reg = format!("[{}", reg);
+                    if line.contains(&bracket_reg) {
+                        let paren_val = if val.contains(' ') {
+                            format!("({})", val)
+                        } else {
+                            val.clone()
+                        };
+                        *line = line.replace(&bracket_reg, &format!("[{}", paren_val));
+                    }
+                }
+            }
         }
     }
 
@@ -545,6 +652,81 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 }
             }
             i += 1;
+        }
+    }
+
+    // Fix RBP + 0xNN where NN is a signed-byte negative (0x80-0xFF) → RBP - offset
+    // Then resolve to DWARF local names
+    for line in &mut lines {
+        // Pattern: "RBP + 0x" followed by 1-2 hex digits
+        while let Some(pos) = line.find("RBP + 0x") {
+            let hex_start = pos + 8;
+            let hex_end = line[hex_start..].find(|c: char| !c.is_ascii_hexdigit())
+                .map(|e| hex_start + e).unwrap_or(line.len());
+            let hex_str = &line[hex_start..hex_end];
+            if let Ok(val) = u64::from_str_radix(hex_str, 16) {
+                if val >= 0x80 && val < 0x100 {
+                    let neg_off = 0x100 - val;
+                    let var_name = format!("var_{:x}", neg_off);
+                    // Check DWARF names (try direct and 8-byte adjusted)
+                    let resolved = aliases.get(&var_name).cloned()
+                        .or_else(|| {
+                            let adj = format!("var_{:x}", neg_off + 8);
+                            aliases.get(&adj).cloned()
+                        });
+                    if let Some(name) = resolved {
+                        let old = format!("RBP + 0x{}", hex_str);
+                        *line = line.replace(&old, &name);
+                        continue;
+                    }
+                }
+            }
+            break;
+        }
+    }
+
+    // Resolve bare register names in array indices: str[RCX] → str[(len-1)-i]
+    // by finding a richer index expression for the same base on another line
+    for i in 0..lines.len() {
+        let lt = lines[i].to_string();
+        // Find all [REG] patterns (bare register in brackets)
+        let mut pos = 0;
+        while let Some(br_start) = lt[pos..].find('[') {
+            let abs_start = pos + br_start;
+            if let Some(br_end) = lt[abs_start..].find(']') {
+                let idx = &lt[abs_start + 1..abs_start + br_end];
+                let is_bare_reg = idx.len() >= 2 && idx.len() <= 3
+                    && idx.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+                if is_bare_reg {
+                    // Find the base (text before the bracket)
+                    let base_start = lt[..abs_start].rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                        .map(|p| p + 1).unwrap_or(0);
+                    let base = &lt[base_start..abs_start];
+                    if !base.is_empty() {
+                        // Search for the same base with a richer index on another line
+                        for j in 0..lines.len() {
+                            if i == j { continue; }
+                            let other = lines[j].trim();
+                            let search = format!("{}[", base);
+                            if let Some(ob) = other.find(&search) {
+                                let inner_start = ob + search.len();
+                                if let Some(inner_end) = other[inner_start..].find(']') {
+                                    let other_idx = &other[inner_start..inner_start + inner_end];
+                                    if other_idx.len() > idx.len() && other_idx.contains(' ') {
+                                        let old = format!("[{}]", idx);
+                                        let new_idx = format!("[{}]", other_idx);
+                                        lines[i] = lines[i].replace(&old, &new_idx);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                pos = abs_start + br_end + 1;
+            } else {
+                break;
+            }
         }
     }
 
