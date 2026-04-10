@@ -23,6 +23,51 @@ mod x86 {
         let disasm: Vec<String> = display.iter().map(|d| format!("{}", d)).collect();
         (inst_next - addr, disasm.join(""), pcode)
     }
+
+    /// Decode a multi-instruction byte sequence, returns vec of (addr, len, disasm, pcode).
+    /// Resets context between instructions to avoid REX prefix leaking.
+    pub fn decode_sequence(bytes: &[u8], base: u64) -> Vec<(u64, u64, String, Vec<PcodeOp>)> {
+        let mut results = Vec::new();
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            let addr = base + offset as u64;
+            let mut ctx = context();
+            let mut gs = x86_root::GlobalSet::new(context());
+            if let Some((inst_next, display, mut pcode)) =
+                x86_root::parse_instruction(&bytes[offset..], &mut ctx, addr, &mut gs)
+            {
+                pcode_ir::optimize(&mut pcode);
+                let len = inst_next - addr;
+                let disasm = display.iter().map(|d| format!("{}", d)).collect::<Vec<_>>().join("");
+                results.push((addr, len, disasm, pcode));
+                offset += len as usize;
+            } else {
+                break;
+            }
+        }
+        results
+    }
+}
+
+mod arm_seq {
+    use super::*;
+
+    /// Decode a multi-instruction ARM64 byte sequence.
+    pub fn decode_sequence(bytes: &[u8], base: u64) -> Vec<(u64, u64, String, Vec<PcodeOp>)> {
+        let mut results = Vec::new();
+        let mut offset = 0usize;
+        while offset + 4 <= bytes.len() {
+            let addr = base + offset as u64;
+            match std::panic::catch_unwind(|| arm::decode(&bytes[offset..offset+4], addr)) {
+                Ok((len, disasm, pcode)) => {
+                    results.push((addr, len, disasm, pcode));
+                    offset += len as usize;
+                }
+                Err(_) => break,
+            }
+        }
+        results
+    }
 }
 
 mod arm {
@@ -450,9 +495,10 @@ mod tests {
         test_x86_64_vs_ghidra_fixture();
         test_aarch64_vs_ghidra_fixture();
         eprintln!("  145 golden tests passed");
-        // Stress tests — edge cases that probe for bugs
         run_stress_tests();
         eprintln!("  stress tests passed");
+        run_functional_tests();
+        eprintln!("  functional tests passed");
         // Scale validation
         test_x86_64_corpus();
         test_aarch64_corpus();
@@ -2253,6 +2299,368 @@ mod tests {
                 |op| matches!(op, PcodeOp::Store { space: AddressSpaceId::Ram, .. }),
             ]);
         }
+    }
+
+    // ── Functional tests: real compiled code patterns ──────────────
+
+    fn run_functional_tests() {
+        test_x86_function_prologue_epilogue();
+        test_x86_stack_locals();
+        test_x86_call_with_args();
+        test_x86_compare_and_branch();
+        test_x86_loop_pattern();
+        test_x86_array_access();
+        test_x86_rip_relative_data();
+        test_x86_sign_extend_chain();
+        test_arm64_function_prologue_epilogue();
+        test_arm64_adrp_add_pair();
+        test_arm64_compare_and_branch();
+        test_arm64_stack_locals();
+        test_arm64_loop_pattern();
+        test_arm64_conditional_select();
+    }
+
+    fn test_x86_function_prologue_epilogue() {
+        // Standard prologue: push rbp; mov rbp,rsp; sub rsp,0x20
+        // Standard epilogue: add rsp,0x20; pop rbp; ret
+        let prologue = [
+            0x55,                         // push rbp
+            0x48, 0x89, 0xe5,             // mov rbp, rsp
+            0x48, 0x83, 0xec, 0x20,       // sub rsp, 0x20
+        ];
+        let epilogue = [
+            0x48, 0x83, 0xc4, 0x20,       // add rsp, 0x20
+            0x5d,                         // pop rbp
+            0xc3,                         // ret
+        ];
+        let seq = x86::decode_sequence(&prologue, 0x1000);
+        assert_eq!(seq.len(), 3, "prologue should be 3 instructions, got {}", seq.len());
+        assert!(seq[0].2.contains("PUSH"), "first should be PUSH, got {}", seq[0].2);
+        assert!(seq[1].2.contains("MOV"), "second should be MOV, got {}", seq[1].2);
+        assert!(seq[2].2.contains("SUB"), "third should be SUB, got {}", seq[2].2);
+
+        // Verify prologue P-code: PUSH stores RBP, MOV copies RSP to RBP
+        let push_pcode = &seq[0].3;
+        assert!(push_pcode.iter().any(|op| matches!(op, PcodeOp::Store { space: AddressSpaceId::Ram, val, .. }
+            if *val == reg(RBP, 8))), "PUSH should store RBP");
+        let mov_pcode = &seq[1].3;
+        assert!(mov_pcode.iter().any(|op| matches!(op, PcodeOp::Copy { out, input }
+            if *out == reg(RBP, 8) && *input == reg(RSP, 8))), "MOV should copy RSP→RBP");
+
+        let eseq = x86::decode_sequence(&epilogue, 0x2000);
+        assert_eq!(eseq.len(), 3, "epilogue should be 3 instructions");
+        assert!(eseq[2].3.iter().any(|op| matches!(op, PcodeOp::Return { .. })), "RET should emit Return");
+    }
+
+    fn test_x86_stack_locals() {
+        // Store and load from stack locals via RBP:
+        //   mov [rbp-0x8], rdi       (save arg to local)
+        //   mov rax, [rbp-0x8]       (reload local)
+        let bytes = [
+            0x48, 0x89, 0x7d, 0xf8,   // mov [rbp-0x8], rdi
+            0x48, 0x8b, 0x45, 0xf8,   // mov rax, [rbp-0x8]
+        ];
+        let seq = x86::decode_sequence(&bytes, 0x1000);
+        assert_eq!(seq.len(), 2);
+
+        // First: Store RDI to [RBP-8]
+        let store_ops = &seq[0].3;
+        assert!(store_ops.iter().any(|op| matches!(op, PcodeOp::Store { space: AddressSpaceId::Ram, .. })),
+            "MOV [rbp-8],rdi should produce Store\n{store_ops:#?}");
+        // Verify the displacement is sign-extended (-8 = 0xFFFFFFFFFFFFFFF8)
+        let has_neg8 = store_ops.iter().any(|op| match op {
+            PcodeOp::IntAdd { right, .. } =>
+                right.space == AddressSpaceId::Const && right.offset == 0xFFFFFFFFFFFFFFF8,
+            _ => false,
+        });
+        assert!(has_neg8, "displacement -8 should be sign-extended to 0xFFFFFFFFFFFFFFF8\n{store_ops:#?}");
+
+        // Second: Load from [RBP-8] to RAX
+        let load_ops = &seq[1].3;
+        assert!(load_ops.iter().any(|op| matches!(op, PcodeOp::Load { out, space: AddressSpaceId::Ram, .. }
+            if *out == reg(RAX, 8))),
+            "MOV rax,[rbp-8] should produce Load to RAX\n{load_ops:#?}");
+    }
+
+    fn test_x86_call_with_args() {
+        // SysV ABI: first 2 args in RDI, RSI
+        //   mov edi, 3            (arg1 = 3)
+        //   mov esi, 4            (arg2 = 4)
+        //   call func             (call at +0x100)
+        let bytes = [
+            0xbf, 0x03, 0x00, 0x00, 0x00,       // mov edi, 3
+            0xbe, 0x04, 0x00, 0x00, 0x00,       // mov esi, 4
+            0xe8, 0xf1, 0x00, 0x00, 0x00,       // call +0x100 (from next_inst)
+        ];
+        let seq = x86::decode_sequence(&bytes, 0x1000);
+        assert_eq!(seq.len(), 3, "should decode 3 instructions, got {}", seq.len());
+
+        // Arg1: EDI = 3 (writes to RDI offset with value 3)
+        assert!(seq[0].3.iter().any(|op| matches!(op, PcodeOp::Copy { input, .. }
+            if input.space == AddressSpaceId::Const && input.offset == 3)),
+            "mov edi,3 should load constant 3");
+
+        // Arg2: ESI = 4
+        assert!(seq[1].3.iter().any(|op| matches!(op, PcodeOp::Copy { input, .. }
+            if input.space == AddressSpaceId::Const && input.offset == 4)),
+            "mov esi,4 should load constant 4");
+
+        // Call: target should be base + 0xa + 0xf1 + 5 = 0x1100
+        assert!(seq[2].3.iter().any(|op| matches!(op, PcodeOp::Call { dest }
+            if dest.offset == 0x1100)),
+            "call should target 0x1100, pcode: {:#?}", seq[2].3);
+    }
+
+    fn test_x86_compare_and_branch() {
+        // if (rdi == 0) goto target
+        //   test rdi, rdi
+        //   je +0x10
+        //   ... (fall through)
+        let bytes = [
+            0x48, 0x85, 0xff,       // test rdi, rdi
+            0x74, 0x10,             // je +0x10 (addr 0x1005 + 0x10 = 0x1015)
+        ];
+        let seq = x86::decode_sequence(&bytes, 0x1000);
+        assert_eq!(seq.len(), 2);
+
+        // TEST should AND rdi with itself and set flags
+        assert!(seq[0].3.iter().any(|op| matches!(op, PcodeOp::IntAnd { left, right, .. }
+            if *left == reg(RDI, 8) && *right == reg(RDI, 8))),
+            "TEST should AND rdi,rdi");
+        assert!(seq[0].3.iter().any(|op| matches!(op, PcodeOp::IntEq { out, .. }
+            if *out == reg(ZF, 1))),
+            "TEST should set ZF");
+
+        // JE should branch on ZF to 0x1015
+        assert!(seq[1].3.iter().any(|op| matches!(op, PcodeOp::CBranch { dest, cond }
+            if dest.offset == 0x1015 && *cond == reg(ZF, 1))),
+            "JE should CBranch on ZF to 0x1015\npcode: {:#?}", seq[1].3);
+    }
+
+    fn test_x86_loop_pattern() {
+        // Simple countdown loop:
+        //   mov ecx, 10           (counter)
+        // loop_top:
+        //   dec ecx               (counter--)
+        //   jnz loop_top          (branch back if != 0)
+        let bytes = [
+            0xb9, 0x0a, 0x00, 0x00, 0x00,   // mov ecx, 10
+            0xff, 0xc9,                       // dec ecx
+            0x75, 0xfc,                       // jnz -4 (back to dec)
+        ];
+        let seq = x86::decode_sequence(&bytes, 0x1000);
+        assert_eq!(seq.len(), 3, "should decode 3 instructions");
+
+        // MOV ECX, 10
+        assert!(seq[0].3.iter().any(|op| matches!(op, PcodeOp::Copy { input, .. }
+            if input.space == AddressSpaceId::Const && input.offset == 10)),
+            "should load constant 10");
+
+        // DEC ECX
+        assert!(seq[1].3.iter().any(|op| matches!(op, PcodeOp::IntSub { .. })),
+            "DEC should produce IntSub");
+
+        // JNZ backward: target should be 0x1005 (the DEC instruction)
+        assert!(seq[2].3.iter().any(|op| matches!(op, PcodeOp::CBranch { dest, .. }
+            if dest.offset == 0x1005)),
+            "JNZ should branch back to 0x1005 (the DEC)\npcode: {:#?}", seq[2].3);
+    }
+
+    fn test_x86_array_access() {
+        // Array access with scale: mov rax, [rdi + rsi*8]
+        // Then store: mov [rdi + rsi*8], rdx
+        let bytes = [
+            0x48, 0x8b, 0x04, 0xf7,   // mov rax, [rdi + rsi*8]
+            0x48, 0x89, 0x14, 0xf7,   // mov [rdi + rsi*8], rdx
+        ];
+        let seq = x86::decode_sequence(&bytes, 0x1000);
+        assert_eq!(seq.len(), 2);
+
+        // Load: should have IntMult for scale factor and Load from RAM
+        let load_ops = &seq[0].3;
+        assert!(load_ops.iter().any(|op| matches!(op, PcodeOp::Load { out, space: AddressSpaceId::Ram, .. }
+            if *out == reg(RAX, 8))),
+            "array load should produce Load to RAX\n{load_ops:#?}");
+
+        // Store: should Store RDX to computed address
+        let store_ops = &seq[1].3;
+        assert!(store_ops.iter().any(|op| matches!(op, PcodeOp::Store { space: AddressSpaceId::Ram, val, .. }
+            if *val == reg(RDX, 8))),
+            "array store should Store RDX\n{store_ops:#?}");
+    }
+
+    fn test_x86_rip_relative_data() {
+        // Load from RIP-relative address (common for global data):
+        //   lea rdi, [rip + 0x1000]     (48 8d 3d 00 10 00 00)
+        //   mov rax, [rip + 0x2000]     (48 8b 05 00 20 00 00)
+        let bytes = [
+            0x48, 0x8d, 0x3d, 0x00, 0x10, 0x00, 0x00,   // lea rdi, [rip+0x1000]
+            0x48, 0x8b, 0x05, 0x00, 0x20, 0x00, 0x00,   // mov rax, [rip+0x2000]
+        ];
+        let seq = x86::decode_sequence(&bytes, 0x1000);
+        assert_eq!(seq.len(), 2);
+
+        // LEA: should compute address into RDI, not load from memory
+        // RIP-relative may produce IntAdd or Copy (if address is computed as constant)
+        let lea_ops = &seq[0].3;
+        let writes_rdi = lea_ops.iter().any(|op| match op {
+            PcodeOp::IntAdd { out, .. } | PcodeOp::Copy { out, .. } => *out == reg(RDI, 8),
+            _ => false,
+        });
+        assert!(writes_rdi, "LEA [rip+disp] should write to RDI\n{lea_ops:#?}");
+        // Should NOT have a Load (LEA computes address only)
+        assert!(!lea_ops.iter().any(|op| matches!(op, PcodeOp::Load { .. })),
+            "LEA should NOT produce Load");
+
+        // MOV: should Load from computed address
+        assert!(seq[1].3.iter().any(|op| matches!(op, PcodeOp::Load { out, space: AddressSpaceId::Ram, .. }
+            if *out == reg(RAX, 8))),
+            "MOV [rip+disp] should produce Load\n{:#?}", seq[1].3);
+    }
+
+    fn test_x86_sign_extend_chain() {
+        // Compiler pattern: load byte, sign-extend to 32, then to 64:
+        //   movsx eax, byte ptr [rdi]    (0F BE 07)
+        //   cdqe                          (48 98)
+        let bytes = [
+            0x0f, 0xbe, 0x07,       // movsx eax, byte ptr [rdi]
+            0x48, 0x98,             // cdqe (sign-extend eax to rax)
+        ];
+        let seq = x86::decode_sequence(&bytes, 0x1000);
+        assert_eq!(seq.len(), 2);
+
+        // MOVSX: Load byte then sign-extend
+        assert!(seq[0].3.iter().any(|op| matches!(op, PcodeOp::IntSext { .. })),
+            "MOVSX should produce IntSext\n{:#?}", seq[0].3);
+
+        // CDQE: sign-extend EAX to RAX
+        assert!(seq[1].3.iter().any(|op| matches!(op, PcodeOp::IntSext { out, .. }
+            if *out == reg(RAX, 8))),
+            "CDQE should IntSext to RAX\n{:#?}", seq[1].3);
+    }
+
+    // ── ARM64 functional tests ──────────────────────────────────────
+
+    fn test_arm64_function_prologue_epilogue() {
+        // Standard prologue: stp x29,x30,[sp,#-16]!; mov x29,sp
+        // Standard epilogue: ldp x29,x30,[sp],#16; ret
+        let prologue = [
+            0xfd, 0x7b, 0xbf, 0xa9,   // stp x29, x30, [sp, #-16]!
+            0xfd, 0x03, 0x00, 0x91,   // mov x29, sp  (add x29, sp, #0)
+        ];
+        let epilogue = [
+            0xfd, 0x7b, 0xc1, 0xa8,   // ldp x29, x30, [sp], #16
+            0xc0, 0x03, 0x5f, 0xd6,   // ret
+        ];
+        let pseq = arm_seq::decode_sequence(&prologue, 0x1000);
+        assert_eq!(pseq.len(), 2, "prologue should be 2 instructions");
+
+        // STP should Store both X29 and X30
+        let stp_ops = &pseq[0].3;
+        let store_count = stp_ops.iter().filter(|op| matches!(op, PcodeOp::Store { .. })).count();
+        assert!(store_count >= 2, "STP x29,x30 should produce at least 2 Stores, got {store_count}\n{stp_ops:#?}");
+
+        let eseq = arm_seq::decode_sequence(&epilogue, 0x2000);
+        assert_eq!(eseq.len(), 2);
+        // LDP should Load both registers
+        let ldp_ops = &eseq[0].3;
+        let load_count = ldp_ops.iter().filter(|op| matches!(op, PcodeOp::Load { .. })).count();
+        assert!(load_count >= 2, "LDP should produce at least 2 Loads, got {load_count}");
+        // RET
+        assert!(eseq[1].3.iter().any(|op| matches!(op, PcodeOp::Return { .. })),
+            "RET should emit Return");
+    }
+
+    fn test_arm64_adrp_add_pair() {
+        // Address materialization: adrp x0, page; add x0, x0, #offset
+        // This is how ARM64 loads addresses of globals/strings.
+        let bytes = [
+            0x00, 0x00, 0x00, 0x90,   // adrp x0, .  (page-aligned PC-relative)
+            0x00, 0x40, 0x00, 0x91,   // add x0, x0, #0x10
+        ];
+        let seq = arm_seq::decode_sequence(&bytes, 0x1000);
+        assert_eq!(seq.len(), 2);
+        // ADRP should produce some P-code that writes X0
+        assert!(!seq[0].3.is_empty(), "ADRP should produce P-code");
+        // ADD should add immediate to X0
+        assert!(seq[1].3.iter().any(|op| matches!(op, PcodeOp::IntAdd { .. })),
+            "ADD x0,x0,#0x10 should produce IntAdd\n{:#?}", seq[1].3);
+    }
+
+    fn test_arm64_compare_and_branch() {
+        // if (x0 == 0) goto target:
+        //   cbz x0, +8
+        // else:
+        //   mov x0, #1
+        // target:
+        let bytes = [
+            0x00, 0x00, 0x00, 0xb4,   // cbz x0, +0 (branch to self for test simplicity)
+            0x20, 0x00, 0x80, 0xd2,   // movz x0, #1
+        ];
+        let seq = arm_seq::decode_sequence(&bytes, 0x1000);
+        assert_eq!(seq.len(), 2);
+
+        // CBZ should compare to zero and conditional branch
+        assert!(seq[0].3.iter().any(|op| matches!(op, PcodeOp::CBranch { .. })),
+            "CBZ should produce CBranch\n{:#?}", seq[0].3);
+    }
+
+    fn test_arm64_stack_locals() {
+        // Store and reload stack local:
+        //   str x0, [sp, #8]
+        //   ldr x1, [sp, #8]
+        let bytes = [
+            0xe0, 0x07, 0x00, 0xf9,   // str x0, [sp, #8]
+            0xe1, 0x07, 0x40, 0xf9,   // ldr x1, [sp, #8]
+        ];
+        let seq = arm_seq::decode_sequence(&bytes, 0x1000);
+        assert_eq!(seq.len(), 2);
+
+        assert!(seq[0].3.iter().any(|op| matches!(op, PcodeOp::Store { space: AddressSpaceId::Ram, .. })),
+            "STR should produce Store\n{:#?}", seq[0].3);
+        assert!(seq[1].3.iter().any(|op| matches!(op, PcodeOp::Load { space: AddressSpaceId::Ram, .. })),
+            "LDR should produce Load\n{:#?}", seq[1].3);
+    }
+
+    fn test_arm64_loop_pattern() {
+        // Countdown loop:
+        //   mov w0, #10
+        // loop:
+        //   subs w0, w0, #1
+        //   b.ne loop
+        let bytes = [
+            0x40, 0x01, 0x80, 0x52,   // movz w0, #10
+            0x00, 0x04, 0x00, 0x71,   // subs w0, w0, #1
+            0x01, 0xff, 0xff, 0x54,   // b.ne -4 (back to subs)
+        ];
+        let seq = arm_seq::decode_sequence(&bytes, 0x1000);
+        assert_eq!(seq.len(), 3, "should decode 3 instructions");
+
+        // SUBS should subtract and set flags
+        assert!(seq[1].3.iter().any(|op| matches!(op, PcodeOp::IntSub { .. })),
+            "SUBS should produce IntSub\n{:#?}", seq[1].3);
+
+        // B.NE should CBranch
+        assert!(seq[2].3.iter().any(|op| matches!(op, PcodeOp::CBranch { .. })),
+            "B.NE should produce CBranch\npcode: {:#?}", seq[2].3);
+    }
+
+    fn test_arm64_conditional_select() {
+        // Pattern: x = (cond) ? a : b
+        //   cmp x0, #0
+        //   csel x2, x0, x1, eq
+        let bytes = [
+            0x1f, 0x00, 0x00, 0xf1,   // cmp x0, #0 (subs xzr, x0, #0)
+            0x02, 0x00, 0x81, 0x9a,   // csel x2, x0, x1, eq
+        ];
+        let seq = arm_seq::decode_sequence(&bytes, 0x1000);
+        assert_eq!(seq.len(), 2);
+
+        // CMP should set flags via subtraction
+        assert!(seq[0].3.iter().any(|op| matches!(op, PcodeOp::IntSub { .. })),
+            "CMP should produce IntSub\n{:#?}", seq[0].3);
+        // CSEL should produce non-trivial P-code (conditional copy)
+        assert!(seq[1].3.len() >= 1, "CSEL should produce P-code, got empty");
     }
 
     fn test_x86_64_vs_ghidra_fixture() {
