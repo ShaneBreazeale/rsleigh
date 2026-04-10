@@ -450,6 +450,9 @@ mod tests {
         test_x86_64_vs_ghidra_fixture();
         test_aarch64_vs_ghidra_fixture();
         eprintln!("  145 golden tests passed");
+        // Stress tests — edge cases that probe for bugs
+        run_stress_tests();
+        eprintln!("  stress tests passed");
         // Scale validation
         test_x86_64_corpus();
         test_aarch64_corpus();
@@ -2031,6 +2034,225 @@ mod tests {
         assert_pcode_contains(&pcode, &disasm, &[
             |op| matches!(op, PcodeOp::IntLsl { .. } | PcodeOp::Copy { .. }),
         ]);
+    }
+
+    // ── Stress tests: edge cases that probe for bugs ───────────────
+
+    fn run_stress_tests() {
+        // --- x86-64 REX prefix edge cases ---
+        // REX.B selects R8-R15 registers
+        {
+            let (_len, disasm, pcode) = decode(&[0x49, 0x89, 0xc0], 0x1000); // MOV R8, RAX
+            assert!(disasm.contains("R8"), "REX.B should select R8, got {disasm}");
+            assert_pcode_contains(&pcode, &disasm, &[
+                |op| matches!(op, PcodeOp::Copy { out, .. } if out.offset != RAX), // NOT RAX
+            ]);
+        }
+        {
+            let (_len, disasm, _pcode) = decode(&[0x49, 0x89, 0xc7], 0x1000); // MOV R15, RAX
+            assert!(disasm.contains("R15"), "REX.B+reg=7 should select R15, got {disasm}");
+        }
+        {
+            let (_len, disasm, _pcode) = decode(&[0x41, 0x89, 0xc8], 0x1000); // MOV R8D, ECX
+            assert!(disasm.contains("R8") || disasm.contains("r8"),
+                "32-bit REX.B should select R8D, got {disasm}");
+        }
+
+        // --- Sign-extended immediate edge cases ---
+        {
+            // MOV RAX, -1 (imm32 = 0xFFFFFFFF sign-extended to 64-bit)
+            let (_len, disasm, pcode) = decode(
+                &[0x48, 0xc7, 0xc0, 0xff, 0xff, 0xff, 0xff], 0x1000);
+            assert!(disasm.contains("MOV") && disasm.contains("RAX"), "got {disasm}");
+            // The constant should be 0xFFFFFFFFFFFFFFFF (sign-extended), not 0xFFFFFFFF
+            assert_pcode_contains(&pcode, &disasm, &[
+                |op| matches!(op, PcodeOp::Copy { input, .. }
+                    if input.space == AddressSpaceId::Const
+                    && input.offset == 0xFFFFFFFFFFFFFFFF),
+            ]);
+        }
+        {
+            // ADD RAX, -0x80 (imm8 = 0x80, sign-extended to -128)
+            let (_len, _disasm, pcode) = decode(&[0x48, 0x83, 0xc0, 0x80], 0x1000);
+            // Constant should be 0xFFFFFFFFFFFFFF80 (sign-extended), may be in Copy or IntAdd
+            let has_sext_const = pcode.iter().any(|op| match op {
+                PcodeOp::Copy { input, .. } | PcodeOp::IntAdd { right: input, .. } =>
+                    input.space == AddressSpaceId::Const && input.offset == 0xFFFFFFFFFFFFFF80,
+                _ => false,
+            });
+            assert!(has_sext_const,
+                "ADD RAX,-0x80: imm8=0x80 should sign-extend to 0xFFFFFFFFFFFFFF80\n{pcode:#?}");
+        }
+        {
+            // CMP RAX, -1 (imm8 = 0xFF sign-extended)
+            let (_len, _disasm, pcode) = decode(&[0x48, 0x83, 0xf8, 0xff], 0x1000);
+            let has_sext_const = pcode.iter().any(|op| match op {
+                PcodeOp::Copy { input, .. } | PcodeOp::IntSub { right: input, .. } =>
+                    input.space == AddressSpaceId::Const && input.offset == 0xFFFFFFFFFFFFFFFF,
+                _ => false,
+            });
+            assert!(has_sext_const,
+                "CMP RAX,-1: imm8=0xFF should sign-extend to 0xFFFFFFFFFFFFFFFF\n{pcode:#?}");
+        }
+
+        // --- Backward branch displacement (sign extension) ---
+        {
+            // JMP -2 (EB FE) = infinite loop, target should be same address
+            let (_len, disasm, pcode) = decode(&[0xeb, 0xfe], 0x1000);
+            assert!(disasm.contains("0x1000"), "JMP -2 at 0x1000 should target 0x1000, got {disasm}");
+            assert_pcode_contains(&pcode, &disasm, &[
+                |op| matches!(op, PcodeOp::Branch { dest } if dest.offset == 0x1000),
+            ]);
+        }
+        {
+            // JZ -5 (74 FB) at 0x1000 → target 0xffd (0x1000 + 2 - 5 = 0xffd)
+            let (_len, disasm, pcode) = decode(&[0x74, 0xfb], 0x1000);
+            assert_pcode_contains(&pcode, &disasm, &[
+                |op| matches!(op, PcodeOp::CBranch { dest, .. } if dest.offset == 0xffd),
+            ]);
+        }
+
+        // --- SIB addressing modes ---
+        {
+            // MOV RAX, [RSI+RDX*8]
+            let (_len, disasm, pcode) = decode(&[0x48, 0x8b, 0x04, 0xd6], 0x1000);
+            assert!(disasm.contains("MOV"), "expected MOV, got {disasm}");
+            // Should have IntMult (scale) and IntAdd (base+index) and Load
+            assert_pcode_contains(&pcode, &disasm, &[
+                |op| matches!(op, PcodeOp::Load { out, space: AddressSpaceId::Ram, .. }
+                    if *out == reg(RAX, 8)),
+            ]);
+        }
+        {
+            // LEA RAX, [RBX+RCX*4+0x10]
+            let (_len, disasm, pcode) = decode(&[0x48, 0x8d, 0x44, 0x8b, 0x10], 0x1000);
+            assert!(disasm.contains("LEA"), "expected LEA, got {disasm}");
+            assert_pcode_contains(&pcode, &disasm, &[
+                |op| matches!(op, PcodeOp::IntAdd { out, .. } if *out == reg(RAX, 8)),
+            ]);
+        }
+
+        // --- 64-bit immediate (movabs) ---
+        {
+            // MOV RAX, 0x123456789abcdef0
+            let (_len, disasm, pcode) = decode(
+                &[0x48, 0xb8, 0xf0, 0xde, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12], 0x1000);
+            assert_eq!(_len, 10);
+            assert!(disasm.contains("MOV") || disasm.contains("RAX"), "got {disasm}");
+            assert_pcode_contains(&pcode, &disasm, &[
+                |op| matches!(op, PcodeOp::Copy { out, input }
+                    if *out == reg(RAX, 8)
+                    && input.space == AddressSpaceId::Const
+                    && input.offset == 0x123456789abcdef0),
+            ]);
+        }
+
+        // --- CMOV (conditional move) ---
+        {
+            // CMOVZ RAX, RCX
+            let (_len, disasm, pcode) = decode(&[0x48, 0x0f, 0x44, 0xc1], 0x1000);
+            assert!(disasm.contains("CMOV"), "expected CMOV, got {disasm}");
+            // Should read ZF and conditionally copy
+            assert!(!pcode.is_empty(), "CMOV should produce P-code");
+        }
+
+        // --- XCHG ---
+        {
+            // XCHG RAX, RCX
+            let (_len, disasm, pcode) = decode(&[0x48, 0x91], 0x1000);
+            assert!(disasm.contains("XCHG"), "expected XCHG, got {disasm}");
+            assert!(!pcode.is_empty(), "XCHG should produce P-code");
+        }
+
+        // --- ARM64 edge cases ---
+        {
+            // MOVN X0, #0 (bitwise NOT of 0 = all 1s = -1)
+            let (len, disasm, pcode) = arm::decode(&[0x00, 0x00, 0x80, 0x92], 0x1000);
+            assert_eq!(len, 4);
+            assert!(disasm.to_lowercase().contains("mov"), "expected mov, got {disasm}");
+            assert!(!pcode.is_empty(), "MOVN should produce P-code");
+        }
+        {
+            // LDR X0, [X1, X2] (register offset)
+            let (len, disasm, pcode) = arm::decode(&[0x20, 0x68, 0x62, 0xf8], 0x1000);
+            assert_eq!(len, 4);
+            assert!(disasm.to_lowercase().contains("ldr"), "expected ldr, got {disasm}");
+            assert_pcode_contains(&pcode, &disasm, &[
+                |op| matches!(op, PcodeOp::Load { space: AddressSpaceId::Ram, .. }),
+            ]);
+        }
+        {
+            // MADD X0, X1, X2, X3 (multiply-add)
+            let (len, disasm, pcode) = arm::decode(&[0x20, 0x0c, 0x02, 0x9b], 0x1000);
+            assert_eq!(len, 4);
+            assert!(disasm.to_lowercase().contains("madd") || disasm.to_lowercase().contains("mul"),
+                "expected madd/mul, got {disasm}");
+            assert_pcode_contains(&pcode, &disasm, &[
+                |op| matches!(op, PcodeOp::IntMult { .. }),
+            ]);
+        }
+
+        // --- RISC-V edge cases ---
+        {
+            // ADDI with negative immediate: ADDI x1, x1, -1
+            let (_len, disasm, pcode) = riscv::decode(&[0x93, 0x80, 0xf0, 0xff], 0x1000);
+            assert!(disasm.to_lowercase().contains("addi"), "expected addi, got {disasm}");
+            // The immediate should be sign-extended to -1
+            assert_pcode_contains(&pcode, &disasm, &[
+                |op| matches!(op, PcodeOp::IntAdd { right, .. }
+                    if right.space == AddressSpaceId::Const
+                    && right.offset > 0x7FFFFFFFFFFFFFFF), // negative when sign-extended
+            ]);
+        }
+        {
+            // C.NOP (compressed 16-bit instruction, RV64C)
+            let (len, disasm, _pcode) = riscv::decode(&[0x01, 0x00], 0x1000);
+            assert_eq!(len, 2, "compressed NOP should be 2 bytes, got {len}");
+            assert!(disasm.to_lowercase().contains("nop") || disasm.to_lowercase().contains("c.nop"),
+                "expected c.nop, got {disasm}");
+        }
+        {
+            // C.ADD x1, x2 (compressed add)
+            let (len, disasm, _pcode) = riscv::decode(&[0x0a, 0x90], 0x1000);
+            assert_eq!(len, 2, "compressed ADD should be 2 bytes, got {len}");
+        }
+
+        // --- MIPS delay slot ---
+        {
+            // NOP = SLL $zero, $zero, 0 = 0x00000000
+            let (len, disasm, _pcode) = mips::decode(&[0x00, 0x00, 0x00, 0x00], 0x1000);
+            assert_eq!(len, 4);
+            assert!(disasm.to_lowercase().contains("nop") || disasm.to_lowercase().contains("sll"),
+                "expected nop/sll, got {disasm}");
+        }
+
+        // --- ARM32 conditional execution ---
+        {
+            // ADDNE R0, R1, R2 (condition NE = 0x1) = 0x10810002
+            let (len, disasm, pcode) = arm32::decode(&[0x02, 0x00, 0x81, 0x10], 0x1000);
+            assert_eq!(len, 4);
+            assert!(disasm.to_lowercase().contains("add"), "expected addne, got {disasm}");
+            // Conditional ARM32 should produce CBranch or conditional P-code
+            assert!(!pcode.is_empty(), "conditional ADD should produce P-code");
+        }
+        {
+            // LDR R0, [R1, R2] (register offset)
+            let (len, disasm, pcode) = arm32::decode(&[0x02, 0x00, 0x91, 0xe7], 0x1000);
+            assert_eq!(len, 4);
+            assert!(disasm.to_lowercase().contains("ldr"), "expected ldr, got {disasm}");
+            assert_pcode_contains(&pcode, &disasm, &[
+                |op| matches!(op, PcodeOp::Load { space: AddressSpaceId::Ram, .. }),
+            ]);
+        }
+        {
+            // STR R0, [R1, #-4]! (pre-index negative offset)
+            let (len, disasm, pcode) = arm32::decode(&[0x04, 0x00, 0x21, 0xe5], 0x1000);
+            assert_eq!(len, 4);
+            assert!(disasm.to_lowercase().contains("str"), "expected str, got {disasm}");
+            assert_pcode_contains(&pcode, &disasm, &[
+                |op| matches!(op, PcodeOp::Store { space: AddressSpaceId::Ram, .. }),
+            ]);
+        }
     }
 
     fn test_x86_64_vs_ghidra_fixture() {

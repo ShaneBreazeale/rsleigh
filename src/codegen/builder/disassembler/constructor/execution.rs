@@ -77,15 +77,28 @@ impl<'a> ExecutionGenerator<'a> {
 
     /// Generate a `u64` expression for a token field, with proper sign extension
     /// for signed fields (simm8, simm16, etc.).
+    /// Handles arbitrary bit widths (e.g., 12-bit RISC-V immediates) by
+    /// sign-extending from the exact field width, not just 8/16/32.
     fn token_field_as_u64(&self, tf_id: &crate::TokenFieldId, field_name: &Ident) -> TokenStream {
         let token_field = self.disassembler.sleigh.token_field(*tf_id);
         let bits = token_field.bits.len().get();
         if token_field.raw_value_is_signed() {
+            // For exact power-of-2 widths, cast through the matching signed type
             match bits {
-                1..=8 => quote! { ((self.#field_name as i8) as i64 as u64) },
-                9..=16 => quote! { ((self.#field_name as i16) as i64 as u64) },
-                17..=32 => quote! { ((self.#field_name as i32) as i64 as u64) },
-                _ => quote! { ((self.#field_name as i64) as u64) },
+                8 => quote! { ((self.#field_name as i8) as i64 as u64) },
+                16 => quote! { ((self.#field_name as i16) as i64 as u64) },
+                32 => quote! { ((self.#field_name as i32) as i64 as u64) },
+                64 => quote! { ((self.#field_name as i64) as u64) },
+                _ => {
+                    // Arbitrary bit width: sign-extend from bit (bits-1)
+                    // If sign bit is set, OR with mask to extend 1s
+                    let sign_bit = 1u64 << (bits - 1);
+                    let sign_ext_mask = !((1u64 << bits) - 1); // all 1s above the field
+                    quote! {{
+                        let val = self.#field_name as u64;
+                        if val & #sign_bit != 0 { val | #sign_ext_mask } else { val }
+                    }}
+                }
             }
         } else {
             quote! { self.#field_name as u64 }

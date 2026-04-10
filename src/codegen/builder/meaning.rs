@@ -199,7 +199,7 @@ impl ValueMeaning {
         let number_ele = &disassembler.display.number_var;
         let into_display = if value_type.is_signed() {
             quote! {
-                <#display_element>::#number_ele(hex, value.is_negative(), value.abs() as #DISPLAY_WORK_TYPE)
+                <#display_element>::#number_ele(hex, value.is_negative(), (value as i128).unsigned_abs() as #DISPLAY_WORK_TYPE)
             }
         } else {
             quote! {
@@ -288,7 +288,7 @@ impl Meanings {
                     let value = crate::codegen::builder::helper::sign_from_value(
                         len_bits, final_type, value,
                     );
-                    quote! { DisplayElement::Number(#hex, #value.is_negative(), #value.abs() as #DISPLAY_WORK_TYPE) }
+                    quote! { DisplayElement::Number(#hex, #value.is_negative(), (#value as i128).unsigned_abs() as #DISPLAY_WORK_TYPE) }
                 }
             }
             Meaning::Varnode(vars) => {
