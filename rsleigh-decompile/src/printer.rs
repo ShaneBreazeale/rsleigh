@@ -500,6 +500,20 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         lines.remove(i);
                         continue;
                     }
+                    // Chain: REG1 = expr; REG2 = REG1; use[REG2] → use[expr]
+                    // Check if next line is "REG2 = REG1;" or "REG2 = lhs;"
+                    if let Some(next_eq) = next.find(" = ") {
+                        let next_lhs = &next[..next_eq];
+                        let next_rhs = next[next_eq + 3..].trim_end_matches(';');
+                        if next_rhs == lhs || (!alias64.is_empty() && next_rhs == alias64) {
+                            // Chain: replace REG1 assignment with REG2 = expr
+                            let indent = lines[i].len() - lines[i].trim_start().len();
+                            let pad = &lines[i][..indent];
+                            lines[i] = format!("{}{} = {};", pad, next_lhs, rhs);
+                            lines.remove(i + 1);
+                            continue; // Re-process the composed line
+                        }
+                    }
                 }
             }
             i += 1;
@@ -527,6 +541,39 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         lines[i + 1] = format!("{}{}", pad, new_next);
                         lines.remove(i);
                         continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
+    // Detect swap pattern: str[i] = str[j]; str[j] = AL; → str[j] = str[i];
+    // (AL holds the original str[i] from a read that was elided by the printer)
+    {
+        let mut i = 0;
+        while i + 1 < lines.len() {
+            let l1 = lines[i].trim().to_string();
+            let l2 = lines[i + 1].trim().to_string();
+            // Pattern: "X[a] = X[b];" followed by "X[c] = AL;"
+            if l2.ends_with(" = AL;") {
+                // l1 should be "base[idx1] = base[idx2];"
+                if let Some(bracket1_start) = l1.find('[') {
+                    if let Some(eq1) = l1.find("] = ") {
+                        let base = &l1[..bracket1_start];
+                        let idx1 = &l1[bracket1_start + 1..eq1];
+                        // The rhs of l1 is base[idx2]
+                        let rhs1 = l1[eq1 + 4..].trim_end_matches(';');
+                        if rhs1.starts_with(base) && rhs1.contains('[') {
+                            // This is the swap pattern
+                            // The original value at idx1 was saved to AL
+                            // Replace AL with base[idx1]
+                            let swap_val = format!("{}[{}]", base, idx1);
+                            let indent = lines[i + 1].len() - lines[i + 1].trim_start().len();
+                            let new_line = l2.replace("AL", &swap_val);
+                            let pad = " ".repeat(indent);
+                            lines[i + 1] = format!("{}{}", pad, new_line.trim());
+                        }
                     }
                 }
             }
