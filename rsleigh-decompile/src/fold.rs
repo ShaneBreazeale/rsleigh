@@ -144,7 +144,7 @@ fn propagate_register_copies(ssa: &mut SsaCfg) {
                         && left_var.use_count <= 1
                     {
                         // Look up what that register was previously assigned to
-                        if let Some((prev_id, prev_expr)) = reg_expr.get(&key) {
+                        if let Some((prev_id, _prev_expr)) = reg_expr.get(&key) {
                             // Substitute the previous assignment's VarId as the left operand
                             // This handles: EAX = X; EAX = EAX + Y → EAX = X + Y
                             replacements.push((i, Expr::BinOp(*kind, *prev_id, *right)));

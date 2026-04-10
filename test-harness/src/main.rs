@@ -1043,6 +1043,190 @@ mod tests {
         );
     }
 
+    // ---- Decompiler validation tests ----
+
+    #[test]
+    fn decompiler_validation() {
+        let t = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(run_decompiler_validation)
+            .unwrap();
+        t.join().unwrap();
+    }
+
+    fn run_decompiler_validation() {
+        // Try to find or build the test binary
+        let binary_path = "/tmp/test_prog_x86";
+        let source = r#"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+int add(int a, int b) { return a + b; }
+int factorial(int n) { if (n <= 1) return 1; return n * factorial(n - 1); }
+char* reverse_string(char* str) {
+    int len = strlen(str);
+    for (int i = 0; i < len / 2; i++) {
+        char tmp = str[i]; str[i] = str[len-1-i]; str[len-1-i] = tmp;
+    }
+    return str;
+}
+int main(int argc, char** argv) {
+    printf("add(3, 4) = %d\n", add(3, 4));
+    printf("factorial(5) = %d\n", factorial(5));
+    char buf[32]; strcpy(buf, "hello world");
+    printf("reversed: %s\n", reverse_string(buf));
+    return 0;
+}
+"#;
+
+        // Write source and compile
+        let src_path = "/tmp/test_decompile_validation.c";
+        std::fs::write(src_path, source).unwrap();
+        let compile = std::process::Command::new("cc")
+            .args(["-arch", "x86_64", "-o", binary_path, src_path, "-g"])
+            .output();
+
+        match compile {
+            Ok(output) if output.status.success() => {}
+            _ => {
+                // Can't compile (no x86_64 toolchain, e.g. Linux CI)
+                // Skip test gracefully
+                if !std::path::Path::new(binary_path).exists() {
+                    eprintln!("  decompiler validation skipped (no x86_64 cross-compiler)");
+                    return;
+                }
+            }
+        }
+
+        if !std::path::Path::new(binary_path).exists() {
+            eprintln!("  decompiler validation skipped (binary not found)");
+            return;
+        }
+
+        let data = std::fs::read(binary_path).unwrap();
+        let obj = goblin::Object::parse(&data).unwrap();
+
+        let (segs, symbols) = match &obj {
+            goblin::Object::Mach(goblin::mach::Mach::Binary(m)) => {
+                let segs: Vec<(u64,u64,u64)> = m.segments.iter()
+                    .map(|s| (s.vmaddr, s.vmsize, s.fileoff)).collect();
+                let mut syms = Vec::new();
+                for sym in m.symbols() {
+                    if let Ok((name, nlist)) = sym {
+                        if nlist.n_type & 0x0e == 0x0e && nlist.n_value != 0 {
+                            let c: &str = if name.starts_with('_') { &name[1..] } else { name };
+                            if !c.is_empty() {
+                                syms.push((nlist.n_value, c.to_string()));
+                            }
+                        }
+                    }
+                }
+                syms.sort_by_key(|(a,_)| *a);
+                syms.dedup_by_key(|(a,_)| *a);
+                (segs, syms)
+            }
+            _ => {
+                eprintln!("  decompiler validation skipped (not Mach-O)");
+                return;
+            }
+        };
+
+        let mut dec = rsleigh_api::Decoder::new(rsleigh_api::Architecture::X86_64);
+
+        let decompile_func = |fa: u64, dec: &mut rsleigh_api::Decoder| -> String {
+            let off = segs.iter().find_map(|(va,sz,fo)|
+                if fa >= *va && fa < va+sz { Some(fo+(fa-va)) } else { None });
+            let Some(off) = off else { return String::new() };
+            let max = 512.min(data.len() - off as usize);
+            let bytes = &data[off as usize..off as usize + max];
+            let mut io = 0usize;
+            let mut insts = Vec::new();
+            while io < max {
+                match dec.decode(&bytes[io..], fa + io as u64) {
+                    Ok(inst) => {
+                        let r = inst.ops.iter().any(|o| matches!(o, rsleigh_api::PcodeOp::Return{..}));
+                        let l = inst.len as usize;
+                        insts.push((fa + io as u64, inst));
+                        io += l;
+                        if r { break; }
+                    }
+                    Err(_) => break,
+                }
+            }
+            rsleigh_decompile::decompile_with_binary(
+                rsleigh_api::Architecture::X86_64, &insts, Some(&data))
+        };
+
+        let find_addr = |name: &str| -> Option<u64> {
+            symbols.iter().find(|(_, n)| n == name).map(|(a, _)| *a)
+        };
+
+        // --- Validate add() ---
+        if let Some(addr) = find_addr("add") {
+            let output = decompile_func(addr, &mut dec);
+            assert!(output.contains("var_4") || output.contains("EDI"),
+                "add(): should reference first argument\n{}", output);
+            assert!(output.contains("var_8") || output.contains("ESI"),
+                "add(): should reference second argument\n{}", output);
+            assert!(output.contains("+"),
+                "add(): should contain addition operator\n{}", output);
+            assert!(output.contains("return"),
+                "add(): should contain return\n{}", output);
+            eprintln!("  add() validated");
+        }
+
+        // --- Validate factorial() ---
+        if let Some(addr) = find_addr("factorial") {
+            let output = decompile_func(addr, &mut dec);
+            assert!(output.contains("if"),
+                "factorial(): should contain if statement\n{}", output);
+            assert!(output.contains("factorial") || output.contains(&format!("func_{:x}", addr)),
+                "factorial(): should contain recursive call\n{}", output);
+            assert!(output.contains("1"),
+                "factorial(): should contain base case value 1\n{}", output);
+            assert!(output.contains("*") || output.contains("IMUL"),
+                "factorial(): should contain multiplication\n{}", output);
+            eprintln!("  factorial() validated");
+        }
+
+        // --- Validate reverse_string() ---
+        if let Some(addr) = find_addr("reverse_string") {
+            let output = decompile_func(addr, &mut dec);
+            assert!(output.contains("while") || output.contains("if"),
+                "reverse_string(): should contain loop or conditional\n{}", output);
+            assert!(output.contains("strlen") || output.contains("func_"),
+                "reverse_string(): should call strlen\n{}", output);
+            assert!(output.contains("return"),
+                "reverse_string(): should return\n{}", output);
+            eprintln!("  reverse_string() validated");
+        }
+
+        // --- Validate main() ---
+        if let Some(addr) = find_addr("main") {
+            let output = decompile_func(addr, &mut dec);
+            // String literals should resolve
+            assert!(output.contains("add(3, 4)") || output.contains("add(3,4)"),
+                "main(): should contain 'add(3, 4)' string literal\n{}", output);
+            assert!(output.contains("factorial(5)"),
+                "main(): should contain 'factorial(5)' string literal\n{}", output);
+            assert!(output.contains("hello world"),
+                "main(): should contain 'hello world' string literal\n{}", output);
+            // Import resolution
+            assert!(output.contains("printf"),
+                "main(): should resolve printf import\n{}", output);
+            // Function calls
+            assert!(output.contains("add(") || output.contains("add ()"),
+                "main(): should call add()\n{}", output);
+            assert!(output.contains("factorial(") || output.contains("factorial ()"),
+                "main(): should call factorial()\n{}", output);
+            assert!(output.contains("reverse_string("),
+                "main(): should call reverse_string()\n{}", output);
+            eprintln!("  main() validated");
+        }
+
+        eprintln!("  decompiler validation passed");
+    }
+
     // Verify register_name works for known registers
     #[test]
     fn register_name_lookup() {
