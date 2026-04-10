@@ -55,7 +55,13 @@ fn fold_once(ssa: &mut SsaCfg) {
         }
     }
 
-    // Pass 2: Inline single-use Unique vars and all constants
+    // Pass 2: Algebraic simplification
+    for v in 0..ssa.vars.len() {
+        let expr = ssa.vars[v].expr.clone();
+        ssa.vars[v].expr = simplify_expr(expr, &ssa.vars);
+    }
+
+    // Pass 3: Inline single-use Unique vars and all constants
     let inline_candidates: Vec<(VarId, Expr)> = (0..ssa.vars.len())
         .filter_map(|v| {
             let vdef = &ssa.vars[v];
@@ -72,6 +78,81 @@ fn fold_once(ssa: &mut SsaCfg) {
     for v in 0..ssa.vars.len() {
         let expr = ssa.vars[v].expr.clone();
         ssa.vars[v].expr = substitute_expr(&expr, &inline_candidates);
+    }
+
+    // Pass 4: Propagate single-use register assignments into their consumer.
+    // e.g., RAX = var_8; RAX = RAX + 1  →  RAX = var_8 + 1
+    propagate_register_copies(ssa);
+}
+
+/// Algebraic simplification: x & x → x, x ^ 0 → x, etc.
+fn simplify_expr(expr: Expr, vars: &[VarDef]) -> Expr {
+    match &expr {
+        // x & x → x (from TEST instruction)
+        Expr::BinOp(BinOpKind::And, left, right) if left == right => {
+            Expr::Var(*left)
+        }
+        // x ^ x → 0
+        Expr::BinOp(BinOpKind::Xor, left, right) if left == right => {
+            let size = vars[left.0 as usize].size;
+            Expr::Const(0, size)
+        }
+        // x | 0 → x, x & all-ones → x, etc. (check for const 0)
+        Expr::BinOp(BinOpKind::Or | BinOpKind::Add, left, right) => {
+            if is_const_zero(*right, vars) { Expr::Var(*left) }
+            else if is_const_zero(*left, vars) { Expr::Var(*right) }
+            else { expr }
+        }
+        _ => expr,
+    }
+}
+
+fn is_const_zero(id: VarId, vars: &[VarDef]) -> bool {
+    matches!(&vars[id.0 as usize].expr, Expr::Const(0, _))
+}
+
+/// Propagate: if var A = var B, and B was just assigned in the same block,
+/// and B has use_count == 1, substitute B's definition into A.
+fn propagate_register_copies(ssa: &mut SsaCfg) {
+    for bi in 0..ssa.blocks.len() {
+        let stmts = &ssa.blocks[bi].stmts;
+        let mut replacements: Vec<(usize, Expr)> = Vec::new();
+
+        for i in 1..stmts.len() {
+            if let Stmt::Assign(var_id) = &stmts[i] {
+                let vdef = &ssa.vars[var_id.0 as usize];
+                if vdef.varnode.space != AddressSpaceId::Register { continue; }
+
+                // Check if this is "REG = REG op SOMETHING" where REG was just assigned
+                if let Expr::BinOp(kind, left, right) = &vdef.expr {
+                    let left_var = &ssa.vars[left.0 as usize];
+                    // Is the left operand the same register that was assigned in a recent stmt?
+                    if left_var.varnode == vdef.varnode && left_var.use_count == 1 {
+                        // Find the previous assignment to this register
+                        for j in (0..i).rev() {
+                            if let Stmt::Assign(prev_id) = &stmts[j] {
+                                if *prev_id == *left {
+                                    // Substitute: RAX = prev_expr op right
+                                    let prev_expr = ssa.vars[prev_id.0 as usize].expr.clone();
+                                    if let Expr::Var(src) = &prev_expr {
+                                        // RAX = var_8; RAX = RAX + 1 → RAX = var_8 + 1
+                                        replacements.push((i, Expr::BinOp(*kind, *src, *right)));
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for (idx, new_expr) in replacements {
+            if let Stmt::Assign(var_id) = &ssa.blocks[bi].stmts[idx] {
+                let vid = var_id.0 as usize;
+                ssa.vars[vid].expr = new_expr;
+            }
+        }
     }
 }
 

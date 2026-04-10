@@ -25,13 +25,13 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
         let next_addr = addr + inst.len;
         for op in &inst.ops {
             match op {
-                PcodeOp::Branch { dest } | PcodeOp::CBranch { dest, .. }
-                    if dest.space == AddressSpaceId::Ram =>
-                {
+                PcodeOp::Branch { dest } if dest.space == AddressSpaceId::Ram => {
                     leaders.push(dest.offset);
-                    if matches!(op, PcodeOp::CBranch { .. }) {
-                        leaders.push(next_addr);
-                    }
+                    leaders.push(next_addr); // instruction after unconditional branch
+                }
+                PcodeOp::CBranch { dest, .. } if dest.space == AddressSpaceId::Ram => {
+                    leaders.push(dest.offset);
+                    leaders.push(next_addr);
                 }
                 PcodeOp::Branch { .. } => {
                     leaders.push(next_addr);
@@ -52,6 +52,26 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
 
     leaders.sort_unstable();
     leaders.dedup();
+
+    // Snap branch targets to the nearest valid instruction address.
+    // Works around rsleigh branch target computation bugs where relative offsets
+    // may be off by a constant (known issue with subtable inst_next).
+    let inst_addrs: Vec<u64> = instructions.iter().map(|(a, _)| *a).collect();
+    let snap_to_inst = |addr: u64| -> u64 {
+        if inst_addrs.contains(&addr) { return addr; }
+        // Find nearest instruction address (within 256 bytes)
+        inst_addrs.iter().copied()
+            .filter(|a| (*a as i64 - addr as i64).unsigned_abs() <= 256)
+            .min_by_key(|a| (*a as i64 - addr as i64).unsigned_abs())
+            .unwrap_or(addr)
+    };
+    leaders = leaders.into_iter().map(|a| snap_to_inst(a)).collect();
+    leaders.sort_unstable();
+    leaders.dedup();
+
+    // Filter leaders to only include addresses that correspond to instructions
+    let valid_addrs: std::collections::HashSet<u64> = inst_addrs.iter().copied().collect();
+    leaders.retain(|a| valid_addrs.contains(a));
 
     // Map leader address -> block id
     let mut leader_to_block: HashMap<u64, BlockId> = HashMap::new();
@@ -93,7 +113,7 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                     Terminator::Return
                 }
                 PcodeOp::Branch { dest } if dest.space == AddressSpaceId::Ram => {
-                    let target = dest.offset;
+                    let target = snap_to_inst(dest.offset);
                     ops.pop();
                     if let Some(&bid) = leader_to_block.get(&target) {
                         Terminator::Branch(bid)
@@ -102,7 +122,7 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                     }
                 }
                 PcodeOp::CBranch { dest, cond } if dest.space == AddressSpaceId::Ram => {
-                    let target = dest.offset;
+                    let target = snap_to_inst(dest.offset);
                     let cond = *cond;
                     ops.pop();
                     let taken = leader_to_block.get(&target)

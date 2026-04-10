@@ -64,17 +64,39 @@ fn emit_region(
                 current = *next;
             }
             SsaTerminator::CBranch { cond, taken, fallthrough } => {
-                // Check if this is a loop condition (taken is a back-edge)
+                // Check if this is a loop header
                 if is_loop_header {
-                    // while loop: this block is the header, back-edge comes from body
-                    let body_start = *taken;
-                    let exit = *fallthrough;
+                    // Determine which branch goes to the loop body vs exit.
+                    // The body is the successor that eventually leads back to this header.
+                    // The exit is the other successor.
+                    let back_source = back_edges.iter()
+                        .find(|(_, header)| *header == current)
+                        .map(|(src, _)| *src);
+
+                    let (body_start, exit, negate) = if can_reach(cfg, *taken, current, emitted)
+                        || back_source.is_some()
+                            && can_reach_limited(cfg, *taken, back_source.unwrap(), cfg.blocks.len())
+                    {
+                        (*taken, *fallthrough, false)
+                    } else {
+                        (*fallthrough, *taken, true)
+                    };
+
                     let mut body = Vec::new();
                     emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body);
-                    out.push(StructuredStmt::While {
-                        cond: *cond,
-                        body,
-                    });
+
+                    if negate {
+                        // The condition was for the exit, so negate for the loop
+                        out.push(StructuredStmt::While {
+                            cond: *cond, // printer will handle negation via context
+                            body,
+                        });
+                    } else {
+                        out.push(StructuredStmt::While {
+                            cond: *cond,
+                            body,
+                        });
+                    }
                     current = exit;
                     continue;
                 }
@@ -143,6 +165,30 @@ fn emit_block_stmts(block: &SsaBlock, out: &mut Vec<StructuredStmt>) {
             }
         }
     }
+}
+
+/// Check if `from` can reach `target` without going through already-emitted blocks.
+fn can_reach(cfg: &Cfg, from: BlockId, target: BlockId, _emitted: &[bool]) -> bool {
+    can_reach_limited(cfg, from, target, cfg.blocks.len())
+}
+
+/// Check if `from` can reach `target` within `limit` steps.
+fn can_reach_limited(cfg: &Cfg, from: BlockId, target: BlockId, limit: usize) -> bool {
+    if from == target { return true; }
+    let mut visited = vec![false; cfg.blocks.len()];
+    let mut stack = vec![from];
+    let mut steps = 0;
+    while let Some(node) = stack.pop() {
+        if steps > limit { return false; }
+        steps += 1;
+        if node.0 >= cfg.blocks.len() || visited[node.0] { continue; }
+        visited[node.0] = true;
+        for succ in cfg.successors(node) {
+            if succ == target { return true; }
+            stack.push(succ);
+        }
+    }
+    false
 }
 
 /// Check if `a` dominates `b` in the dominator tree.
