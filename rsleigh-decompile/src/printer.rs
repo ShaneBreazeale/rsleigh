@@ -126,6 +126,9 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, arch: Architecture, indent: u
             if matches!(&vdef.expr, Expr::Phi(_)) { return; }
             if is_zext_artifact(vdef, ssa) { return; }
             if is_self_assign(vdef, ssa) { return; }
+            // Skip argument register assignments that are consumed by a call
+            // (they're shown inline in the call's argument list)
+            if is_arg_consumed_by_call(*lhs, ssa) { return; }
 
             let name = var_name(&vdef.varnode, arch);
             let rhs = format_expr(&vdef.expr, ssa, arch);
@@ -146,8 +149,13 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, arch: Architecture, indent: u
         }
         StructuredStmt::Call { target, args, out: call_out } => {
             let target_name = format_call_target(target, ssa, arch);
+            // Show argument VALUES (the expression assigned to the arg register)
             let args_str: Vec<String> = args.iter()
-                .map(|a| format_var(*a, ssa, arch))
+                .map(|a| {
+                    let vdef = ssa.var(*a);
+                    // Show the RHS of the arg register assignment, not "RDI"
+                    format_expr(&vdef.expr, ssa, arch)
+                })
                 .collect();
             if let Some(out_var) = call_out {
                 let name = var_name(&ssa.var(*out_var).varnode, arch);
@@ -432,6 +440,23 @@ fn is_zext_artifact(vdef: &VarDef, ssa: &SsaCfg) -> bool {
     } else {
         false
     }
+}
+
+/// Check if an argument register assignment is consumed by a Call (shown inline).
+fn is_arg_consumed_by_call(var_id: VarId, ssa: &SsaCfg) -> bool {
+    for block in &ssa.blocks {
+        // Check Call terminators
+        if let SsaTerminator::Call { args, .. } = &block.terminator {
+            if args.contains(&var_id) { return true; }
+        }
+        // Check Call statements
+        for stmt in &block.stmts {
+            if let Stmt::Call { args, .. } = stmt {
+                if args.contains(&var_id) { return true; }
+            }
+        }
+    }
+    false
 }
 
 fn is_self_assign(vdef: &VarDef, ssa: &SsaCfg) -> bool {
