@@ -16,7 +16,7 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
 
     // Find block leaders: first instruction, branch targets, instruction after branch/call/return
     let mut leaders: Vec<u64> = vec![instructions[0].0];
-    let addr_set: HashMap<u64, usize> = instructions.iter()
+    let _addr_set: HashMap<u64, usize> = instructions.iter()
         .enumerate()
         .map(|(i, (addr, _))| (*addr, i))
         .collect();

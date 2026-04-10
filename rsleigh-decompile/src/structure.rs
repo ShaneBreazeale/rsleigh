@@ -117,7 +117,7 @@ fn emit_region(
                 });
                 current = *fallthrough;
             }
-            SsaTerminator::Indirect(v) => {
+            SsaTerminator::Indirect(_v) => {
                 out.push(StructuredStmt::Goto(0)); // Can't resolve indirect
                 break;
             }

@@ -5,37 +5,103 @@ use crate::ir::*;
 /// Print structured statements as C-like pseudocode.
 pub fn print_c(stmts: &[StructuredStmt], ssa: &SsaCfg, arch: Architecture) -> String {
     let mut out = String::new();
-    print_stmts(stmts, ssa, arch, 0, &mut out);
+    let filtered = filter_boilerplate(stmts, ssa);
+    print_stmts(&filtered, ssa, arch, 0, &mut out);
     out
 }
 
-fn print_stmts(
-    stmts: &[StructuredStmt],
-    ssa: &SsaCfg,
-    arch: Architecture,
-    indent: usize,
-    out: &mut String,
-) {
+/// Remove prologue/epilogue boilerplate from the top level.
+fn filter_boilerplate(stmts: &[StructuredStmt], ssa: &SsaCfg) -> Vec<StructuredStmt> {
+    stmts.iter().filter(|stmt| {
+        match stmt {
+            StructuredStmt::Assign { lhs, .. } => {
+                let vdef = ssa.var(*lhs);
+                // Skip RSP adjustments (prologue/epilogue stack management)
+                if is_stack_management(vdef, ssa) { return false; }
+                // Skip RBP = RSP (frame pointer setup) and RBP = *(RSP) (restore)
+                if is_frame_pointer_op(vdef) { return false; }
+                // Skip RIP writes
+                if vdef.varnode.space == AddressSpaceId::Register && vdef.varnode.offset == 648 {
+                    return false;
+                }
+                true
+            }
+            StructuredStmt::Store { addr, val: _ } => {
+                let addr_def = ssa.var(*addr);
+                // Skip stores to RSP (push return address, push RBP)
+                if addr_def.varnode.space == AddressSpaceId::Register
+                    && addr_def.varnode.offset == 32
+                {
+                    return false;
+                }
+                // Skip stores where address is an RSP-derived expression
+                if is_rsp_expr(&addr_def.expr, ssa) { return false; }
+                true
+            }
+            _ => true,
+        }
+    }).cloned().collect()
+}
+
+fn is_stack_management(vdef: &VarDef, ssa: &SsaCfg) -> bool {
+    if vdef.varnode.space != AddressSpaceId::Register { return false; }
+    // RSP = RSP +/- N
+    if vdef.varnode.offset == 32 {
+        if let Expr::BinOp(BinOpKind::Add | BinOpKind::Sub, l, _) = &vdef.expr {
+            let lv = ssa.var(*l);
+            return lv.varnode.space == AddressSpaceId::Register && lv.varnode.offset == 32;
+        }
+        // RSP = RBP (leave instruction)
+        if let Expr::Var(id) = &vdef.expr {
+            let v = ssa.var(*id);
+            return v.varnode.space == AddressSpaceId::Register && v.varnode.offset == 40;
+        }
+    }
+    false
+}
+
+fn is_frame_pointer_op(vdef: &VarDef) -> bool {
+    if vdef.varnode.space != AddressSpaceId::Register { return false; }
+    // RBP = RSP or RBP = *(RSP) or RSP = RBP
+    if vdef.varnode.offset == 40 || vdef.varnode.offset == 32 {
+        match &vdef.expr {
+            Expr::Var(_) => true, // RBP = RSP, RSP = RBP
+            Expr::Load(_) => vdef.varnode.offset == 40, // RBP = *(RSP)
+            _ => false,
+        }
+    } else {
+        false
+    }
+}
+
+fn is_rsp_expr(expr: &Expr, ssa: &SsaCfg) -> bool {
+    match expr {
+        Expr::Var(id) => {
+            let v = ssa.var(*id);
+            v.varnode.space == AddressSpaceId::Register && v.varnode.offset == 32
+        }
+        Expr::BinOp(_, l, _) => {
+            let v = ssa.var(*l);
+            v.varnode.space == AddressSpaceId::Register && v.varnode.offset == 32
+        }
+        _ => false,
+    }
+}
+
+fn print_stmts(stmts: &[StructuredStmt], ssa: &SsaCfg, arch: Architecture, indent: usize, out: &mut String) {
     for stmt in stmts {
         print_stmt(stmt, ssa, arch, indent, out);
     }
 }
 
-fn print_stmt(
-    stmt: &StructuredStmt,
-    ssa: &SsaCfg,
-    arch: Architecture,
-    indent: usize,
-    out: &mut String,
-) {
+fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, arch: Architecture, indent: usize, out: &mut String) {
     let pad: String = "    ".repeat(indent);
 
     match stmt {
         StructuredStmt::Assign { lhs, .. } => {
             let vdef = ssa.var(*lhs);
-            // Skip assignments to Unique-space vars that are only used once
-            // (they'll be inlined into their consumer)
-            if vdef.varnode.space == AddressSpaceId::Unique && vdef.use_count <= 1 {
+            // Skip all Unique-space vars (they're temporaries — inline or drop)
+            if vdef.varnode.space == AddressSpaceId::Unique {
                 return;
             }
             // Skip flag register assignments
@@ -47,11 +113,11 @@ fn print_stmt(
             out.push_str(&format!("{}{} = {};\n", pad, name, rhs));
         }
         StructuredStmt::Store { addr, val } => {
-            let addr_expr = format_var(*addr, ssa, arch);
+            let addr_str = format_expr_for_addr(*addr, ssa, arch);
             let val_expr = format_var(*val, ssa, arch);
             let size = ssa.var(*val).size;
             let type_name = size_to_type(size);
-            out.push_str(&format!("{}*({} *)({}) = {};\n", pad, type_name, addr_expr, val_expr));
+            out.push_str(&format!("{}*({}*)({}) = {};\n", pad, type_name, addr_str, val_expr));
         }
         StructuredStmt::Call { target, args, out: call_out } => {
             let target_name = match target {
@@ -78,18 +144,21 @@ fn print_stmt(
         }
         StructuredStmt::IfElse { cond, then_body, else_body } => {
             let cond_expr = format_var(*cond, ssa, arch);
+            let then_filtered = filter_boilerplate(then_body, ssa);
+            let else_filtered = filter_boilerplate(else_body, ssa);
             out.push_str(&format!("{}if ({}) {{\n", pad, cond_expr));
-            print_stmts(then_body, ssa, arch, indent + 1, out);
-            if !else_body.is_empty() {
+            print_stmts(&then_filtered, ssa, arch, indent + 1, out);
+            if !else_filtered.is_empty() {
                 out.push_str(&format!("{}}} else {{\n", pad));
-                print_stmts(else_body, ssa, arch, indent + 1, out);
+                print_stmts(&else_filtered, ssa, arch, indent + 1, out);
             }
             out.push_str(&format!("{}}}\n", pad));
         }
         StructuredStmt::While { cond, body } => {
             let cond_expr = format_var(*cond, ssa, arch);
+            let body_filtered = filter_boilerplate(body, ssa);
             out.push_str(&format!("{}while ({}) {{\n", pad, cond_expr));
-            print_stmts(body, ssa, arch, indent + 1, out);
+            print_stmts(&body_filtered, ssa, arch, indent + 1, out);
             out.push_str(&format!("{}}}\n", pad));
         }
         StructuredStmt::Goto(addr) => {
@@ -98,6 +167,82 @@ fn print_stmt(
         StructuredStmt::Label(addr) => {
             out.push_str(&format!("label_{:x}:\n", addr));
         }
+    }
+}
+
+/// Format an address expression, recognizing RBP-relative stack accesses.
+fn format_expr_for_addr(id: VarId, ssa: &SsaCfg, arch: Architecture) -> String {
+    let expr = resolve_through_vars(id, ssa);
+    if let Expr::BinOp(BinOpKind::Add, base_id, off_id) = &expr {
+        let base_expr = resolve_through_vars(*base_id, ssa);
+        let off_expr = resolve_through_vars(*off_id, ssa);
+        // Check if base is RBP
+        let is_rbp = match &base_expr {
+            Expr::Unknown => ssa.var(*base_id).varnode.space == AddressSpaceId::Register
+                && ssa.var(*base_id).varnode.offset == 40,
+            _ => {
+                let bv = ssa.var(*base_id);
+                bv.varnode.space == AddressSpaceId::Register && bv.varnode.offset == 40
+            }
+        };
+        if is_rbp {
+            let const_val = match &off_expr {
+                Expr::Const(val, _) => Some(*val),
+                _ => {
+                    let off_vdef = ssa.var(*off_id);
+                    match &off_vdef.expr {
+                        Expr::Const(val, _) => Some(*val),
+                        _ => None,
+                    }
+                }
+            };
+            if let Some(val) = const_val {
+                return format_rbp_offset(val);
+            }
+        }
+    }
+    format_var(id, ssa, arch)
+}
+
+/// Format an RBP-relative offset, detecting negative stack frame offsets.
+/// Ghidra/rsleigh encodes `[RBP-8]` as `IntAdd(RBP, 0xf8)` where 0xf8 is the
+/// unsigned byte encoding of -8. We detect this by checking common size boundaries.
+fn format_rbp_offset(val: u64) -> String {
+    // Full 64-bit negative
+    if val > 0x7fffffffffffffff {
+        let neg = (!val).wrapping_add(1);
+        return format!("RBP - 0x{:x}", neg);
+    }
+    // Byte-sized negative (128..256)
+    if val >= 0x80 && val < 0x100 {
+        let neg = 0x100 - val;
+        return format!("RBP - 0x{:x}", neg);
+    }
+    // Word-sized negative (0x8000..0x10000)
+    if val >= 0x8000 && val < 0x10000 {
+        let neg = 0x10000 - val;
+        return format!("RBP - 0x{:x}", neg);
+    }
+    // Dword-sized negative
+    if val >= 0x80000000 && val < 0x100000000 {
+        let neg = 0x100000000 - val;
+        return format!("RBP - 0x{:x}", neg);
+    }
+    if val == 0 {
+        return "RBP".to_string();
+    }
+    format!("RBP + 0x{:x}", val)
+}
+
+/// Resolve a VarId through Var chains to find the underlying expression.
+fn resolve_through_vars(id: VarId, ssa: &SsaCfg) -> Expr {
+    let vdef = ssa.var(id);
+    match &vdef.expr {
+        Expr::Var(inner) => {
+            // One level of indirection
+            ssa.var(*inner).expr.clone()
+        }
+        other => other.clone(),
     }
 }
 
@@ -110,8 +255,8 @@ fn format_var(id: VarId, ssa: &SsaCfg, arch: Architecture) -> String {
     }
 
     // Inline constants directly
-    if let Expr::Const(val, _) = &vdef.expr {
-        return format_const(*val);
+    if let Expr::Const(val, sz) = &vdef.expr {
+        return format_const(*val, *sz);
     }
 
     var_name(&vdef.varnode, arch)
@@ -120,11 +265,21 @@ fn format_var(id: VarId, ssa: &SsaCfg, arch: Architecture) -> String {
 fn format_expr(expr: &Expr, ssa: &SsaCfg, arch: Architecture) -> String {
     match expr {
         Expr::Var(id) => format_var(*id, ssa, arch),
-        Expr::Const(val, _) => format_const(*val),
+        Expr::Const(val, sz) => format_const(*val, *sz),
         Expr::BinOp(kind, left, right) => {
             let l = format_var(*left, ssa, arch);
             let r = format_var(*right, ssa, arch);
             let op = binop_str(*kind);
+            // Check for signed negative constant on right side of add
+            if matches!(kind, BinOpKind::Add) {
+                let rv = ssa.var(*right);
+                if let Expr::Const(val, sz) = &rv.expr {
+                    if *val > 0x7fffffffffffffff {
+                        let neg = (!*val).wrapping_add(1);
+                        return format!("{} - {}", l, format_const(neg, *sz));
+                    }
+                }
+            }
             format!("{} {} {}", l, op, r)
         }
         Expr::UnaryOp(kind, input) => {
@@ -139,7 +294,7 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, arch: Architecture) -> String {
             }
         }
         Expr::Load(ptr) => {
-            let p = format_var(*ptr, ssa, arch);
+            let p = format_expr_for_addr(*ptr, ssa, arch);
             format!("*({})", p)
         }
         Expr::Phi(inputs) => {
@@ -148,18 +303,37 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, arch: Architecture) -> String {
                 .collect();
             format!("phi({})", args.join(", "))
         }
-        Expr::Unknown => {
-            "?".to_string()
-        }
+        Expr::Unknown => "?".to_string(),
     }
 }
 
-fn format_const(val: u64) -> String {
+fn format_const(val: u64, size: u32) -> String {
+    // Check for small positive values
     if val < 10 {
-        format!("{}", val)
-    } else {
-        format!("0x{:x}", val)
+        return format!("{}", val);
     }
+    // Check for negative values (high bit set based on size)
+    let sign_bit = match size {
+        1 => 0x80,
+        2 => 0x8000,
+        4 => 0x80000000,
+        8 => 0x8000000000000000,
+        _ => 0,
+    };
+    if sign_bit != 0 && val >= sign_bit && val != u64::MAX {
+        let mask = match size {
+            1 => 0xFF,
+            2 => 0xFFFF,
+            4 => 0xFFFFFFFF,
+            8 => u64::MAX,
+            _ => u64::MAX,
+        };
+        let neg = ((!val) & mask).wrapping_add(1);
+        if neg <= 0x1000 {
+            return format!("-0x{:x}", neg);
+        }
+    }
+    format!("0x{:x}", val)
 }
 
 fn var_name(vn: &Varnode, arch: Architecture) -> String {
@@ -171,7 +345,7 @@ fn var_name(vn: &Varnode, arch: Architecture) -> String {
         }
         AddressSpaceId::Unique => format!("tmp_{:x}", vn.offset),
         AddressSpaceId::Ram => format!("mem_{:x}", vn.offset),
-        AddressSpaceId::Const => format_const(vn.offset),
+        AddressSpaceId::Const => format_const(vn.offset, 8),
     }
 }
 
@@ -195,8 +369,7 @@ fn binop_str(kind: BinOpKind) -> &'static str {
         BinOpKind::Add | BinOpKind::FloatAdd => "+",
         BinOpKind::Sub | BinOpKind::FloatSub => "-",
         BinOpKind::Mult | BinOpKind::FloatMult => "*",
-        BinOpKind::Div | BinOpKind::FloatDiv => "/",
-        BinOpKind::SDiv => "/",
+        BinOpKind::Div | BinOpKind::SDiv | BinOpKind::FloatDiv => "/",
         BinOpKind::Rem | BinOpKind::SRem => "%",
         BinOpKind::And => "&",
         BinOpKind::Or => "|",

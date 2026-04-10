@@ -195,7 +195,7 @@ fn build_expr(ssa: &mut SsaCfg, current: &mut HashMap<Varnode, VarId>, op: &Pcod
         PcodeOp::FloatRound { input, .. } => unary!(FloatRound, input),
         PcodeOp::Popcount { input, .. } => unary!(Popcount, input),
         PcodeOp::Lzcount { input, .. } => unary!(Lzcount, input),
-        PcodeOp::Subpiece { input, lsb, out } => {
+        PcodeOp::Subpiece { input, lsb, out: _ } => {
             let i = resolve_input(ssa, current, input);
             if *lsb == 0 {
                 // Truncation — just treat as a variable reference
