@@ -22,6 +22,7 @@ pub fn fold(ssa: &mut SsaCfg) {
         let before = count_live_stmts(ssa);
         fold_once(ssa);
         recount_uses(ssa);
+        propagate_register_constants(ssa);
         propagate_call_returns(ssa);
         // forward_substitute_block: disabled pending liveness analysis
         recount_uses(ssa);
@@ -123,6 +124,41 @@ fn same_varnode(a: VarId, b: VarId, vars: &[VarDef]) -> bool {
 
 fn is_const_zero(id: VarId, vars: &[VarDef]) -> bool {
     matches!(&vars[id.0 as usize].expr, Expr::Const(0, _))
+}
+
+/// Propagate constants from register writes to Unknown versions at the same offset.
+/// Only propagates to non-parameter, non-argument registers that aren't heavily used
+/// (which would indicate they're loop variables, not constants).
+fn propagate_register_constants(ssa: &mut SsaCfg) {
+    // Collect all register constants: offset → (value, size)
+    let mut reg_consts: std::collections::HashMap<u64, (u64, u32)> = std::collections::HashMap::new();
+    for v in &ssa.vars {
+        if v.varnode.space == AddressSpaceId::Register && v.param_name.is_none() {
+            if let Expr::Const(val, sz) = &v.expr {
+                reg_consts.insert(v.varnode.offset, (*val, *sz));
+            }
+        }
+    }
+
+    // Propagate to Unknown vars at the same register offset
+    // Only target non-parameter, low-use Unknown vars
+    for v in &mut ssa.vars {
+        if v.varnode.space == AddressSpaceId::Register && matches!(&v.expr, Expr::Unknown)
+            && v.param_name.is_none()
+            && v.use_count <= 2  // Low use count = likely a constant setup, not a loop var
+            && !FLAG_OFFSETS.contains(&v.varnode.offset)
+            && v.varnode.offset != RSP_OFFSET
+            && v.varnode.offset != RIP_OFFSET
+            && v.varnode.offset != 40 // RBP
+        {
+            if let Some(&(val, _const_sz)) = reg_consts.get(&v.varnode.offset) {
+                let mask = match v.varnode.size {
+                    1 => 0xFF, 2 => 0xFFFF, 4 => 0xFFFFFFFF, _ => u64::MAX,
+                };
+                v.expr = Expr::Const(val & mask, v.varnode.size);
+            }
+        }
+    }
 }
 
 /// Multi-level register copy propagation:

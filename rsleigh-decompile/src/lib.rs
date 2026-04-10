@@ -69,16 +69,18 @@ pub fn decompile_with_binary(
                 }
             }
             // Build local variable name map: DWARF fbreg offset → var_N name
+            // Try both the direct mapping and an 8-byte adjusted mapping
+            // (some toolchains have a consistent 8-byte offset between DWARF and actual layout)
             for (dwarf_offset, name) in &info.local_names {
-                // DWARF DW_OP_fbreg(N) means RBP + N
-                // For negative offsets: fbreg(-8) → RBP - 8 → var_8
                 if *dwarf_offset < 0 {
                     let positive = (-dwarf_offset) as u64;
                     let var_name = format!("var_{:x}", positive);
                     local_var_names.insert(var_name, name.clone());
+                    // Also try with 8-byte adjustment (CFA vs RBP frame base mismatch)
+                    let adjusted = positive + 8;
+                    let adj_name = format!("var_{:x}", adjusted);
+                    local_var_names.entry(adj_name).or_insert_with(|| name.clone());
                 } else if *dwarf_offset > 0 {
-                    // Positive offset (e.g., function args passed on stack)
-                    // These map to RBP + offset format
                     let var_name = format!("var_{:x}", *dwarf_offset as u64);
                     local_var_names.insert(var_name, name.clone());
                 }
