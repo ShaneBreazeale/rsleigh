@@ -655,10 +655,31 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
-    // Fix RBP + 0xNN where NN is a signed-byte negative (0x80-0xFF) → RBP - offset
-    // Then resolve to DWARF local names
+    // Resolve RBP-relative addresses to DWARF local names
+    // Handles both "RBP - 0xNN" (correct IR) and "RBP + 0xNN" (legacy/fallback)
     for line in &mut lines {
-        // Pattern: "RBP + 0x" followed by 1-2 hex digits
+        // Pattern: "RBP - 0xNN"
+        while let Some(pos) = line.find("RBP - 0x") {
+            let hex_start = pos + 8;
+            let hex_end = line[hex_start..].find(|c: char| !c.is_ascii_hexdigit())
+                .map(|e| hex_start + e).unwrap_or(line.len());
+            let hex_str = &line[hex_start..hex_end];
+            if let Ok(offset) = u64::from_str_radix(hex_str, 16) {
+                let var_name = format!("var_{:x}", offset);
+                let resolved = aliases.get(&var_name).cloned()
+                    .or_else(|| {
+                        let adj = format!("var_{:x}", offset + 8);
+                        aliases.get(&adj).cloned()
+                    });
+                if let Some(name) = resolved {
+                    let old = format!("RBP - 0x{}", hex_str);
+                    *line = line.replace(&old, &name);
+                    continue;
+                }
+            }
+            break;
+        }
+        // Fallback: "RBP + 0xNN" where NN is signed-byte negative (pre-fix IR)
         while let Some(pos) = line.find("RBP + 0x") {
             let hex_start = pos + 8;
             let hex_end = line[hex_start..].find(|c: char| !c.is_ascii_hexdigit())
@@ -668,7 +689,6 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 if val >= 0x80 && val < 0x100 {
                     let neg_off = 0x100 - val;
                     let var_name = format!("var_{:x}", neg_off);
-                    // Check DWARF names (try direct and 8-byte adjusted)
                     let resolved = aliases.get(&var_name).cloned()
                         .or_else(|| {
                             let adj = format!("var_{:x}", neg_off + 8);

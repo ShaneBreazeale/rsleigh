@@ -75,29 +75,48 @@ impl<'a> ExecutionGenerator<'a> {
         self.disassembler.sleigh.addr_bytes().get() as u32
     }
 
+    /// Generate a `u64` expression for a token field, with proper sign extension
+    /// for signed fields (simm8, simm16, etc.).
+    fn token_field_as_u64(&self, tf_id: &crate::TokenFieldId, field_name: &Ident) -> TokenStream {
+        let token_field = self.disassembler.sleigh.token_field(*tf_id);
+        let bits = token_field.bits.len().get();
+        if token_field.raw_value_is_signed() {
+            match bits {
+                1..=8 => quote! { ((self.#field_name as i8) as i64 as u64) },
+                9..=16 => quote! { ((self.#field_name as i16) as i64 as u64) },
+                17..=32 => quote! { ((self.#field_name as i32) as i64 as u64) },
+                _ => quote! { ((self.#field_name as i64) as u64) },
+            }
+        } else {
+            quote! { self.#field_name as u64 }
+        }
+    }
+
     /// Generate a runtime expression for a DynamicValueType (token field or context value).
     fn dynamic_value_expr(&self, dv: &crate::execution::DynamicValueType) -> TokenStream {
         match dv {
             crate::execution::DynamicValueType::TokenField(tf_id) => {
                 match self.constructor.ass_fields.get(tf_id) {
-                    Some(n) => quote! { self.#n as u64 },
+                    Some(n) => self.token_field_as_u64(tf_id, n),
                     None => {
                         // The exact token field isn't stored. Try to find another
                         // field at the same bit position (e.g., r32 and r64 share bits 0-2).
                         let target_tf = self.disassembler.sleigh.token_field(*tf_id);
                         let target_bits = (target_tf.bits.start(), target_tf.bits.end());
                         let mut found = None;
+                        let mut found_id = None;
                         for (other_id, other_name) in &self.constructor.ass_fields {
                             let other_tf = self.disassembler.sleigh.token_field(*other_id);
                             let other_bits = (other_tf.bits.start(), other_tf.bits.end());
                             if other_bits == target_bits {
                                 found = Some(other_name.clone());
+                                found_id = Some(*other_id);
                                 break;
                             }
                         }
-                        match found {
-                            Some(n) => quote! { self.#n as u64 },
-                            None => quote! { 0u64 },
+                        match (found, found_id) {
+                            (Some(n), Some(id)) => self.token_field_as_u64(&id, &n),
+                            _ => quote! { 0u64 },
                         }
                     }
                 }
@@ -897,10 +916,13 @@ impl<'a> ExecutionGenerator<'a> {
                     }
                     ReferencedValue::TokenField(tf) => {
                         match self.constructor.ass_fields.get(&tf.id) {
-                            Some(n) => (
-                                quote! { pcode_ir::Varnode::constant(self.#n as u64, #sz) },
-                                quote! {},
-                            ),
+                            Some(n) => {
+                                let val = self.token_field_as_u64(&tf.id, n);
+                                (
+                                    quote! { pcode_ir::Varnode::constant(#val, #sz) },
+                                    quote! {},
+                                )
+                            }
                             None => (quote! { pcode_ir::Varnode::constant(0, #sz) }, quote! {}),
                         }
                     }
@@ -950,10 +972,13 @@ impl<'a> ExecutionGenerator<'a> {
             ExprValue::TokenField(tf) => {
                 let sz = Self::bytes_from_bits(tf.size.get()) as u32;
                 match self.constructor.ass_fields.get(&tf.id) {
-                    Some(n) => (
-                        quote! { pcode_ir::Varnode::constant(self.#n as u64, #sz) },
-                        quote! {},
-                    ),
+                    Some(n) => {
+                        let val = self.token_field_as_u64(&tf.id, n);
+                        (
+                            quote! { pcode_ir::Varnode::constant(#val, #sz) },
+                            quote! {},
+                        )
+                    }
                     None => (quote! { pcode_ir::Varnode::constant(0, #sz) }, quote! {}),
                 }
             }
