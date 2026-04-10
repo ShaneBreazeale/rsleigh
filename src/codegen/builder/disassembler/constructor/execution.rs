@@ -81,7 +81,25 @@ impl<'a> ExecutionGenerator<'a> {
             crate::execution::DynamicValueType::TokenField(tf_id) => {
                 match self.constructor.ass_fields.get(tf_id) {
                     Some(n) => quote! { self.#n as u64 },
-                    None => quote! { 0u64 },
+                    None => {
+                        // The exact token field isn't stored. Try to find another
+                        // field at the same bit position (e.g., r32 and r64 share bits 0-2).
+                        let target_tf = self.disassembler.sleigh.token_field(*tf_id);
+                        let target_bits = (target_tf.bits.start(), target_tf.bits.end());
+                        let mut found = None;
+                        for (other_id, other_name) in &self.constructor.ass_fields {
+                            let other_tf = self.disassembler.sleigh.token_field(*other_id);
+                            let other_bits = (other_tf.bits.start(), other_tf.bits.end());
+                            if other_bits == target_bits {
+                                found = Some(other_name.clone());
+                                break;
+                            }
+                        }
+                        match found {
+                            Some(n) => quote! { self.#n as u64 },
+                            None => quote! { 0u64 },
+                        }
+                    }
                 }
             }
             crate::execution::DynamicValueType::Context(ctx_id) => {
