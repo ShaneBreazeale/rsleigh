@@ -72,33 +72,21 @@ fn run() {
         let bytes = &data[off as usize..off as usize + max];
         let mut io = 0usize;
         let mut insts = Vec::new();
-        // Decode all instructions in the function. Don't stop at the first
-        // Return — functions have multiple return paths (early returns,
-        // conditional returns). Stop when we hit a known different function
-        // or exceed a reasonable limit.
-        let mut saw_return = false;
-        while io < max {
+        // Find the next function's start address to bound decoding
+        let next_func = symbols.iter()
+            .filter(|(a, _)| *a > fa)
+            .map(|(a, _)| *a)
+            .min()
+            .unwrap_or(fa + max as u64);
+        let func_max = (next_func - fa) as usize;
+        let decode_max = func_max.min(max);
+
+        while io < decode_max {
             match dec.decode(&bytes[io..], fa + io as u64) {
                 Ok(inst) => {
-                    let r = inst
-                        .ops
-                        .iter()
-                        .any(|o| matches!(o, rsleigh_api::PcodeOp::Return { .. }));
                     let l = inst.len as usize;
                     insts.push((fa + io as u64, inst));
                     io += l;
-                    if r {
-                        if saw_return {
-                            // Second return — likely end of function
-                            break;
-                        }
-                        saw_return = true;
-                        // Check if the next address is a different known symbol
-                        let next_addr = fa + io as u64;
-                        if symbols.iter().any(|(a, _)| *a == next_addr) {
-                            break; // Hit another function
-                        }
-                    }
                 }
                 Err(_) => break,
             }

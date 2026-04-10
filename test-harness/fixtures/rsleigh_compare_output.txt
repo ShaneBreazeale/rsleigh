@@ -20,26 +20,28 @@
   while (len > i) {
       RCX = i;
       EAX = (arr[RCX * 4]) + total;
-      total = arr;
-      return arr;
+      total = EAX + total;
+      return EAX + 1;
   }
   return arr;
 ---
 === string_length (47 instructions) ===
   len = 0;
   while (EAX != 0) {
-      len = EAX;
-      return RAX;
+      len = EAX + 1;
+      return RAX + 1;
   }
   return s;
 ---
 === manhattan_distance (28 instructions) ===
   EAX = (a[4]) - RCX[4];
   if (!a >= 0) {
+      EAX = 0 - dx;
       dx = 0 - dx;
       if (!dy >= 0) {
+          EAX = 0 - dy;
           dy = 0 - dy;
-          return dx + EAX;
+          return dx + 0 - dy;
       }
   }
 ---
@@ -59,7 +61,7 @@
   sum = 0;
   while (head != 0) {
       EAX = *(RAX) + sum;
-      sum = head;
+      sum = EAX + sum;
       RAX = head[8];
       return RAX;
   }
@@ -72,15 +74,17 @@
       hi = lo;
       EAX = EAX / 2;
       EDX = EAX % 2;
-      mid = lo + EAX;
-      RCX = EAX;
+      EAX = lo + EAX;
+      mid = EAX + ECX;
+      RCX = EAX + ECX;
       if (EAX != target) {
           RCX = mid;
           EAX = arr[RCX * 4];
           if (target <= EAX) {
-              hi = mid - 1;
+              EAX = mid - 1;
+              hi = EAX - 1;
           } else {
-              return EAX;
+              return EAX + 1;
           }
       } else {
           var_4 = mid;
@@ -90,11 +94,8 @@
   var_4 = -0x1;
 ---
 === apply (101 instructions) ===
-  var_8 = "search(23) = %d\n";
-  var_c = 0xa;
-  var_10 = 0x17;
-  (*RAX)(0xa, 0x17);
-  return;
+  (*RAX)(a, b);
+  return op;
 ---
 === main (93 instructions) ===
   var_8 = RAX;

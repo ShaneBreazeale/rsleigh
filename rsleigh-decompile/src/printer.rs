@@ -1061,7 +1061,10 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
             if vdef.varnode.space == AddressSpaceId::Register
                 && vdef.varnode.offset == 0 // RAX/EAX — return value register
             {
-                let next_is_return = stmts[stmt_idx + 1..].iter().all(|s| {
+                // Only fold into return if there's an actual Return in the remaining stmts
+                let has_return = stmts[stmt_idx + 1..].iter().any(|s|
+                    matches!(s, StructuredStmt::Return(_)));
+                let next_is_return = has_return && stmts[stmt_idx + 1..].iter().all(|s| {
                     match s {
                         StructuredStmt::Return(_) => true,
                         StructuredStmt::Assign { lhs, .. } => {
@@ -1092,8 +1095,18 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
         }
         StructuredStmt::Store { addr, val } => {
             let addr_str = format_addr(*addr, ssa, ctx);
-            let val_expr = format_var_tracked(*val, ssa, ctx, tracker);
-            let size = ssa.var(*val).size;
+            // For Store values, prefer the SSA expression over the tracker when
+            // the expression is a computation (BinOp, etc). The tracker can
+            // resolve EAX to a stale alias (e.g., "arr" instead of "arr[i]+total").
+            let vdef = ssa.var(*val);
+            let val_expr = if indent > 0 && matches!(&vdef.expr, Expr::BinOp(_, _, _)) {
+                // Inside loops/ifs, render computed values directly from SSA
+                // to avoid stale tracker aliases (e.g., EAX → arr instead of arr[i]+total)
+                format_expr(&vdef.expr, ssa, ctx)
+            } else {
+                format_var_tracked(*val, ssa, ctx, tracker)
+            };
+            let size = vdef.size;
             let type_name = size_to_type(size);
 
             if let Some(stack_name) = try_stack_var_name(*addr, ssa) {
