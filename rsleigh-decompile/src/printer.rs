@@ -1216,13 +1216,17 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
             // Inside loop bodies (no Return in stmt list), elide register
             // assignments that feed into a Store to a stack variable.
             let has_return_in_list = stmts.iter().any(|s| matches!(s, StructuredStmt::Return(_)));
+            let has_store_in_list = stmts.iter().any(|s| matches!(s, StructuredStmt::Store { .. }));
             if vdef.varnode.space == AddressSpaceId::Register && indent > 0 && !has_return_in_list {
-                // Also elide simple register-to-register copies and sign extensions
-                // that are just index setup (RCX = i, RCX = (int64_t)ECX, etc.)
-                if let Expr::Var(_) | Expr::UnaryOp(UnaryOpKind::Sext | UnaryOpKind::Zext, _)
-                    | Expr::Load(_) = &vdef.expr
-                {
-                    return; // Intermediate register setup — value used in subsequent expression
+                // In loop bodies with Stores: elide simple register setup
+                // (copies, sign extensions, loads) that feed into the Store.
+                // In loop bodies WITHOUT Stores (-O2 code): keep them visible.
+                if has_store_in_list {
+                    if let Expr::Var(_) | Expr::UnaryOp(UnaryOpKind::Sext | UnaryOpKind::Zext, _)
+                        | Expr::Load(_) = &vdef.expr
+                    {
+                        return; // Intermediate register setup feeding a Store
+                    }
                 }
                 if let Some(next) = stmts.get(stmt_idx + 1..) {
                     // Skip hidden stmts (Unique/flag assigns) to find next visible

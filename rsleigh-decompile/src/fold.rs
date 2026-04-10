@@ -605,9 +605,42 @@ fn classify_jcc_condition(cond_id: VarId, ssa: &SsaCfg) -> Option<(BinOpKind, bo
             Some((BinOpKind::SLessEq, true))
         }
 
+        // NotEq(OF, SF) or NotEq(SBORROW, SLess) → JL → a < b (signed)
+        Expr::BinOp(BinOpKind::NotEq, left, right)
+            if (is_of(*left) && is_sf(*right)) || (is_sf(*left) && is_of(*right)) =>
+        {
+            Some((BinOpKind::SLess, false))
+        }
+
         // SF/NG directly → JL/BLT → a < b (signed)
         _ if is_sf(cond_id) => {
             Some((BinOpKind::SLess, false))
+        }
+
+        // BoolOr(CF, ZF) → JBE → a <= b (unsigned)
+        Expr::BinOp(BinOpKind::BoolOr, left, right)
+            if (is_cf(*left) && is_zf(*right)) || (is_zf(*left) && is_cf(*right)) =>
+        {
+            Some((BinOpKind::LessEq, false))
+        }
+
+        // BoolOr(ZF, NotEq(OF, SF)) → JLE → a <= b (signed)
+        Expr::BinOp(BinOpKind::BoolOr, left, right) => {
+            let left_def = &ssa.vars[left.0 as usize];
+            let right_def = &ssa.vars[right.0 as usize];
+            // ZF || (OF != SF) → JLE
+            let zf_or_sfneqof =
+                (is_zf(*left) && matches!(&right_def.expr,
+                    Expr::BinOp(BinOpKind::NotEq, a, b)
+                    if (is_of(*a) && is_sf(*b)) || (is_sf(*a) && is_of(*b))))
+                || (is_zf(*right) && matches!(&left_def.expr,
+                    Expr::BinOp(BinOpKind::NotEq, a, b)
+                    if (is_of(*a) && is_sf(*b)) || (is_sf(*a) && is_of(*b))));
+            if zf_or_sfneqof {
+                Some((BinOpKind::SLessEq, false))
+            } else {
+                None
+            }
         }
 
         // BoolAnd(BoolNot(ZF/ZR), IntEq(OF/OV, SF/NG)) → JG/BGT → a > b = b < a

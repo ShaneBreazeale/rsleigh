@@ -5,27 +5,30 @@
   return;
 ---
 === bubble_sort (82 instructions) ===
-  if (ESI SBORROW 2 != ESI - 2 < 0) {
+  if (ESI < 2) {
       return;
   } else {
-      while (ZF || OF != SF) {
+      while (ESI <= EAX) {
           return ECX - 1;
       }
       if (ECX != 1) {
-          while (ZF || OF != SF) {
+          while (EDX <= R10D) {
+              EDX = R10D;
+              R10D = 8[RDI + 0];
               if (R10D < EDX) {
                   4[RDI + R8] = ?;
                   8[RDI + R8] = ?;
                   R8 = R8 + 2;
                   if (R9 - R8 + 2 == 0) {
                       if (CL & 1 != 0) {
-                          if (ZF || OF == SF) {
+                          if (EDX > R9D) {
                               RDI[R8] = 4[RDI + 0];
                               4[RDI + R8] = ?;
                           }
                       }
                   }
               } else {
+                  EDX = R10D;
               }
           }
           RDI[R8] = 4[RDI + 0];
@@ -37,6 +40,9 @@
 === count_bits (29 instructions) ===
   if (EDI != 0) {
       while (!CF || ZF) {
+          EDX = EDI & 1;
+          EAX = EAX + EDX;
+          ECX = ECX >> 1;
       }
       return;
   }
@@ -65,19 +71,20 @@
   return EAX + ECX;
 ---
 === dot_product (51 instructions) ===
-  if (ZF || 0 == SF) {
+  if (RCX > RDX + 1) {
       if (!CF || ZF) {
           EDX = ECX & 0x7ffffff8;
           EAX = (ECX >> 3 & 0x1f) & 0xfffffff;
           RAX = RAX << 5 & 0x3f;
           XMM0 = 0;
           XMM1 = 0;
-          XMM2 = RDI[R8];
-          XMM4 = ?;
-          XMM0 = ((XMM4 >> 0x20 + XMM4 >> 0x20) >> 0x40 + XMM4 >> 0x40) >> 0x60 + XMM4 >> 0x60;
-          XMM2 = ?;
-          XMM1 = ((XMM2 >> 0x20 + XMM2 >> 0x20) >> 0x40 + XMM2 >> 0x40) >> 0x60 + XMM2 >> 0x60;
           while (RAX != R8 + 0x20) {
+              XMM2 = RDI[R8];
+              XMM4 = ?;
+              XMM0 = ((XMM4 >> 0x20 + XMM4 >> 0x20) >> 0x40 + XMM4 >> 0x40) >> 0x60 + XMM4 >> 0x60;
+              XMM2 = ?;
+              XMM1 = ((XMM2 >> 0x20 + XMM2 >> 0x20) >> 0x40 + XMM2 >> 0x40) >> 0x60 + XMM2 >> 0x60;
+              R8 = R8 + 0x20;
           }
           XMM1 = (((XMM1 + XMM0) >> 0x20 + XMM0 >> 0x20) >> 0x40 + XMM0 >> 0x40) >> 0x60 + XMM0 >> 0x60;
           XMM0 = ((((3 == 0 * XMM1 + 3 == 1 * XMM1 >> 0x20 + 3 == 2 * XMM1 >> 0x40 + 3 == 3 * XMM1 >> 0x60) + XMM1) >> 0x20 + XMM1 >> 0x20) >> 0x40 + XMM1 >> 0x40) >> 0x60 + XMM1 >> 0x60;
@@ -91,16 +98,20 @@
           return 0;
       } else {
           while (RCX != RDX + 1) {
+              R8D = (RSI[RDX]) * RDI[RDX];
+              EAX = EAX + R8D;
           }
       }
   }
 ---
 === factorial (58 instructions) ===
-  if (EDI SBORROW 2 != EDI - 2 < 0) {
+  if (EDI < 2) {
       return;
   }
   if (EDI < 9) {
       while (!CF || ZF) {
+          EAX = 1 * EDI;
+          ECX = RDI - 1;
       }
   }
   ECX = RDI - 1;
@@ -112,11 +123,12 @@
   XMM3 = ?;
   XMM4 = ?;
   XMM2 = XMM1;
-  XMM5 = ((XMM0 + XMM3) >> 0x20 + XMM3 >> 0x20) >> 0x40 + XMM3 >> 0x40;
-  XMM2 = ?;
-  XMM1 = ?;
-  XMM0 = (((XMM0 + XMM4) >> 0x20 + XMM4 >> 0x20) >> 0x40 + XMM4 >> 0x40) >> 0x60 + XMM4 >> 0x60;
   while (EDI != 2) {
+      XMM5 = ((XMM0 + XMM3) >> 0x20 + XMM3 >> 0x20) >> 0x40 + XMM3 >> 0x40;
+      XMM2 = ?;
+      XMM1 = ?;
+      XMM0 = (((XMM0 + XMM4) >> 0x20 + XMM4 >> 0x20) >> 0x40 + XMM4 >> 0x40) >> 0x60 + XMM4 >> 0x60;
+      EAX = EAX - 8;
   }
   XMM2 = ?;
   XMM0 = ?;
@@ -124,11 +136,13 @@
   return XMM1;
 ---
 === factorial_tail (89 instructions) ===
-  if (EDI SBORROW 2 != EDI - 2 < 0) {
+  if (EDI < 2) {
       return;
   }
   if (EDI < 9) {
       while (!CF || ZF) {
+          EAX = EAX * EDI;
+          ECX = RDI - 1;
       }
   }
   ECX = RDI - 1;
@@ -140,11 +154,12 @@
   XMM1 = ?;
   XMM3 = ?;
   XMM4 = ?;
-  XMM5 = ((XMM2 + XMM3) >> 0x20 + XMM3 >> 0x20) >> 0x40 + XMM3 >> 0x40;
-  XMM1 = ?;
-  XMM0 = ?;
-  XMM2 = (((XMM2 + XMM4) >> 0x20 + XMM4 >> 0x20) >> 0x40 + XMM4 >> 0x40) >> 0x60 + XMM4 >> 0x60;
   while (EDI != 2) {
+      XMM5 = ((XMM2 + XMM3) >> 0x20 + XMM3 >> 0x20) >> 0x40 + XMM3 >> 0x40;
+      XMM1 = ?;
+      XMM0 = ?;
+      XMM2 = (((XMM2 + XMM4) >> 0x20 + XMM4 >> 0x20) >> 0x40 + XMM4 >> 0x40) >> 0x60 + XMM4 >> 0x60;
+      EAX = EAX - 8;
   }
   XMM1 = ?;
   XMM0 = ?;
@@ -166,6 +181,8 @@
       return;
   } else {
       while (!ZF) {
+          EDX = EAX;
+          EAX = EAX / ECX;
       }
   }
 ---
@@ -189,6 +206,7 @@
       if (EDX == 0) {
           printf("words = %d\n", 0);
           while (*(RAX) != 0x20) {
+              EAX = 0 << 0x20 | 0xc / 0;
           }
           printf("gcd(12,8) = %d\n");
           return 0;
@@ -200,7 +218,7 @@
   }
 ---
 === matrix_add (173 instructions) ===
-  if (ZF || 0 != SF) {
+  if (EAX <= R9 + 2) {
       return;
   } else {
       RDX = RDX - RCX;
@@ -216,7 +234,7 @@
       R13 = R13 << 5 & 0x3f;
       R11 = R9 + 4;
       var_50 = ?;
-      while (ZF || 0 != SF) {
+      while (EAX <= R9 + 2) {
           RBX = RBX + var_68;
           R15 = R15 + var_68;
           R12 = R12 + var_68;
@@ -226,11 +244,12 @@
       }
       R9B = R9B | SIL | DL;
       if (EAX == R9 + 2) {
-          XMM2 = (((XMM2 + XMM0) >> 0x20 + XMM0 >> 0x20) >> 0x40 + XMM0 >> 0x40) >> 0x60 + XMM0 >> 0x60;
-          XMM0 = (((XMM0 + XMM1) >> 0x20 + XMM1 >> 0x20) >> 0x40 + XMM1 >> 0x40) >> 0x60 + XMM1 >> 0x60;
-          *(__uint128_t*)(-0x10 + RBX + R9) = XMM2 + XMM0 >> 0x20 + *(-0x10 + R12 + R9) >> 0x20 >> 0x40 + *(-0x10 + R12 + R9) >> 0x40 >> 0x60 + *(-0x10 + R12 + R9) >> 0x60;
-          *(__uint128_t*)(RBX + R9) = XMM0 + XMM1 >> 0x20 + *(R12 + R9) >> 0x20 >> 0x40 + *(R12 + R9) >> 0x40 >> 0x60 + *(R12 + R9) >> 0x60;
           while (R13 != R9 + 0x20) {
+              XMM2 = (((XMM2 + XMM0) >> 0x20 + XMM0 >> 0x20) >> 0x40 + XMM0 >> 0x40) >> 0x60 + XMM0 >> 0x60;
+              XMM0 = (((XMM0 + XMM1) >> 0x20 + XMM1 >> 0x20) >> 0x40 + XMM1 >> 0x40) >> 0x60 + XMM1 >> 0x60;
+              *(__uint128_t*)(-0x10 + RBX + R9) = XMM2 + XMM0 >> 0x20 + *(-0x10 + R12 + R9) >> 0x20 >> 0x40 + *(-0x10 + R12 + R9) >> 0x40 >> 0x60 + *(-0x10 + R12 + R9) >> 0x60;
+              *(__uint128_t*)(RBX + R9) = XMM0 + XMM1 >> 0x20 + *(R12 + R9) >> 0x20 >> 0x40 + *(R12 + R9) >> 0x40 >> 0x60 + *(R12 + R9) >> 0x60;
+              R9 = R9 + 0x20;
           }
           if (ECX - EAX != 0) {
               if (AL & 1 == 0) {

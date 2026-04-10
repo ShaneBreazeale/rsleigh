@@ -49,11 +49,21 @@ fn emit_region(
 
         let block = &ssa.blocks[current.0];
 
-        // Emit statements for this block
-        emit_block_stmts(block, out);
-
         // Check if this block is a loop header
         let is_loop_header = back_edges.iter().any(|(_, header)| *header == current);
+
+        // For self-loops (block branches back to itself), emit statements
+        // INSIDE the while body, not before it.
+        let is_self_loop = is_loop_header && match &block.terminator {
+            SsaTerminator::CBranch { taken, fallthrough, .. } =>
+                *taken == current || *fallthrough == current,
+            _ => false,
+        };
+
+        if !is_self_loop {
+            // Normal block: emit statements before control flow
+            emit_block_stmts(block, out);
+        }
 
         match &block.terminator {
             SsaTerminator::Return(ret_val) => {
@@ -83,6 +93,10 @@ fn emit_region(
                     };
 
                     let mut body = Vec::new();
+                    // For self-loops, the block's statements ARE the loop body
+                    if is_self_loop {
+                        emit_block_stmts(block, &mut body);
+                    }
                     emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body);
 
                     out.push(StructuredStmt::While {

@@ -1,61 +1,16 @@
 === add (17 instructions) ===
   return a + b;
 ---
-=== sub (30 instructions) ===
-  return a - b;
----
-=== factorial (43 instructions) ===
-  if (n > 1) {
-      return n * factorial(n - 1);
-  } else {
-      return 1;
-  }
----
-=== sum_array (40 instructions) ===
-  while (len > i) {
-      total = arr[i] + total;
-      i = i + 1;
-  }
-  return total;
----
-=== string_length (47 instructions) ===
-  while (EAX != 0) {
-      len = len + 1;
-      s = s + 1;
-  }
-  return s;
----
-=== manhattan_distance (28 instructions) ===
-  EAX = (a->field4) - b->field4;
-  if (a < 0) {
-      dx = -dx;
-      if (dy < 0) {
-          dy = -dy;
-          return dx - dy;
-      }
-  }
----
-=== day_name (39 instructions) ===
-  RAX = day - 6;
-  if (!CF || ZF) {
-      return "Unknown";
-  } else {
-      RCX = 0x1000006b4;
-      return "Sunday";
-  }
----
-=== list_sum (66 instructions) ===
-  while (head != 0) {
-      sum = *(EAX) + sum;
-      head = head->field8;
-  }
-  return sum;
+=== apply (101 instructions) ===
+  (*RAX)(a, b);
+  return op;
 ---
 === binary_search (62 instructions) ===
   while (hi >= lo) {
       EAX = EAX / 2;
       mid = lo + ECX;
       if (EAX != target) {
+          EAX = arr[mid];
           if (target <= EAX) {
               hi = mid - 1;
           } else {
@@ -67,9 +22,28 @@
   }
   return -0x1;
 ---
-=== apply (101 instructions) ===
-  (*RAX)(a, b);
-  return op;
+=== day_name (39 instructions) ===
+  RAX = day - 6;
+  if (!CF || ZF) {
+      return "Unknown";
+  } else {
+      RCX = 0x1000006b4;
+      return "Sunday";
+  }
+---
+=== factorial (43 instructions) ===
+  if (n > 1) {
+      return n * factorial(n - 1);
+  } else {
+      return 1;
+  }
+---
+=== list_sum (66 instructions) ===
+  while (head != 0) {
+      sum = *(EAX) + sum;
+      head = head->field8;
+  }
+  return sum;
 ---
 === main (93 instructions) ===
   printf("add(3,4) = %d\n", add(3, 4));
@@ -82,4 +56,31 @@
   memcpy(sorted, 0x100000a50, 0x28);
   printf("search(23) = %d\n", binary_search(sorted, 0xa, 0x17));
   return 0;
+---
+=== manhattan_distance (28 instructions) ===
+  EAX = (a->field4) - b->field4;
+  if (a < 0) {
+      dx = -dx;
+      if (dy < 0) {
+          dy = -dy;
+          return dx - dy;
+      }
+  }
+---
+=== string_length (47 instructions) ===
+  while (EAX != 0) {
+      len = len + 1;
+      s = s + 1;
+  }
+  return s;
+---
+=== sub (30 instructions) ===
+  return a - b;
+---
+=== sum_array (40 instructions) ===
+  while (len > i) {
+      total = arr[i] + total;
+      i = i + 1;
+  }
+  return total;
 ---
