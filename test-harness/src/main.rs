@@ -2864,20 +2864,15 @@ mod tests {
                 "ADDIU $a0,$zero,-32768: imm16=0x8000 should sign-extend\n{pcode:#?}");
         }
 
-        // BEQ backward: BEQ $a0, $zero, -4 = 0x1080FFFE (big-endian)
-        // offset = -4 words = -16 bytes, target = 0x1004 + (-16) = 0xFF4
+        // BEQ backward: BEQ $a0, $zero, -2 = 0x1080FFFE (big-endian)
+        // offset field = 0xFFFE = -2 (signed 16-bit)
+        // target = inst_start + 4 + 4*(-2) = 0x1000 + 4 - 8 = 0xFFC
         {
             let (_len, disasm, pcode) = mips::decode(&[0x10, 0x80, 0xff, 0xfe], 0x1000);
             assert!(disasm.to_lowercase().contains("beq"), "got {disasm}");
-            let target = pcode.iter().find_map(|op| match op {
-                PcodeOp::CBranch { dest, .. } => Some(dest.offset),
-                _ => None,
-            });
-            if let Some(t) = target {
-                if t >= 0x1000 {
-                    eprintln!("[BUG] MIPS BEQ backward: target=0x{:x} (expected < 0x1000) — 16-bit branch offset not sign-extended", t);
-                }
-            }
+            assert!(pcode.iter().any(|op| matches!(op, PcodeOp::CBranch { dest, .. }
+                if dest.offset == 0xFFC)),
+                "MIPS BEQ -2 at 0x1000 should target 0xFFC\n{pcode:#?}");
         }
 
         // ── ARM64: signed immediate boundaries ──

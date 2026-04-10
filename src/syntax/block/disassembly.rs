@@ -125,9 +125,9 @@ impl Expr {
     declare_expr_level!(parse_safe_unsafe_lv1, parse_lv2, Op::parse_unsafe_level4);
     // unsafe, things not around brackets
     declare_expr_level!(parse_unsafe_lv1, parse_lv2, Op::parse_unsafe_level4);
-    declare_expr_level!(parse_lv2, parse_lv3, Op::parse_level3);
-    declare_expr_level!(parse_lv3, parse_lv4, Op::parse_level2);
-    declare_expr_level!(parse_lv4, parse_rec_or_ele, Op::parse_level1);
+    declare_expr_level!(parse_lv2, parse_lv3, Op::parse_level1);    // + - (lowest precedence = shallowest)
+    declare_expr_level!(parse_lv3, parse_lv4, Op::parse_level2);    // * / (medium)
+    declare_expr_level!(parse_lv4, parse_rec_or_ele, Op::parse_level3); // >> << (highest = deepest)
 
     pub fn parse_safe(input: &[Token]) -> IResult<&[Token], Self, Box<SleighError>> {
         Self::parse_safe_lv1(input)
