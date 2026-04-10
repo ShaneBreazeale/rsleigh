@@ -12,12 +12,17 @@ const FLAG_OFFSETS: &[u64] = &[
     523, // OF
 ];
 
+const _ZF_OFFSET: u64 = 518;
+const _CF_OFFSET: u64 = 512;
+const _SF_OFFSET: u64 = 519;
+
 /// RSP offset in x86 Ghidra register space.
 const RSP_OFFSET: u64 = 32;
-/// RBP offset
 const _RBP_OFFSET: u64 = 40;
 /// RIP offset
 const RIP_OFFSET: u64 = 648;
+/// RAX offset (return value on x86-64)
+pub const RAX_OFFSET: u64 = 0;
 
 /// Fold expressions: inline single-use temps, eliminate dead code, flags, and boilerplate.
 pub fn fold(ssa: &mut SsaCfg) {
@@ -27,6 +32,8 @@ pub fn fold(ssa: &mut SsaCfg) {
         recount_uses(ssa);
         eliminate_dead(ssa);
         recount_uses(ssa);
+        recover_conditions(ssa);
+        detect_return_values(ssa);
         let after = count_live_stmts(ssa);
         if before == after { break; }
     }
@@ -48,15 +55,13 @@ fn fold_once(ssa: &mut SsaCfg) {
         }
     }
 
-    // Pass 2: Inline single-use vars into their consumers
-    // Collect inlining candidates: single-use Unique or Const vars
+    // Pass 2: Inline single-use Unique vars and all constants
     let inline_candidates: Vec<(VarId, Expr)> = (0..ssa.vars.len())
         .filter_map(|v| {
             let vdef = &ssa.vars[v];
             if vdef.use_count == 1 && vdef.varnode.space == AddressSpaceId::Unique {
                 Some((vdef.id, vdef.expr.clone()))
             } else if matches!(vdef.expr, Expr::Const(_, _)) {
-                // Always inline constants regardless of use count
                 Some((vdef.id, vdef.expr.clone()))
             } else {
                 None
@@ -64,7 +69,6 @@ fn fold_once(ssa: &mut SsaCfg) {
         })
         .collect();
 
-    // Apply inlining: for each var's expr, replace Var(candidate) with candidate's expr
     for v in 0..ssa.vars.len() {
         let expr = ssa.vars[v].expr.clone();
         ssa.vars[v].expr = substitute_expr(&expr, &inline_candidates);
@@ -80,76 +84,226 @@ fn substitute_expr(expr: &Expr, candidates: &[(VarId, Expr)]) -> Expr {
                 expr.clone()
             }
         }
-        Expr::BinOp(kind, left, right) => {
-            let l = resolve_var_id(left, candidates);
-            let r = resolve_var_id(right, candidates);
-            Expr::BinOp(*kind, l, r)
-        }
-        Expr::UnaryOp(kind, input) => {
-            let i = resolve_var_id(input, candidates);
-            Expr::UnaryOp(*kind, i)
-        }
-        Expr::Load(ptr) => {
-            let p = resolve_var_id(ptr, candidates);
-            Expr::Load(p)
-        }
         _ => expr.clone(),
     }
 }
 
-/// If a VarId points to a constant, return a new VarId for that constant.
-/// Otherwise return the original. (We don't actually create new vars here;
-/// the printer handles the resolution.)
-fn resolve_var_id(id: &VarId, _candidates: &[(VarId, Expr)]) -> VarId {
-    *id
-}
-
 fn eliminate_dead(ssa: &mut SsaCfg) {
+    // Collect register writes per block to find overwrites-before-read
     for block in &mut ssa.blocks {
-        block.stmts.retain(|stmt| {
-            match stmt {
+        // Track which registers have been read in remaining statements
+        let mut read_after: std::collections::HashSet<(u64, u32)> = std::collections::HashSet::new();
+
+        // First, collect all reads from terminators
+        match &block.terminator {
+            SsaTerminator::CBranch { cond, .. } => {
+                collect_var_reads(*cond, &ssa.vars, &mut read_after);
+            }
+            SsaTerminator::Return(Some(v)) | SsaTerminator::Indirect(v) => {
+                collect_var_reads(*v, &ssa.vars, &mut read_after);
+            }
+            _ => {}
+        }
+
+        // Walk statements in reverse to find dead writes
+        let mut dead_indices = Vec::new();
+        for i in (0..block.stmts.len()).rev() {
+            match &block.stmts[i] {
                 Stmt::Assign(var_id) => {
                     let vdef = &ssa.vars[var_id.0 as usize];
+                    let key = (vdef.varnode.offset, vdef.varnode.size);
+
                     // Remove dead flag writes
                     if vdef.varnode.space == AddressSpaceId::Register
                         && FLAG_OFFSETS.contains(&vdef.varnode.offset)
                         && vdef.use_count == 0
                     {
-                        return false;
+                        dead_indices.push(i);
+                        continue;
                     }
                     // Remove dead unique writes
                     if vdef.varnode.space == AddressSpaceId::Unique && vdef.use_count == 0 {
-                        return false;
+                        dead_indices.push(i);
+                        continue;
                     }
-                    // Remove RIP writes (return address management)
+                    // Remove RIP writes
                     if vdef.varnode.space == AddressSpaceId::Register
                         && vdef.varnode.offset == RIP_OFFSET
                     {
-                        return false;
+                        dead_indices.push(i);
+                        continue;
                     }
-                    true
+                    // Remove register writes that are overwritten before any read in same block.
+                    // BUT: don't eliminate writes to argument registers (RDI, RSI, RDX, RCX, R8, R9)
+                    // that precede a Call — they're setting up function arguments.
+                    // x86-64 SysV ABI argument registers: RDI(56), RSI(48), RDX(16), RCX(8), R8(128), R9(136)
+                    let is_arg_reg = matches!(vdef.varnode.offset, 56 | 48 | 16 | 8 | 128 | 136)
+                        && vdef.varnode.space == AddressSpaceId::Register;
+                    let precedes_call = block.stmts.get(i + 1..).map_or(false, |rest|
+                        rest.iter().any(|s| matches!(s, Stmt::Call { .. })))
+                        || matches!(block.terminator, SsaTerminator::Call { .. });
+                    if vdef.varnode.space == AddressSpaceId::Register
+                        && !read_after.contains(&key)
+                        && vdef.use_count == 0
+                        && !(is_arg_reg && precedes_call)
+                    {
+                        dead_indices.push(i);
+                        continue;
+                    }
+
+                    // This statement is live — mark its inputs as read
+                    collect_expr_reads(&vdef.expr, &ssa.vars, &mut read_after);
                 }
                 Stmt::Store { addr, val } => {
-                    // Remove push-return-address pattern:
-                    // *(RSP) = const (where const looks like a return address)
+                    // Remove push-return-address pattern
                     let val_def = &ssa.vars[val.0 as usize];
                     let addr_def = &ssa.vars[addr.0 as usize];
-                    if is_rsp_var(&addr_def.varnode) {
+                    if is_rsp_derived(&addr_def.varnode, &addr_def.expr, &ssa.vars) {
                         if let Expr::Const(_, _) = &val_def.expr {
-                            // This is `push return_address` before a CALL — eliminate
-                            return false;
+                            dead_indices.push(i);
+                            continue;
                         }
                     }
-                    true
+                    collect_var_reads(*addr, &ssa.vars, &mut read_after);
+                    collect_var_reads(*val, &ssa.vars, &mut read_after);
                 }
-                _ => true,
+                Stmt::Call { args, .. } => {
+                    for a in args {
+                        collect_var_reads(*a, &ssa.vars, &mut read_after);
+                    }
+                }
             }
-        });
+        }
+
+        for i in dead_indices {
+            block.stmts.remove(i);
+        }
     }
 }
 
-fn is_rsp_var(vn: &pcode_ir::Varnode) -> bool {
-    vn.space == AddressSpaceId::Register && vn.offset == RSP_OFFSET
+fn collect_var_reads(id: VarId, vars: &[VarDef], reads: &mut std::collections::HashSet<(u64, u32)>) {
+    let vdef = &vars[id.0 as usize];
+    if vdef.varnode.space == AddressSpaceId::Register {
+        reads.insert((vdef.varnode.offset, vdef.varnode.size));
+    }
+    collect_expr_reads(&vdef.expr, vars, reads);
+}
+
+fn collect_expr_reads(expr: &Expr, vars: &[VarDef], reads: &mut std::collections::HashSet<(u64, u32)>) {
+    match expr {
+        Expr::Var(id) => {
+            let v = &vars[id.0 as usize];
+            if v.varnode.space == AddressSpaceId::Register {
+                reads.insert((v.varnode.offset, v.varnode.size));
+            }
+        }
+        Expr::BinOp(_, l, r) => {
+            collect_var_reads(*l, vars, reads);
+            collect_var_reads(*r, vars, reads);
+        }
+        Expr::UnaryOp(_, i) | Expr::Load(i) => {
+            collect_var_reads(*i, vars, reads);
+        }
+        Expr::Phi(inputs) => {
+            for i in inputs { collect_var_reads(*i, vars, reads); }
+        }
+        _ => {}
+    }
+}
+
+fn is_rsp_derived(vn: &pcode_ir::Varnode, expr: &Expr, vars: &[VarDef]) -> bool {
+    if vn.space == AddressSpaceId::Register && vn.offset == RSP_OFFSET {
+        return true;
+    }
+    match expr {
+        Expr::Var(id) => {
+            let v = &vars[id.0 as usize];
+            v.varnode.space == AddressSpaceId::Register && v.varnode.offset == RSP_OFFSET
+        }
+        Expr::BinOp(_, l, _) => {
+            let v = &vars[l.0 as usize];
+            v.varnode.space == AddressSpaceId::Register && v.varnode.offset == RSP_OFFSET
+        }
+        _ => false,
+    }
+}
+
+/// Recover high-level conditions from flag variables.
+/// Replace CBranch(flag_var) with CBranch(comparison_var) by tracing
+/// the flag back to the comparison that produced it.
+fn recover_conditions(ssa: &mut SsaCfg) {
+    // Collect replacements first to avoid borrow conflict
+    let mut replacements: Vec<(usize, VarId)> = Vec::new();
+    for (bi, block) in ssa.blocks.iter().enumerate() {
+        if let SsaTerminator::CBranch { cond, .. } = &block.terminator {
+            let vdef = &ssa.vars[cond.0 as usize];
+            if vdef.varnode.space == AddressSpaceId::Register
+                && FLAG_OFFSETS.contains(&vdef.varnode.offset)
+            {
+                if let Some(new_cond) = trace_flag_condition(*cond, &ssa.vars) {
+                    replacements.push((bi, new_cond));
+                }
+            }
+        }
+    }
+    for (bi, new_cond) in replacements {
+        if let SsaTerminator::CBranch { taken, fallthrough, .. } = ssa.blocks[bi].terminator {
+            ssa.blocks[bi].terminator = SsaTerminator::CBranch {
+                cond: new_cond, taken, fallthrough,
+            };
+        }
+    }
+}
+
+/// Trace a flag variable back to the comparison that produced it.
+/// Returns a new VarId with a comparison expression, or None.
+fn trace_flag_condition(flag_id: VarId, vars: &[VarDef]) -> Option<VarId> {
+    let vdef = &vars[flag_id.0 as usize];
+
+    match &vdef.expr {
+        // Already a comparison — use it directly
+        Expr::BinOp(BinOpKind::Eq | BinOpKind::NotEq | BinOpKind::Less
+            | BinOpKind::LessEq | BinOpKind::SLess | BinOpKind::SLessEq, _, _) =>
+        {
+            Some(flag_id)
+        }
+        // Flag was set by a Var reference — trace through one level
+        Expr::Var(inner_id) => {
+            let inner = &vars[inner_id.0 as usize];
+            match &inner.expr {
+                Expr::BinOp(BinOpKind::Eq | BinOpKind::NotEq | BinOpKind::Less
+                    | BinOpKind::LessEq | BinOpKind::SLess | BinOpKind::SLessEq, _, _) =>
+                {
+                    Some(*inner_id)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Detect return values: if a block ends with Return and RAX/X0 was recently written,
+/// set the return value.
+fn detect_return_values(ssa: &mut SsaCfg) {
+    for block in &mut ssa.blocks {
+        if let SsaTerminator::Return(ref mut ret_val) = block.terminator {
+            if ret_val.is_some() { continue; }
+            // Search backwards for the last RAX write
+            for stmt in block.stmts.iter().rev() {
+                if let Stmt::Assign(var_id) = stmt {
+                    let vdef = &ssa.vars[var_id.0 as usize];
+                    if vdef.varnode.space == AddressSpaceId::Register
+                        && vdef.varnode.offset == RAX_OFFSET
+                        && vdef.varnode.size == 8
+                    {
+                        *ret_val = Some(*var_id);
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn recount_uses(ssa: &mut SsaCfg) {
