@@ -23,7 +23,6 @@ pub fn fold(ssa: &mut SsaCfg) {
         fold_once(ssa);
         recount_uses(ssa);
         propagate_call_returns(ssa);
-        collapse_copy_chains(ssa);
         recount_uses(ssa);
         eliminate_dead(ssa);
         recount_uses(ssa);
@@ -709,6 +708,143 @@ pub(crate) fn recount_uses(ssa: &mut SsaCfg) {
     }
     for (i, count) in use_counts.into_iter().enumerate() {
         ssa.vars[i].use_count = count;
+    }
+}
+
+// ---- Pass: Save/Restore Elimination ----
+// Detect the pattern:  A = X; [call]; Y = A
+// where A is a stack variable used only for the save+restore.
+// Replace Y's expression with X directly, eliminating the roundtrip.
+// Also: A = X; ... ; B = A where B has same register as X → B = X
+
+fn eliminate_save_restore(ssa: &mut SsaCfg) {
+    // First: look for the specific pattern REG = stack_var where
+    // stack_var.expr = Var(same_REG) — this is a restore.
+    // Replace the restore's expr to point directly at the original register value.
+    for v in 0..ssa.vars.len() {
+        let vdef = &ssa.vars[v];
+        if vdef.varnode.space != AddressSpaceId::Register { continue; }
+        // Is this REG = Var(stack_var)?
+        let src_id = match &vdef.expr {
+            Expr::Var(id) => Some(*id),
+            _ => None,
+        };
+        let Some(src_id) = src_id else { continue };
+        let src = &ssa.vars[src_id.0 as usize];
+        // Is the source a stack variable (stored to RBP-offset)?
+        // In our SSA, stack vars have Unique space or are intermediate
+        // Check if the source was defined as Var(original_reg) where original_reg
+        // is the same register we're writing to
+        if let Expr::Var(orig_id) = &src.expr {
+            let orig = &ssa.vars[orig_id.0 as usize];
+            if orig.varnode.space == AddressSpaceId::Register
+                && orig.varnode.offset == vdef.varnode.offset
+                && orig.varnode.size == vdef.varnode.size
+            {
+                // Save/restore detected: REG = X; stack = REG; ... ; REG = stack
+                // Replace this var's expr with Var(orig_id) to skip the stack roundtrip
+                // But we can't do it here because we'd need to modify ssa.vars while reading it.
+                // Collect for later.
+            }
+        }
+    }
+
+    // Collect and apply save/restore eliminations (Var chains)
+    let mut sr_replacements: Vec<(usize, VarId)> = Vec::new();
+    for v in 0..ssa.vars.len() {
+        let vdef = &ssa.vars[v];
+        if vdef.varnode.space != AddressSpaceId::Register { continue; }
+        if let Expr::Var(src_id) = &vdef.expr {
+            let src = &ssa.vars[src_id.0 as usize];
+            if let Expr::Var(orig_id) = &src.expr {
+                let orig = &ssa.vars[orig_id.0 as usize];
+                if orig.varnode.space == AddressSpaceId::Register
+                    && orig.varnode.offset == vdef.varnode.offset
+                    && orig.varnode.size == vdef.varnode.size
+                    && src.use_count <= 2
+                {
+                    sr_replacements.push((v, *orig_id));
+                }
+            }
+        }
+    }
+    // Disabled — too aggressive, eliminates legitimate assignments
+    // for (v, orig_id) in &sr_replacements {
+    //     ssa.vars[*v].expr = Expr::Var(*orig_id);
+    // }
+
+    // Memory save/restore: within each block, match Store(addr, reg_val)
+    // followed by Load(same_addr) → same register. Only match within the
+    // SAME block to avoid cross-block aliasing issues.
+    for bi in 0..ssa.blocks.len() {
+        let mut store_map: std::collections::HashMap<u64, VarId> = std::collections::HashMap::new();
+
+        // Collect stores in this block
+        for stmt in &ssa.blocks[bi].stmts {
+            if let Stmt::Store { addr, val } = stmt {
+                if let Some(offset) = compute_rbp_offset(*addr, &ssa.vars) {
+                    let stored = &ssa.vars[val.0 as usize];
+                    // Only track stores of register values (save patterns)
+                    if stored.varnode.space == AddressSpaceId::Register {
+                        store_map.insert(offset, *val);
+                    }
+                }
+            }
+        }
+
+        if store_map.is_empty() { continue; }
+
+        // Find Load assignments in this block that match a store
+        let mut load_replacements: Vec<(u32, VarId)> = Vec::new();
+        for stmt in &ssa.blocks[bi].stmts {
+            if let Stmt::Assign(var_id) = stmt {
+                let vdef = &ssa.vars[var_id.0 as usize];
+                if vdef.varnode.space != AddressSpaceId::Register { continue; }
+                if let Expr::Load(addr_id) = &vdef.expr {
+                    if let Some(offset) = compute_rbp_offset(*addr_id, &ssa.vars) {
+                        if let Some(stored_val) = store_map.get(&offset) {
+                            let stored = &ssa.vars[stored_val.0 as usize];
+                            // Only replace if stored value was the same register
+                            if stored.varnode.offset == vdef.varnode.offset {
+                                load_replacements.push((var_id.0, *stored_val));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Disabled for now — needs more precise matching
+        // for (var_idx, stored_val) in load_replacements {
+        //     ssa.vars[var_idx as usize].expr = Expr::Var(stored_val);
+        // }
+    }
+}
+
+/// Compute the RBP-relative offset for an address var, if it's RBP + const.
+fn compute_rbp_offset(addr_id: VarId, vars: &[VarDef]) -> Option<u64> {
+    let v = &vars[addr_id.0 as usize];
+    match &v.expr {
+        Expr::BinOp(BinOpKind::Add, base_id, off_id) => {
+            let base = &vars[base_id.0 as usize];
+            if base.varnode.space == AddressSpaceId::Register && base.varnode.offset == 40 {
+                // RBP + const
+                if let Expr::Const(val, _) = &vars[off_id.0 as usize].expr {
+                    return Some(*val);
+                }
+            }
+            // One level of indirection on base
+            if let Expr::Var(inner) = &base.expr {
+                let inner_v = &vars[inner.0 as usize];
+                if inner_v.varnode.space == AddressSpaceId::Register && inner_v.varnode.offset == 40 {
+                    if let Expr::Const(val, _) = &vars[off_id.0 as usize].expr {
+                        return Some(*val);
+                    }
+                }
+            }
+            None
+        }
+        Expr::Var(inner) => compute_rbp_offset(*inner, vars),
+        _ => None,
     }
 }
 

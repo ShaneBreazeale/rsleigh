@@ -143,10 +143,6 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, indent: usize
             // Skip call return value captures (e.g., ECX = EAX after a call)
             // when the var is only used once — it will be inlined at the use site
             if vdef.call_return && vdef.use_count <= 1 { return; }
-            // Skip parameter setup in entry block (e.g., var_8 = param_0)
-            if let Expr::Var(src) = &vdef.expr {
-                if ssa.var(*src).param_name.is_some() { return; }
-            }
             // Skip argument register assignments that are consumed by a call
             // (they're shown inline in the call's argument list)
             if is_arg_consumed_by_call(*lhs, ssa) { return; }
