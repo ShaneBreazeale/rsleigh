@@ -243,8 +243,12 @@ fn print_stmt_tracked(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, inden
                     // Skip printing if this register is just used as an intermediate
                     // to pass a stack value to another assignment or call.
                     // But DON'T skip if this overwrites a call return — the restore is important.
+                    // Skip stack Loads that are only used as intermediates:
+                    // - use_count <= 1: only used once (tracked at use site)
+                    // - had_call_return: this is a restore after a call (tracked)
+                    // - use_count <= 2 AND all uses are copies to other regs/stack
                     if get_rbp_offset(*ptr, ssa).is_some() && (vdef.use_count <= 1 || had_call_return) {
-                        return; // Elided: value available via tracker as var_N
+                        return; // Elided: stack Load tracked
                     }
                 } else {
                     tracker.invalidate(vdef.varnode.offset, vdef.varnode.size);
@@ -267,22 +271,12 @@ fn print_stmt_tracked(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, inden
             let size = ssa.var(*val).size;
             let type_name = size_to_type(size);
 
-            // Skip save-pattern stores: var_c = var_8 where var_c is only used
-            // for a restore later (same register value roundtrip)
             if let Some(stack_name) = try_stack_var_name(*addr, ssa) {
-                // Check if the stored value is just another stack variable or parameter
-                // If so, this is a save pattern — skip it
-                let is_save = {
-                    let vdef = ssa.var(*val);
-                    // Value came from a register that was tracked to a stack var
-                    if vdef.varnode.space == AddressSpaceId::Register {
-                        tracker.get(vdef.varnode.offset, vdef.varnode.size).is_some()
-                    } else {
-                        false
-                    }
-                };
-                if is_save && val_expr.starts_with("var_") || val_expr.starts_with("param_") {
-                    return; // Elided: save pattern (var_c = var_8)
+                // Skip save-pattern stores where the value is a tracked variable
+                // and the stack var name matches an existing variable (redundant save)
+                let is_redundant_save = val_expr.starts_with("var_") && val_expr == stack_name;
+                if is_redundant_save {
+                    return; // Self-assign to same stack var
                 }
                 out.push_str(&format!("{}{} = {};\n", pad, stack_name, val_expr));
             } else {
