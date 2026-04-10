@@ -302,20 +302,21 @@ fn is_rsp_derived(vn: &pcode_ir::Varnode, expr: &Expr, vars: &[VarDef]) -> bool 
 /// Recover high-level conditions from flag variables.
 /// Handles: ZF (from TEST/CMP → IntEq), SF==OF (JGE/JL from CMP → IntSLess).
 fn recover_conditions(ssa: &mut SsaCfg) {
-    // First pass: collect what we need without borrowing ssa mutably
+    // Collect ALL CBranch conditions — not just flag registers.
+    // Compound conditions from Jcc (like JG) produce BoolAnd/BoolNot in Unique space.
     let mut to_recover: Vec<(usize, VarId)> = Vec::new();
     for (bi, block) in ssa.blocks.iter().enumerate() {
         if let SsaTerminator::CBranch { cond, .. } = &block.terminator {
             let vdef = &ssa.vars[cond.0 as usize];
-            if vdef.varnode.space == AddressSpaceId::Register
-                && FLAG_OFFSETS.contains(&vdef.varnode.offset)
-            {
+            // Accept: flag registers, Unique-space compound expressions, anything not already a comparison
+            let dominated_by_flags = is_flag_derived(*cond, ssa);
+            let already_comparison = matches!(&vdef.expr, Expr::BinOp(k, _, _) if is_comparison(*k));
+            if dominated_by_flags && !already_comparison {
                 to_recover.push((bi, *cond));
             }
         }
     }
 
-    // Second pass: try to recover each condition
     for (bi, cond_id) in to_recover {
         if let Some(new_cond) = try_recover_condition(cond_id, bi, ssa) {
             if let SsaTerminator::CBranch { taken, fallthrough, .. } = ssa.blocks[bi].terminator {
@@ -324,6 +325,27 @@ fn recover_conditions(ssa: &mut SsaCfg) {
                 };
             }
         }
+    }
+}
+
+/// Check if a VarId's expression tree references any flag registers.
+fn is_flag_derived(id: VarId, ssa: &SsaCfg) -> bool {
+    is_flag_derived_depth(id, ssa, 5)
+}
+
+fn is_flag_derived_depth(id: VarId, ssa: &SsaCfg, depth: u32) -> bool {
+    if depth == 0 { return false; }
+    let vdef = &ssa.vars[id.0 as usize];
+    if vdef.varnode.space == AddressSpaceId::Register && FLAG_OFFSETS.contains(&vdef.varnode.offset) {
+        return true;
+    }
+    match &vdef.expr {
+        Expr::Var(inner) => is_flag_derived_depth(*inner, ssa, depth - 1),
+        Expr::BinOp(_, l, r) => {
+            is_flag_derived_depth(*l, ssa, depth - 1) || is_flag_derived_depth(*r, ssa, depth - 1)
+        }
+        Expr::UnaryOp(_, i) => is_flag_derived_depth(*i, ssa, depth - 1),
+        _ => false,
     }
 }
 
@@ -347,13 +369,14 @@ fn try_recover_condition(cond_id: VarId, block_idx: usize, ssa: &mut SsaCfg) -> 
     // Try to find CMP/SUB operands from this block
     let (cmp_left, cmp_right) = find_cmp_operands(block_idx, ssa)?;
 
-    // Classify the condition expression
-    let cmp_kind = classify_jcc_condition(cond_id, ssa);
+    // Classify the condition expression and determine operand order
+    let classified = classify_jcc_condition(cond_id, ssa);
 
-    if let Some(kind) = cmp_kind {
+    if let Some((kind, swap)) = classified {
+        let (left, right) = if swap { (cmp_right, cmp_left) } else { (cmp_left, cmp_right) };
         let new_var = ssa.new_var(
             ssa.vars[cond_id.0 as usize].varnode,
-            Expr::BinOp(kind, cmp_left, cmp_right),
+            Expr::BinOp(kind, left, right),
             1,
         );
         return Some(new_var);
@@ -374,72 +397,102 @@ fn try_recover_condition(cond_id: VarId, block_idx: usize, ssa: &mut SsaCfg) -> 
     None
 }
 
-/// Find the CMP/SUB/TEST operands in a block by searching for the comparison instruction.
+/// Find the CMP/SUB/TEST operands by tracing from the flag definitions.
+/// Looks for the SUB/AND that produced the result used by ZF/SF flags.
 fn find_cmp_operands(block_idx: usize, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
     let block = &ssa.blocks[block_idx];
-    // Search backward for a SUB (from CMP) or AND (from TEST)
+
+    // Strategy: find ZF assignment (IntEq(result, 0)), then trace `result` back
+    // to the SUB/AND that produced it.
     for stmt in block.stmts.iter().rev() {
         if let Stmt::Assign(vid) = stmt {
             let v = &ssa.vars[vid.0 as usize];
-            match &v.expr {
-                Expr::BinOp(BinOpKind::Sub, left, right) => {
-                    // CMP produces SUB — but we want the ORIGINAL operands,
-                    // not the SUB result. The operands are left and right.
+            // ZF = IntEq(sub_result, 0) — the sub_result comes from CMP's SUB
+            if v.varnode.space == AddressSpaceId::Register && v.varnode.offset == 518 {
+                if let Expr::BinOp(BinOpKind::Eq, result_id, zero_id) = &v.expr {
+                    let zero = &ssa.vars[zero_id.0 as usize];
+                    if matches!(&zero.expr, Expr::Const(0, _)) {
+                        // Trace result_id back to a SUB or AND
+                        return trace_to_cmp(*result_id, ssa);
+                    }
+                }
+            }
+            // Also check: IntSLess(result, 0) for SF
+            if v.varnode.space == AddressSpaceId::Register && v.varnode.offset == 519 {
+                if let Expr::BinOp(BinOpKind::SLess, result_id, zero_id) = &v.expr {
+                    let zero = &ssa.vars[zero_id.0 as usize];
+                    if matches!(&zero.expr, Expr::Const(0, _)) {
+                        return trace_to_cmp(*result_id, ssa);
+                    }
+                }
+            }
+            // IntCarry/IntSCarry for CF/OF — trace their operands directly
+            if v.varnode.space == AddressSpaceId::Register
+                && (v.varnode.offset == 512 || v.varnode.offset == 523) // CF or OF
+            {
+                if let Expr::BinOp(BinOpKind::Carry | BinOpKind::SCarry | BinOpKind::SBorrow
+                    | BinOpKind::Less, left, right) = &v.expr
+                {
                     return Some((*left, *right));
                 }
-                Expr::BinOp(BinOpKind::And, left, right) => {
-                    // TEST produces AND. If x & x (TEST reg,reg), the operands are the same.
-                    return Some((*left, *right));
-                }
-                _ => {}
             }
         }
     }
     None
 }
 
+/// Trace a SUB/AND result variable back to find the CMP operands.
+fn trace_to_cmp(result_id: VarId, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
+    let v = &ssa.vars[result_id.0 as usize];
+    match &v.expr {
+        Expr::BinOp(BinOpKind::Sub, left, right) => Some((*left, *right)),
+        Expr::BinOp(BinOpKind::And, left, right) => Some((*left, *right)),
+        Expr::Var(inner) => trace_to_cmp(*inner, ssa), // one level of indirection
+        _ => None,
+    }
+}
+
 /// Classify a Jcc condition expression into a comparison kind.
-fn classify_jcc_condition(cond_id: VarId, ssa: &SsaCfg) -> Option<BinOpKind> {
+/// Returns (comparison_kind, swap_operands).
+/// swap_operands=true means use (right, left) instead of (left, right) from CMP.
+fn classify_jcc_condition(cond_id: VarId, ssa: &SsaCfg) -> Option<(BinOpKind, bool)> {
     let vdef = &ssa.vars[cond_id.0 as usize];
 
     match &vdef.expr {
-        // ZF directly → JE → Eq
-        _ if is_flag_ref(cond_id, 518, ssa) => Some(BinOpKind::Eq),
+        // ZF directly → JE → a == b
+        _ if is_flag_ref(cond_id, 518, ssa) => Some((BinOpKind::Eq, false)),
 
-        // BoolNot(ZF) → JNE → NotEq
+        // BoolNot(ZF) → JNE → a != b
         Expr::UnaryOp(UnaryOpKind::BoolNot, inner) if is_flag_ref(*inner, 518, ssa) => {
-            Some(BinOpKind::NotEq)
+            Some((BinOpKind::NotEq, false))
         }
 
-        // CF directly → JB → Less (unsigned)
-        _ if is_flag_ref(cond_id, 512, ssa) => Some(BinOpKind::Less),
+        // CF directly → JB → a < b (unsigned)
+        _ if is_flag_ref(cond_id, 512, ssa) => Some((BinOpKind::Less, false)),
 
-        // BoolNot(CF) → JAE → unsigned >=... but we approximate with NotLess
+        // BoolNot(CF) → JAE → a >= b (unsigned) = !(a < b) = b <= a? No: use LessEq swapped
         Expr::UnaryOp(UnaryOpKind::BoolNot, inner) if is_flag_ref(*inner, 512, ssa) => {
-            // JGE unsigned, approximate as >= (LessEq negated)
-            None // skip for now
+            Some((BinOpKind::LessEq, true)) // a >= b = b <= a
         }
 
-        // IntEq(OF, SF) → JGE → signed >=
+        // IntEq(OF, SF) → JGE → a >= b (signed) = b <= a (signed)
         Expr::BinOp(BinOpKind::Eq, left, right)
             if is_flag_ref(*left, 523, ssa) && is_flag_ref(*right, 519, ssa) =>
         {
-            Some(BinOpKind::SLessEq) // JGE means "not less than", but CBranch takes when true.
-            // JGE = SF==OF. If taken branch is the "greater or equal" path,
-            // the condition is "signed greater or equal". But we negate in the printer
-            // when the then-body is empty. Return SLess here since the taken branch
-            // typically goes to the "true" (skip) path.
-            // Actually: JGE taken means >=, so the condition IS >=.
-            // We need a SGreaterEq but we don't have that. Use: !(left < right)
-            // For now, let the printer handle the negation.
+            Some((BinOpKind::SLessEq, true)) // a >= b = b <= a
         }
 
-        // BoolAnd(BoolNot(ZF), IntEq(OF, SF)) → JG → signed >
+        // SF directly or through Var → if it's IntSLess → JL → a < b (signed)
+        _ if is_flag_ref(cond_id, 519, ssa) => {
+            // SF set = result was negative = a < b for CMP
+            Some((BinOpKind::SLess, false))
+        }
+
+        // BoolAnd(BoolNot(ZF), IntEq(OF, SF)) → JG → a > b (signed) = b < a
         Expr::BinOp(BinOpKind::BoolAnd, left, right) => {
             let left_def = &ssa.vars[left.0 as usize];
             let right_def = &ssa.vars[right.0 as usize];
 
-            // Check: left = BoolNot(ZF), right = IntEq(OF, SF)
             let left_is_not_zf = matches!(&left_def.expr,
                 Expr::UnaryOp(UnaryOpKind::BoolNot, inner) if is_flag_ref(*inner, 518, ssa));
             let right_is_sf_eq_of = matches!(&right_def.expr,
@@ -447,16 +500,23 @@ fn classify_jcc_condition(cond_id: VarId, ssa: &SsaCfg) -> Option<BinOpKind> {
                     if is_flag_ref(*a, 523, ssa) && is_flag_ref(*b, 519, ssa));
 
             if left_is_not_zf && right_is_sf_eq_of {
-                // JG: signed greater than. Since there's no SGreater, use SLessEq
-                // and let the printer negate. Actually we want: NOT (left <= right).
-                // JG taken = a > b. The CBranch condition is "a > b".
-                // We don't have SGreater, so emit SLessEq and rely on the printer
-                // negating when the then-body is empty.
-                // Better: just return SLess with swapped operands later.
-                Some(BinOpKind::SLess) // This means "CMP left < right" but JG takes when !(ZF) && SF==OF
-                // The printer will negate this appropriately.
+                // JG: a > b = b < a (swap operands, use SLess)
+                Some((BinOpKind::SLess, true))
             } else {
-                None
+                // BoolAnd(BoolNot(CF), BoolNot(ZF)) → JA → a > b (unsigned) = b < a
+                let left_is_not_cf = matches!(&left_def.expr,
+                    Expr::UnaryOp(UnaryOpKind::BoolNot, inner) if is_flag_ref(*inner, 512, ssa));
+                let right_is_not_zf = matches!(&right_def.expr,
+                    Expr::UnaryOp(UnaryOpKind::BoolNot, inner) if is_flag_ref(*inner, 518, ssa));
+
+                if left_is_not_cf && right_is_not_zf {
+                    Some((BinOpKind::Less, true)) // JA: a > b unsigned = b < a
+                } else if left_is_not_zf {
+                    // Partial match — at least it's a JNE variant
+                    Some((BinOpKind::NotEq, false))
+                } else {
+                    None
+                }
             }
         }
 
