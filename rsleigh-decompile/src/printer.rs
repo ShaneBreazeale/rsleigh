@@ -229,8 +229,12 @@ fn print_stmt_tracked(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, inden
                         {
                             return; // Elided: value available via tracker
                         }
-                    } else {
+                    } else if src.varnode.space != AddressSpaceId::Unique {
+                        // REG = stack_var/const: track it
                         tracker.set(vdef.varnode.offset, vdef.varnode.size, *src_id);
+                    } else {
+                        // REG = Unique (expression result): invalidate, don't track
+                        tracker.invalidate(vdef.varnode.offset, vdef.varnode.size);
                     }
                 } else if let Expr::Load(ptr) = &vdef.expr {
                     // REG = Load(addr): track so later uses resolve to the stack var
@@ -338,20 +342,60 @@ fn print_stmt_tracked(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, inden
     }
 }
 
-/// Format an expression, resolving register copies through the tracker.
 /// Format a VarId with register tracking — resolves register copies to their source.
 fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> String {
     let vdef = ssa.var(id);
-    // Inline Unique-space through the tracked formatter (not the plain one)
+    // For Unique-space: normally use standard formatting.
+    // BUT: if this Unique wraps a UnaryOp(Sext/Zext) of a register that has
+    // a call return expression, inline it.
     if vdef.varnode.space == AddressSpaceId::Unique {
-        return format_expr_tracked(&vdef.expr, ssa, ctx, tracker);
+        if let Expr::UnaryOp(kind, inner) = &vdef.expr {
+            let iv = ssa.var(*inner);
+            if iv.varnode.space == AddressSpaceId::Register {
+                if let Some(expr_str) = tracker.get_expr_str(iv.varnode.offset, iv.varnode.size) {
+                    // Inline the call return through the cast
+                    return match kind {
+                        UnaryOpKind::Sext => format!("(int64_t){}", expr_str),
+                        UnaryOpKind::Zext => format!("(uint64_t){}", expr_str),
+                        _ => expr_str.to_string(),
+                    };
+                }
+                // Also resolve through regular tracking
+                if let Some(tracked_id) = tracker.get(iv.varnode.offset, iv.varnode.size) {
+                    let tv = ssa.var(tracked_id);
+                    if let Expr::Load(ptr) = &tv.expr {
+                        if let Some(offset) = get_rbp_offset(*ptr, ssa) {
+                            return match kind {
+                                UnaryOpKind::Sext => format!("(int64_t)var_{:x}", offset),
+                                UnaryOpKind::Zext => format!("(uint64_t)var_{:x}", offset),
+                                _ => format!("var_{:x}", offset),
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        // Also check BinOp whose operands are Uniques wrapping tracked registers
+        if let Expr::BinOp(kind, left, right) = &vdef.expr {
+            let lv = ssa.var(*left);
+            let rv = ssa.var(*right);
+            let l_has_tracked = lv.varnode.space == AddressSpaceId::Unique
+                && expr_has_tracked_reg(&lv.expr, ssa, tracker);
+            let r_has_tracked = rv.varnode.space == AddressSpaceId::Unique
+                && expr_has_tracked_reg(&rv.expr, ssa, tracker);
+            if l_has_tracked || r_has_tracked {
+                let l = format_var_tracked(*left, ssa, ctx, tracker);
+                let r = format_var_tracked(*right, ssa, ctx, tracker);
+                return format!("{} {} {}", l, binop_str(*kind), r);
+            }
+        }
+        return format_expr(&vdef.expr, ssa, ctx);
     }
+    // Check register tracking
     if vdef.varnode.space == AddressSpaceId::Register {
-        // Check for inlined expression string (call return value)
         if let Some(expr_str) = tracker.get_expr_str(vdef.varnode.offset, vdef.varnode.size) {
             return expr_str.to_string();
         }
-        // Check for tracked VarId source
         if let Some(tracked_id) = tracker.get(vdef.varnode.offset, vdef.varnode.size) {
             let tracked_vdef = ssa.var(tracked_id);
             if let Expr::Load(ptr) = &tracked_vdef.expr {
@@ -368,6 +412,39 @@ fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTrac
         }
     }
     format_var(id, ssa, ctx)
+}
+
+/// Recursively check if an expression tree references any tracked register.
+fn expr_has_tracked_reg(expr: &Expr, ssa: &SsaCfg, tracker: &RegTracker) -> bool {
+    match expr {
+        Expr::Var(inner) => {
+            let iv = ssa.var(*inner);
+            if iv.varnode.space == AddressSpaceId::Register {
+                return tracker.get(iv.varnode.offset, iv.varnode.size).is_some()
+                    || tracker.get_expr_str(iv.varnode.offset, iv.varnode.size).is_some();
+            }
+            if iv.varnode.space == AddressSpaceId::Unique {
+                return expr_has_tracked_reg(&iv.expr, ssa, tracker);
+            }
+            false
+        }
+        Expr::UnaryOp(_, inner) => {
+            let iv = ssa.var(*inner);
+            if iv.varnode.space == AddressSpaceId::Register {
+                return tracker.get(iv.varnode.offset, iv.varnode.size).is_some()
+                    || tracker.get_expr_str(iv.varnode.offset, iv.varnode.size).is_some();
+            }
+            if iv.varnode.space == AddressSpaceId::Unique {
+                return expr_has_tracked_reg(&iv.expr, ssa, tracker);
+            }
+            false
+        }
+        Expr::BinOp(_, left, right) => {
+            expr_has_tracked_reg(&ssa.var(*left).expr, ssa, tracker)
+                || expr_has_tracked_reg(&ssa.var(*right).expr, ssa, tracker)
+        }
+        _ => false,
+    }
 }
 
 fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> String {
