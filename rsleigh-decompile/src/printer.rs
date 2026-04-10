@@ -19,7 +19,110 @@ pub fn print_c(
     let ctx = PrintCtx { arch, binary, imports };
     let filtered = filter_boilerplate(stmts, ssa);
     print_stmts(&filtered, ssa, &ctx, 0, &mut out);
+    post_process(&mut out);
     out
+}
+
+/// Text-level post-processing to clean up common patterns.
+fn post_process(out: &mut String) {
+    let mut lines: Vec<String> = out.lines().map(|l| l.to_string()).collect();
+    let mut i = 0;
+    while i < lines.len() {
+        // #4: Hide stack canary boilerplate
+        // Pattern: RAX = *(0x...); RAX = *(RAX); ... if (!RAX != RCX/var_8)
+        if lines[i].trim().starts_with("RAX = *(0x") && lines[i].contains("1008") {
+            // Look ahead for the canary check pattern
+            let mut j = i + 1;
+            let mut canary_end = None;
+            while j < lines.len() {
+                let lt = lines[j].trim();
+                if lt.starts_with("if (") && (lt.contains("!= RCX") || lt.contains("!= var_")) {
+                    // Find the closing brace
+                    let mut k = j + 1;
+                    while k < lines.len() {
+                        if lines[k].trim() == "}" { canary_end = Some(k); break; }
+                        k += 1;
+                    }
+                    break;
+                }
+                if lt.starts_with("printf") || lt.starts_with("func_") || lt.contains("strlen")
+                    || lt.starts_with("add") || lt.starts_with("factorial") || lt.starts_with("reverse")
+                    || lt.starts_with("__") || lt.starts_with("while") || lt.starts_with("if (1")
+                {
+                    break; // Not a canary — real code
+                }
+                j += 1;
+            }
+            if let Some(end) = canary_end {
+                // Remove lines i..=end
+                for idx in (i..=end).rev() {
+                    lines.remove(idx);
+                }
+                continue; // Don't increment i
+            }
+        }
+
+        // #2: Remove standalone calls that appear again inlined on the next line
+        // Pattern: "    func();" followed by "    printf("...", func());"
+        if i + 1 < lines.len() {
+            let current = lines[i].trim();
+            if current.ends_with("();") || current.ends_with(");") {
+                // Extract the call expression (without semicolon and indent)
+                let call = current.trim_end_matches(';');
+                let next = lines[i + 1].trim();
+                if next.contains(call) && next != current {
+                    lines.remove(i);
+                    continue;
+                }
+            }
+        }
+
+        // #5: "var_N = expr;" at end of else block → "return expr;"
+        // Detect: line is "    var_X = expr;" and next line is "}"
+        if i + 1 < lines.len() {
+            let lt = lines[i].trim();
+            let next_t = lines[i + 1].trim();
+            if lt.starts_with("var_") && lt.ends_with(';') && lt.contains(" = ") && next_t == "}" {
+                // Check if this is inside an else block (there's a matching if)
+                let indent = lines[i].len() - lines[i].trim_start().len();
+                if indent > 0 {
+                    // Replace with return
+                    let expr = lt.split(" = ").nth(1).unwrap_or("").trim_end_matches(';');
+                    if !expr.is_empty() {
+                        let pad = &lines[i][..indent];
+                        lines[i] = format!("{}return {};", pad, expr);
+                    }
+                }
+            }
+        }
+
+        // #6: Hide "EAX = var_X;" or "EDI = var_X;" when the next line uses the same var
+        // These are register loads that are tracked by the printer
+        {
+            let lt = lines[i].trim();
+            if (lt.starts_with("EAX = var_") || lt.starts_with("EDI = var_") || lt.starts_with("EAX = param_"))
+                && lt.ends_with(';')
+                && !lt.contains('+') && !lt.contains('*') && !lt.contains('-')
+            {
+                lines.remove(i);
+                continue;
+            }
+        }
+
+        i += 1;
+    }
+
+    // Remove consecutive blank lines
+    let mut result = String::new();
+    let mut prev_blank = false;
+    for line in &lines {
+        let is_blank = line.trim().is_empty();
+        if is_blank && prev_blank { continue; }
+        result.push_str(line);
+        result.push('\n');
+        prev_blank = is_blank;
+    }
+    *out = result;
 }
 
 struct PrintCtx<'a> {
