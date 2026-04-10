@@ -112,6 +112,16 @@ fn post_process(out: &mut String) {
         i += 1;
     }
 
+    // Strip verbose casts: (int64_t)x * (int64_t)y → x * y
+    for line in &mut lines {
+        // Remove (int64_t) and (uint64_t) casts that just add noise
+        *line = line.replace("(int64_t)", "").replace("(uint64_t)", "");
+        // Clean up double spaces from removal
+        while line.contains("  ") && !line.starts_with("  ") {
+            *line = line.replace("  ", " ");
+        }
+    }
+
     // Remove consecutive blank lines
     let mut result = String::new();
     let mut prev_blank = false;
@@ -512,7 +522,7 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
             }
         }
         StructuredStmt::IfElse { cond, then_body, else_body } => {
-            let cond_expr = format_condition(*cond, ssa, ctx);
+            let cond_expr = format_condition_tracked(*cond, ssa, ctx, tracker);
             let then_filtered = filter_boilerplate(then_body, ssa);
             let else_filtered = filter_boilerplate(else_body, ssa);
             let then_empty = is_body_empty(&then_filtered, ssa);
@@ -533,7 +543,7 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
             }
         }
         StructuredStmt::While { cond, body } => {
-            let cond_expr = format_condition(*cond, ssa, ctx);
+            let cond_expr = format_condition_tracked(*cond, ssa, ctx, tracker);
             let body_filtered = filter_boilerplate(body, ssa);
             out.push_str(&format!("{}while ({}) {{\n", pad, cond_expr));
             print_stmts(&body_filtered, ssa, ctx, indent + 1, out);
@@ -863,13 +873,16 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, indent: usize
 
 /// Format a condition, trying to show the comparison rather than a flag name.
 fn format_condition(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
+    format_condition_tracked(id, ssa, ctx, &RegTracker::new())
+}
+
+fn format_condition_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> String {
     let vdef = ssa.var(id);
 
-    // If this is a comparison expression, format it directly
     if let Expr::BinOp(kind, left, right) = &vdef.expr {
         if is_comparison(*kind) {
-            let l = format_var(*left, ssa, ctx);
-            let r = format_var(*right, ssa, ctx);
+            let l = format_var_tracked(*left, ssa, ctx, tracker);
+            let r = format_var_tracked(*right, ssa, ctx, tracker);
             return format!("{} {} {}", l, binop_str(*kind), r);
         }
     }
