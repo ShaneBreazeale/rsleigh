@@ -50,10 +50,10 @@ fn collect_store_aliases(stmts: &[StructuredStmt], ssa: &SsaCfg, ctx: &PrintCtx,
         if let StructuredStmt::Assign { lhs, .. } = stmt {
             let vdef = ssa.var(*lhs);
             if vdef.varnode.space == AddressSpaceId::Register {
-                if let Expr::Var(src) | Expr::Load(src) = &vdef.expr {
+                if let Expr::Var(_) | Expr::Load(_) = &vdef.expr {
                     tracker.set(vdef.varnode.offset, vdef.varnode.size, *lhs);
                 }
-                if let Some(ref name) = vdef.param_name {
+                if vdef.param_name.is_some() {
                     tracker.set(vdef.varnode.offset, vdef.varnode.size, *lhs);
                 }
             }
@@ -513,6 +513,34 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     param_idx += 1;
                 }
             }
+        }
+    }
+
+    // Elide redundant register assignments: REG = expr; var = expr; → var = expr;
+    // When a Store to a stack variable captures the same expression that was just
+    // assigned to a register, the register assignment is pure noise.
+    {
+        let mut i = 0;
+        while i + 1 < lines.len() {
+            let l1 = lines[i].trim().to_string();
+            let l2 = lines[i + 1].trim().to_string();
+            if let (Some(eq1), Some(eq2)) = (l1.find(" = "), l2.find(" = ")) {
+                let lhs1 = &l1[..eq1];
+                let rhs1 = l1[eq1 + 3..].trim_end_matches(';');
+                let lhs2 = &l2[..eq2];
+                let rhs2 = l2[eq2 + 3..].trim_end_matches(';');
+                // REG = expr; var_X = expr; → remove REG line
+                let is_reg = lhs1.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                    && lhs1.len() >= 2 && lhs1.len() <= 3;
+                let is_var = lhs2.starts_with("var_") || lhs2.chars().next().map_or(false, |c| c.is_ascii_lowercase());
+                if is_reg && is_var && rhs1 == rhs2 {
+                    lines.remove(i);
+                    continue;
+                }
+                // Also: REG = expr; var_X = different_expr_containing_REG;
+                // But the var line should be self-contained, so just check exact match
+            }
+            i += 1;
         }
     }
 
@@ -1047,6 +1075,7 @@ impl RegTracker {
     }
 
     /// Invalidate all, including call return expressions.
+    #[allow(dead_code)]
     fn invalidate_everything(&mut self) {
         self.reg_source.clear();
         self.reg_expr_str.clear();
@@ -1078,6 +1107,51 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
             if is_self_assign(vdef, ssa) { return; }
             if vdef.call_return && vdef.use_count <= 1 { return; }
             if is_arg_consumed_by_call(*lhs, ssa) { return; }
+
+            // Inside loop bodies (no Return in stmt list), elide register
+            // assignments that feed into a Store to a stack variable.
+            let has_return_in_list = stmts.iter().any(|s| matches!(s, StructuredStmt::Return(_)));
+            if vdef.varnode.space == AddressSpaceId::Register && indent > 0 && !has_return_in_list {
+                // Also elide simple register-to-register copies and sign extensions
+                // that are just index setup (RCX = i, RCX = (int64_t)ECX, etc.)
+                if let Expr::Var(_) | Expr::UnaryOp(UnaryOpKind::Sext | UnaryOpKind::Zext, _)
+                    | Expr::Load(_) = &vdef.expr
+                {
+                    return; // Intermediate register setup — value used in subsequent expression
+                }
+                if let Some(next) = stmts.get(stmt_idx + 1..) {
+                    // Skip hidden stmts (Unique/flag assigns) to find next visible
+                    for ns in next {
+                        match ns {
+                            StructuredStmt::Store { val, addr } => {
+                                // Check if the Store's value references this register
+                                let sv = ssa.var(*val);
+                                if sv.varnode.space == AddressSpaceId::Register
+                                    && sv.varnode.offset == vdef.varnode.offset
+                                {
+                                    // The Store captures this register's value
+                                    // Check the Store is to a stack variable
+                                    if try_stack_var_name(*addr, ssa).is_some() {
+                                        return; // Elide: Store will display the value
+                                    }
+                                }
+                                break; // Found a visible statement, stop looking
+                            }
+                            StructuredStmt::Assign { lhs: next_lhs, .. } => {
+                                let nv = ssa.var(*next_lhs);
+                                if nv.varnode.space == AddressSpaceId::Unique { continue; }
+                                if nv.varnode.space == AddressSpaceId::Register
+                                    && is_flag(nv.varnode.offset) { continue; }
+                                // Skip assigns to the same register (computation chain)
+                                if nv.varnode.space == AddressSpaceId::Register
+                                    && nv.varnode.offset == vdef.varnode.offset { continue; }
+                                break; // Different visible assign, stop looking
+                            }
+                            _ => break,
+                        }
+                    }
+                }
+            }
 
             // Track register copies for display-time elision
             if vdef.varnode.space == AddressSpaceId::Register {
