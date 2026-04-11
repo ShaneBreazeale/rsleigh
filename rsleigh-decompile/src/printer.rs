@@ -81,46 +81,16 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // Preamble: RAX = *(0x...); RAX = *(RAX); (global canary pointer load)
         // Epilogue: RAX = *(0x...); RAX = *(RAX); RCX = ...; if (...)  { ... }
         if lines[i].trim().starts_with("RAX = *(0x") {
-            // Look ahead: canary preamble is RAX = *(addr); RAX = *(RAX); followed by real code
-            // Canary epilogue is RAX = *(addr); RAX = *(RAX); ...; if (...) { ... }
-            let mut j = i + 1;
-            let mut canary_end = None;
-            let mut saw_deref = false;
-            let mut extracted_return = None;
-            while j < lines.len() {
-                let lt = lines[j].trim();
-                if lt == "RAX = *(RAX);" { saw_deref = true; j += 1; continue; }
-                if lt.starts_with("RCX = ") || lt.starts_with("RDX = ") { j += 1; continue; }
-                // If we see an if after the canary load, it's the epilogue check
-                if saw_deref && lt.starts_with("if (") {
-                    let mut depth = 0;
-                    let mut k = j;
-                    while k < lines.len() {
-                        if lines[k].trim().starts_with("return") && depth == 1 {
-                            extracted_return = Some(lines[k].trim().to_string());
-                        }
-                        if lines[k].contains('{') { depth += 1; }
-                        if lines[k].contains('}') { depth -= 1; if depth == 0 { canary_end = Some(k); break; } }
-                        k += 1;
-                    }
-                    break;
-                }
-                // If we hit real code after RAX = *(RAX), this is a preamble
-                if saw_deref {
-                    canary_end = Some(j - 1);
-                    break;
-                }
-                break;
-            }
-            if let Some(end) = canary_end {
-                for idx in (i..=end).rev() {
-                    lines.remove(idx);
-                }
-                // Re-insert any return that was inside the canary check
-                if let Some(ret) = extracted_return {
-                    lines.insert(i, ret);
-                    i += 1;
-                }
+            // Stack canary preamble: RAX = *(canary_addr); RAX = *(RAX);
+            // Only remove if the next line is RAX = *(RAX) — the double-deref is
+            // the signature of canary loading (GOT ptr -> actual canary value).
+            // Then remove just the 2 preamble lines and stop — don't touch the
+            // code that follows. The epilogue check (if ... __stack_chk_guard) is
+            // handled separately below.
+            let next = lines.get(i + 1).map(|l| l.trim().to_string()).unwrap_or_default();
+            if next == "RAX = *(RAX);" {
+                lines.remove(i); // RAX = *(0x...)
+                lines.remove(i); // RAX = *(RAX)
                 continue;
             }
         }
@@ -671,25 +641,60 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
-    // Remove stack canary check blocks: if (... ^ __stack_chk_guard ...) { __stack_chk_fail(); }
+    // Remove stack canary check blocks.
+    // Matches: if (... __stack_chk_guard ...) { ... } or any if-block containing __stack_chk_fail()
     {
         let mut j = 0;
         while j < lines.len() {
             let lt = lines[j].trim().to_string();
-            if lt.contains("__stack_chk_guard") && lt.starts_with("if (") {
+            // Match if-blocks that are canary checks:
+            // 1. Condition mentions __stack_chk_guard
+            // 2. Body contains __stack_chk_fail()
+            let is_canary_if = lt.starts_with("if (") && (
+                lt.contains("__stack_chk_guard") || lt.contains("__stack_chk_fail")
+            );
+            // Also match if-blocks where __stack_chk_fail is in the DIRECT body (depth 1),
+            // not in a deeply nested sub-block. This prevents removing real code that
+            // happens to contain a canary check in an error path.
+            let is_canary_block = if lt.starts_with("if (") && !is_canary_if {
+                let mut has_fail_at_depth1 = false;
+                let mut depth = 0;
+                for k in j..lines.len().min(j + 10) {
+                    if lines[k].contains('{') { depth += 1; }
+                    if depth == 1 && lines[k].contains("__stack_chk_fail") { has_fail_at_depth1 = true; break; }
+                    if lines[k].contains('}') { depth -= 1; if depth == 0 { break; } }
+                }
+                has_fail_at_depth1
+            } else { false };
+
+            if is_canary_if || is_canary_block {
+                // Find the end of the if-block and remove it entirely
                 let mut depth = 0;
                 let mut end = None;
+                // Extract any return statement from inside
+                let mut extracted_return = None;
                 for k in j..lines.len() {
+                    let kl = lines[k].trim();
+                    if kl.starts_with("return") && depth == 1 && !kl.contains("__stack_chk") {
+                        extracted_return = Some(lines[k].clone());
+                    }
                     if lines[k].contains('{') { depth += 1; }
                     if lines[k].contains('}') { depth -= 1; if depth == 0 { end = Some(k); break; } }
                 }
                 if let Some(end_idx) = end {
                     for idx in (j..=end_idx).rev() { lines.remove(idx); }
+                    if let Some(ret) = extracted_return {
+                        lines.insert(j, ret);
+                    }
                     continue;
                 }
             }
-            // Also remove standalone canary lines: RAX = ... ^ __stack_chk_guard;
+            // Also remove standalone canary lines
             if lt.contains("__stack_chk_guard") && !lt.starts_with("if ") {
+                lines.remove(j);
+                continue;
+            }
+            if lt.contains("__stack_chk_fail") {
                 lines.remove(j);
                 continue;
             }
