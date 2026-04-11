@@ -1748,6 +1748,103 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #LLM: Clean up patterns that confuse LLM analysis.
+
+    // Strip __isoc99_ prefix from scanf variants
+    for line in &mut lines {
+        *line = line.replace("__isoc99_scanf", "scanf");
+        *line = line.replace("__isoc99_sscanf", "sscanf");
+        *line = line.replace("__isoc99_fscanf", "fscanf");
+    }
+
+    // Remove register-only assignment lines that are just noise:
+    // "RAX = func(...) + N;" where the register isn't used meaningfully
+    // "EAX = EAX & 0x7fffffff;" (sign-extension noise)
+    // "EAX = strlen(...) - 1;" when followed by another EAX assignment
+    {
+        let mut i = 0;
+        while i < lines.len() {
+            let lt = lines[i].trim().to_string();
+            // Remove "REG = void_call(...) + N;" or "REG = void_call(...) * N;"
+            let starts_with_reg = lt.starts_with("RAX = ") || lt.starts_with("RCX = ")
+                || lt.starts_with("RDX = ") || lt.starts_with("EAX = ")
+                || lt.starts_with("ECX = ") || lt.starts_with("EDX = ")
+                || lt.starts_with("R8D = ") || lt.starts_with("R9D = ");
+            if starts_with_reg && lt.ends_with(';') {
+                let rhs = lt.split(" = ").nth(1).unwrap_or("");
+                // Remove "REG = call(...) + N;" or "REG = call(...) * N;"
+                // where the call is to a known void/output function
+                let is_void_call_noise = ["puts(", "printf(", "scanf(", "write("]
+                    .iter().any(|f| rhs.contains(f))
+                    && (rhs.contains(") +") || rhs.contains(") *") || rhs.contains(") -"));
+                // Remove "EAX = EAX & 0x7fffffff;" (sign mask noise)
+                let is_sign_mask = rhs.contains("& 0x7fffffff");
+                // Remove stack probe: "RAX = 0x1518;" or similar large hex before ___chkstk
+                let is_stack_probe = lt.starts_with("RAX = 0x")
+                    && i + 1 < lines.len()
+                    && lines[i + 1].trim().contains("chkstk");
+                // Remove "RAX = *(RSP);" after chkstk
+                let is_post_chkstk = lt == "RAX = *(RSP);"
+                    && i > 0 && lines[i - 1].trim().contains("chkstk");
+                if is_void_call_noise || is_sign_mask || is_stack_probe || is_post_chkstk {
+                    lines.remove(i);
+                    continue;
+                }
+            }
+            // Remove ___chkstk_darwin() standalone calls (Mach-O stack probe)
+            if lt == "___chkstk_darwin();" || lt == "__chkstk();" {
+                lines.remove(i);
+                continue;
+            }
+            i += 1;
+        }
+    }
+
+    // Simplify "var - N == 0" → "var == N" and "var - N != 0" → "var != N"
+    for line in &mut lines {
+        // Match "if (X - N == 0)" or "if (X - N != 0)"
+        let l = line.clone();
+        if l.contains(" - ") && (l.contains(" == 0)") || l.contains(" != 0)")) {
+            // Simple pattern: (expr - const == 0) → (expr == const)
+            if let Some(if_start) = l.find("if (") {
+                let cond = &l[if_start + 4..];
+                if let Some(close) = cond.rfind(')') {
+                    let inner = &cond[..close];
+                    if let Some(eq_pos) = inner.rfind(" == 0").or(inner.rfind(" != 0")) {
+                        let before_eq = &inner[..eq_pos];
+                        let op = if inner[eq_pos..].starts_with(" == 0") { "==" } else { "!=" };
+                        if let Some(minus) = before_eq.rfind(" - ") {
+                            let lhs = &before_eq[..minus];
+                            let rhs_val = before_eq[minus + 3..].trim();
+                            // Only simplify if rhs is a simple constant or short string
+                            if rhs_val.len() <= 20 && !rhs_val.contains('(') {
+                                let indent = line.len() - line.trim_start().len();
+                                let pad = " ".repeat(indent);
+                                let rest = &l[if_start + 4 + close + 1..];
+                                *line = format!("{}if ({} {} {}){}", pad, lhs, op, rhs_val, rest);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Simplify *(global_var) → global_var for known global symbol names
+    // Globals are directly accessible, the extra dereference is an artifact
+    for line in &mut lines {
+        for (_addr, name) in ctx.imports.iter() {
+            // Only for known data objects (not functions)
+            if name.contains("stdin") || name.contains("stdout") || name.contains("stderr") {
+                continue; // these are pointer globals that DO need dereference
+            }
+            let deref = format!("*({})", name);
+            if line.contains(&deref) {
+                *line = line.replace(&deref, name);
+            }
+        }
+    }
+
     // Remove consecutive blank lines
     let mut result = String::new();
     let mut prev_blank = false;
