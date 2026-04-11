@@ -1388,8 +1388,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let hex_str = &new_line[abs_pos..hex_end];
                 if let Ok(val) = u64::from_str_radix(&hex_str[2..], 16) {
                     if val > 0x200 {
-                        // Try string literal
+                        // Try string literal (require >= 4 chars to avoid false positives)
                         if let Some(s) = try_read_string(val, ctx) {
+                            if s.len() < 4 { search_from = hex_end; continue; }
                             let escaped = format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"));
                             new_line = format!("{}{}{}", &new_line[..abs_pos], escaped, &new_line[hex_end..]);
                             search_from = abs_pos + escaped.len();
@@ -1732,18 +1733,43 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
-    // #FALSESTR: Remove false short string literals from addresses
-    // "h@@" and similar garbage from .bss addresses decoded as ASCII
+    // #FALSESTR: Remove false short string literals from addresses.
+    // These are garbage strings from random bytes at addresses decoded as ASCII.
     for line in &mut lines {
-        // Replace patterns like = "X@@" or "X@@" where it's clearly not a real string
-        let l = line.clone();
-        if l.contains("\"") {
-            // Check for strings that are clearly address garbage (contain @, \x, non-printable patterns)
+        if line.contains("\"") {
+            // Replace known garbage patterns
             for pat in ["\"h@@\"", "\"@@\"", "\"@\""] {
-                if l.contains(pat) {
-                    // Replace with hex address
-                    *line = line.replace(pat, "0x0");
+                *line = line.replace(pat, "0x0");
+            }
+            // Remove false short strings in arithmetic contexts:
+            // pattern & "XYZ" or pattern & "XY"%" — these are addresses not strings
+            // Detect: quoted strings inside & or | expressions (bitwise ops on "strings" = nonsense)
+            if (line.contains("& \"") || line.contains("| \"")) && !line.contains("printf")
+                && !line.contains("puts") && !line.contains("fwrite")
+            {
+                // Replace all short quoted strings (< 5 chars) with hex in this line
+                let mut result = String::new();
+                let mut chars = line.chars().peekable();
+                while let Some(c) = chars.next() {
+                    if c == '"' {
+                        let mut s = String::new();
+                        while let Some(&nc) = chars.peek() {
+                            if nc == '"' { chars.next(); break; }
+                            s.push(nc);
+                            chars.next();
+                        }
+                        if s.len() < 5 && (line.contains(" & ") || line.contains(" | ")) {
+                            result.push_str("0x0");
+                        } else {
+                            result.push('"');
+                            result.push_str(&s);
+                            result.push('"');
+                        }
+                    } else {
+                        result.push(c);
+                    }
                 }
+                *line = result;
             }
         }
     }
@@ -2290,6 +2316,91 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 }
             }
         }
+    }
+
+    // #CTYPE: Remove ctype table access noise (60[REG + RAX] patterns).
+    // macOS ctype lookup: loads from the __ctype_b table at offset 60.
+    {
+        let mut i = 0;
+        while i < lines.len() {
+            let lt = lines[i].trim();
+            // Remove lines that are ONLY ctype table lookups with no other effect
+            if lt.contains("60[") && lt.contains("/* isspace */") && lt.ends_with(';') {
+                if lt.starts_with("EAX = ") || lt.starts_with("RAX = ") {
+                    lines.remove(i);
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+
+    // #SWITCH2: Detect if-else chains on the same variable as switch/case.
+    // Pattern: if (*(v) == 3) { ... } else { if (*(v) == 4) { ... } else { if (*(v) == 5) { ... } } }
+    // → switch(*(v)) { case 3: ... case 4: ... case 5: ... }
+    // For now, just annotate with comments when we see cascading equality checks.
+    {
+        let mut i = 0;
+        while i < lines.len() {
+            let lt = lines[i].trim().to_string();
+            // Find "if (EXPR == N)" where the next else-if checks the same EXPR
+            if lt.starts_with("if (") && lt.contains(" == ") && lt.ends_with(") {") {
+                // Extract the variable being compared
+                let cond = &lt[4..lt.len()-3]; // strip "if (" and ") {"
+                if let Some(eq_pos) = cond.find(" == ") {
+                    let var_name = &cond[..eq_pos];
+                    let first_val = &cond[eq_pos+4..];
+                    // Count how many consecutive else-if blocks check the same variable
+                    let mut cases = vec![first_val.to_string()];
+                    let mut j = i + 1;
+                    let mut depth = 1i32;
+                    while j < lines.len() && depth > 0 {
+                        let jt = lines[j].trim();
+                        if jt.contains('{') { depth += jt.matches('{').count() as i32; }
+                        if jt.contains('}') { depth -= jt.matches('}').count() as i32; }
+                        if depth == 0 {
+                            // Check next line for "} else {"
+                            if j + 1 < lines.len() {
+                                let next = lines[j+1].trim();
+                                if next.starts_with("} else {") || next == "} else {" {
+                                    // Check line after for another if with same var
+                                    if j + 2 < lines.len() {
+                                        let inner = lines[j+2].trim();
+                                        let check = format!("if ({} == ", var_name);
+                                        if inner.starts_with(&check) && inner.ends_with(") {") {
+                                            let val = &inner[check.len()..inner.len()-3];
+                                            cases.push(val.to_string());
+                                            depth = 1;
+                                            j += 2;
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        j += 1;
+                    }
+                    if cases.len() >= 3 {
+                        let indent = lines[i].len() - lines[i].trim_start().len();
+                        let pad = " ".repeat(indent);
+                        let case_str = cases.iter().map(|c| format!("{}", c)).collect::<Vec<_>>().join(", ");
+                        lines.insert(i, format!("{}// switch({}) — cases: {}", pad, var_name, case_str));
+                        i += 1; // skip the comment we just inserted
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
+    // #SIZEOF: Annotate calloc/malloc with likely struct sizes.
+    for line in &mut lines {
+        // Common struct sizes from real-world code
+        if line.contains("calloc(1, 32)") { *line = line.replace("calloc(1, 32)", "calloc(1, 32) /* sizeof(struct) */"); }
+        if line.contains("calloc(1, 40)") { *line = line.replace("calloc(1, 40)", "calloc(1, 40) /* sizeof(struct) */"); }
+        if line.contains("calloc(1, 48)") { *line = line.replace("calloc(1, 48)", "calloc(1, 48) /* sizeof(struct) */"); }
+        if line.contains("calloc(1, 56)") { *line = line.replace("calloc(1, 56)", "calloc(1, 56) /* sizeof(struct) */"); }
+        if line.contains("calloc(1, 64)") { *line = line.replace("calloc(1, 64)", "calloc(1, 64) /* sizeof(struct) */"); }
     }
 
     // #LLM: Clean up patterns that confuse LLM analysis.
@@ -3720,7 +3831,11 @@ fn format_const_ctx(val: u64, size: u32, ctx: &PrintCtx) -> String {
         if let Some(s) = try_read_string(val, ctx) {
             // Skip empty strings — these are usually float constants or padding
             // (the first byte is 0x00 which try_read_string returns as "")
-            if s.is_empty() { /* fall through to hex */ }
+            // Skip empty strings and very short strings (< 4 chars) in SSA output.
+            // Short strings at random addresses are almost always false positives
+            // from float constants, flag fields, or padding bytes.
+            // Real short strings are handled by the post-processor for puts("").
+            if s.is_empty() || s.len() < 4 { /* fall through to hex */ }
             else { return format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")); }
         }
         // Try import/global name (e.g., GOT entry for stdin/stdout)
