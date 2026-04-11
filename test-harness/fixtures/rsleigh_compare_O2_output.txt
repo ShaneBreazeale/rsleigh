@@ -1,5 +1,8 @@
 === abs_val (52 instructions) ===
-  return -EDI;
+  EAX = -EDI;
+  if (!(!SF)) {
+      return EDI;
+  }
 ---
 === add (13 instructions) ===
   return;
@@ -268,7 +271,9 @@
   }
 ---
 === max_val (15 instructions) ===
-  return ESI;
+  if (!!ZF && OF != SF) {
+      return EDI;
+  }
 ---
 === modulo_10 (132 instructions) ===
   RAX = EDI;
