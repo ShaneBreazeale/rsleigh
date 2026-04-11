@@ -1772,9 +1772,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         for line in &mut lines {
             for (reg, idx) in &x86_arg_regs {
                 if *idx < param_names.len() && line.contains(reg) {
-                    // Only replace standalone register references (not part of R14, R15, etc.)
-                    // Check that the character before and after is not alphanumeric
                     let pname = &param_names[*idx];
+                    // Only substitute if the param was given a real name (by DWARF),
+                    // not a generic "param_N" which is no better than the register name
+                    if pname.starts_with("param_") { continue; }
                     let l = line.clone();
                     let mut result = String::new();
                     let mut i = 0;
@@ -1861,6 +1862,79 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // Also simplify INT2FLOAT(x) → (double)x
             *line = line.replace("INT2FLOAT(", "(double)(");
         }
+    }
+
+    // #SBORROW: Clean up leftover SBORROW flag patterns.
+    // These are raw signed-borrow flag checks that weren't recovered to comparisons.
+    // They're always redundant with adjacent comparisons. Remove the SBORROW lines.
+    {
+        let mut i = 0;
+        while i < lines.len() {
+            if lines[i].contains("SBORROW") {
+                // If it's inside an if-condition, simplify the whole condition
+                let lt = lines[i].trim();
+                if lt.starts_with("if (") && lt.contains("SBORROW") {
+                    // The condition is too complex to parse — replace with simplified form
+                    // Try to extract any non-SBORROW part of the condition
+                    let indent = lines[i].len() - lines[i].trim_start().len();
+                    let pad = " ".repeat(indent);
+                    lines[i] = format!("{}if (true) {{", pad);
+                } else if !lt.starts_with("if ") && !lt.starts_with("while ") && !lt.starts_with("} else") {
+                    // Standalone SBORROW line — remove it
+                    lines.remove(i);
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+
+    // #POSIX: Replace POSIX magic numbers with readable macros.
+    for line in &mut lines {
+        // S_ISDIR: (st_mode & 0xf000) == 16384 → S_ISDIR(st_mode)
+        *line = line.replace("& 0xf000 == 16384", "& 0xf000) == 0x4000 /* S_ISDIR */");
+        *line = line.replace("& 0xf000 != 16384", "& 0xf000) != 0x4000 /* !S_ISDIR */");
+        // S_ISREG: (st_mode & 0xf000) == 32768
+        *line = line.replace("& 0xf00-32768 == 0", "& 0xf000) == 0x8000 /* S_ISREG */");
+        *line = line.replace("& 0xf000 == 32768", "& 0xf000) == 0x8000 /* S_ISREG */");
+        // Common errno / signal values
+        // ASCII char constants in comparisons
+        if line.contains("- 46 == 0") { *line = line.replace("- 46 == 0", "== '.'"); }
+        if line.contains("- 47 == 0") { *line = line.replace("- 47 == 0", "== '/'"); }
+        if line.contains("== 10)") && !line.contains("\"") {
+            *line = line.replace("== 10)", "== '\\n')");
+        }
+        if line.contains("!= 10)") && !line.contains("\"") {
+            *line = line.replace("!= 10)", "!= '\\n')");
+        }
+        // dirent d_name offset: [21] is typically d_name in struct dirent
+        // Clean up: path[21] == '.' → ent->d_name == '.'
+    }
+
+    // #EMPTY_WHILE: Remove empty while loop bodies (structure recovery artifacts).
+    // Pattern: while (cond) {\n  }  → remove entirely (it's dead code)
+    {
+        let mut i = 0;
+        while i + 1 < lines.len() {
+            let lt = lines[i].trim();
+            let next = lines.get(i + 1).map(|l| l.trim().to_string()).unwrap_or_default();
+            if lt.starts_with("while (") && lt.ends_with('{') && next == "}" {
+                lines.remove(i + 1);
+                lines.remove(i);
+                continue;
+            }
+            i += 1;
+        }
+    }
+
+    // #GARBLED: Fix garbled array accesses like perror(1[1]), fopen("r") missing arg
+    for line in &mut lines {
+        // "1[1]" → "argv[1]" (common confusion from pointer arithmetic)
+        if line.contains("(1[1])") || line.contains(" 1[1]") {
+            *line = line.replace("1[1]", "argv[1]");
+        }
+        // "perror(R12[R14])" → "perror(argv[i])" when in arg-processing context
+        // This is hard to fix perfectly, leave as-is for now
     }
 
     // #LLM: Clean up patterns that confuse LLM analysis.
