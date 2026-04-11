@@ -173,6 +173,21 @@ while (EAX % EDX != 0) {
 // Constant folding in main (compiler inlined everything)
 printf("add(3,4) = %d\n", 7);
 printf("factorial(6) = %d\n", 720);
+
+// Call return values inlined into conditions
+if (stage1() == 0) { fail(); }         // was: stage1(); if (0 == 0)
+if (trademark(buf) == 0) { ... }       // was: trademark(buf); if (0 == 0)
+if (strcmp(RAX, param_0) == 0) { ... }  // was: strcmp(...); if (param_2 == 0)
+
+// Float constant resolution from binary memory
+snprintf(buf, N, "%.1f GB", XMM0 / 1073741824.0);  // reciprocal detected
+
+// Switch/case jump table resolution
+// switch table: case 0: "Sunday", case 1: "Monday", ..., case 6: "Saturday"
+
+// DWARF param names in optimized code
+if (size > 1023) { ... }               // was: if (RDI > 0x3ff)
+snprintf(buf, buflen, "%lld B");       // was: snprintf(RBX, 1, ...)
 ```
 
 The decompiler pipeline: P-code -> CFG -> SSA -> expression folding -> structure recovery -> C printer.
@@ -229,6 +244,15 @@ What it does:
 - Register copy tracking and inlining at print time
 - Sequential register assignment chaining (`ECX = len - 1; ECX = ECX - i` -> `ECX = (len - 1) - i`)
 - Cross-block expression folding (`EAX = -EDI; if (...) {...} return EAX` -> `return -EDI`)
+- Call return value inlining into conditions (`func(); if (0 == 0)` -> `if (func() == 0)`)
+- Switch/case jump table resolution from binary (reads relative offset tables, shows case strings)
+- While loop body scoping (exit block bounded to prevent post-loop code leaking into body)
+- Float reciprocal detection from binary memory (`* *(addr)` -> `/ 1024.0`)
+- Variadic float arg merging (`RAX = "%.1f"; XMM0 = expr; snprintf(...)` -> `snprintf(buf, N, "%.1f", expr)`)
+- POSIX macro annotation (`& 0xf000 == 16384` -> `/* S_ISDIR */`)
+- ASCII constant decoding in comparisons (`- 46 == 0` -> `== '.'`)
+- `-1` display for sentinel values (`0xffffffffffffffff` -> `-1`)
+- SBORROW flag cleanup (complex flag conditions replaced)
 - IDIV dividend noise removal (`EDX << 0x20 | X` -> `X`)
 - Constant propagation for loop-invariant register values
 
@@ -280,7 +304,7 @@ rsleigh/
 - **Compiled code patterns** — stack canary (FS:[0x28]), stack alignment (AND RSP,-16), indirect calls/jumps, switch tables, SETcc, REP MOVSB, LOCK XADD, SSE2 ADDSD/MOVSD, SYSCALL, PLT/GOT sequences, TBZ/TBNZ, CSET/CSINC, post-index loads, memory barriers, thread pointer reads.
 - **Ghidra differential fixtures** — ~300 instructions compared against Ghidra's P-code output
 - **Ghidra decompiler comparison** — 11 functions (add, factorial, sum_array, string_length, manhattan_distance, day_name, list_sum, binary_search, apply, main) decompiled side-by-side with Ghidra 12 (`cargo run -p test-harness --example compare`)
-- **CTF binary validation** — 25+ real CTF binaries from CSAW Red 2020, CSAW 2016, HSCTF 6, Nightmare, UTCTF decompiled successfully (buffer overflows, heap menus, integer exploitation, bad seeds, C++ reversing, format strings, heap notes, crypto)
+- **CTF binary validation** — 30+ real CTF binaries from Google CTF 2024, CSAW Red 2020, CSAW 2016, HSCTF 6, DiceCTF, Nightmare, UTCTF decompiled successfully (buffer overflows, heap menus, integer exploitation, bad seeds, C++ reversing, format strings, heap notes, crypto, AES, encoding schemes)
 - **Corpus validation** — 278 real instructions across all architectures, decode without panic
 - **Fuzz tests** — 5000 random byte sequences (empty, truncated, garbage), zero panics
 - **Decompiler validation** — compiles C source with `-g`, decompiles with rsleigh, asserts string literals, import names, DWARF parameter names, conditions, function calls, return values
