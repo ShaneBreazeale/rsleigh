@@ -690,6 +690,45 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Fold accumulator chains: EDX = a; EAX = b; EDX = EDX + EAX; → EDX = a + b;
+    // Runs after struct field conversion so field names are preserved.
+    {
+        let mut i = 0;
+        while i + 2 < lines.len() {
+            let l1 = lines[i].trim().to_string();
+            let l2 = lines[i + 1].trim().to_string();
+            let l3 = lines[i + 2].trim().to_string();
+            if let (Some(eq1), Some(eq2), Some(eq3)) = (l1.find(" = "), l2.find(" = "), l3.find(" = ")) {
+                let lhs1 = l1[..eq1].to_string();
+                let rhs1 = l1[eq1 + 3..].trim_end_matches(';').to_string();
+                let lhs2 = l2[..eq2].to_string();
+                let rhs2 = l2[eq2 + 3..].trim_end_matches(';').to_string();
+                let lhs3 = l3[..eq3].to_string();
+                let rhs3 = l3[eq3 + 3..].trim_end_matches(';').to_string();
+                // Pattern: ACC = expr; TMP = val; ACC = ACC + TMP;
+                if lhs1 == lhs3 && rhs3 == format!("{} + {}", lhs1, lhs2) {
+                    let indent = lines[i].len() - lines[i].trim_start().len();
+                    let pad = " ".repeat(indent);
+                    lines[i] = format!("{}{} = {} + {};", pad, lhs1, rhs1, rhs2);
+                    lines.remove(i + 2);
+                    lines.remove(i + 1);
+                    continue;
+                }
+                // Also: ACC = expr; TMP = (val) + ACC; → ACC = expr + val;
+                if lhs2 == lhs3 && rhs3.ends_with(&format!(" + {}", lhs1)) {
+                    let val_part = rhs3.trim_end_matches(&format!(" + {}", lhs1));
+                    let indent = lines[i].len() - lines[i].trim_start().len();
+                    let pad = " ".repeat(indent);
+                    lines[i] = format!("{}{} = {} + {};", pad, lhs2, rhs1, val_part);
+                    lines.remove(i + 2);
+                    lines.remove(i + 1);
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+
     // Elide redundant register assignments: REG = expr; var = expr; → var = expr;
     // When a Store to a stack variable captures the same expression that was just
     // assigned to a register, the register assignment is pure noise.
@@ -1596,7 +1635,16 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                 });
 
                 if !next_reads_eax {
-                    out.push_str(&format!("{}{};\n", pad, call_expr));
+                    // For allocation functions, show the return assignment
+                    // since the pointer is always used afterwards.
+                    let is_alloc = target_name == "malloc" || target_name == "calloc"
+                        || target_name == "realloc" || target_name == "mmap"
+                        || target_name == "strdup";
+                    if is_alloc {
+                        out.push_str(&format!("{}ptr = {};\n", pad, call_expr));
+                    } else {
+                        out.push_str(&format!("{}{};\n", pad, call_expr));
+                    }
                 }
             }
         }
@@ -2459,14 +2507,17 @@ fn format_const_ctx(val: u64, size: u32, ctx: &PrintCtx) -> String {
 
 fn format_const(val: u64, size: u32) -> String {
     if val == 0 { return "0".to_string(); }
-    if val < 10 { return format!("{}", val); }
+    // Small positive values in decimal for readability
+    if val < 1000 { return format!("{}", val); }
+    // Check for negative values (sign bit set)
     let sign_bit = match size {
         1 => 0x80, 2 => 0x8000, 4 => 0x80000000, 8 => 0x8000000000000000, _ => 0,
     };
     if sign_bit != 0 && val >= sign_bit && val != u64::MAX {
         let mask = match size { 1 => 0xFF, 2 => 0xFFFF, 4 => 0xFFFFFFFF, _ => u64::MAX };
         let neg = ((!val) & mask).wrapping_add(1);
-        if neg <= 0x1000 { return format!("-0x{:x}", neg); }
+        if neg < 1000 { return format!("-{}", neg); }
+        if neg <= 0x10000 { return format!("-0x{:x}", neg); }
     }
     format!("0x{:x}", val)
 }

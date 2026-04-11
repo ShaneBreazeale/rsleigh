@@ -7,7 +7,7 @@
 ---
 === binary_search (62 instructions) ===
   while (hi >= lo) {
-      EAX = EAX / 2;
+      EAX = EDX << 32 | EAX / 2;
       mid = lo + ECX;
       if (target != arr[mid]) {
           EAX = arr[mid];
@@ -20,7 +20,6 @@
           return;
       }
   }
-  return -0x1;
 ---
 === day_name (39 instructions) ===
   RAX = day - 6;
@@ -48,13 +47,13 @@
 === main (93 instructions) ===
   printf("add(3,4) = %d\n", add(3, 4));
   printf("factorial(6) = %d\n", factorial(6));
-  printf("sum = %d\n", sum_array(nums, 5));
+  printf("sum = %d\n", sum_array(RBP - 32, 5));
   printf("strlen = %d\n", string_length("hello world"));
-  printf("manhattan = %d\n", manhattan_distance(a, b));
+  printf("manhattan = %d\n", manhattan_distance(RBP - 104, RBP - 112));
   printf("day = %s\n", day_name(3));
   printf("apply(add,5,6) = %d\n", apply(add, 5, 6));
-  memcpy(sorted, 0x100000a50, 0x28);
-  printf("search(23) = %d\n", binary_search(sorted, 0xa, 0x17));
+  memcpy(RBP - 80, 0x100000a50, 40);
+  printf("search(23) = %d\n", binary_search(RBP - 80, 10, 23));
   return 0;
 ---
 === manhattan_distance (28 instructions) ===
