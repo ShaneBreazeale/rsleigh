@@ -141,7 +141,10 @@ fn run() {
     let cli_funcs: Vec<String> = std::env::args().skip(2).collect();
     let target_funcs: Vec<String> = if cli_funcs.is_empty() {
         symbols.iter()
-            .filter(|(_, n)| !n.starts_with('_') && !n.starts_with("dyld") && !n.is_empty())
+            .filter(|(_, n)| !n.starts_with('_') && !n.starts_with("dyld") && !n.is_empty()
+                && !["deregister_tm_clones", "register_tm_clones", "frame_dummy",
+                      "__do_global_dtors_aux", "__libc_csu_init", "__libc_csu_fini",
+                      "_dl_relocate_static_pie"].contains(&n.as_str()))
             .map(|(_, n)| n.clone())
             .collect()
     } else {

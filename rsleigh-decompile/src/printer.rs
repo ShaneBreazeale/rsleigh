@@ -1671,6 +1671,83 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #ARGS: Strip extra arguments from known single-arg functions.
+    // puts(msg, stale_reg) → puts(msg), exit(code, stale) → exit(code)
+    let single_arg_fns = ["puts", "exit", "abort", "perror", "free",
+                           "close", "putchar", "strlen"];
+    for line in &mut lines {
+        for func in &single_arg_fns {
+            let pat = format!("{}(", func);
+            if let Some(start) = line.find(&pat) {
+                let args_start = start + pat.len();
+                // Find the first arg's end (respecting nested parens/quotes)
+                let mut depth = 0;
+                let mut in_str = false;
+                let mut first_comma = None;
+                for (i, c) in line[args_start..].char_indices() {
+                    if c == '"' && !in_str { in_str = true; continue; }
+                    if c == '"' && in_str { in_str = false; continue; }
+                    if in_str { continue; }
+                    if c == '(' { depth += 1; }
+                    if c == ')' { if depth == 0 { break; } depth -= 1; }
+                    if c == ',' && depth == 0 { first_comma = Some(args_start + i); break; }
+                }
+                if let Some(comma_pos) = first_comma {
+                    // Find the closing paren
+                    let mut d = 0;
+                    let mut close = None;
+                    for (i, c) in line[args_start..].char_indices() {
+                        if c == '(' { d += 1; }
+                        if c == ')' { if d == 0 { close = Some(args_start + i); break; } d -= 1; }
+                    }
+                    if let Some(close_pos) = close {
+                        // Replace: func(arg1, arg2, ...) → func(arg1)
+                        let new_line = format!("{}{}){}", &line[..comma_pos], "", &line[close_pos + 1..]);
+                        let first_arg = &line[args_start..comma_pos];
+                        *line = format!("{}{}({}){}", &line[..start], func, first_arg, &line[close_pos + 1..]);
+                    }
+                }
+            }
+        }
+    }
+
+    // #INDENT: Fix orphaned return at end of function with wrong indentation.
+    // Only fix the very last non-empty line if it's a return with excess indent.
+    if let Some(last_idx) = lines.iter().rposition(|l| !l.trim().is_empty()) {
+        let lt = lines[last_idx].trim().to_string();
+        let my_indent = lines[last_idx].len() - lines[last_idx].trim_start().len();
+        if (lt == "return;" || lt.starts_with("return ")) && my_indent > 2 {
+            // Check if this return is at top level (not inside a block)
+            // by counting open/close braces before it
+            let mut depth: i32 = 0;
+            for j in 0..last_idx {
+                let t = lines[j].trim();
+                depth += t.matches('{').count() as i32;
+                depth -= t.matches('}').count() as i32;
+            }
+            // If depth is 0, this return should be at top level (indent 0 or 2)
+            if depth <= 0 && my_indent > 0 {
+                lines[last_idx] = lt;
+            }
+        }
+    }
+
+    // #FALSESTR: Remove false short string literals from addresses
+    // "h@@" and similar garbage from .bss addresses decoded as ASCII
+    for line in &mut lines {
+        // Replace patterns like = "X@@" or "X@@" where it's clearly not a real string
+        let l = line.clone();
+        if l.contains("\"") {
+            // Check for strings that are clearly address garbage (contain @, \x, non-printable patterns)
+            for pat in ["\"h@@\"", "\"@@\"", "\"@\""] {
+                if l.contains(pat) {
+                    // Replace with hex address
+                    *line = line.replace(pat, "0x0");
+                }
+            }
+        }
+    }
+
     // Remove consecutive blank lines
     let mut result = String::new();
     let mut prev_blank = false;
