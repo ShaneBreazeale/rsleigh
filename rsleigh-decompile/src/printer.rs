@@ -2615,6 +2615,71 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #DEDUP_ERRNO: Remove duplicate __error() + errno condition check sequences.
+    // When __error() is followed by an identical condition that was already tested
+    // in the parent scope, the inner check is redundant.
+    {
+        let mut i = 0;
+        while i + 2 < lines.len() {
+            let lt = lines[i].trim().to_string();
+            let l1 = lines[i + 1].trim().to_string();
+            let l2 = lines[i + 2].trim().to_string();
+            // Pattern: "if (COND) {\n __error();\n if (COND) {"
+            // The inner __error + if is redundant
+            if lt.starts_with("if (") && lt.ends_with('{')
+                && l1.contains("__error()")
+                && l2 == lt
+            {
+                // Remove __error() and the duplicate if, plus its closing brace
+                lines.remove(i + 2);
+                lines.remove(i + 1);
+                // Find and remove the extra closing "}"
+                let indent = lines[i].len() - lines[i].trim_start().len();
+                for j in (i + 1..lines.len()).rev() {
+                    let jt = lines[j].trim();
+                    let j_indent = lines[j].len() - lines[j].trim_start().len();
+                    if jt == "}" && j_indent >= indent {
+                        lines.remove(j);
+                        break;
+                    }
+                }
+                continue;
+            }
+            i += 1;
+        }
+    }
+
+    // #DEAD_STORE_BEFORE_RETURN: Remove "var_N = expr;" immediately before "return"
+    // when the var_N is not referenced anywhere else in the function.
+    {
+        let all_text = lines.join("\n");
+        let mut i = 0;
+        while i + 1 < lines.len() {
+            let lt = lines[i].trim().to_string();
+            let next = lines[i + 1].trim().to_string();
+            if lt.starts_with("var_") && lt.contains(" = ") && next.starts_with("return ") {
+                if let Some(eq) = lt.find(" = ") {
+                    let var_name = &lt[..eq];
+                    // Count occurrences of this var name in the entire output
+                    let count = all_text.matches(var_name).count();
+                    // If it only appears once (this assignment), it's dead
+                    if count <= 1 {
+                        lines.remove(i);
+                        continue;
+                    }
+                    // Also remove if RHS matches the return value
+                    let rhs = lt[eq + 3..].trim_end_matches(';').trim();
+                    let ret_val = next.strip_prefix("return ").unwrap_or("").trim_end_matches(';').trim();
+                    if rhs == ret_val {
+                        lines.remove(i);
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
     // #DEAD_RETURN: Remove unreachable return after if/else where both branches return.
     // Pattern: "} else {\n  return ...;\n}\nreturn ...;" → remove trailing return
     {
