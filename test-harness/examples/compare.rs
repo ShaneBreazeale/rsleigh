@@ -65,6 +65,7 @@ fn run() {
         goblin::Object::Elf(elf) => {
             let arch = match elf.header.e_machine {
                 0x3E => rsleigh_api::Architecture::X86_64,   // EM_X86_64
+                0x03 => rsleigh_api::Architecture::X86_32,   // EM_386
                 0xB7 => rsleigh_api::Architecture::AArch64,  // EM_AARCH64
                 0x28 => rsleigh_api::Architecture::ARM32,    // EM_ARM
                 0x08 => rsleigh_api::Architecture::MIPS32,   // EM_MIPS
