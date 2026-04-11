@@ -3691,6 +3691,89 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #DECLARATIONS: Insert typed local variable declarations after the opening brace.
+    // Scan the output for auto-named variables (lVar1, iVar2, etc.) and emit a
+    // declaration block matching Ghidra's style.
+    {
+        use std::collections::BTreeSet;
+        // Collect all auto-named variable references from the output
+        let all_text = lines.join("\n");
+        let mut var_names: BTreeSet<String> = BTreeSet::new();
+        // Match patterns: lVar\d+, iVar\d+, bVar\d+, wVar\d+, pVar\d+, fVar\d+, dVar\d+
+        let prefixes = &["lVar", "iVar", "bVar", "wVar", "pVar", "fVar", "dVar"];
+        for prefix in prefixes {
+            let mut search_from = 0;
+            while let Some(pos) = all_text[search_from..].find(prefix) {
+                let abs_pos = search_from + pos;
+                // Check word boundary before
+                let before_ok = abs_pos == 0 || {
+                    let b = all_text.as_bytes()[abs_pos - 1];
+                    !b.is_ascii_alphanumeric() && b != b'_'
+                };
+                if before_ok {
+                    // Collect digits after prefix
+                    let digit_start = abs_pos + prefix.len();
+                    let mut digit_end = digit_start;
+                    while digit_end < all_text.len() && all_text.as_bytes()[digit_end].is_ascii_digit() {
+                        digit_end += 1;
+                    }
+                    if digit_end > digit_start {
+                        // Check word boundary after
+                        let after_ok = digit_end >= all_text.len() || {
+                            let b = all_text.as_bytes()[digit_end];
+                            !b.is_ascii_alphanumeric() && b != b'_'
+                        };
+                        if after_ok {
+                            var_names.insert(all_text[abs_pos..digit_end].to_string());
+                        }
+                    }
+                }
+                search_from = search_from + pos + prefix.len();
+            }
+        }
+
+        if !var_names.is_empty() {
+            // Build declaration lines
+            let mut decl_lines: Vec<String> = Vec::new();
+            for name in &var_names {
+                let type_str = if name.starts_with("lVar") {
+                    "long"
+                } else if name.starts_with("iVar") {
+                    "int"
+                } else if name.starts_with("bVar") {
+                    "uint8_t"
+                } else if name.starts_with("wVar") {
+                    "uint16_t"
+                } else if name.starts_with("pVar") {
+                    "void *"
+                } else if name.starts_with("fVar") {
+                    "float"
+                } else if name.starts_with("dVar") {
+                    "double"
+                } else {
+                    "int"
+                };
+                decl_lines.push(format!("    {} {};", type_str, name));
+            }
+
+            // Find the first line ending with '{' and insert after it
+            let mut insert_idx = None;
+            for (idx, line) in lines.iter().enumerate() {
+                if line.trim_end().ends_with('{') {
+                    insert_idx = Some(idx + 1);
+                    break;
+                }
+            }
+            if let Some(idx) = insert_idx {
+                // Insert an empty line after declarations for visual separation
+                decl_lines.push(String::new());
+                for (j, decl) in decl_lines.into_iter().enumerate() {
+                    lines.insert(idx + j, decl);
+                }
+            }
+        }
+    }
+
     // Convert ->fieldN to array indexing [N/element_size] when offset is aligned.
     // offset divisible by 8 → [N/8] (64-bit pointer array)
     // offset divisible by 4 but not 8 → [N/4] (32-bit int array)
