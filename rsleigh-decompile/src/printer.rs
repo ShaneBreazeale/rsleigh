@@ -16,12 +16,13 @@ pub fn print_c(
     imports: &HashMap<u64, String>,
     local_names: &HashMap<String, String>,
     struct_fields: &HashMap<u64, String>,
+    func_name: &str,
 ) -> String {
     let mut out = String::new();
     let ctx = PrintCtx { arch, binary, imports };
 
     // Generate function signature from SSA analysis
-    generate_function_signature(&mut out, ssa);
+    generate_function_signature(&mut out, ssa, func_name);
 
     let filtered = filter_boilerplate(stmts, ssa);
     let mut tracker = RegTracker::new();
@@ -3222,6 +3223,50 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         true
     });
 
+    // #CONST_FOLD: Remove constant-vs-constant comparisons that are always true/false.
+    // Pattern: "if (0 < 41)" or "if (0 > 41)" where both sides are literals.
+    lines.retain(|line| {
+        let t = line.trim();
+        // "if (N < M)" where N and M are both numeric constants
+        if t.starts_with("if (") && t.ends_with('{') {
+            let inner = &t[4..t.len() - 2].trim(); // strip "if (" and ") {"
+            for op in [" < ", " > ", " <= ", " >= ", " == ", " != "] {
+                if let Some(pos) = inner.find(op) {
+                    let left = inner[..pos].trim();
+                    let right = inner[pos + op.len()..].trim().trim_end_matches(')');
+                    if left.parse::<i64>().is_ok() && right.parse::<i64>().is_ok() {
+                        return false; // constant comparison — remove
+                    }
+                }
+            }
+        }
+        true
+    });
+
+    // #EMPTY_ELSE: Remove empty else branches: "} else {\n}"
+    {
+        let mut i = 0;
+        while i + 1 < lines.len() {
+            let lt = lines[i].trim();
+            let next = lines[i + 1].trim();
+            if lt == "} else {" && next == "}" {
+                lines.remove(i + 1);
+                lines[i] = lines[i].replace("} else {", "}");
+                continue;
+            }
+            i += 1;
+        }
+    }
+
+    // #RETURN_NEG1: Display 0xffffffffffffffff and 0xffffffff as -1 in return statements.
+    for line in &mut lines {
+        let t = line.trim();
+        if t == "return 0xffffffffffffffff;" || t == "return 0xffffffff;" {
+            let pad = " ".repeat(line.len() - line.trim_start().len());
+            *line = format!("{}return -1;", pad);
+        }
+    }
+
     // #ERRNO: Recognize __error() + store patterns as errno assignment.
     // macOS: __error() returns &errno. Linux: ___errno_location() returns &errno.
     // Pattern: "__error();\n  *(uint32_t*)(N) = M;" → "errno = M;"
@@ -3288,20 +3333,23 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         use std::collections::BTreeMap;
         // Registers that should NOT be auto-named (parameters, stack/frame, instruction pointer)
         let skip_regs: &[&str] = &[
-            "RDI", "EDI", "DIL", "RSI", "ESI", "SIL", "RDX", "EDX", "DL",
-            "RCX", "ECX", "CL", "R8", "R8D", "R9", "R9D",
+            "RDI", "EDI", "RSI", "ESI", "RDX", "EDX",
+            "RCX", "ECX", "R8", "R8D", "R9", "R9D",
             "RSP", "ESP", "RBP", "EBP", "RIP", "EIP",
             "XMM0", "XMM1", "XMM2", "XMM3", "XMM4", "XMM5",
         ];
         // Candidate registers for renaming
         let reg_candidates: &[(&str, &str)] = &[
-            // (register_name, type_prefix) — 64-bit → l, 32-bit → i
+            // (register_name, type_prefix) — 64-bit → l, 32-bit → i, 8-bit → b
             ("RAX", "l"), ("RBX", "l"), ("R12", "l"), ("R13", "l"),
             ("R14", "l"), ("R15", "l"), ("R10", "l"), ("R11", "l"),
             ("EAX", "i"), ("EBX", "i"), ("R12D", "i"), ("R13D", "i"),
             ("R14D", "i"), ("R15D", "i"), ("R10D", "i"), ("R11D", "i"),
             ("AL", "b"), ("BL", "b"), ("AH", "b"), ("BH", "b"),
-            ("AX", "w"), ("BX", "w"),
+            ("DIL", "b"), ("SIL", "b"), ("DL", "b"), ("CL", "b"),
+            ("R8B", "b"), ("R9B", "b"), ("R10B", "b"), ("R11B", "b"),
+            ("R12B", "b"), ("R13B", "b"), ("R14B", "b"), ("R15B", "b"),
+            ("AX", "w"), ("BX", "w"), ("CX", "w"),
         ];
 
         // Scan all lines for register appearances
@@ -3382,7 +3430,7 @@ struct PrintCtx<'a> {
 
 /// Remove prologue/epilogue boilerplate from the top level.
 /// Generate a C-style function signature from SSA parameter and return type analysis.
-fn generate_function_signature(out: &mut String, ssa: &SsaCfg) {
+fn generate_function_signature(out: &mut String, ssa: &SsaCfg, func_name: &str) {
     use crate::ir::InferredType;
 
     // Detect return type from Return terminators
@@ -3455,7 +3503,7 @@ fn generate_function_signature(out: &mut String, ssa: &SsaCfg) {
         param_strs.join(", ")
     };
 
-    out.push_str(&format!("{} func({}) {{\n", return_type, params_str));
+    out.push_str(&format!("{} {}({}) {{\n", return_type, func_name, params_str));
 }
 
 fn filter_boilerplate(stmts: &[StructuredStmt], ssa: &SsaCfg) -> Vec<StructuredStmt> {

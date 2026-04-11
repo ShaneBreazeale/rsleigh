@@ -152,6 +152,13 @@ pub fn decompile_with_binary(
         std::collections::HashMap::new()
     };
 
+    // Resolve function name from import map or DWARF
+    let func_addr = instructions[0].0;
+    let func_name = import_map.get(&func_addr).cloned()
+        .or_else(|| debug_info.as_ref().and_then(|di| di.get(&func_addr).and_then(|f|
+            Some(f.param_names.first()?.clone()))).and(None)) // DWARF doesn't have func name easily
+        .unwrap_or_else(|| format!("func_{:x}", func_addr));
+
     let structured = structure::recover_structure(&ssa, &cfg);
-    printer::print_c(&structured, &ssa, arch, binary, &import_map, &local_var_names, &struct_fields)
+    printer::print_c(&structured, &ssa, arch, binary, &import_map, &local_var_names, &struct_fields, &func_name)
 }
