@@ -3540,6 +3540,47 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #GLOBAL_NAMES: Name repeated hex addresses as DAT_xxx (global variables).
+    // When a hex address 0x1400NNNNN appears 2+ times, it's likely a global variable.
+    {
+        let all_text = lines.join("\n");
+        let mut addr_counts: HashMap<String, usize> = HashMap::new();
+        // Find all 0x1XXXXXXXX or 0x4XXXXXXX patterns (PE/ELF address ranges)
+        let mut pos = 0;
+        while let Some(hex_pos) = all_text[pos..].find("0x") {
+            let abs = pos + hex_pos;
+            let hex_start = abs + 2;
+            let mut hex_end = hex_start;
+            while hex_end < all_text.len() && all_text.as_bytes()[hex_end].is_ascii_hexdigit() {
+                hex_end += 1;
+            }
+            let hex_str = &all_text[hex_start..hex_end];
+            if hex_str.len() >= 7 && hex_str.len() <= 16 { // address-length hex
+                if let Ok(val) = u64::from_str_radix(hex_str, 16) {
+                    // Only name addresses in data sections (not code)
+                    if val > 0x1000 && !hex_str.starts_with("ffffff") {
+                        let key = format!("0x{}", hex_str);
+                        *addr_counts.entry(key).or_insert(0) += 1;
+                    }
+                }
+            }
+            pos = hex_end.max(abs + 1);
+        }
+        // Replace addresses that appear 2+ times with DAT_xxx
+        for (addr_str, count) in &addr_counts {
+            if *count >= 2 {
+                let hex = addr_str.strip_prefix("0x").unwrap_or(addr_str);
+                let dat_name = format!("DAT_{}", hex);
+                for line in &mut lines {
+                    // Only replace in data contexts (not in string literals or comments)
+                    if line.contains(addr_str) && !line.contains('"') && !line.contains("//") {
+                        *line = line.replace(addr_str, &dat_name);
+                    }
+                }
+            }
+        }
+    }
+
     // #PUTCHAR_ASCII: Display putchar(10) as putchar('\n'), etc.
     for line in &mut lines {
         *line = line.replace("putchar(10)", "putchar('\\n')")
@@ -5289,6 +5330,10 @@ fn format_const_ctx(val: u64, size: u32, ctx: &PrintCtx) -> String {
                 return vtable_name;
             }
         }
+        // Try wide string (UTF-16LE) for PE binaries
+        if let Some(ws) = try_read_wide_string(val, ctx) {
+            return ws;
+        }
     }
     format_const(val, size)
 }
@@ -5483,10 +5528,10 @@ fn try_read_string(va: u64, ctx: &PrintCtx) -> Option<String> {
         _ => return None,
     };
     if file_offset >= binary.len() { return None; }
-    let max = 200.min(binary.len() - file_offset);
+    let max = 512.min(binary.len() - file_offset);
     let slice = &binary[file_offset..file_offset + max];
     let null_pos = slice.iter().position(|&b| b == 0)?;
-    if null_pos > 120 { return None; } // reject very long "strings"
+    if null_pos > 256 { return None; } // reject very long "strings"
     // Allow empty strings (null_pos == 0) and single-char strings (null_pos == 1)
     if null_pos == 0 { return Some(String::new()); }
     let s = std::str::from_utf8(&slice[..null_pos]).ok()?;
@@ -5523,6 +5568,46 @@ fn try_read_string(va: u64, ctx: &PrintCtx) -> Option<String> {
     if s.chars().all(|c| c.is_ascii_graphic() || c == ' ' || c == '\n' || c == '\t'
         || (c as u32 >= 0x80 && !c.is_control())) {
         Some(s.to_string())
+    } else { None }
+}
+
+/// Try to read a wide string (UTF-16LE) from a virtual address in the binary.
+fn try_read_wide_string(va: u64, ctx: &PrintCtx) -> Option<String> {
+    let binary = ctx.binary?;
+    let obj = goblin::Object::parse(binary).ok()?;
+    // Only for PE binaries (Windows uses wide strings)
+    let file_offset = match &obj {
+        goblin::Object::PE(pe) => {
+            let rva = va.checked_sub(pe.image_base as u64)? as u64;
+            pe.sections.iter().find_map(|s| {
+                let sr = s.virtual_address as u64;
+                if rva < sr || rva >= sr + s.virtual_size as u64 { return None; }
+                let is_writable = s.characteristics & 0x80000000 != 0;
+                let is_exec = s.characteristics & 0x20000000 != 0;
+                if is_writable || is_exec { return None; }
+                Some((s.pointer_to_raw_data as u64 + (rva - sr)) as usize)
+            })?
+        }
+        _ => return None,
+    };
+    if file_offset >= binary.len() { return None; }
+    let max = 512.min(binary.len() - file_offset);
+    let slice = &binary[file_offset..file_offset + max];
+    // Read UTF-16LE: pairs of bytes until double-null
+    let mut chars = Vec::new();
+    let mut i = 0;
+    while i + 1 < slice.len() {
+        let ch = u16::from_le_bytes([slice[i], slice[i + 1]]);
+        if ch == 0 { break; }
+        chars.push(ch);
+        i += 2;
+        if chars.len() > 256 { return None; } // too long
+    }
+    if chars.len() < 2 { return None; } // too short
+    let s = String::from_utf16(&chars).ok()?;
+    // Verify it's actually readable text
+    if s.chars().all(|c| c.is_ascii_graphic() || c == ' ' || c == '\\' || c == '%') {
+        Some(format!("L\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")))
     } else { None }
 }
 
