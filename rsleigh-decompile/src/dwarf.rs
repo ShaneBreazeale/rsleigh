@@ -206,21 +206,38 @@ pub fn parse_struct_fields(binary: &[u8]) -> StructFieldMap {
         let mut entries = unit.entries();
 
         let mut in_struct = false;
+        // Track parent member offsets for nested structs
+        let mut parent_offsets: Vec<u64> = Vec::new();
+        let mut prev_depth = 0isize;
 
         while let Ok(Some((depth, entry))) = entries.next_dfs() {
-            // depth < 0 means we popped back up — leaving the struct's children
-            if depth < 0 { in_struct = false; }
+            if depth < prev_depth {
+                for _ in 0..(prev_depth - depth) { parent_offsets.pop(); }
+                if parent_offsets.is_empty() { in_struct = false; }
+            }
+            prev_depth = depth;
 
             match entry.tag() {
                 gimli::DW_TAG_structure_type | gimli::DW_TAG_union_type => {
                     in_struct = true;
+                    parent_offsets.push(0); // will be updated by the enclosing member
                 }
                 gimli::DW_TAG_member if in_struct => {
-                    if let (Some(name), Some(offset)) = (
-                        get_die_name(&dwarf, &unit, entry),
-                        get_member_offset(&unit, entry),
-                    ) {
-                        fields.entry(offset).or_insert(name);
+                    if let Some(offset) = get_member_offset(&unit, entry) {
+                        // Update parent offset if this member introduces a nested type
+                        if let Some(last) = parent_offsets.last_mut() {
+                            // The member's offset relative to parent struct
+                            *last = offset;
+                        }
+                        if let Some(name) = get_die_name(&dwarf, &unit, entry) {
+                            // Insert at both the raw offset AND the accumulated offset
+                            // This handles both flat structs and nested ones
+                            fields.insert(offset, name.clone());
+                            let accumulated: u64 = parent_offsets.iter().sum();
+                            if accumulated != offset {
+                                fields.insert(accumulated, name);
+                            }
+                        }
                     }
                 }
                 _ => {}

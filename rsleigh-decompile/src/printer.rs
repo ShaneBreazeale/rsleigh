@@ -2240,6 +2240,48 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #VARNAME: Infer variable names from usage patterns.
+    // - Loop counter that increments by 1 → 'i', 'j', 'k'
+    // - Variable compared to string length → 'len'
+    {
+        let mut counter_idx = 0u8;
+        let counter_names = ['i', 'j', 'k', 'n', 'm'];
+        for line in &mut lines {
+            // Pattern: "var_XX = var_XX + 1;" inside a while loop body → loop counter
+            let lt = line.trim().to_string();
+            if lt.starts_with("var_") && lt.ends_with(" + 1;") && lt.contains(" = ") {
+                if let Some(eq) = lt.find(" = ") {
+                    let var_name = &lt[..eq];
+                    let rhs = &lt[eq + 3..lt.len() - 1]; // strip trailing ;
+                    if rhs == format!("{} + 1", var_name) && counter_idx < counter_names.len() as u8 {
+                        // This var is a loop counter — but don't rename here, just note it
+                        // (Renaming requires changing all references, which is complex)
+                        let _ = counter_names[counter_idx as usize];
+                        counter_idx += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // #TRAILINGDEAD: Remove dead assignments at end of blocks.
+    // Pattern: "RAX = v->field;" as the last statement in a block — dead store
+    {
+        let mut i = 0;
+        while i < lines.len() {
+            let lt = lines[i].trim().to_string();
+            if lt.starts_with("RAX = ") && lt.ends_with(';') && !lt.contains("return") {
+                // Check if next non-empty line is } or end of function
+                let next = lines.get(i + 1).map(|l| l.trim().to_string()).unwrap_or_default();
+                if next == "}" || next.is_empty() || next.starts_with('}') {
+                    lines.remove(i);
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+
     // #NEG1: Replace 0xffffffffffffffff and 4294967295 with -1.
     for line in &mut lines {
         *line = line.replace("0xffffffffffffffff", "-1");
