@@ -2032,6 +2032,48 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #REGINLINE: Inline register assignments into subsequent conditions.
+    // Pattern: EAX = expr; if (AL == Y) → if (expr == Y)
+    //          RAX = expr; if (EAX ...) → if (expr ...)
+    {
+        let reg_pairs: &[(&str, &[&str])] = &[
+            ("EAX", &["AL", "AX", "EAX"]),
+            ("RAX", &["AL", "AX", "EAX", "RAX"]),
+            ("ECX", &["CL", "CX", "ECX"]),
+            ("RCX", &["CL", "CX", "ECX", "RCX"]),
+            ("EDX", &["DL", "DX", "EDX"]),
+            ("RDX", &["DL", "DX", "EDX", "RDX"]),
+        ];
+        let mut i = 0;
+        while i + 1 < lines.len() {
+            let lt = lines[i].trim().to_string();
+            let next = lines[i + 1].trim().to_string();
+            // Match: REG = expr; if (SUBREG ...)
+            for (full_reg, sub_regs) in reg_pairs {
+                if lt.starts_with(&format!("{} = ", full_reg)) && lt.ends_with(';')
+                    && !lt.contains("return") && !lt.contains("if ")
+                {
+                    let expr = lt[full_reg.len() + 3..lt.len()-1].to_string();
+                    // Check if next line's condition uses a sub-register
+                    if next.starts_with("if (") {
+                        for sub in *sub_regs {
+                            let check = format!("if ({} ", sub);
+                            if next.starts_with(&check) {
+                                let indent = lines[i + 1].len() - lines[i + 1].trim_start().len();
+                                let pad = " ".repeat(indent);
+                                let new_cond = next.replacen(sub, &expr, 1);
+                                lines[i + 1] = format!("{}{}", pad, new_cond.trim());
+                                lines.remove(i);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
     // #CALLRET: Inline call return values into subsequent conditions.
     // Pattern: func(...); if (0 == 0) { ... } → if (func(...) == 0) { ... }
     // The call return (in EAX) isn't captured by the SSA because CALL P-code
