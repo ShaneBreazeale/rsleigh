@@ -4,10 +4,43 @@ Compiles Ghidra's SLEIGH architecture specs (`.slaspec`) into native Rust decode
 
 This is the disassembly and decompilation backend for [Spectra](https://github.com/ShaneBreazeale/spectra) — it replaces the Ghidra JVM daemon entirely.
 
+## CLI
+
+```bash
+cargo install --path rsleigh-cli       # install the `rsleigh` binary
+```
+
+```bash
+rsleigh ./binary                       # list functions
+rsleigh ./binary main                  # decompile a function
+rsleigh ./binary main vuln init        # decompile multiple functions
+rsleigh ./binary --all                 # decompile everything
+rsleigh ./binary main --json           # JSON output for tool integration
+rsleigh ./binary --disasm main         # disassembly with P-code
+```
+
+```
+$ rsleigh ./ctf_challenge main
+// main
+init();
+puts("Welcome to my intricate trap, where all who are not me shall fail.");
+if (stage1() == 0) {
+    fail();
+    if (stage2() == 0) {
+        fail();
+        if (stage3() == 0) {
+            fail();
+            puts("Amazing");
+            give_flag();
+        }
+    }
+}
+```
+
 ## Quick start
 
 ```bash
-make test   # generate all archs + build + run tests
+make test                              # generate all archs + build + run tests
 ```
 
 Or step by step:
@@ -17,7 +50,7 @@ cargo run -p rsleigh-generate          # parse slaspecs, emit generated Rust (~3
 cargo test -p test-harness             # compile generated crates + run tests
 ```
 
-## Decode + decompile
+## Rust API
 
 ```rust
 use rsleigh_api::{Decoder, Architecture};
@@ -286,7 +319,8 @@ rsleigh/
   src/                    # SLEIGH parser + Rust codegen library
   pcode-ir/               # PcodeOp, Varnode types + peephole optimizer (no_std, zero deps)
   rsleigh-api/            # Decoder API — decode bytes into instructions + P-code
-  rsleigh-decompile/      # Decompiler — P-code to C-like pseudocode (5-pass pipeline + post-processor)
+  rsleigh-decompile/      # Decompiler — P-code to C-like pseudocode (5-pass pipeline + 50+ post-processor passes)
+  rsleigh-cli/            # CLI binary — `rsleigh` command for decompiling any binary
   rsleigh-generate/       # CLI: parse .slaspec files, write generated crate source
   generated/              # Output crates (gitignored /out/ dirs, regenerated from slaspecs)
   test-harness/           # Golden tests, corpus validation, fuzz tests, decompiler validation
