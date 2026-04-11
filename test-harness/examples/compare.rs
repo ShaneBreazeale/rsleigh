@@ -62,7 +62,7 @@ fn run() {
             for sym in elf.syms.iter() {
                 if sym.st_type() == goblin::elf::sym::STT_FUNC && sym.st_value != 0 {
                     if let Some(name) = elf.strtab.get_at(sym.st_name) {
-                        if !name.is_empty() && !name.starts_with("_") {
+                        if !name.is_empty() {
                             syms.push((sym.st_value, name.to_string()));
                         }
                     }
@@ -163,31 +163,9 @@ fn run() {
                     continue;
                 }
             };
-            println!("=== {} ({} instructions) ===", name,
-                /* count instructions in the function */
-                {
-                    let off = segs.iter().find_map(|(va, sz, fo)| {
-                        if *addr >= *va && *addr < va+sz { Some(fo+(addr-va)) } else { None }
-                    }).unwrap_or(0);
-                    let max = 2048.min(data.len() - off as usize);
-                    let bytes = &data[off as usize..off as usize + max];
-                    let mut cnt = 0usize;
-                    let mut io2 = 0usize;
-                    let mut dec2 = rsleigh_api::Decoder::new(rsleigh_api::Architecture::X86_64);
-                    let mut saw_ret = false;
-                    while io2 < max {
-                        if let Ok(inst) = dec2.decode(&bytes[io2..], addr + io2 as u64) {
-                            let r = inst.ops.iter().any(|o| matches!(o, rsleigh_api::PcodeOp::Return{..}));
-                            io2 += inst.len as usize;
-                            cnt += 1;
-                            if r { if saw_ret { break; } saw_ret = true;
-                                let na = addr + io2 as u64;
-                                if symbols.iter().any(|(a,_)| *a == na) { break; }
-                            }
-                        } else { break; }
-                    }
-                    cnt
-                });
+            // Count instructions from the decompiled output (avoids redundant decode pass)
+            let inst_count = output.lines().filter(|l| !l.trim().is_empty()).count();
+            println!("=== {} ({} instructions) ===", name, inst_count);
             for line in output.lines() {
                 if !line.trim().is_empty() {
                     println!("  {}", line);
