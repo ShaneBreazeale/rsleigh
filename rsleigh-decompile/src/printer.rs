@@ -3019,7 +3019,7 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                 format_var_tracked(*val, ssa, ctx, tracker)
             };
             let size = vdef.size;
-            let type_name = size_to_type(size);
+            let type_name = typed_name(size, vdef.inferred_type);
 
             if let Some(stack_name) = try_stack_var_name(*addr, ssa) {
                 // Track this stack variable's value for later resolution
@@ -3390,8 +3390,8 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
                 UnaryOpKind::Neg => format!("-{}", i),
                 UnaryOpKind::Not => format!("~{}", i),
                 UnaryOpKind::BoolNot => format!("!{}", i),
-                UnaryOpKind::Zext => format!("(uint64_t){}", i),
-                UnaryOpKind::Sext => format!("(int64_t){}", i),
+                UnaryOpKind::Zext => i, // zero-extend is implicit in C
+                UnaryOpKind::Sext => format!("(int){}", i),
                 _ => format!("{}({})", unaryop_str(*kind), i),
             }
         }
@@ -3432,8 +3432,9 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, indent: usize
         StructuredStmt::Store { addr, val } => {
             let addr_str = format_addr(*addr, ssa, ctx);
             let val_expr = format_var(*val, ssa, ctx);
-            let size = ssa.var(*val).size;
-            let type_name = size_to_type(size);
+            let vdef = ssa.var(*val);
+            let size = vdef.size;
+            let type_name = typed_name(size, vdef.inferred_type);
 
             // Use stack variable name if this is a stack store
             if let Some(stack_name) = try_stack_var_name(*addr, ssa) {
@@ -3936,8 +3937,8 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
                 UnaryOpKind::Neg => format!("-{}", i),
                 UnaryOpKind::Not => format!("~{}", i),
                 UnaryOpKind::BoolNot => format!("!{}", i),
-                UnaryOpKind::Zext => format!("(uint64_t){}", i),
-                UnaryOpKind::Sext => format!("(int64_t){}", i),
+                UnaryOpKind::Zext => i, // zero-extend is implicit in C
+                UnaryOpKind::Sext => format!("(int){}", i),
                 _ => format!("{}({})", unaryop_str(*kind), i),
             }
         }
@@ -4266,6 +4267,34 @@ fn is_self_assign(vdef: &VarDef, ssa: &SsaCfg) -> bool {
 
 fn size_to_type(size: u32) -> &'static str {
     match size { 1 => "uint8_t", 2 => "uint16_t", 4 => "uint32_t", 8 => "uint64_t", 16 => "__uint128_t", _ => "void" }
+}
+
+/// Type-aware version: uses InferredType to pick signed/float/pointer types.
+fn typed_name(size: u32, ty: InferredType) -> &'static str {
+    match ty {
+        InferredType::Float => match size {
+            4 => "float",
+            8 => "double",
+            _ => "double",
+        },
+        InferredType::Signed => match size {
+            1 => "int8_t",
+            2 => "int16_t",
+            4 => "int",
+            8 => "int64_t",
+            _ => "int",
+        },
+        InferredType::Pointer => match size {
+            1 => "char",
+            2 => "short",
+            4 => "int",
+            8 => "long",
+            _ => "void",
+        },
+        InferredType::Bool => "bool",
+        InferredType::Unsigned => size_to_type(size),
+        InferredType::Unknown => size_to_type(size),
+    }
 }
 
 fn binop_str(kind: BinOpKind) -> &'static str {

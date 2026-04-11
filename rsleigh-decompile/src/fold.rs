@@ -39,6 +39,8 @@ pub fn fold(ssa: &mut SsaCfg) {
         let after = count_live_stmts(ssa);
         if before == after { break; }
     }
+    // Type inference runs once after folding is stable
+    infer_types(ssa);
 }
 
 fn count_live_stmts(ssa: &SsaCfg) -> usize {
@@ -1206,6 +1208,191 @@ fn is_esp_derived(vdef: &VarDef, vars: &[VarDef]) -> bool {
             is_esp_write(inner)
         }
         _ => false,
+    }
+}
+
+// ---- Type inference ----
+
+/// Infer types for all SSA variables from operation context.
+///
+/// Three phases:
+/// 1. **Seed** — mark variables whose defining expression directly implies a type
+///    (float ops, signed ops, comparisons, load/store addresses)
+/// 2. **Forward propagation** — propagate types through Copy/Var chains and extensions
+/// 3. **Backward propagation** — propagate types from uses (e.g., if a var is used in
+///    SDiv, mark it signed even if its definition didn't imply it)
+fn infer_types(ssa: &mut SsaCfg) {
+    let n = ssa.vars.len();
+
+    // Phase 1: Seed types from defining expressions
+    for vi in 0..n {
+        let ty = seed_type_from_expr(&ssa.vars[vi].expr, &ssa.vars);
+        if ty != InferredType::Unknown {
+            ssa.vars[vi].inferred_type = ty;
+        }
+    }
+
+    // Mark Store addresses as pointers
+    for bi in 0..ssa.blocks.len() {
+        for stmt in &ssa.blocks[bi].stmts {
+            if let Stmt::Store { addr, .. } = stmt {
+                let cur = ssa.vars[addr.0 as usize].inferred_type;
+                ssa.vars[addr.0 as usize].inferred_type = cur.merge(InferredType::Pointer);
+            }
+        }
+    }
+
+    // Mark Load pointer operands as pointers (from Expr::Load(ptr_var))
+    for vi in 0..n {
+        if let Expr::Load(ptr) = ssa.vars[vi].expr {
+            let cur = ssa.vars[ptr.0 as usize].inferred_type;
+            ssa.vars[ptr.0 as usize].inferred_type = cur.merge(InferredType::Pointer);
+        }
+    }
+
+    // Phase 2: Forward propagation (2 rounds)
+    for _ in 0..2 {
+        for vi in 0..n {
+            let expr = ssa.vars[vi].expr.clone();
+            let propagated = forward_propagate_type(&expr, &ssa.vars);
+            if propagated != InferredType::Unknown && ssa.vars[vi].inferred_type == InferredType::Unknown {
+                ssa.vars[vi].inferred_type = propagated;
+            }
+        }
+    }
+
+    // Phase 3: Backward propagation — mark operands of typed operations
+    for vi in 0..n {
+        let ty = ssa.vars[vi].inferred_type;
+        if ty == InferredType::Unknown { continue; }
+
+        match ssa.vars[vi].expr.clone() {
+            Expr::BinOp(_, left, right) => {
+                backward_propagate(ssa, left, ty);
+                backward_propagate(ssa, right, ty);
+            }
+            Expr::UnaryOp(_, input) => {
+                // For Sext/Zext, the input inherits the signedness
+                backward_propagate(ssa, input, ty);
+            }
+            Expr::Var(v) => {
+                backward_propagate(ssa, v, ty);
+            }
+            _ => {}
+        }
+    }
+
+    // Mark size-1 comparison results as Bool
+    for vi in 0..n {
+        if ssa.vars[vi].size == 1 {
+            if let Expr::BinOp(kind, _, _) = &ssa.vars[vi].expr {
+                match kind {
+                    BinOpKind::Eq | BinOpKind::NotEq
+                    | BinOpKind::Less | BinOpKind::LessEq
+                    | BinOpKind::SLess | BinOpKind::SLessEq
+                    | BinOpKind::FloatEq | BinOpKind::FloatNotEq
+                    | BinOpKind::FloatLess | BinOpKind::FloatLessEq
+                    | BinOpKind::Carry | BinOpKind::SCarry | BinOpKind::SBorrow
+                    | BinOpKind::BoolAnd | BinOpKind::BoolOr | BinOpKind::BoolXor => {
+                        ssa.vars[vi].inferred_type = InferredType::Bool;
+                    }
+                    _ => {}
+                }
+            }
+            if let Expr::UnaryOp(UnaryOpKind::BoolNot | UnaryOpKind::FloatNan, _) = &ssa.vars[vi].expr {
+                ssa.vars[vi].inferred_type = InferredType::Bool;
+            }
+        }
+    }
+}
+
+/// Seed the type of a variable from its defining expression.
+fn seed_type_from_expr(expr: &Expr, _vars: &[VarDef]) -> InferredType {
+    match expr {
+        // Float operations
+        Expr::BinOp(kind, _, _) => match kind {
+            BinOpKind::FloatAdd | BinOpKind::FloatSub
+            | BinOpKind::FloatMult | BinOpKind::FloatDiv => InferredType::Float,
+            BinOpKind::FloatEq | BinOpKind::FloatNotEq
+            | BinOpKind::FloatLess | BinOpKind::FloatLessEq => InferredType::Bool,
+            // Signed operations
+            BinOpKind::SDiv | BinOpKind::SRem => InferredType::Signed,
+            BinOpKind::SLess | BinOpKind::SLessEq => InferredType::Bool,
+            // Unsigned operations
+            BinOpKind::Div | BinOpKind::Rem => InferredType::Unsigned,
+            BinOpKind::Less | BinOpKind::LessEq => InferredType::Bool,
+            // Comparisons
+            BinOpKind::Eq | BinOpKind::NotEq => InferredType::Bool,
+            // Boolean logic
+            BinOpKind::BoolAnd | BinOpKind::BoolOr | BinOpKind::BoolXor => InferredType::Bool,
+            _ => InferredType::Unknown,
+        },
+        Expr::UnaryOp(kind, _) => match kind {
+            // Float unary ops
+            UnaryOpKind::FloatNeg | UnaryOpKind::FloatAbs | UnaryOpKind::FloatSqrt
+            | UnaryOpKind::FloatCeil | UnaryOpKind::FloatFloor | UnaryOpKind::FloatRound
+            | UnaryOpKind::Int2Float | UnaryOpKind::Float2Float => InferredType::Float,
+            UnaryOpKind::FloatNan => InferredType::Bool,
+            // Trunc: float→int
+            UnaryOpKind::Trunc => InferredType::Signed,
+            // Sign extension implies signed source
+            UnaryOpKind::Sext | UnaryOpKind::Neg => InferredType::Signed,
+            // Zero extension implies unsigned source
+            UnaryOpKind::Zext => InferredType::Unsigned,
+            // Arithmetic shift right implies signed
+            // (mapped from IntAsr)
+            UnaryOpKind::BoolNot => InferredType::Bool,
+            _ => InferredType::Unknown,
+        },
+        _ => InferredType::Unknown,
+    }
+}
+
+/// Propagate type forward from the defining expression's operands.
+fn forward_propagate_type(expr: &Expr, vars: &[VarDef]) -> InferredType {
+    match expr {
+        // Copy/Var inherits the source type
+        Expr::Var(v) => vars[v.0 as usize].inferred_type,
+        // Arithmetic on floats produces float
+        Expr::BinOp(BinOpKind::Add | BinOpKind::Sub | BinOpKind::Mult, left, right) => {
+            let lt = vars[left.0 as usize].inferred_type;
+            let rt = vars[right.0 as usize].inferred_type;
+            if lt == InferredType::Float || rt == InferredType::Float {
+                InferredType::Float
+            } else if lt == InferredType::Signed || rt == InferredType::Signed {
+                InferredType::Signed
+            } else {
+                InferredType::Unknown
+            }
+        }
+        // Sext preserves signed, Zext preserves unsigned
+        Expr::UnaryOp(UnaryOpKind::Sext, input) => {
+            let it = vars[input.0 as usize].inferred_type;
+            if it == InferredType::Unknown { InferredType::Signed } else { it }
+        }
+        Expr::UnaryOp(UnaryOpKind::Zext, input) => {
+            let it = vars[input.0 as usize].inferred_type;
+            if it == InferredType::Unknown { InferredType::Unsigned } else { it }
+        }
+        // Neg implies signed result
+        Expr::UnaryOp(UnaryOpKind::Neg, _) => InferredType::Signed,
+        // Load result: unknown (the pointee type isn't known without more analysis)
+        _ => InferredType::Unknown,
+    }
+}
+
+/// Backward-propagate a type to an operand variable (if it's still Unknown).
+fn backward_propagate(ssa: &mut SsaCfg, var: VarId, ty: InferredType) {
+    let cur = ssa.vars[var.0 as usize].inferred_type;
+    if cur == InferredType::Unknown {
+        // Don't propagate Bool backward (comparisons don't make operands bool)
+        // Don't propagate Pointer backward (pointer arithmetic doesn't make operands pointers)
+        match ty {
+            InferredType::Signed | InferredType::Float => {
+                ssa.vars[var.0 as usize].inferred_type = ty;
+            }
+            _ => {}
+        }
     }
 }
 

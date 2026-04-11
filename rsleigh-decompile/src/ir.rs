@@ -71,6 +71,38 @@ pub enum Stmt {
     Call { target: CallTarget, args: Vec<VarId>, out: Option<VarId> },
 }
 
+/// Inferred type for a variable, propagated by the type inference pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InferredType {
+    /// No type inferred yet — prints as uintN_t based on size
+    Unknown,
+    /// Explicitly unsigned (from unsigned ops like IntDiv, IntLess, IntZext)
+    Unsigned,
+    /// Signed integer (from IntSDiv, IntSLess, IntSext, IntSRight, IntNeg)
+    Signed,
+    /// IEEE 754 float (from FloatAdd, FloatMult, Int2Float, etc.)
+    Float,
+    /// Pointer (used as Load/Store address)
+    Pointer,
+    /// Boolean (comparison result, flag register, BoolAnd/BoolOr operand)
+    Bool,
+}
+
+impl InferredType {
+    /// Merge two types: if they agree, keep it; if they conflict, prefer the more specific.
+    pub fn merge(self, other: InferredType) -> InferredType {
+        if self == other { return self; }
+        match (self, other) {
+            (InferredType::Unknown, t) | (t, InferredType::Unknown) => t,
+            // Signed wins over Unsigned (common in mixed contexts)
+            (InferredType::Signed, InferredType::Unsigned)
+            | (InferredType::Unsigned, InferredType::Signed) => InferredType::Signed,
+            // Everything else: keep the first (don't corrupt)
+            _ => self,
+        }
+    }
+}
+
 pub struct VarDef {
     pub id: VarId,
     pub varnode: Varnode,
@@ -81,6 +113,8 @@ pub struct VarDef {
     pub param_name: Option<String>,
     /// If this var holds a call return value, the call's VarId
     pub call_return: bool,
+    /// Inferred type from dataflow analysis
+    pub inferred_type: InferredType,
 }
 
 #[derive(Debug, Clone)]
@@ -157,6 +191,7 @@ impl SsaCfg {
             use_count: 0,
             param_name: None,
             call_return: false,
+            inferred_type: InferredType::Unknown,
         });
         id
     }
