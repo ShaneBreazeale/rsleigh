@@ -53,19 +53,24 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
             CallingConv::Cdecl32 => &[],
         };
     });
+    // Collect call arguments FIRST, before any optimization.
+    // Arg register writes (RCX/RDX for Win64, RDI/RSI for SysV) have use_count=0
+    // because the Call terminator doesn't reference them by VarId. If we run
+    // fold_once or eliminate_dead first, these assignments get removed.
+    collect_call_arguments(ssa);
+    recount_uses(ssa);
+
     for _round in 0..8 {
         let before = count_live_stmts(ssa);
         fold_once(ssa);
         recount_uses(ssa);
         propagate_register_constants(ssa);
         propagate_call_returns(ssa);
-        // forward_substitute_block: disabled pending liveness analysis
         recount_uses(ssa);
         eliminate_dead(ssa);
         recount_uses(ssa);
         recover_conditions(ssa);
         detect_return_values(ssa);
-        collect_call_arguments(ssa);
         recount_uses(ssa);
         name_parameters(ssa);
         let after = count_live_stmts(ssa);
@@ -934,12 +939,9 @@ fn detect_return_values(ssa: &mut SsaCfg) {
 
 /// Collect argument register writes (x86-64) or stack pushes (x86-32) before each Call.
 fn collect_call_arguments(ssa: &mut SsaCfg) {
-    // Detect x86-32 mode: any variable uses ESP (offset 16, size 4)
-    let is_x86_32 = ssa.vars.iter().any(|v| {
-        v.varnode.space == AddressSpaceId::Register
-            && v.varnode.offset == ESP_OFFSET
-            && v.varnode.size == 4
-    });
+    // Use the calling convention set by fold_with_cc, not heuristic detection.
+    // The old ESP_OFFSET=16 heuristic collided with EDX (also offset 16 in x86-64).
+    let is_x86_32 = arg_reg_offsets().is_empty(); // Cdecl32 has no register args
 
     for bi in 0..ssa.blocks.len() {
         // Check if block ends with a Call terminator
@@ -951,10 +953,11 @@ fn collect_call_arguments(ssa: &mut SsaCfg) {
         };
 
         if let Some((target, fallthrough)) = call_info {
+            let n_stmts = ssa.blocks[bi].stmts.len();
             let args = if is_x86_32 {
-                collect_stack_args_from_block(&ssa.blocks[bi].stmts, &ssa.vars, ssa.blocks[bi].stmts.len())
+                collect_stack_args_from_block(&ssa.blocks[bi].stmts, &ssa.vars, n_stmts)
             } else {
-                collect_reg_args_from_block(&ssa.blocks[bi].stmts, &ssa.vars, ssa.blocks[bi].stmts.len())
+                collect_reg_args_from_block(&ssa.blocks[bi].stmts, &ssa.vars, n_stmts)
             };
 
             if !args.is_empty() {
@@ -991,12 +994,14 @@ fn collect_call_arguments(ssa: &mut SsaCfg) {
 
 /// Collect x86-64 register-based arguments before a call (original logic).
 fn collect_reg_args_from_block(stmts: &[Stmt], vars: &[VarDef], up_to: usize) -> Vec<VarId> {
+    let arg_offsets = arg_reg_offsets();
+    if arg_offsets.is_empty() { return Vec::new(); }
     let mut args: Vec<(u64, VarId)> = Vec::new();
     for j in (0..up_to).rev() {
         if let Stmt::Assign(var_id) = &stmts[j] {
-            let vdef = &vars[var_id.0 as usize];
+            let vdef = safe_var(vars, *var_id);
             if vdef.varnode.space == AddressSpaceId::Register
-                && arg_reg_offsets().contains(&vdef.varnode.offset)
+                && arg_offsets.contains(&vdef.varnode.offset)
             {
                 if !args.iter().any(|(off, _)| *off == vdef.varnode.offset) {
                     args.push((vdef.varnode.offset, *var_id));
