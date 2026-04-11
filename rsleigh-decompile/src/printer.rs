@@ -1417,6 +1417,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                        "write", "read", "fgets", "fread", "fwrite",
                        "sprintf", "snprintf", "strcspn", "strtok", "strcmp",
                        "fflush", "fclose", "fopen", "setvbuf",
+                       "__isoc99_scanf", "scanf", "sscanf",
+                       "memset", "memcpy", "strncpy", "strlen",
                        "cout_write", "cin_read"];
     for _round in 0..4 {  // iterate to peel nested layers
         let mut changed = false;

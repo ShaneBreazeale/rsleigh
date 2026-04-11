@@ -185,7 +185,13 @@ fn resolve_elf(elf: &goblin::elf::Elf, binary: &[u8], map: &mut HashMap<u64, Str
         {
             if let Some(name) = elf.strtab.get_at(sym.st_name) {
                 if !name.is_empty() && !name.starts_with("FUN_") {
-                    map.insert(sym.st_value, demangle_name(name));
+                    let clean = name.split("@@").next().unwrap_or(name);
+                    // Skip linker-internal symbols that collide with real names
+                    if clean == "__TMC_END__" || clean.starts_with("_ITM_")
+                        || clean == "_IO_stdin_used" || clean == "completed.0"
+                    { continue; }
+                    // Don't overwrite existing names from dynsyms (stdin, stdout, etc.)
+                    map.entry(sym.st_value).or_insert_with(|| demangle_name(name));
                 }
             }
         }
