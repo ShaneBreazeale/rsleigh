@@ -3197,6 +3197,162 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // Remove consecutive blank lines
     let mut result = String::new();
     let mut prev_blank = false;
+    // #STACK_NOISE: Remove XMM zero-init noise and RSP-relative stores that are
+    // stack frame initialization (not meaningful program logic).
+    lines.retain(|line| {
+        let t = line.trim();
+        // Remove "XMM0 = 0; // zero-init" and similar SSE register clears
+        if t.starts_with("XMM") && t.contains("= 0") && t.contains("zero-init") { return false; }
+        // Remove 128-bit stack stores that are zero-init: "*(__uint128_t*)(N + RSP) = 0; // zero-init"
+        if t.starts_with("*(__uint128_t*)") && t.contains("RSP") && t.contains("= 0") && t.contains("zero-init") { return false; }
+        // Remove "N[RSP] = 0;" patterns (stack zero-init without the comment)
+        if t.ends_with("[RSP] = 0;") || t.ends_with("[RSP] = 0; // zero-init") { return false; }
+        true
+    });
+
+    // #ERRNO: Recognize __error() + store patterns as errno assignment.
+    // macOS: __error() returns &errno. Linux: ___errno_location() returns &errno.
+    // Pattern: "__error();\n  *(uint32_t*)(N) = M;" → "errno = M;"
+    // Also: "*(param_N) == 4" after __error → "errno == EINTR"
+    {
+        let errno_names: &[(i64, &str)] = &[
+            (4, "EINTR"), (9, "EBADF"), (12, "ENOMEM"), (13, "EACCES"),
+            (22, "EINVAL"), (35, "EAGAIN"), (36, "EINPROGRESS"),
+            (54, "ECONNRESET"), (61, "ECONNREFUSED"),
+        ];
+        let errno_map: HashMap<i64, &str> = errno_names.iter().copied().collect();
+
+        let mut i = 0;
+        while i < lines.len() {
+            let lt = lines[i].trim().to_string();
+            // Pattern: "__error();" followed by "*(uint32_t*)(1) = N;" or "*(uint32_t*)(iVar) = N;"
+            if lt == "__error();" || lt.ends_with("__error();") {
+                if i + 1 < lines.len() {
+                    let next = lines[i + 1].trim().to_string();
+                    // *(uint32_t*)(ANYTHING) = N;
+                    if next.starts_with("*(uint32_t*)(") || next.starts_with("*(int*)(") {
+                        if let Some(eq) = next.find(" = ") {
+                            let val_str = next[eq + 3..].trim_end_matches(';').trim();
+                            if let Ok(val) = val_str.parse::<i64>() {
+                                let pad = " ".repeat(lines[i].len() - lines[i].trim_start().len());
+                                let name = errno_map.get(&val).map(|s| format!(" /* {} */", s)).unwrap_or_default();
+                                lines[i] = format!("{}errno = {}{};", pad, val, name);
+                                lines.remove(i + 1);
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Pattern: "*(param_N) == 4" → "errno == EINTR" (after a call to __error)
+            // Replace errno constant values in conditions
+            if lt.contains("*(param_") && (lt.contains(" == ") || lt.contains(" != ")) {
+                for (val, name) in errno_names {
+                    let old = format!(" == {})", val);
+                    let new = format!(" == {} /* {} */)", val, name);
+                    if lt.contains(&old) && !lt.contains("/*") {
+                        lines[i] = lines[i].replace(&old, &new);
+                    }
+                    let old = format!(" != {})", val);
+                    let new = format!(" != {} /* {} */)", val, name);
+                    if lt.contains(&old) && !lt.contains("/*") {
+                        lines[i] = lines[i].replace(&old, &new);
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
+    // #AUTONAME: Replace remaining raw register names with auto-generated variable names.
+    // Collect all bare register names that appear, assign sequential names by type:
+    //   64-bit (RAX,RBX,...) → lVar1, lVar2, ...
+    //   32-bit (EAX,EBX,...) → iVar1, iVar2, ...
+    //   8/16-bit → bVar1, wVar1, ...
+    //   Pointer-used (R14[...]) → pVar1, pVar2, ...
+    // Skip registers that are parameters (RDI,RSI,RDX,RCX) or already named.
+    {
+        use std::collections::BTreeMap;
+        // Registers that should NOT be auto-named (parameters, stack/frame, instruction pointer)
+        let skip_regs: &[&str] = &[
+            "RDI", "EDI", "DIL", "RSI", "ESI", "SIL", "RDX", "EDX", "DL",
+            "RCX", "ECX", "CL", "R8", "R8D", "R9", "R9D",
+            "RSP", "ESP", "RBP", "EBP", "RIP", "EIP",
+            "XMM0", "XMM1", "XMM2", "XMM3", "XMM4", "XMM5",
+        ];
+        // Candidate registers for renaming
+        let reg_candidates: &[(&str, &str)] = &[
+            // (register_name, type_prefix) — 64-bit → l, 32-bit → i
+            ("RAX", "l"), ("RBX", "l"), ("R12", "l"), ("R13", "l"),
+            ("R14", "l"), ("R15", "l"), ("R10", "l"), ("R11", "l"),
+            ("EAX", "i"), ("EBX", "i"), ("R12D", "i"), ("R13D", "i"),
+            ("R14D", "i"), ("R15D", "i"), ("R10D", "i"), ("R11D", "i"),
+            ("AL", "b"), ("BL", "b"), ("AH", "b"), ("BH", "b"),
+            ("AX", "w"), ("BX", "w"),
+        ];
+
+        // Scan all lines for register appearances
+        let all_text = lines.join("\n");
+        let mut rename_map: BTreeMap<String, String> = BTreeMap::new();
+        let mut counters: HashMap<String, usize> = HashMap::new();
+
+        for (reg, prefix) in reg_candidates {
+            if skip_regs.contains(reg) { continue; }
+            // Check if this register appears as a standalone word in the output
+            // (not inside a string literal or as part of another identifier)
+            let appears = all_text.contains(reg) && {
+                // Verify it's not only inside quotes
+                let outside_quotes: String = all_text.split('"')
+                    .enumerate()
+                    .filter(|(i, _)| i % 2 == 0) // outside quotes
+                    .map(|(_, s)| s)
+                    .collect::<Vec<_>>().join("");
+                outside_quotes.contains(reg)
+            };
+
+            if appears && !rename_map.contains_key(*reg) {
+                let counter = counters.entry(prefix.to_string()).or_insert(0);
+                *counter += 1;
+                let new_name = format!("{}Var{}", prefix, counter);
+                rename_map.insert(reg.to_string(), new_name);
+            }
+        }
+
+        // Apply renames — use word-boundary replacement
+        if !rename_map.is_empty() {
+            for line in &mut lines {
+                for (old_reg, new_name) in &rename_map {
+                    if !line.contains(old_reg.as_str()) { continue; }
+                    // Replace as whole-word only (not inside function names or strings)
+                    let mut result = String::new();
+                    let mut in_quote = false;
+                    let mut chars = line.chars().peekable();
+                    let mut pos = 0;
+                    while pos < line.len() {
+                        if line.as_bytes()[pos] == b'"' { in_quote = !in_quote; }
+                        if !in_quote && line[pos..].starts_with(old_reg.as_str()) {
+                            let before = if pos > 0 { line.as_bytes()[pos - 1] } else { b' ' };
+                            let after_pos = pos + old_reg.len();
+                            let after = if after_pos < line.len() { line.as_bytes()[after_pos] } else { b' ' };
+                            // Word boundary: not alphanumeric/underscore on either side
+                            let is_word = !before.is_ascii_alphanumeric() && before != b'_'
+                                && !after.is_ascii_alphanumeric() && after != b'_';
+                            if is_word {
+                                result.push_str(new_name);
+                                pos += old_reg.len();
+                                continue;
+                            }
+                        }
+                        result.push(line.as_bytes()[pos] as char);
+                        pos += 1;
+                    }
+                    *line = result;
+                }
+            }
+        }
+    }
+
     for line in &lines {
         let is_blank = line.trim().is_empty();
         if is_blank && prev_blank { continue; }
