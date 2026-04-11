@@ -43,6 +43,7 @@ members = [
     "generated/arm32-root",
     "rsleigh-api",
     "rsleigh-decompile",
+    "rsleigh-cli",
 ]
 resolver = "2"
 
