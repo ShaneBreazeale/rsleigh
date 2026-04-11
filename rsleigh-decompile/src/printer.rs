@@ -2277,6 +2277,189 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #DIV_BY_CONST: Recognize multiply-then-shift division patterns.
+    // The compiler replaces x/D with x * magic >> shift.
+    // Pattern 1 (same line): "REG = EXPR * (int)0xNNNN >> K;"
+    // Pattern 2 (two lines): "REG = EXPR * (int)0xNNNN;" then "REG = REG >> K;"
+    {
+        let mut i = 0;
+        while i < lines.len() {
+            // Look for multiply by magic constant
+            let lt = lines[i].trim().to_string();
+            let mul_pos = lt.find(" * (int)0x").or_else(|| lt.find(" * 0x"));
+            let Some(mul_pos) = mul_pos else { i += 1; continue; };
+
+            // Extract magic constant
+            let hex_marker = if lt[mul_pos..].starts_with(" * (int)0x") { " * (int)0x" } else { " * 0x" };
+            let hex_start = mul_pos + hex_marker.len();
+            let hex_end = lt[hex_start..].find(|c: char| !c.is_ascii_hexdigit())
+                .map(|e| hex_start + e).unwrap_or(lt.len());
+            let hex_str = lt[hex_start..hex_end].to_string();
+            let Ok(magic) = u64::from_str_radix(&hex_str, 16) else { i += 1; continue; };
+            if magic < 0x10000000 { i += 1; continue; } // too small to be a magic constant
+
+            // Find the source variable (before the multiply)
+            let eq_pos = lt.find(" = ");
+            let src_var = if let Some(ep) = eq_pos {
+                let rhs = lt[ep + 3..mul_pos].trim();
+                // Strip (int) cast if present
+                let clean = rhs.strip_prefix("(int)").unwrap_or(rhs);
+                clean.to_string()
+            } else { i += 1; continue; };
+
+            // Find shift: same line or next line
+            let shift = if let Some(shr_pos) = lt.find(">> ") {
+                let ns = shr_pos + 3;
+                let ne = lt[ns..].find(|c: char| !c.is_ascii_digit()).map(|e| ns + e).unwrap_or(lt.len());
+                lt[ns..ne].parse::<u32>().ok()
+            } else {
+                // Scan forward (up to 3 lines) for the division shift (>> 32..38)
+                // Skip sign-extraction shifts (>> 31, >> 63)
+                let mut found_shift = None;
+                for look in 1..=3 {
+                    if i + look >= lines.len() { break; }
+                    let next = lines[i + look].trim().to_string();
+                    if let Some(shr_pos) = next.find(">> ") {
+                        let ns = shr_pos + 3;
+                        let ne = next[ns..].find(|c: char| !c.is_ascii_digit()).map(|e| ns + e).unwrap_or(next.len());
+                        if let Ok(s) = next[ns..ne].parse::<u32>() {
+                            // Skip sign-extraction shifts (31 for 32-bit, 63 for 64-bit)
+                            if s == 31 || s == 63 { continue; }
+                            found_shift = Some(s);
+                            break;
+                        }
+                    }
+                }
+                found_shift
+            };
+
+            let Some(shift) = shift else { i += 1; continue; };
+            if shift < 30 || shift > 40 { i += 1; continue; }
+
+            // Compute divisor: D = round(2^(32+shift-32) / magic) for shift > 32
+            // or D = round(2^shift / magic) for general case
+            let effective_shift = if shift >= 32 { shift } else { shift + 32 };
+            let power = (1u128 << effective_shift) as f64;
+            let divisor = (power / magic as f64).round() as u64;
+            if divisor < 2 || divisor > 1000 { i += 1; continue; }
+
+            // Replace multiply line with division
+            let pad = " ".repeat(lines[i].len() - lines[i].trim_start().len());
+            let dest = if let Some(ep) = eq_pos { lt[..ep].to_string() } else { src_var.clone() };
+
+            // Replace multiply line with division, remove shift and sign-extraction lines
+            lines[i] = format!("{}{} = {} / {};", pad, dest.trim(), src_var, divisor);
+            // Remove subsequent lines that are part of the division pattern
+            // (sign-extraction >> 63, the actual shift >> N, and sign correction + lines)
+            let mut j = i + 1;
+            while j < lines.len() {
+                let jt = lines[j].trim();
+                if jt.contains(">> 63;") || jt.contains(">> 31;") {
+                    lines.remove(j); // sign extraction
+                } else if jt.contains(&format!(">> {};", shift)) {
+                    lines.remove(j); // the division shift
+                } else {
+                    break;
+                }
+            }
+            i += 1;
+        }
+    }
+
+    // #FOR_LOOP: Convert while loops with init + increment to for loops.
+    // Matches: while (cond) { ...body... VAR = VAR + 1; }
+    // Optionally preceded by: VAR = init;
+    {
+        let mut i = 0;
+        while i < lines.len() {
+            let lt = lines[i].trim().to_string();
+
+            // Find while lines — either at position i or i+1 (if preceded by init)
+            let (while_idx, init_line) = if lt.starts_with("while (") && lt.ends_with('{') {
+                // Check if line i-1 is a simple init assignment
+                let init = if i > 0 {
+                    let prev = lines[i - 1].trim().to_string();
+                    if prev.ends_with(';') && prev.contains(" = ") && !prev.contains('(') {
+                        Some((i - 1, prev))
+                    } else { None }
+                } else { None };
+                (i, init)
+            } else {
+                i += 1;
+                continue;
+            };
+
+            // Find the closing brace of this while block
+            let indent = lines[while_idx].len() - lines[while_idx].trim_start().len();
+            let mut close_idx = None;
+            let mut depth = 1i32;
+            for j in (while_idx + 1)..lines.len() {
+                let jt = lines[j].trim();
+                if jt.ends_with('{') { depth += 1; }
+                if jt == "}" || jt.starts_with("} else") { depth -= 1; }
+                if depth == 0 {
+                    close_idx = Some(j);
+                    break;
+                }
+            }
+            let Some(close_idx) = close_idx else { i += 1; continue; };
+
+            // Check if the last statement before close brace is an increment
+            if close_idx <= while_idx + 1 { i += 1; continue; }
+            let last_body = lines[close_idx - 1].trim().to_string();
+
+            // Match: "VAR = VAR + 1;" or "VAR = VAR + N;" or "VAR - 1"
+            let (inc_var, inc_expr) = if let Some(rest) = last_body.strip_suffix(';') {
+                if let Some(eq) = rest.find(" = ") {
+                    let lhs = &rest[..eq];
+                    let rhs = &rest[eq + 3..];
+                    if rhs == format!("{} + 1", lhs) {
+                        (Some(lhs.to_string()), Some(format!("{}++", lhs)))
+                    } else if rhs.starts_with(&format!("{} + ", lhs)) {
+                        (Some(lhs.to_string()), Some(format!("{} += {}", lhs, &rhs[lhs.len() + 3..])))
+                    } else if rhs == format!("{} - 1", lhs) {
+                        (Some(lhs.to_string()), Some(format!("{}--", lhs)))
+                    } else {
+                        (None, None)
+                    }
+                } else { (None, None) }
+            } else { (None, None) };
+
+            let Some(inc_var) = inc_var else { i += 1; continue; };
+            let Some(inc_expr) = inc_expr else { i += 1; continue; };
+
+            // Extract while condition
+            let while_text = lines[while_idx].trim();
+            let cond = &while_text["while (".len()..while_text.len() - ") {".len()];
+
+            // Build the for loop
+            let pad = " ".repeat(indent);
+            let has_init = init_line.as_ref().map_or(false, |(_, text)| {
+                let eq = text.find(" = ").unwrap();
+                &text[..eq] == inc_var
+            });
+
+            if has_init {
+                let (init_idx, init_text) = init_line.unwrap();
+                let init = init_text.trim_end_matches(';');
+                lines[init_idx] = format!("{}for ({}; {}; {}) {{", pad, init, cond, inc_expr);
+                lines.remove(while_idx); // remove old while line (now at init_idx + 1)
+                // Remove the increment line (shifted by 1 due to removal)
+                let new_close = close_idx - 1;
+                if new_close > init_idx + 1 {
+                    lines.remove(new_close - 1);
+                }
+            } else {
+                lines[while_idx] = format!("{}for (; {}; {}) {{", pad, cond, inc_expr);
+                // Remove the increment line
+                if close_idx > while_idx + 1 {
+                    lines.remove(close_idx - 1);
+                }
+            }
+            i += 1;
+        }
+    }
+
     // #GARBLED: Fix garbled array accesses like perror(1[1]), fopen("r") missing arg
     for line in &mut lines {
         // "1[1]" → "argv[1]" (common confusion from pointer arithmetic)
