@@ -19,6 +19,10 @@ pub fn print_c(
 ) -> String {
     let mut out = String::new();
     let ctx = PrintCtx { arch, binary, imports };
+
+    // Generate function signature from SSA analysis
+    generate_function_signature(&mut out, ssa);
+
     let filtered = filter_boilerplate(stmts, ssa);
     let mut tracker = RegTracker::new();
     // Pre-scan: collect stack aliases from Stores in the top-level stmts
@@ -36,6 +40,14 @@ pub fn print_c(
         .filter_map(|v| v.param_name.as_ref().cloned())
         .collect();
     post_process(&mut out, &all_aliases, &param_names, struct_fields, &ctx);
+    // Close the function body brace (opened in generate_function_signature)
+    if out.starts_with("void ") || out.starts_with("int ") || out.starts_with("long ")
+        || out.starts_with("float ") || out.starts_with("double ")
+        || out.starts_with("char ") || out.starts_with("uint8_t ")
+        || out.starts_with("bool ")
+    {
+        out.push_str("}\n");
+    }
     out
 }
 
@@ -3327,7 +3339,6 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     // Replace as whole-word only (not inside function names or strings)
                     let mut result = String::new();
                     let mut in_quote = false;
-                    let mut chars = line.chars().peekable();
                     let mut pos = 0;
                     while pos < line.len() {
                         if line.as_bytes()[pos] == b'"' { in_quote = !in_quote; }
@@ -3370,6 +3381,83 @@ struct PrintCtx<'a> {
 }
 
 /// Remove prologue/epilogue boilerplate from the top level.
+/// Generate a C-style function signature from SSA parameter and return type analysis.
+fn generate_function_signature(out: &mut String, ssa: &SsaCfg) {
+    use crate::ir::InferredType;
+
+    // Detect return type from Return terminators
+    let mut return_type = "void";
+    let mut _return_size = 0u32;
+    for block in &ssa.blocks {
+        if let SsaTerminator::Return(Some(v)) = &block.terminator {
+            let vdef = ssa.var(*v);
+            _return_size = vdef.size;
+            return_type = match (vdef.inferred_type, vdef.size) {
+                (InferredType::Float, 4) => "float",
+                (InferredType::Float, 8) => "double",
+                (InferredType::Signed, 1) => "char",
+                (InferredType::Signed, 4) => "int",
+                (InferredType::Signed, 8) => "long",
+                (InferredType::Pointer, _) => "void *",
+                (InferredType::Bool, _) => "bool",
+                (_, 1) => "uint8_t",
+                (_, 4) => "int",
+                (_, 8) => "long",
+                _ => "int",
+            };
+            break;
+        }
+    }
+    // If no return terminator has a value, it's void
+    let has_return_val = ssa.blocks.iter().any(|b|
+        matches!(&b.terminator, SsaTerminator::Return(Some(_))));
+    if !has_return_val { return_type = "void"; }
+
+    // Collect parameters — variables with param_name set
+    let mut params: Vec<(String, u32, InferredType)> = Vec::new();
+    for v in &ssa.vars {
+        if let Some(ref name) = v.param_name {
+            let ty = v.inferred_type;
+            let sz = v.size;
+            params.push((name.clone(), sz, ty));
+        }
+    }
+    // Deduplicate by name (SSA may have multiple defs of the same param)
+    // Deduplicate and sort by param index (param_0, param_1, ...)
+    let mut seen = std::collections::HashSet::new();
+    params.retain(|p| seen.insert(p.0.clone()));
+    params.sort_by(|a, b| {
+        let idx_a = a.0.strip_prefix("param_").and_then(|s| s.parse::<u32>().ok()).unwrap_or(999);
+        let idx_b = b.0.strip_prefix("param_").and_then(|s| s.parse::<u32>().ok()).unwrap_or(999);
+        idx_a.cmp(&idx_b).then(a.0.cmp(&b.0))
+    });
+
+    // Format parameter list
+    let param_strs: Vec<String> = params.iter().map(|(name, size, ty)| {
+        let type_name = match (*ty, *size) {
+            (InferredType::Float, 4) => "float",
+            (InferredType::Float, 8) => "double",
+            (InferredType::Signed, 1) => "char",
+            (InferredType::Signed, 4) => "int",
+            (InferredType::Signed, 8) => "long",
+            (InferredType::Pointer, _) | (_, 8) => "long",
+            (InferredType::Bool, _) => "bool",
+            (_, 1) => "uint8_t",
+            (_, 4) => "int",
+            _ => "int",
+        };
+        format!("{} {}", type_name, name)
+    }).collect();
+
+    let params_str = if param_strs.is_empty() {
+        "void".to_string()
+    } else {
+        param_strs.join(", ")
+    };
+
+    out.push_str(&format!("{} func({}) {{\n", return_type, params_str));
+}
+
 fn filter_boilerplate(stmts: &[StructuredStmt], ssa: &SsaCfg) -> Vec<StructuredStmt> {
     stmts.iter().filter(|stmt| {
         match stmt {
