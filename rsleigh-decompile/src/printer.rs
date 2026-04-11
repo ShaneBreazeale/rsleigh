@@ -5106,11 +5106,6 @@ fn format_var(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
         return format_const_ctx(*val, *sz, ctx);
     }
 
-    // Note: register-to-parameter tracing disabled — caused regressions
-    // where call return values were resolved back to parameter names,
-    // hiding the actual function call. Needs SSA-level solution instead
-    // of printer-level Var chain following.
-
     var_name(&vdef.varnode, ctx)
 }
 
@@ -5287,6 +5282,12 @@ fn format_const_ctx(val: u64, size: u32, ctx: &PrintCtx) -> String {
         // Try import/global name (e.g., GOT entry for stdin/stdout)
         if let Some(name) = ctx.imports.get(&val) {
             return name.clone();
+        }
+        // Try MSVC RTTI vtable resolution for PE binaries
+        if let Some(binary) = ctx.binary {
+            if let Some(vtable_name) = crate::imports::resolve_pe_vtable(val, binary) {
+                return vtable_name;
+            }
         }
     }
     format_const(val, size)

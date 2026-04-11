@@ -386,6 +386,78 @@ fn resolve_macho(macho: &goblin::mach::MachO, binary: &[u8], map: &mut HashMap<u
 /// references the IAT (Import Address Table). We walk the import descriptors to get
 /// IAT base addresses, then resolve names from either the ILT or (when ILT is zeroed,
 /// e.g. UPX-unpacked binaries) directly from the IAT entries which contain hint/name RVAs.
+/// Try to resolve a PE address as an MSVC RTTI vtable.
+/// Returns the demangled class name if the address points to a vtable
+/// with a valid RTTI Complete Object Locator at [addr-8].
+pub fn resolve_pe_vtable(addr: u64, binary: &[u8]) -> Option<String> {
+    let Ok(obj) = goblin::Object::parse(binary) else { return None };
+    let goblin::Object::PE(pe) = &obj else { return None };
+    let base = pe.image_base as u64;
+    let is_64 = pe.is_64;
+
+    let rva_to_off = |rva: u64| -> Option<usize> {
+        for s in &pe.sections {
+            let sva = s.virtual_address as u64;
+            let vsz = s.virtual_size as u64;
+            let fo = s.pointer_to_raw_data as u64;
+            if rva >= sva && rva < sva + vsz {
+                return Some((fo + (rva - sva)) as usize);
+            }
+        }
+        None
+    };
+
+    // Read the COL pointer at [vtable - ptr_size]
+    let vtable_rva = addr.checked_sub(base)?;
+    let col_ptr_off = rva_to_off(vtable_rva.checked_sub(if is_64 { 8 } else { 4 })?)?;
+    if col_ptr_off + 8 > binary.len() { return None; }
+
+    let col_rva = if is_64 {
+        // PE64: COL pointer is an RVA (not full VA) in newer MSVC
+        // But it could also be a full VA — try both
+        let raw = u64::from_le_bytes(binary[col_ptr_off..col_ptr_off+8].try_into().ok()?);
+        if raw > base { raw - base } else { raw }
+    } else {
+        u32::from_le_bytes(binary[col_ptr_off..col_ptr_off+4].try_into().ok()?) as u64
+    };
+
+    let col_off = rva_to_off(col_rva)?;
+    if col_off + 24 > binary.len() { return None; }
+
+    // COL signature must be 0 (PE32) or 1 (PE64)
+    let sig = u32::from_le_bytes(binary[col_off..col_off+4].try_into().ok()?);
+    if sig > 1 { return None; }
+
+    // TypeDescriptor RVA at offset 12
+    let td_rva = u32::from_le_bytes(binary[col_off+12..col_off+16].try_into().ok()?) as u64;
+    let td_off = rva_to_off(td_rva)?;
+
+    // TD: pVFTable(ptr_size) + spare(ptr_size) + name(null-terminated)
+    let name_off = td_off + if is_64 { 16 } else { 8 };
+    if name_off >= binary.len() { return None; }
+    let name_end = binary[name_off..].iter().position(|&b| b == 0)?;
+    if name_end == 0 || name_end > 256 { return None; }
+    let mangled = std::str::from_utf8(&binary[name_off..name_off + name_end]).ok()?;
+
+    // Demangle MSVC type name: ".?AVbad_array_new_length@std@@" → "std::bad_array_new_length"
+    let clean = mangled
+        .strip_prefix(".?AV").or_else(|| mangled.strip_prefix(".?AU"))
+        .unwrap_or(mangled)
+        .trim_end_matches('@');
+    // Reverse the namespace: "bad_array_new_length@std" → "std::bad_array_new_length"
+    let parts: Vec<&str> = clean.split('@').filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() { return None; }
+    let demangled = if parts.len() > 1 {
+        let mut rev = parts.clone();
+        rev.reverse();
+        format!("{}::vftable", rev.join("::"))
+    } else {
+        format!("{}::vftable", parts[0])
+    };
+
+    Some(demangled)
+}
+
 fn resolve_pe(pe: &goblin::pe::PE, binary: &[u8], map: &mut HashMap<u64, String>) {
     let base = pe.image_base as u64;
     let ptr_size = if pe.is_64 { 8usize } else { 4usize };
