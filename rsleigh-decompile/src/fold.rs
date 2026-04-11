@@ -409,7 +409,13 @@ fn try_recover_condition(cond_id: VarId, block_idx: usize, ssa: &mut SsaCfg) -> 
     // JB:  CF                                     → left < right (unsigned)
 
     // Try to find CMP/SUB operands from this block
-    let (cmp_left, cmp_right) = find_cmp_operands(block_idx, ssa)?;
+    let cmp_result = find_cmp_operands(block_idx, ssa)
+        // Fallback: trace through the condition's SSA expression tree directly.
+        // Flag assignments may have been eliminated by dead code elimination,
+        // but the VarIds still exist. Trace from the condition variable through
+        // its expression tree to find the underlying CMP/TEST operands.
+        .or_else(|| trace_cond_to_cmp(cond_id, ssa, 8));
+    let (cmp_left, cmp_right) = cmp_result?;
 
     // Classify the condition expression and determine operand order
     let classified = classify_jcc_condition(cond_id, ssa);
@@ -443,6 +449,55 @@ fn try_recover_condition(cond_id: VarId, block_idx: usize, ssa: &mut SsaCfg) -> 
     None
 }
 
+/// Trace the condition variable's SSA expression tree to find CMP/TEST operands.
+/// This handles the case where flag assignments have been inlined/eliminated by
+/// earlier fold passes but the VarIds still exist.
+fn trace_cond_to_cmp(cond_id: VarId, ssa: &SsaCfg, depth: u32) -> Option<(VarId, VarId)> {
+    if depth == 0 { return None; }
+    let vdef = &ssa.vars[cond_id.0 as usize];
+    match &vdef.expr {
+        // SF = IntSLess(result, 0)
+        Expr::BinOp(BinOpKind::SLess, result_id, zero_id) => {
+            let zero = &ssa.vars[zero_id.0 as usize];
+            if matches!(&zero.expr, Expr::Const(0, _)) {
+                return trace_to_cmp_with_zero(*result_id, ssa, Some(*zero_id));
+            }
+            None
+        }
+        // CF = Carry/Less(left, right)
+        Expr::BinOp(BinOpKind::Carry | BinOpKind::SCarry | BinOpKind::SBorrow
+            | BinOpKind::Less, left, right) => {
+            Some((*left, *right))
+        }
+        // BoolNot(inner) → trace inner
+        Expr::UnaryOp(UnaryOpKind::BoolNot, inner) => trace_cond_to_cmp(*inner, ssa, depth - 1),
+        // Var(inner) → follow
+        Expr::Var(inner) => trace_cond_to_cmp(*inner, ssa, depth - 1),
+        // Compound: BoolAnd/BoolOr → trace both sides for CMP operands
+        Expr::BinOp(BinOpKind::BoolAnd | BinOpKind::BoolOr, left, right) => {
+            trace_cond_to_cmp(*left, ssa, depth - 1)
+                .or_else(|| trace_cond_to_cmp(*right, ssa, depth - 1))
+        }
+        // Eq/NotEq: could be ZF=IntEq(result,0) or IntEq(OF,SF)
+        Expr::BinOp(BinOpKind::Eq | BinOpKind::NotEq, left, right) => {
+            // Check if right is Const(0) — this is ZF = IntEq(result, 0)
+            let rdef = &ssa.vars[right.0 as usize];
+            if matches!(&rdef.expr, Expr::Const(0, _)) {
+                if let Some(result) = trace_to_cmp_with_zero(*left, ssa, Some(*right)) {
+                    return Some(result);
+                }
+                // Can't trace further — use (result, 0) directly.
+                // This handles TEST of computed values like IDIV remainder.
+                return Some((*left, *right));
+            }
+            // Otherwise trace through (e.g., IntEq(OF, SF) for JGE)
+            trace_cond_to_cmp(*left, ssa, depth - 1)
+                .or_else(|| trace_cond_to_cmp(*right, ssa, depth - 1))
+        }
+        _ => None,
+    }
+}
+
 /// Find the CMP/SUB/TEST operands by tracing from the flag definitions.
 /// Searches the specified block first, then all blocks as fallback.
 fn find_cmp_operands(block_idx: usize, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
@@ -470,7 +525,7 @@ fn find_cmp_in_block(block_idx: usize, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
                 if let Expr::BinOp(BinOpKind::Eq, result_id, zero_id) = &v.expr {
                     let zero = &ssa.vars[zero_id.0 as usize];
                     if matches!(&zero.expr, Expr::Const(0, _)) {
-                        return trace_to_cmp(*result_id, ssa);
+                        return trace_to_cmp_with_zero(*result_id, ssa, Some(*zero_id));
                     }
                 }
             }
@@ -479,7 +534,7 @@ fn find_cmp_in_block(block_idx: usize, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
                 if let Expr::BinOp(BinOpKind::SLess, result_id, zero_id) = &v.expr {
                     let zero = &ssa.vars[zero_id.0 as usize];
                     if matches!(&zero.expr, Expr::Const(0, _)) {
-                        return trace_to_cmp(*result_id, ssa);
+                        return trace_to_cmp_with_zero(*result_id, ssa, Some(*zero_id));
                     }
                 }
             }
@@ -498,7 +553,7 @@ fn find_cmp_in_block(block_idx: usize, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
                 if let Expr::BinOp(BinOpKind::Eq, result_id, zero_id) = &v.expr {
                     let zero = &ssa.vars[zero_id.0 as usize];
                     if matches!(&zero.expr, Expr::Const(0, _)) {
-                        return trace_to_cmp(*result_id, ssa);
+                        return trace_to_cmp_with_zero(*result_id, ssa, Some(*zero_id));
                     }
                 }
             }
@@ -506,7 +561,7 @@ fn find_cmp_in_block(block_idx: usize, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
                 if let Expr::BinOp(BinOpKind::SLess, result_id, zero_id) = &v.expr {
                     let zero = &ssa.vars[zero_id.0 as usize];
                     if matches!(&zero.expr, Expr::Const(0, _)) {
-                        return trace_to_cmp(*result_id, ssa);
+                        return trace_to_cmp_with_zero(*result_id, ssa, Some(*zero_id));
                     }
                 }
             }
@@ -515,18 +570,41 @@ fn find_cmp_in_block(block_idx: usize, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
     None
 }
 
-/// Trace a SUB/AND result variable back to find the CMP operands.
-/// Follows register copies and Loads to find the underlying values.
-fn trace_to_cmp(result_id: VarId, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
+/// Trace a SUB/AND/NEG result variable back to find the CMP operands.
+/// Uses zero_id for IntNeg(x) → (0, x) and TEST same-register → (x, 0).
+fn trace_to_cmp_with_zero(result_id: VarId, ssa: &SsaCfg, zero_id: Option<VarId>) -> Option<(VarId, VarId)> {
     let v = &ssa.vars[result_id.0 as usize];
     match &v.expr {
         Expr::BinOp(BinOpKind::Sub, left, right) => {
             Some((resolve_cmp_operand(*left, ssa), resolve_cmp_operand(*right, ssa)))
         }
         Expr::BinOp(BinOpKind::And, left, right) => {
-            Some((resolve_cmp_operand(*left, ssa), resolve_cmp_operand(*right, ssa)))
+            // TEST a, b → AND(a, b). ZF = (a & b == 0).
+            // When both operands are the same (TEST a, a), compare a against 0.
+            // When different, compare (a & b) result against 0.
+            let l = resolve_cmp_operand(*left, ssa);
+            let r = resolve_cmp_operand(*right, ssa);
+            if let Some(z) = zero_id {
+                // For TEST: compare the operand (or result) against zero
+                if ssa.vars[l.0 as usize].varnode == ssa.vars[r.0 as usize].varnode {
+                    Some((l, z))
+                } else {
+                    // Different operands: use the result itself vs zero
+                    Some((result_id, z))
+                }
+            } else {
+                Some((l, r))
+            }
         }
-        Expr::Var(inner) => trace_to_cmp(*inner, ssa),
+        // IntNeg(x) is equivalent to Sub(0, x)
+        Expr::UnaryOp(UnaryOpKind::Neg, inner) => {
+            if let Some(z) = zero_id {
+                Some((z, resolve_cmp_operand(*inner, ssa)))
+            } else {
+                None
+            }
+        }
+        Expr::Var(inner) => trace_to_cmp_with_zero(*inner, ssa, zero_id),
         _ => None,
     }
 }

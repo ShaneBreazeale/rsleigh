@@ -152,14 +152,28 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     }
                 }
             }
-            // Hide LEA patterns: RAX = RBP - 0xNN (address computation, not a value)
-            if (lt.starts_with("RAX = RBP") || lt.starts_with("RDI = RBP")
-                || lt.starts_with("RSI = RBP") || lt.starts_with("RDX = RBP"))
-                && (lt.contains("- 0x") || lt.contains("+ 0x"))
-                && lt.ends_with(';')
-            {
-                lines.remove(i);
-                continue;
+            // Hide address loads: REG = large_address (data/code pointer, not a useful value)
+            if let Some(eq_pos) = lt.find(" = 0x") {
+                let lhs_candidate = &lt[..eq_pos];
+                let is_reg_lhs = lhs_candidate.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                    && lhs_candidate.len() >= 2 && lhs_candidate.len() <= 3;
+                if is_reg_lhs && lt.ends_with(';') {
+                    let hex_val = &lt[eq_pos + 3..lt.len() - 1]; // "0x..." without ";"
+                    if hex_val.len() > 6 { // addresses are > 6 hex digits
+                        lines.remove(i);
+                        continue;
+                    }
+                }
+            }
+            // Hide LEA patterns: REG = RBP ± offset (address computation, not a value)
+            if let Some(eq_pos) = lt.find(" = RBP") {
+                let lhs = &lt[..eq_pos];
+                let is_reg = lhs.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                    && lhs.len() >= 2 && lhs.len() <= 3;
+                if is_reg && lt.ends_with(';') && (lt.contains("- ") || lt.contains("+ ")) {
+                    lines.remove(i);
+                    continue;
+                }
             }
         }
 
@@ -510,18 +524,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
-    // Simplify x86 IDIV dividend pattern: EDX << 0x20 | X / Y → X / Y
-    // CDQ sign-extends EAX into EDX:EAX before IDIV, but the quotient is just EAX/divisor
+    // Simplify x86 IDIV dividend pattern: EDX << 32 | X → X (sign extension noise)
     for line in &mut lines {
-        // Pattern: "EDX << 0x20 | EXPR" → "EXPR" (the EDX part is sign extension noise)
-        while let Some(pos) = line.find("EDX << 0x20 | ") {
-            let replacement_start = pos + "EDX << 0x20 | ".len();
-            *line = format!("{}{}", &line[..pos], &line[replacement_start..]);
-        }
-        // Also: "RDX << 0x20 | EXPR"
-        while let Some(pos) = line.find("RDX << 0x20 | ") {
-            let replacement_start = pos + "RDX << 0x20 | ".len();
-            *line = format!("{}{}", &line[..pos], &line[replacement_start..]);
+        for pattern in &["EDX << 32 | ", "EDX << 0x20 | ", "RDX << 32 | ", "RDX << 0x20 | "] {
+            while let Some(pos) = line.find(pattern) {
+                *line = format!("{}{}", &line[..pos], &line[pos + pattern.len()..]);
+            }
         }
     }
 
@@ -978,8 +986,32 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     }
 
     // Resolve RBP-relative addresses to DWARF local names
-    // Handles both "RBP - 0xNN" (correct IR) and "RBP + 0xNN" (legacy/fallback)
+    // Handles "RBP - N" (decimal), "RBP - 0xNN" (hex), "RBP + 0xNN" (legacy)
     for line in &mut lines {
+        // Pattern: "RBP - N" with decimal offset
+        while let Some(pos) = line.find("RBP - ") {
+            let num_start = pos + 6;
+            if line[num_start..].starts_with("0x") {
+                break; // hex handled below
+            }
+            let num_end = line[num_start..].find(|c: char| !c.is_ascii_digit())
+                .map(|e| num_start + e).unwrap_or(line.len());
+            let num_str = &line[num_start..num_end];
+            if let Ok(offset) = num_str.parse::<u64>() {
+                let var_name = format!("var_{:x}", offset);
+                let resolved = aliases.get(&var_name).cloned()
+                    .or_else(|| {
+                        let adj = format!("var_{:x}", offset + 8);
+                        aliases.get(&adj).cloned()
+                    });
+                if let Some(name) = resolved {
+                    let old = format!("RBP - {}", num_str);
+                    *line = line.replace(&old, &name);
+                    continue;
+                }
+            }
+            break;
+        }
         // Pattern: "RBP - 0xNN"
         while let Some(pos) = line.find("RBP - 0x") {
             let hex_start = pos + 8;
@@ -1149,6 +1181,64 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Add missing return after if-with-return blocks (CMOV pattern):
+    // if (cond) { return X; }  ← needs: return default;
+    if let Some(last) = lines.iter().rposition(|l| !l.trim().is_empty()) {
+        let lt = lines[last].trim();
+        if lt == "}" {
+            // Find the if-block and its return value
+            let mut has_return = false;
+            let mut if_return_val = String::new();
+            let mut if_line_idx = 0;
+            for j in (0..last).rev() {
+                let t = lines[j].trim();
+                if t.starts_with("return ") && !t.starts_with("return;") {
+                    has_return = true;
+                    if_return_val = t.strip_prefix("return ").unwrap_or("")
+                        .trim_end_matches(';').to_string();
+                }
+                if t.starts_with("if (") { if_line_idx = j; break; }
+            }
+            // Check there's no return statement after the }
+            let has_return_after = lines.get(last + 1..).map_or(false, |rest|
+                rest.iter().any(|l| l.trim().starts_with("return ")));
+            if has_return && !has_return_after {
+                // Look for the last assignment before the if block to determine return value
+                // e.g., "EAX = -EDI;" → else returns EAX (= -EDI expression)
+                let mut else_val = String::new();
+                for j in (0..if_line_idx).rev() {
+                    let t = lines[j].trim();
+                    if t.contains(" = ") && t.ends_with(';') {
+                        if let Some(eq) = t.find(" = ") {
+                            let lhs = &t[..eq];
+                            // Use this variable as the return value
+                            else_val = lhs.to_string();
+                            break;
+                        }
+                    }
+                    if !t.is_empty() { break; }
+                }
+                let ret_val = if !else_val.is_empty() {
+                    else_val
+                } else if param_names.len() >= 2 {
+                    // If the if returns one param, return the other
+                    if if_return_val == param_names[0] {
+                        param_names[1].clone()
+                    } else {
+                        param_names[0].clone()
+                    }
+                } else {
+                    match if_return_val.as_str() {
+                        "EDI" => "ESI".to_string(),
+                        "ESI" => "EDI".to_string(),
+                        _ => "EAX".to_string(),
+                    }
+                };
+                lines.insert(last + 1, format!("return {};", ret_val));
+            }
+        }
+    }
+
     // Fold "var_N = expr;" at end of function into "return expr;"
     // Also handles: var_N = expr; return [var_N];
     {
@@ -1189,6 +1279,45 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     }
                 }
             }
+        }
+    }
+
+    // Fold "X = expr; ... return X;" across if-blocks: inline the expression
+    // Pattern: X = expr; if (...) { return Y; } return X; → remove assignment, return expr;
+    // Only fold when the assignment is at top level (not inside a loop/if body).
+    {
+        let mut i = 0;
+        while i < lines.len() {
+            let indent = lines[i].len() - lines[i].trim_start().len();
+            let lt = lines[i].trim().to_string();
+            // Only fold top-level assignments (indent 0)
+            if indent == 0 && lt.contains(" = ") && lt.ends_with(';')
+                && !lt.starts_with("if ") && !lt.starts_with("return ")
+                && !lt.starts_with("while ") && !lt.starts_with("}")
+            {
+                if let Some(eq_pos) = lt.find(" = ") {
+                    let var_name = lt[..eq_pos].to_string();
+                    let expr = lt[eq_pos + 3..lt.len() - 1].to_string();
+                    // Search forward for "return var_name;" at top level
+                    let mut found = false;
+                    for j in (i + 1)..lines.len() {
+                        let j_indent = lines[j].len() - lines[j].trim_start().len();
+                        let t = lines[j].trim();
+                        if j_indent == 0 && t == format!("return {};", var_name) {
+                            lines[j] = format!("return {};", expr);
+                            lines.remove(i);
+                            found = true;
+                            break;
+                        }
+                        // Check if var_name is reassigned at top level
+                        if j_indent == 0 && t.starts_with(&format!("{} = ", var_name)) {
+                            break;
+                        }
+                    }
+                    if found { continue; }
+                }
+            }
+            i += 1;
         }
     }
 
