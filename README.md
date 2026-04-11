@@ -75,29 +75,25 @@ printf("search(23) = %d\n", binary_search(sorted, 10, 23));
 return 0;
 ```
 
-### Real CTF binaries (stripped ELF, no source)
+### Real CTF binaries (ELF, no source)
 
-Tested against 16+ binaries from CSAW Red 2020, Nightmare, UTCTF, and picoCTF:
+Tested against 25+ binaries from CSAW Red 2020, CSAW 2016, HSCTF 6, Nightmare, UTCTF:
 
 ```
-// CSAW warmup — buffer overflow + win function (immediately visible)
+// Buffer overflow — win function visible immediately
 write(1, "-Warm Up-\n", 10);
-write(1, "WOW:", 4);
 sprintf(buf, "%p\n", easy);      // leaks easy() address
 write(1, buf, 9);
 gets(buf);                        // overflow here
 // easy():
 system("cat flag.txt");
 
-// CSAW worstcodeever play() — heap menu (full string + function resolution)
+// Heap menu (CSAW worstcodeever) — full string + function + global resolution
 while (var_c <= 49) {
     puts("What would you like to do?");
-    puts("	1. Add a friend");
-    puts("	2. Remove a friend");
-    puts("	3. Display a friend");
-    puts("	4. Edit a friend");
+    puts("\t1. Add a friend");
     printf("> ");
-    __isoc99_scanf("%d", buf);
+    scanf("%d", buf);
     if (var_10 != 1) {
         if (var_10 != 2) {
             if (var_10 != 3) {
@@ -107,35 +103,55 @@ while (var_c <= 49) {
     } else { add_friend(); }
 }
 
-// CSAW concrete_trap — multi-stage CTF (PIE binary, all strings resolved)
-init();
+// Multi-stage CTF (PIE binary, all strings + symbols resolved)
 puts("Welcome to my intricate trap, where all who are not me shall fail.");
-stage1();
+stage1();                         // secret passcode check
 if (0 == 0) {
     fail();
-    puts("I am slightly convinced you are me. Proceed.");
-    stage2();
-    ...
-    puts("Amazing");
-    give_flag();
+    stage2();                     // two numbers > 49
+    if (0 == 0) {
+        fail();
+        stage3();                 // five numbers sum to 0x7a69 (31337)
+        puts("Amazing");
+        give_flag();              // fopen("flag.txt", "r")
+    }
 }
 
-// Integer exploitation puzzle
-if (0x1064deadbeef4601 * *(param_0[8]) == 0xd1038d2e07b42569) {
-    system("/bin/sh");
+// Stack string decoding — hex constants decoded as ASCII
+// stack string: "u_will_never_gueits_so_l"
+puts("What is my super secret passcode?");
+fgets(buf, 48, stdin);
+strcmp(buf, RDX, 0);
+
+// Format string vulnerability (caesars-revenge)
+printf("Enter text to be encoded: ");
+fgets(buf, 250, stdin);
+// ... cipher logic ...
+printf(buf);                      // FORMAT STRING BUG
+
+// Heap note (aria-writer) — info leak + menu visible
+if (var_8 == 2) {                 // simplified from (var_8 - 2 == 0)
+    free(buf);
+} else if (var_8 == 3) {
+    write(1, name, 200);          // info leak!
+} else if (var_8 == 1) {
+    ptr = malloc(buf);
+    fgets(buf, ECX, stdin, var_4);
 }
 
-// Bad seed CTF — predictable PRNG
-time(0);
-srand(0);                         // seed is always 0!
-rand();
-puts("Welcome to the number guessing game!");
-if (var_10 != var_c) {
-    puts("Sorry. Try again, wrong guess!");
-} else {
-    puts("You won. Guess was right! Here's your flag:");
-    giveFlag();
-}
+// HTTP server (130-line, -O1 optimized, no debug info)
+// get_mime_type():
+if (EAX == 0) { return "application/octet-stream"; }
+strcmp(RAX, ".html");   // all 7 file extensions resolved
+strcmp(RBX, ".css");
+strcmp(RBX, ".js");
+strcmp(RBX, ".json");
+// main():
+signal(13, 1);                    // SIGPIPE
+socket(2, 1, 0);                  // TCP
+bind(EBX, RBP - 48, 16);
+listen(EBX, 10);
+printf("Listening on port %d\n", 0x1f90);
 ```
 
 ### -O2 optimized code
@@ -194,12 +210,21 @@ What it does:
 - Array access syntax with scaling (`*(uint8_t*)(base + idx * 4)` -> `base[idx]`)
 - Array index canonicalization (`RDX[friend_type]` -> `friend_type[RDX]`)
 - Dead code elimination (unused flag writes, IDIV remainder, register shuffling)
-- Stack canary detection and removal (Mach-O `___stack_chk_guard`, ELF `FS_OFFSET`)
+- Stack canary detection and removal (Mach-O `___stack_chk_guard`, ELF `FS_OFFSET`, `__stack_chk_fail` block removal)
 - setvbuf init boilerplate collapse (stdout/stdin/stderr -> single comment)
-- `__TMC_END__` -> `stdout` normalization
-- `*(stdout)` / `*(stdin)` simplification in call arguments
+- `__TMC_END__` -> `stdout` normalization, `*(stdout)` / `*(stdin)` simplification
 - Nested void call unwinding (`fgets(puts("msg"), 64, stdin)` -> separate statements)
+- Duplicate call deduplication (scope-based, handles non-consecutive duplicates)
 - Phi node removal from output (SSA artifacts stripped)
+- Packed ASCII constant decoding (`0x6e5f6c6c69775f75` -> `"u_will_n"`)
+- Stack string merging (consecutive string assignments -> `// stack string: "..."`)
+- Extra argument stripping (`puts(msg, stale_reg)` -> `puts(msg)`)
+- Subtraction comparison simplification (`var - 2 == 0` -> `var == 2`)
+- `__isoc99_scanf` -> `scanf` prefix cleanup
+- Register noise removal (void call return + arithmetic, sign-mask patterns)
+- Mach-O stack probe removal (`___chkstk_darwin` boilerplate)
+- GCC runtime function hiding (`deregister_tm_clones`, `frame_dummy`, etc.)
+- False string literal rejection (ELF section names, version strings, `"h@@"`)
 - Save/restore elision (register spills across calls hidden)
 - Register copy tracking and inlining at print time
 - Sequential register assignment chaining (`ECX = len - 1; ECX = ECX - i` -> `ECX = (len - 1) - i`)
@@ -217,6 +242,19 @@ What it does:
 | MIPS32 | 900+ | Big-endian, FPU + DSP + MIPS16 + microMIPS |
 | RISC-V 64 | 500+ | RV64GC + F/D/B/K/P/Q/V/C extensions |
 
+## Binary formats
+
+| Format | Architectures | Features |
+|--------|--------------|----------|
+| ELF | x86-64, AArch64, ARM32, MIPS32, RISC-V | PLT/GOT imports, global symbols, PIE strings, DWARF, stack canary |
+| Mach-O | x86-64, AArch64 | Indirect symbol table, dSYM DWARF, `__cstring` literals |
+| PE | x86-64 | Imports, exports, section-based strings |
+
+Architecture is auto-detected from binary headers. The compare tool handles all three formats:
+```bash
+cargo run -p test-harness --example compare -- ./binary [func1 func2 ...]
+```
+
 ## Crates
 
 ```
@@ -224,7 +262,7 @@ rsleigh/
   src/                    # SLEIGH parser + Rust codegen library
   pcode-ir/               # PcodeOp, Varnode types + peephole optimizer (no_std, zero deps)
   rsleigh-api/            # Decoder API — decode bytes into instructions + P-code
-  rsleigh-decompile/      # Decompiler — P-code to C-like pseudocode (5-pass pipeline)
+  rsleigh-decompile/      # Decompiler — P-code to C-like pseudocode (5-pass pipeline + post-processor)
   rsleigh-generate/       # CLI: parse .slaspec files, write generated crate source
   generated/              # Output crates (gitignored /out/ dirs, regenerated from slaspecs)
   test-harness/           # Golden tests, corpus validation, fuzz tests, decompiler validation
@@ -242,7 +280,7 @@ rsleigh/
 - **Compiled code patterns** — stack canary (FS:[0x28]), stack alignment (AND RSP,-16), indirect calls/jumps, switch tables, SETcc, REP MOVSB, LOCK XADD, SSE2 ADDSD/MOVSD, SYSCALL, PLT/GOT sequences, TBZ/TBNZ, CSET/CSINC, post-index loads, memory barriers, thread pointer reads.
 - **Ghidra differential fixtures** — ~300 instructions compared against Ghidra's P-code output
 - **Ghidra decompiler comparison** — 11 functions (add, factorial, sum_array, string_length, manhattan_distance, day_name, list_sum, binary_search, apply, main) decompiled side-by-side with Ghidra 12 (`cargo run -p test-harness --example compare`)
-- **CTF binary validation** — 16+ real CTF binaries from CSAW Red, Nightmare, UTCTF decompiled successfully (buffer overflows, heap menus, integer exploitation, bad seeds, C++ reversing)
+- **CTF binary validation** — 25+ real CTF binaries from CSAW Red 2020, CSAW 2016, HSCTF 6, Nightmare, UTCTF decompiled successfully (buffer overflows, heap menus, integer exploitation, bad seeds, C++ reversing, format strings, heap notes, crypto)
 - **Corpus validation** — 278 real instructions across all architectures, decode without panic
 - **Fuzz tests** — 5000 random byte sequences (empty, truncated, garbage), zero panics
 - **Decompiler validation** — compiles C source with `-g`, decompiles with rsleigh, asserts string literals, import names, DWARF parameter names, conditions, function calls, return values
