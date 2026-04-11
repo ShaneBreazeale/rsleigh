@@ -142,10 +142,71 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let rhs = &lt[eq_pos + 3..lt.len() - 1];
                     let is_small_const = rhs.starts_with("0x") && rhs.len() <= 6
                         || rhs.parse::<i64>().map_or(false, |v| v.abs() < 256);
+                    // Also hide string constant stores: var_24 = "text";
+                    let is_string = rhs.starts_with('"') && rhs.ends_with('"');
                     let indent = lines[i].len() - lines[i].trim_start().len();
-                    if is_small_const && indent == 0 {
+                    if (is_small_const || is_string) && indent == 0 {
                         lines.remove(i);
                         continue;
+                    }
+                }
+            }
+            // Hide LEA patterns: RAX = RBP - 0xNN (address computation, not a value)
+            if (lt.starts_with("RAX = RBP") || lt.starts_with("RDI = RBP")
+                || lt.starts_with("RSI = RBP") || lt.starts_with("RDX = RBP"))
+                && (lt.contains("- 0x") || lt.contains("+ 0x"))
+                && lt.ends_with(';')
+            {
+                lines.remove(i);
+                continue;
+            }
+        }
+
+        // Fix nested call args: func2(..., func1(...), ...) where func1's return
+        // was incorrectly tracked as an argument. Replace nested calls with "buf".
+        {
+            let lt = lines[i].trim().to_string();
+            if lt.contains("(") && !lt.starts_with("if ") && !lt.starts_with("while ")
+                && !lt.starts_with("return ")
+            {
+                // Check each argument: if it's a function call expression (has balanced
+                // parens like printf("...")), replace with "buf"
+                if let Some(outer_open) = lt.find('(') {
+                    let outer_name = &lt[..outer_open];
+                    if !outer_name.is_empty() && outer_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '*') {
+                        let args_start = outer_open + 1;
+                        if let Some(outer_close) = find_matching_paren(&lt, outer_open) {
+                            let args = &lt[args_start..outer_close];
+                            // Split args by balanced commas and check each
+                            let mut new_args = Vec::new();
+                            let mut rest = args;
+                            let mut changed = false;
+                            // Known void/output functions whose return value is NOT useful as an arg
+                            let void_funcs = ["printf", "puts", "fputs", "putchar", "putc",
+                                "fprintf", "write", "send", "perror"];
+                            while !rest.is_empty() {
+                                let comma = find_balanced_comma(rest).unwrap_or(rest.len());
+                                let arg = rest[..comma].trim();
+                                // Only replace if the nested call is a known void/output function
+                                let is_void_call = arg.contains('(') && arg.contains(')')
+                                    && !arg.starts_with('"') && !arg.starts_with("*(")
+                                    && void_funcs.iter().any(|f| arg.starts_with(f));
+                                if is_void_call {
+                                    new_args.push("buf".to_string());
+                                    changed = true;
+                                } else {
+                                    new_args.push(arg.to_string());
+                                }
+                                rest = if comma < rest.len() { &rest[comma + 1..] } else { "" };
+                            }
+                            if changed {
+                                let indent = lines[i].len() - lines[i].trim_start().len();
+                                let pad = " ".repeat(indent);
+                                let suffix = &lt[outer_close..]; // includes ")" and ";"
+                                lines[i] = format!("{}{}({}{}",
+                                    pad, outer_name, new_args.join(", "), suffix);
+                            }
+                        }
                     }
                 }
             }
@@ -2046,6 +2107,17 @@ fn format_cond_operand(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTra
     format_var(id, ssa, ctx)
 }
 
+/// Find the position of the first comma at depth 0 in a string.
+fn find_balanced_comma(s: &str) -> Option<usize> {
+    let mut depth = 0;
+    for (i, ch) in s.char_indices() {
+        if ch == '(' { depth += 1; }
+        if ch == ')' { depth -= 1; }
+        if ch == ',' && depth == 0 { return Some(i); }
+    }
+    None
+}
+
 /// Find matching closing paren for an opening paren at `pos`.
 fn find_matching_paren(s: &str, pos: usize) -> Option<usize> {
     let mut depth = 0;
@@ -2343,6 +2415,10 @@ fn format_const_ctx(val: u64, size: u32, ctx: &PrintCtx) -> String {
     if size >= 4 && val > 0x1000 {
         if let Some(s) = try_read_string(val, ctx) {
             return format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"));
+        }
+        // Try import/global name (e.g., GOT entry for stdin/stdout)
+        if let Some(name) = ctx.imports.get(&val) {
+            return name.clone();
         }
     }
     format_const(val, size)

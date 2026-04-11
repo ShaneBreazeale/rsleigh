@@ -52,7 +52,7 @@
   printf("strlen = %d\n", string_length("hello world"));
   printf("manhattan = %d\n", manhattan_distance(a, b));
   printf("day = %s\n", day_name(3));
-  printf("apply(add,5,6) = %d\n", apply(0x1000004c0, 5, 6));
+  printf("apply(add,5,6) = %d\n", apply(add, 5, 6));
   memcpy(sorted, 0x100000a50, 0x28);
   printf("search(23) = %d\n", binary_search(sorted, 0xa, 0x17));
   return 0;

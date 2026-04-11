@@ -79,11 +79,25 @@ fn resolve_elf(elf: &goblin::elf::Elf, binary: &[u8], map: &mut HashMap<u64, Str
         }
     }
 
-    // Dynamic imports (non-PLT)
+    // Dynamic imports (non-PLT) + data object symbols (stdin, stdout, stderr)
     for sym in elf.dynsyms.iter() {
-        if sym.is_import() && sym.st_value != 0 {
+        if sym.st_value != 0 {
             if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
-                if !name.is_empty() { map.insert(sym.st_value, name.to_string()); }
+                if !name.is_empty() {
+                    map.insert(sym.st_value, name.to_string());
+                }
+            }
+        }
+    }
+    // Also map GOT entries for data objects (stdin, stdout, stderr)
+    // These are accessed via *(GOT_addr) in the code
+    for reloc in &elf.dynrels {
+        if let Some(sym) = elf.dynsyms.get(reloc.r_sym) {
+            if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
+                if !name.is_empty() && reloc.r_offset != 0 {
+                    // Map the GOT entry address so *(addr) resolves to the name
+                    map.entry(reloc.r_offset).or_insert_with(|| name.to_string());
+                }
             }
         }
     }
