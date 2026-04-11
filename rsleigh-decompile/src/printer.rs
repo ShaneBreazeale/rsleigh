@@ -3524,6 +3524,55 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #VOID_RETURN: Remove trailing "return;" in void functions (redundant).
+    if lines.first().map_or(false, |l| l.trim().starts_with("void ")) {
+        // Remove the last "return;" before the closing "}"
+        let mut i = lines.len();
+        while i > 0 {
+            i -= 1;
+            let t = lines[i].trim();
+            if t == "return;" {
+                lines.remove(i);
+                break;
+            }
+            if t == "}" { continue; } // skip closing brace
+            break; // stop at first non-brace, non-return line
+        }
+    }
+
+    // #PUTCHAR_ASCII: Display putchar(10) as putchar('\n'), etc.
+    for line in &mut lines {
+        *line = line.replace("putchar(10)", "putchar('\\n')")
+                    .replace("putchar(9)", "putchar('\\t')")
+                    .replace("putchar(13)", "putchar('\\r')")
+                    .replace("putchar(0)", "putchar('\\0')");
+    }
+
+    // #SIMPLIFY_DEREF: Simplify *(uint64_t*)(VAR) to *VAR and *(uint32_t*)(VAR) to *VAR
+    // when VAR is a simple param or variable (no arithmetic).
+    for line in &mut lines {
+        // *(uint64_t*)(param_N) → *param_N
+        // *(uint32_t*)(param_N) → *(int*)param_N
+        let t = line.trim().to_string();
+        for cast in ["*(uint64_t*)(", "*(int*)(", "*(long*)("] {
+            if t.contains(cast) {
+                // Find the closing paren and check if the content is a simple var
+                if let Some(start) = t.find(cast) {
+                    let inner_start = start + cast.len();
+                    if let Some(close) = t[inner_start..].find(')') {
+                        let inner = &t[inner_start..inner_start + close];
+                        // Only simplify if inner is a simple variable (no spaces, arithmetic)
+                        if inner.starts_with("param_") && !inner.contains(' ') {
+                            let old = format!("{}{})", cast, inner);
+                            let new = format!("*{}", inner);
+                            *line = line.replace(&old, &new);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // #RETURN_NEG1: Display 0xffffffffffffffff and 0xffffffff as -1 in return statements.
     for line in &mut lines {
         let t = line.trim();
