@@ -143,6 +143,15 @@ pub fn decompile_with_binary(
         }
     }
 
+    // Parse struct field names from DWARF
+    let struct_fields = if let Some(path) = binary_path {
+        dwarf::parse_struct_fields_from_path(path)
+    } else if let Some(binary) = binary {
+        dwarf::parse_struct_fields(binary)
+    } else {
+        std::collections::HashMap::new()
+    };
+
     let structured = structure::recover_structure(&ssa, &cfg);
-    printer::print_c(&structured, &ssa, arch, binary, &import_map, &local_var_names)
+    printer::print_c(&structured, &ssa, arch, binary, &import_map, &local_var_names, &struct_fields)
 }

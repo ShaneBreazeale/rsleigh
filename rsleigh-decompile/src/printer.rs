@@ -15,6 +15,7 @@ pub fn print_c(
     binary: Option<&[u8]>,
     imports: &HashMap<u64, String>,
     local_names: &HashMap<String, String>,
+    struct_fields: &HashMap<u64, String>,
 ) -> String {
     let mut out = String::new();
     let ctx = PrintCtx { arch, binary, imports };
@@ -34,7 +35,7 @@ pub fn print_c(
     let param_names: Vec<String> = ssa.vars.iter()
         .filter_map(|v| v.param_name.as_ref().cloned())
         .collect();
-    post_process(&mut out, &all_aliases, &param_names);
+    post_process(&mut out, &all_aliases, &param_names, struct_fields);
     out
 }
 
@@ -71,7 +72,7 @@ fn print_stmts_with_tracker(stmts: &[StructuredStmt], ssa: &SsaCfg, ctx: &PrintC
 }
 
 /// Text-level post-processing to clean up common patterns.
-fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, String>, param_names: &[String]) {
+fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, String>, param_names: &[String], struct_fields: &HashMap<u64, String>) {
     let mut lines: Vec<String> = out.lines().map(|l| l.to_string()).collect();
     let mut i = 0;
     while i < lines.len() {
@@ -564,6 +565,20 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Replace ->fieldN with ->actual_name using DWARF struct field info
+    if !struct_fields.is_empty() {
+        for line in &mut lines {
+            if !line.contains("->field") { continue; }
+            for (offset, name) in struct_fields {
+                let pattern = format!("->field{:x}", offset);
+                if line.contains(&pattern) {
+                    let replacement = format!("->{}", name);
+                    *line = line.replace(&pattern, &replacement);
+                }
+            }
+        }
+    }
+
     // Replace *(REG) with *(param) for pointer dereferences in conditions
     if !param_names.is_empty() {
         for line in &mut lines {
@@ -962,30 +977,35 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // that's likely what was stored in EAX before the return.
     if let Some(last) = lines.iter().rposition(|l| !l.trim().is_empty()) {
         if lines[last].trim() == "return;" {
-            // Scan backward through ALL lines for the last variable assignment.
-            // This looks inside while/if bodies to find accumulator variables.
+            // Scan backward for the return value: prefer non-increment accumulators,
+            // then fall back to incremented locals (not parameters).
             let mut return_var = None;
+            let mut fallback_increment = None;
             for j in (0..last).rev() {
                 let lt = lines[j].trim();
                 if let Some(eq_pos) = lt.find(" = ") {
                     let lhs = &lt[..eq_pos];
                     let is_var = lhs.chars().next().map_or(false, |c| c.is_ascii_lowercase())
                         && lhs.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-                    // Skip loop counter increments: i = i + 1
+                    if !is_var { continue; }
                     let rhs = &lt[eq_pos + 3..].trim_end_matches(';');
-                    let is_increment = rhs.ends_with("+ 1")
-                        && rhs.starts_with(lhs);
-                    // Skip pointer increments: s = s + 1, head = head->field8
-                    let is_ptr_advance = rhs.contains("->") || (rhs.ends_with("+ 1") && rhs.starts_with(lhs));
-                    if is_var && !is_increment && !is_ptr_advance {
+                    let is_self_increment = rhs.ends_with("+ 1") && rhs.starts_with(lhs);
+                    let is_ptr_advance = rhs.contains("->")
+                        || (is_self_increment && param_names.contains(&lhs.to_string()));
+                    if !is_self_increment && !is_ptr_advance {
                         return_var = Some(lhs.to_string());
                         break;
                     }
+                    // Track first non-parameter increment as fallback
+                    if is_self_increment && !param_names.contains(&lhs.to_string())
+                        && fallback_increment.is_none()
+                    {
+                        fallback_increment = Some(lhs.to_string());
+                    }
                 }
             }
-            // If we found a local variable assignment, use that.
-            // Otherwise fall back to the first parameter.
             let ret_val = return_var
+                .or(fallback_increment)
                 .or_else(|| param_names.first().cloned())
                 .unwrap_or_default();
             if !ret_val.is_empty() {

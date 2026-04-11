@@ -41,7 +41,7 @@
 === list_sum (66 instructions) ===
   while (head != 0) {
       sum = *(head) + sum;
-      head = head->field8;
+      head = head->next;
   }
   return sum;
 ---
@@ -58,7 +58,7 @@
   return 0;
 ---
 === manhattan_distance (28 instructions) ===
-  EAX = (a->field4) - b->field4;
+  EAX = (a->y) - b->y;
   if (a < 0) {
       dx = -dx;
       if (dy < 0) {
@@ -72,7 +72,7 @@
       len = len + 1;
       s = s + 1;
   }
-  return s;
+  return len;
 ---
 === sub (30 instructions) ===
   return a - b;

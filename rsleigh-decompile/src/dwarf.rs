@@ -10,6 +10,10 @@ pub struct FunctionDebugInfo {
     pub return_type: Option<String>,
 }
 
+/// Map of struct field byte offset → field name, indexed by struct identity.
+/// The key is the byte offset within the struct, the value is the field name.
+pub type StructFieldMap = HashMap<u64, String>;
+
 /// Extract DWARF debug info from a binary file path.
 /// On macOS, automatically searches for companion .dSYM bundle.
 pub fn parse_dwarf_from_path(binary_path: &Path) -> HashMap<u64, FunctionDebugInfo> {
@@ -148,4 +152,100 @@ fn get_stack_offset(unit: &UnitSlice<'_>, entry: &EntrySlice<'_>) -> Option<i64>
         }
     }
     None
+}
+
+/// Get the DW_AT_data_member_location (byte offset within struct).
+fn get_member_offset(unit: &UnitSlice<'_>, entry: &EntrySlice<'_>) -> Option<u64> {
+    let attr = entry.attr_value(gimli::DW_AT_data_member_location).ok()??;
+    match attr {
+        gimli::AttributeValue::Udata(n) => Some(n),
+        gimli::AttributeValue::Sdata(n) => Some(n as u64),
+        gimli::AttributeValue::Exprloc(ref expr) => {
+            // DW_OP_plus_uconst N — common for member offsets
+            let mut ops = expr.clone().operations(unit.encoding());
+            if let Ok(Some(gimli::Operation::PlusConstant { value })) = ops.next() {
+                return Some(value);
+            }
+            None
+        }
+        gimli::AttributeValue::Data1(n) => Some(n as u64),
+        gimli::AttributeValue::Data2(n) => Some(n as u64),
+        gimli::AttributeValue::Data4(n) => Some(n as u64),
+        gimli::AttributeValue::Data8(n) => Some(n),
+        _ => None,
+    }
+}
+
+/// Parse all struct definitions from DWARF, returning a merged map of
+/// field_byte_offset → field_name across all structs in the binary.
+pub fn parse_struct_fields(binary: &[u8]) -> StructFieldMap {
+    let mut fields = HashMap::new();
+    let Ok(obj) = object::File::parse(binary) else { return fields };
+
+    let endian = if obj.endianness() == object::Endianness::Little {
+        gimli::RunTimeEndian::Little
+    } else {
+        gimli::RunTimeEndian::Big
+    };
+
+    let load_section = |id: gimli::SectionId| -> Result<gimli::EndianSlice<'_, gimli::RunTimeEndian>, gimli::Error> {
+        let data = obj.section_by_name(id.name())
+            .and_then(|s| s.data().ok())
+            .unwrap_or(&[]);
+        Ok(gimli::EndianSlice::new(data, endian))
+    };
+
+    let dwarf = match gimli::Dwarf::load(&load_section) {
+        Ok(d) => d,
+        Err(_) => return fields,
+    };
+
+    let mut units = dwarf.units();
+    while let Ok(Some(header)) = units.next() {
+        let Ok(unit) = dwarf.unit(header) else { continue };
+        let mut entries = unit.entries();
+
+        let mut in_struct = false;
+
+        while let Ok(Some((depth, entry))) = entries.next_dfs() {
+            // depth < 0 means we popped back up — leaving the struct's children
+            if depth < 0 { in_struct = false; }
+
+            match entry.tag() {
+                gimli::DW_TAG_structure_type | gimli::DW_TAG_union_type => {
+                    in_struct = true;
+                }
+                gimli::DW_TAG_member if in_struct => {
+                    if let (Some(name), Some(offset)) = (
+                        get_die_name(&dwarf, &unit, entry),
+                        get_member_offset(&unit, entry),
+                    ) {
+                        fields.entry(offset).or_insert(name);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fields
+}
+
+/// Parse struct fields from a binary file path (with dSYM support).
+pub fn parse_struct_fields_from_path(binary_path: &Path) -> StructFieldMap {
+    if let Ok(data) = std::fs::read(binary_path) {
+        let result = parse_struct_fields(&data);
+        if !result.is_empty() { return result; }
+    }
+    // Try dSYM
+    if let Some(file_name) = binary_path.file_name() {
+        let mut dsym_path = binary_path.as_os_str().to_os_string();
+        dsym_path.push(".dSYM");
+        let dsym_dwarf = Path::new(&dsym_path)
+            .join("Contents").join("Resources").join("DWARF").join(file_name);
+        if let Ok(data) = std::fs::read(&dsym_dwarf) {
+            return parse_struct_fields(&data);
+        }
+    }
+    HashMap::new()
 }
