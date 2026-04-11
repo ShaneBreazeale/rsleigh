@@ -265,15 +265,39 @@ fn eliminate_dead(ssa: &mut SsaCfg) {
 
                     // Dead register writes (not read before overwrite)
                     // BUT preserve argument registers before calls
+                    // BUT preserve registers in loop bodies (back-edge blocks)
+                    // because the SSA may not have connected loop-carried variables
                     let is_arg_reg = ARG_REG_OFFSETS.contains(&vdef.varnode.offset)
                         && vdef.varnode.space == AddressSpaceId::Register;
                     let precedes_call = block.stmts.get(i + 1..).map_or(false, |rest|
                         rest.iter().any(|s| matches!(s, Stmt::Call { .. })))
                         || matches!(block.terminator, SsaTerminator::Call { .. });
+                    // Check if this block branches back to an earlier block (loop body)
+                    let is_loop_body = match &block.terminator {
+                        SsaTerminator::CBranch { taken, fallthrough, .. } =>
+                            taken.0 <= block.id.0 || fallthrough.0 <= block.id.0,
+                        SsaTerminator::Branch(b) => b.0 <= block.id.0,
+                        _ => false,
+                    };
+                    // Also check if this block's successor is a loop header
+                    let is_pre_loop = match &block.terminator {
+                        SsaTerminator::Fallthrough(b) | SsaTerminator::Branch(b) =>
+                            b.0 < block.id.0,
+                        _ => false,
+                    };
+                    // Preserve non-flag register writes in loop bodies — they may be
+                    // loop accumulators (count += bit, total += arr[i]) whose use_count
+                    // is 0 due to incomplete phi resolution in the SSA builder.
+                    let preserve_in_loop = (is_loop_body || is_pre_loop)
+                        && vdef.varnode.space == AddressSpaceId::Register
+                        && !FLAG_OFFSETS.contains(&vdef.varnode.offset)
+                        && vdef.varnode.offset != RIP_OFFSET
+                        && vdef.varnode.offset != RSP_OFFSET;
                     if vdef.varnode.space == AddressSpaceId::Register
                         && !read_after.contains(&key)
                         && vdef.use_count == 0
                         && !(is_arg_reg && precedes_call)
+                        && !preserve_in_loop
                     { dead_indices.push(i); continue; }
 
                     let mut visited = std::collections::HashSet::new();
