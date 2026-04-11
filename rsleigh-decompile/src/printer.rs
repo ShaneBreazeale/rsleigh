@@ -1683,6 +1683,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // #DEDUP: Remove duplicate call lines within the same scope.
     // The nested-call unwinding can create the same call line multiple times.
     // Remove non-consecutive duplicates of function calls at the same indent level.
+    // Only remove duplicates that are NOT adjacent — adjacent identical calls may be
+    // intentional (e.g., printf("===\n"); printf("===\n"); in a banner function).
     {
         let mut i = 0;
         while i < lines.len() {
@@ -1694,11 +1696,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 && !lt.starts_with("for ") && !lt.starts_with("return ")
             {
                 // Check if an identical line exists later at the same indent
+                // but only remove if there are >2 lines between (non-adjacent)
                 let mut j = i + 1;
                 while j < lines.len() {
                     let jt = lines[j].trim();
                     let j_indent = lines[j].len() - lines[j].trim_start().len();
-                    if j_indent == indent && jt == lt {
+                    if j_indent == indent && jt == lt && (j - i) > 2 {
                         lines.remove(j);
                         continue;
                     }
@@ -2413,6 +2416,62 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     lines.remove(j); // the division shift
                 } else {
                     break;
+                }
+            }
+            i += 1;
+        }
+    }
+
+    // #BANNER: Merge consecutive puts/printf calls with string-only args into a banner.
+    // Pattern: 3+ consecutive puts("...")/printf("...\n") at the same indent
+    // → collapse to puts("line1\nline2\nline3")
+    {
+        let mut i = 0;
+        while i < lines.len() {
+            let lt = lines[i].trim();
+            // Check if this is a puts("...") or printf("...\n") with string-only arg
+            let is_print_str = |line: &str| -> Option<String> {
+                let t = line.trim();
+                if let Some(rest) = t.strip_prefix("puts(\"") {
+                    let end = rest.rfind("\")")?;
+                    if rest[end..].ends_with("\");") {
+                        return Some(rest[..end].to_string());
+                    }
+                }
+                if let Some(rest) = t.strip_prefix("printf(\"") {
+                    let end = rest.rfind("\")")?;
+                    if rest[end..].ends_with("\");") {
+                        return Some(rest[..end].to_string());
+                    }
+                }
+                None
+            };
+
+            if is_print_str(lt).is_some() {
+                let indent = lines[i].len() - lines[i].trim_start().len();
+                // Count consecutive print-string lines at the same indent
+                let mut count = 1;
+                while i + count < lines.len() {
+                    let next = lines[i + count].trim();
+                    let next_indent = lines[i + count].len() - lines[i + count].trim_start().len();
+                    if next_indent == indent && is_print_str(next).is_some() {
+                        count += 1;
+                    } else {
+                        break;
+                    }
+                }
+                // Only merge if 3+ consecutive lines (a real banner/header)
+                if count >= 3 {
+                    let pad = " ".repeat(indent);
+                    let strs: Vec<String> = (0..count)
+                        .filter_map(|j| is_print_str(lines[i + j].trim()))
+                        .collect();
+                    let merged = strs.join("\\n");
+                    // Replace with a single puts
+                    lines[i] = format!("{}puts(\"{}\\n\");", pad, merged);
+                    for _ in 1..count {
+                        lines.remove(i + 1);
+                    }
                 }
             }
             i += 1;
@@ -4391,11 +4450,23 @@ fn try_read_string(va: u64, ctx: &PrintCtx) -> Option<String> {
     let obj = goblin::Object::parse(binary).ok()?;
     let file_offset = match &obj {
         goblin::Object::Mach(goblin::mach::Mach::Binary(macho)) => {
-            // Only read strings from __TEXT segment (read-only, contains __cstring)
-            // Skip __DATA/__DATA_CONST (global vars, GOT pointers)
+            // Read strings from __TEXT segment sections (__cstring, __const)
+            // Use section-level granularity to avoid reading code as strings
             macho.segments.iter().find_map(|seg| {
                 let segname = seg.name().ok().unwrap_or("").trim_end_matches('\0');
                 if segname != "__TEXT" { return None; }
+                // Check individual sections within __TEXT
+                if let Ok(sections) = seg.sections() {
+                    for (sec, _) in &sections {
+                        let sname = std::str::from_utf8(&sec.sectname).unwrap_or("")
+                            .trim_end_matches('\0');
+                        if va >= sec.addr && va < sec.addr + sec.size {
+                            let fo = (sec.offset as u64 + (va - sec.addr)) as usize;
+                            return Some(fo);
+                        }
+                    }
+                }
+                // Fallback: use segment-level mapping
                 if va >= seg.vmaddr && va < seg.vmaddr + seg.vmsize {
                     Some((seg.fileoff + (va - seg.vmaddr)) as usize)
                 } else { None }
@@ -4465,7 +4536,9 @@ fn try_read_string(va: u64, ctx: &PrintCtx) -> Option<String> {
                     let dots: Vec<&str> = part.split('.').collect();
                     dots.len() >= 2 && dots.iter().all(|d| !d.is_empty() && d.len() <= 3 && d.chars().all(|c| c.is_ascii_digit()))
                 });
-            has_version && null_pos < 20
+            // Only reject if the string is MOSTLY a version (short and version-dominated)
+            // Don't reject strings like "  Program v1.0\n" that contain a version substring
+            has_version && null_pos < 20 && s.trim().len() < 12
         }
         // Reject strings from inside .bss/.data global arrays that happen to contain
         // readable text from adjacent sections (e.g., GCC version string fragments)
