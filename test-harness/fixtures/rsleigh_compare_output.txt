@@ -40,7 +40,7 @@
 ---
 === list_sum (66 instructions) ===
   while (head != 0) {
-      sum = *(EAX) + sum;
+      sum = *(head) + sum;
       head = head->field8;
   }
   return sum;
@@ -68,7 +68,7 @@
   }
 ---
 === string_length (47 instructions) ===
-  while (EAX != 0) {
+  while (*(s) != 0) {
       len = len + 1;
       s = s + 1;
   }

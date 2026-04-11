@@ -564,6 +564,23 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Replace *(REG) with *(param) for pointer dereferences in conditions
+    if !param_names.is_empty() {
+        for line in &mut lines {
+            let reg_names = ["RAX", "RCX", "RDX", "RBX", "RSI", "RDI", "R8", "R9",
+                             "EAX", "ECX", "EDX", "EBX", "ESI", "EDI"];
+            let mut param_idx = 0;
+            for reg in &reg_names {
+                let deref = format!("*({})", reg);
+                while line.contains(&deref) && param_idx < param_names.len() {
+                    let replacement = format!("*({})", param_names[param_idx]);
+                    *line = line.replacen(&deref, &replacement, 1);
+                    param_idx += 1;
+                }
+            }
+        }
+    }
+
     // Elide redundant register assignments: REG = expr; var = expr; → var = expr;
     // When a Store to a stack variable captures the same expression that was just
     // assigned to a register, the register assignment is pure noise.
@@ -1983,12 +2000,26 @@ fn format_cond_operand(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTra
     if let Expr::Const(val, sz) = &vdef.expr {
         return format_const_ctx(*val, *sz, ctx);
     }
-    // For Var references, recurse to get the underlying expression
+    // For Var references, always recurse to trace through the SSA chain
     if let Expr::Var(inner) = &vdef.expr {
-        let iv = ssa.var(*inner);
-        // If the inner var has a meaningful expression, use it
-        if iv.param_name.is_some() || matches!(&iv.expr, Expr::Load(_) | Expr::BinOp(_, _, _) | Expr::Const(_, _)) {
-            return format_cond_operand(*inner, ssa, ctx, tracker);
+        return format_cond_operand(*inner, ssa, ctx, tracker);
+    }
+    // For registers, also try the tracker for param names
+    if vdef.varnode.space == AddressSpaceId::Register {
+        if let Some(tracked) = tracker.get(vdef.varnode.offset, vdef.varnode.size) {
+            let tv = ssa.var(tracked);
+            if tv.param_name.is_some() {
+                return format_var(tracked, ssa, ctx);
+            }
+            if let Expr::Load(ptr) = &tv.expr {
+                if let Some(offset) = get_rbp_offset(*ptr, ssa) {
+                    let name = format!("var_{:x}", offset);
+                    let resolved = resolve_stack_alias(&name, tracker);
+                    if resolved != name && resolved.chars().next().map_or(false, |c| c.is_ascii_lowercase()) {
+                        return resolved;
+                    }
+                }
+            }
         }
     }
     // Default: show variable via standard formatting
