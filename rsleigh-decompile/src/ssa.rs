@@ -15,47 +15,86 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
     // Per-block: map from varnode -> VarId at block exit
     let mut block_exit_vars: Vec<HashMap<Varnode, VarId>> = vec![HashMap::new(); cfg.blocks.len()];
 
-    // First pass: local numbering within each block
-    for block in &cfg.blocks {
-        let mut current: HashMap<Varnode, VarId> = HashMap::new();
+    // Iterative dataflow: re-process blocks until exit vars stabilize (max 4 passes)
+    for iteration in 0..4u32 {
+        let prev_exit_vars: Vec<HashMap<Varnode, VarId>> = block_exit_vars.clone();
+        let mut changed = false;
 
-        // Inherit from single predecessor if it exists
-        let block_preds = &preds[block.id.0];
-        if block_preds.len() == 1 {
-            current = block_exit_vars[block_preds[0].0].clone();
-        }
+        for (block_idx, block) in cfg.blocks.iter().enumerate() {
+            let block_preds = &preds[block.id.0];
 
-        let mut stmts = Vec::new();
-
-        for (_addr, op) in &block.ops {
-            match op.clone() {
-                PcodeOp::Store { ptr, val, .. } => {
-                    let addr_var = resolve_input(&mut ssa, &mut current, &ptr);
-                    let val_var = resolve_input(&mut ssa, &mut current, &val);
-                    stmts.push(Stmt::Store { addr: addr_var, val: val_var });
+            // On iteration > 0, skip blocks whose predecessors haven't changed
+            if iteration > 0 {
+                let any_pred_changed = block_preds.iter().any(|pred| {
+                    prev_exit_vars[pred.0] != block_exit_vars[pred.0]
+                });
+                // Also check if any predecessor has new keys not in our current entry state
+                let any_new_keys = block_preds.iter().any(|pred| {
+                    block_exit_vars[pred.0].keys().any(|k| {
+                        !prev_exit_vars[pred.0].contains_key(k)
+                    })
+                });
+                if !any_pred_changed && !any_new_keys {
+                    continue;
                 }
-                ref op => {
-                    if let Some(out_vn) = get_output(op) {
-                        let expr = build_expr(&mut ssa, &mut current, op);
-                        let var_id = ssa.new_var(out_vn, expr, out_vn.size);
-                        current.insert(out_vn, var_id);
-                        stmts.push(Stmt::Assign(var_id));
+            }
+
+            let mut current: HashMap<Varnode, VarId> = HashMap::new();
+
+            // Inherit from the first already-processed predecessor
+            if !block_preds.is_empty() {
+                for pred in block_preds {
+                    if !block_exit_vars[pred.0].is_empty() {
+                        current = block_exit_vars[pred.0].clone();
+                        break;
                     }
-                    // Ops with no output and not Store (e.g., Branch handled as terminator)
                 }
+            }
+
+            let mut stmts = Vec::new();
+
+            for (_addr, op) in &block.ops {
+                match op.clone() {
+                    PcodeOp::Store { ptr, val, .. } => {
+                        let addr_var = resolve_input(&mut ssa, &mut current, &ptr);
+                        let val_var = resolve_input(&mut ssa, &mut current, &val);
+                        stmts.push(Stmt::Store { addr: addr_var, val: val_var });
+                    }
+                    ref op => {
+                        if let Some(out_vn) = get_output(op) {
+                            let expr = build_expr(&mut ssa, &mut current, op);
+                            let var_id = ssa.new_var(out_vn, expr, out_vn.size);
+                            current.insert(out_vn, var_id);
+                            stmts.push(Stmt::Assign(var_id));
+                        }
+                    }
+                }
+            }
+
+            let terminator = convert_terminator(&mut ssa, &mut current, &block.terminator);
+
+            if block_exit_vars[block.id.0] != current {
+                changed = true;
+            }
+            block_exit_vars[block.id.0] = current;
+
+            // On first iteration, push new blocks; on subsequent iterations, replace
+            if iteration == 0 {
+                ssa.blocks.push(SsaBlock {
+                    id: block.id,
+                    addr: block.addr,
+                    stmts,
+                    terminator,
+                });
+            } else {
+                ssa.blocks[block_idx].stmts = stmts;
+                ssa.blocks[block_idx].terminator = terminator;
             }
         }
 
-        let terminator = convert_terminator(&mut ssa, &mut current, &block.terminator);
-
-        block_exit_vars[block.id.0] = current;
-
-        ssa.blocks.push(SsaBlock {
-            id: block.id,
-            addr: block.addr,
-            stmts,
-            terminator,
-        });
+        if iteration > 0 && !changed {
+            break;
+        }
     }
 
     // Second pass: insert Phi nodes at join points
