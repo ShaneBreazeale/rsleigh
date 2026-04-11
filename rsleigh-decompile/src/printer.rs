@@ -35,7 +35,7 @@ pub fn print_c(
     let param_names: Vec<String> = ssa.vars.iter()
         .filter_map(|v| v.param_name.as_ref().cloned())
         .collect();
-    post_process(&mut out, &all_aliases, &param_names, struct_fields);
+    post_process(&mut out, &all_aliases, &param_names, struct_fields, &ctx);
     out
 }
 
@@ -72,7 +72,7 @@ fn print_stmts_with_tracker(stmts: &[StructuredStmt], ssa: &SsaCfg, ctx: &PrintC
 }
 
 /// Text-level post-processing to clean up common patterns.
-fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, String>, param_names: &[String], struct_fields: &HashMap<u64, String>) {
+fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, String>, param_names: &[String], struct_fields: &HashMap<u64, String>, ctx: &PrintCtx) {
     let mut lines: Vec<String> = out.lines().map(|l| l.to_string()).collect();
 
     let mut i = 0;
@@ -1366,6 +1366,170 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 }
             }
             i += 1;
+        }
+    }
+
+    // #PIE: Resolve remaining hex constants to string literals or import names.
+    // Handles PIE ELF addresses (0x2070) that weren't resolved during SSA printing.
+    for line in &mut lines {
+        // Find patterns like func(0xNNNN) or func(0xNNNN, ...)
+        let mut new_line = line.clone();
+        let mut search_from = 0;
+        while let Some(pos) = new_line[search_from..].find("0x") {
+            let abs_pos = search_from + pos;
+            // Extract the hex value
+            let hex_end = abs_pos + 2 + new_line[abs_pos + 2..].find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(new_line.len() - abs_pos - 2);
+            if hex_end > abs_pos + 2 {
+                let hex_str = &new_line[abs_pos..hex_end];
+                if let Ok(val) = u64::from_str_radix(&hex_str[2..], 16) {
+                    if val > 0x200 && val < 0x10000000 {
+                        // Try string literal
+                        if let Some(s) = try_read_string(val, ctx) {
+                            let escaped = format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"));
+                            new_line = format!("{}{}{}", &new_line[..abs_pos], escaped, &new_line[hex_end..]);
+                            search_from = abs_pos + escaped.len();
+                            continue;
+                        }
+                        // Try import/symbol name
+                        if let Some(name) = ctx.imports.get(&val) {
+                            new_line = format!("{}{}{}", &new_line[..abs_pos], name, &new_line[hex_end..]);
+                            search_from = abs_pos + name.len();
+                            continue;
+                        }
+                    }
+                }
+            }
+            search_from = hex_end;
+        }
+        *line = new_line;
+    }
+
+    // #NESTED: Remove void function calls nested inside other call arguments.
+    // Pattern: func2(func1("..."), size, stream)  →  func1("..."); func2(buf, size, stream)
+    // When func1 is a void function (puts, printf without format return), it shouldn't
+    // appear as an argument to func2.
+    let void_funcs = ["puts", "printf", "fprintf", "fputs", "perror",
+                       "exit", "abort", "_exit", "free"];
+    for line in &mut lines {
+        let trimmed = line.trim().to_string();
+        // Look for patterns like outer_func(inner_func(...), ...)
+        for vf in &void_funcs {
+            let pattern = format!("{}(", vf);
+            // Check if a void func appears inside another function's argument list
+            // by looking for func_name( before it and , or ) after its closing paren
+            if let Some(inner_pos) = trimmed.find(&pattern) {
+                if inner_pos > 0 {
+                    let before = trimmed[..inner_pos].trim_end();
+                    // If the character before the void func is ( or , it's nested
+                    if before.ends_with('(') || before.ends_with(',') {
+                        // Find the matching closing paren for the inner call
+                        let inner_start = inner_pos + pattern.len();
+                        let mut depth = 1;
+                        let mut inner_end = inner_start;
+                        for (i, c) in trimmed[inner_start..].char_indices() {
+                            if c == '(' { depth += 1; }
+                            if c == ')' { depth -= 1; if depth == 0 { inner_end = inner_start + i + 1; break; } }
+                        }
+                        if depth == 0 {
+                            // Extract the inner call and remove it from args
+                            let inner_call = &trimmed[inner_pos..inner_end];
+                            let mut after = trimmed[inner_end..].trim_start().to_string();
+                            if after.starts_with(',') { after = after[1..].trim_start().to_string(); }
+                            let indent = line.len() - line.trim_start().len();
+                            let pad = " ".repeat(indent);
+                            // Replace with: inner_call;\n  outer(remaining_args)
+                            let remaining = format!("{}{}{}", &trimmed[..inner_pos], "buf", &after);
+                            // But only if the remaining line is valid
+                            if remaining.contains('(') {
+                                *line = format!("{}{};\n{}{}", pad, inner_call, pad, remaining.trim());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // #PHI: Remove phi() noise from output
+    for line in &mut lines {
+        // Remove ", phi(...)" from call arguments
+        while let Some(pos) = line.find(", phi(") {
+            let start = pos;
+            let after = &line[pos + 6..];
+            let mut depth = 1;
+            let mut end = pos + 6;
+            for (i, c) in after.char_indices() {
+                if c == '(' { depth += 1; }
+                if c == ')' { depth -= 1; if depth == 0 { end = pos + 6 + i + 1; break; } }
+            }
+            if depth == 0 {
+                *line = format!("{}{}", &line[..start], &line[end..]);
+            } else {
+                break;
+            }
+        }
+        // Also handle phi(...) as first arg: "func(phi(...), ...)" → "func(...)"
+        while let Some(pos) = line.find("phi(") {
+            let before = &line[..pos];
+            if before.ends_with('(') || before.ends_with(", ") {
+                let after = &line[pos + 4..];
+                let mut depth = 1;
+                let mut end = pos + 4;
+                for (i, c) in after.char_indices() {
+                    if c == '(' { depth += 1; }
+                    if c == ')' { depth -= 1; if depth == 0 { end = pos + 4 + i + 1; break; } }
+                }
+                if depth == 0 {
+                    let mut replacement = line[..pos].to_string();
+                    let rest = &line[end..];
+                    if rest.starts_with(", ") {
+                        replacement.push_str(&rest[2..]);
+                    } else if rest.starts_with(',') {
+                        replacement.push_str(&rest[1..].trim_start());
+                    } else {
+                        replacement.push_str(rest);
+                    }
+                    *line = replacement;
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    // #ARRAY: Fix array index syntax: RDX[name] → name[RDX]
+    // When a register or expression is used as the base and a symbol name as the "index",
+    // swap them for readable array access syntax.
+    for line in &mut lines {
+        // Match patterns like: REG[symbol_name] or expr[symbol_name]
+        let re_patterns = [
+            // Simple: RDX[friend_type]
+            ("var_", false), // Skip var_ patterns - those are correct
+        ];
+        let _ = re_patterns; // silence warning
+        // Use a simple approach: find ][...] patterns where the index is a known symbol
+        let l = line.clone();
+        for (_addr, name) in ctx.imports.iter() {
+            let bracket_pattern = format!("[{}]", name);
+            if l.contains(&bracket_pattern) {
+                // Find what's before the [name]: it should be a register or expression
+                if let Some(bp) = l.find(&bracket_pattern) {
+                    // Walk back to find the start of the base expression
+                    let before = &l[..bp];
+                    // Find the start of the identifier/expression before [
+                    let base_start = before.rfind(|c: char| !c.is_alphanumeric() && c != '_')
+                        .map(|p| p + 1).unwrap_or(0);
+                    let base = &l[base_start..bp];
+                    if !base.is_empty() && base != name {
+                        // Swap: base[name] → name[base]
+                        let old = format!("{}[{}]", base, name);
+                        let new = format!("{}[{}]", name, base);
+                        *line = line.replace(&old, &new);
+                    }
+                }
+            }
         }
     }
 
@@ -2670,7 +2834,7 @@ fn format_const_ctx(val: u64, size: u32, ctx: &PrintCtx) -> String {
     if val == 0 { return "0".to_string(); }
     if val < 10 { return format!("{}", val); }
     // Try string literal
-    if size >= 4 && val > 0x1000 {
+    if size >= 4 && val > 0x200 {
         if let Some(s) = try_read_string(val, ctx) {
             return format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"));
         }
@@ -2775,7 +2939,9 @@ fn try_read_string(va: u64, ctx: &PrintCtx) -> Option<String> {
         // readable text from adjacent sections (e.g., GCC version string fragments)
         || (null_pos <= 8 && s.bytes().any(|b| b < 0x20 && b != b'\n' && b != b'\t'))
     { return None; }
-    if s.chars().all(|c| c.is_ascii_graphic() || c == ' ' || c == '\n' || c == '\t') {
+    // Accept printable ASCII plus UTF-8 characters (accented letters, symbols like ™©®)
+    if s.chars().all(|c| c.is_ascii_graphic() || c == ' ' || c == '\n' || c == '\t'
+        || (c as u32 >= 0x80 && !c.is_control())) {
         Some(s.to_string())
     } else { None }
 }
