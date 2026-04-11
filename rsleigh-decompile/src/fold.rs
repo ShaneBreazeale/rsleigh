@@ -14,11 +14,45 @@ const ESP_OFFSET: u64 = 16;   // x86-32 ESP
 const RIP_OFFSET: u64 = 648;
 pub const RAX_OFFSET: u64 = 0;
 
-/// x86-64 SysV ABI argument register offsets.
-const ARG_REG_OFFSETS: &[u64] = &[56, 48, 16, 8, 128, 136]; // RDI, RSI, RDX, RCX, R8, R9
+/// x86-64 SysV ABI argument register offsets (Linux, macOS, BSD).
+const SYSV_ARG_REGS: &[u64] = &[56, 48, 16, 8, 128, 136]; // RDI, RSI, RDX, RCX, R8, R9
+
+/// Windows x64 ABI argument register offsets.
+const WIN64_ARG_REGS: &[u64] = &[8, 16, 128, 136]; // RCX, RDX, R8, R9
+
+/// Active argument register offsets — set by fold_with_cc() based on binary format.
+/// Uses thread_local to avoid unsafe static mut.
+std::thread_local! {
+    static ARG_REG_OFFSETS_TLS: std::cell::RefCell<&'static [u64]> = const { std::cell::RefCell::new(SYSV_ARG_REGS) };
+}
+
+fn arg_reg_offsets() -> &'static [u64] {
+    ARG_REG_OFFSETS_TLS.with(|r| *r.borrow())
+}
+
+/// Calling convention detected from binary format.
+#[derive(Clone, Copy, PartialEq)]
+pub enum CallingConv {
+    SysV,     // Linux, macOS, BSD — RDI, RSI, RDX, RCX, R8, R9
+    Win64,    // Windows x64 — RCX, RDX, R8, R9
+    Cdecl32,  // x86-32 cdecl — stack-based
+}
 
 /// Fold expressions: inline temps, eliminate dead code, recover conditions.
 pub fn fold(ssa: &mut SsaCfg) {
+    fold_with_cc(ssa, CallingConv::SysV);
+}
+
+/// Fold with explicit calling convention.
+pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
+    // Set the thread-local arg register offsets based on calling convention
+    ARG_REG_OFFSETS_TLS.with(|r| {
+        *r.borrow_mut() = match cc {
+            CallingConv::SysV => SYSV_ARG_REGS,
+            CallingConv::Win64 => WIN64_ARG_REGS,
+            CallingConv::Cdecl32 => &[],
+        };
+    });
     for _round in 0..8 {
         let before = count_live_stmts(ssa);
         fold_once(ssa);
@@ -265,7 +299,7 @@ fn eliminate_dead(ssa: &mut SsaCfg) {
                     // BUT preserve argument registers before calls
                     // BUT preserve registers in loop bodies (back-edge blocks)
                     // because the SSA may not have connected loop-carried variables
-                    let is_arg_reg = ARG_REG_OFFSETS.contains(&vdef.varnode.offset)
+                    let is_arg_reg = arg_reg_offsets().contains(&vdef.varnode.offset)
                         && vdef.varnode.space == AddressSpaceId::Register;
                     let precedes_call = block.stmts.get(i + 1..).map_or(false, |rest|
                         rest.iter().any(|s| matches!(s, Stmt::Call { .. })))
@@ -962,7 +996,7 @@ fn collect_reg_args_from_block(stmts: &[Stmt], vars: &[VarDef], up_to: usize) ->
         if let Stmt::Assign(var_id) = &stmts[j] {
             let vdef = &vars[var_id.0 as usize];
             if vdef.varnode.space == AddressSpaceId::Register
-                && ARG_REG_OFFSETS.contains(&vdef.varnode.offset)
+                && arg_reg_offsets().contains(&vdef.varnode.offset)
             {
                 if !args.iter().any(|(off, _)| *off == vdef.varnode.offset) {
                     args.push((vdef.varnode.offset, *var_id));
@@ -972,7 +1006,7 @@ fn collect_reg_args_from_block(stmts: &[Stmt], vars: &[VarDef], up_to: usize) ->
         if matches!(&stmts[j], Stmt::Call { .. }) { break; }
     }
     args.sort_by_key(|(off, _)| {
-        ARG_REG_OFFSETS.iter().position(|o| o == off).unwrap_or(99)
+        arg_reg_offsets().iter().position(|o| o == off).unwrap_or(99)
     });
     args.into_iter().map(|(_, v)| v).collect()
 }
@@ -1688,7 +1722,7 @@ fn name_parameters(ssa: &mut SsaCfg) {
             let vdef = &ssa.vars[var_id.0 as usize];
             if let Expr::Unknown = &vdef.expr {
                 if vdef.varnode.space == AddressSpaceId::Register
-                    && ARG_REG_OFFSETS.contains(&vdef.varnode.offset)
+                    && arg_reg_offsets().contains(&vdef.varnode.offset)
                     && !named_offsets.contains(&vdef.varnode.offset)
                 {
                     to_name.push((var_id.0 as usize, format!("param_{}", param_idx), vdef.varnode.offset));
@@ -1702,7 +1736,7 @@ fn name_parameters(ssa: &mut SsaCfg) {
             if vdef.param_name.is_none() {
                 if let Expr::Unknown = &vdef.expr {
                     if vdef.varnode.space == AddressSpaceId::Register
-                        && ARG_REG_OFFSETS.contains(&vdef.varnode.offset)
+                        && arg_reg_offsets().contains(&vdef.varnode.offset)
                         && !named_offsets.contains(&vdef.varnode.offset)
                     {
                         to_name.push((val.0 as usize, format!("param_{}", param_idx), vdef.varnode.offset));
@@ -1722,7 +1756,7 @@ fn name_parameters(ssa: &mut SsaCfg) {
     // prior definition in the function (i.e., they come from the caller).
     if param_idx == 0 {
         let mut to_name: Vec<(usize, String)> = Vec::new();
-        for &offset in ARG_REG_OFFSETS.iter() {
+        for &offset in arg_reg_offsets().iter() {
             if named_offsets.contains(&offset) { continue; }
             for v in 0..ssa.vars.len() {
                 let vdef = &ssa.vars[v];

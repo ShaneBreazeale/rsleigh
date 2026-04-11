@@ -3457,16 +3457,35 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         lines.retain(|line| !line.trim().contains("__x86.get_pc_thunk"));
     }
 
-    // #STACK_NOISE: Remove XMM zero-init noise and RSP-relative stores that are
-    // stack frame initialization (not meaningful program logic).
+    // #STACK_NOISE: Remove XMM zero-init, RSP-relative stores, and x86-64 stack
+    // frame boilerplate that clutters the output without adding semantic value.
     lines.retain(|line| {
         let t = line.trim();
         // Remove "XMM0 = 0; // zero-init" and similar SSE register clears
         if t.starts_with("XMM") && t.contains("= 0") && t.contains("zero-init") { return false; }
-        // Remove 128-bit stack stores that are zero-init: "*(__uint128_t*)(N + RSP) = 0; // zero-init"
-        if t.starts_with("*(__uint128_t*)") && t.contains("RSP") && t.contains("= 0") && t.contains("zero-init") { return false; }
-        // Remove "N[RSP] = 0;" patterns (stack zero-init without the comment)
+        // Remove 128-bit stack stores that are zero-init
+        if t.starts_with("*(__uint128_t*)") && t.contains("RSP") && t.contains("= 0") { return false; }
+        // Remove "N[RSP] = 0;" patterns (stack zero-init)
         if t.ends_with("[RSP] = 0;") || t.ends_with("[RSP] = 0; // zero-init") { return false; }
+        // Remove x86-64 RSP-relative shadow space stores: "N[RSP] = VALUE;"
+        // These are Windows x64 shadow space (home area) or register save area.
+        // Pattern: "16[RSP] = ...", "24[RSP] = ...", "32[RSP] = ...", etc.
+        if t.contains("[RSP]") && t.contains(" = ") && !t.contains("if ")
+            && !t.contains("while ") && !t.contains("return ")
+        {
+            // N[RSP] = ... where N is a small numeric offset (shadow/home space)
+            if let Some(bracket) = t.find('[') {
+                let prefix = &t[..bracket];
+                if prefix.parse::<u64>().is_ok() || prefix.ends_with(" + RSP") {
+                    return false;
+                }
+            }
+        }
+        // Remove "RSP = RSP + N;" and "RSP = RSP - N;" (stack adjustments)
+        if t.starts_with("RSP = RSP") && t.ends_with(';') { return false; }
+        // Remove "RBP = RSP + N;" / "RBP = RSP;" / "RBP = -N + RSP;" (frame setup)
+        if t.starts_with("RBP = ") && t.contains("RSP") && t.ends_with(';')
+            && !t.contains("func_") && !t.contains("var_") { return false; }
         true
     });
 

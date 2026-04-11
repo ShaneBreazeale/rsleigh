@@ -95,7 +95,22 @@ pub fn decompile_with_binary(
         .unwrap_or_default();
 
     let mut ssa = ssa::build_ssa(&cfg);
-    fold::fold(&mut ssa);
+
+    // Detect calling convention from binary format
+    let cc = if let Some(binary) = binary {
+        if let Ok(obj) = goblin::Object::parse(binary) {
+            match &obj {
+                goblin::Object::PE(_) => fold::CallingConv::Win64,
+                _ => match arch {
+                    Architecture::X86_32 | Architecture::ARM32 | Architecture::MIPS32
+                        => fold::CallingConv::Cdecl32,
+                    _ => fold::CallingConv::SysV,
+                }
+            }
+        } else { fold::CallingConv::SysV }
+    } else { fold::CallingConv::SysV };
+
+    fold::fold_with_cc(&mut ssa, cc);
 
     // Apply DWARF debug info if available: replace param_N with actual names
     let debug_info = if let Some(path) = binary_path {
