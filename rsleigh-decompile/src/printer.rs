@@ -1864,6 +1864,83 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #SWITCH: Detect jump table patterns and resolve to switch/case.
+    // Pattern: if (val > N) { default } else { table_base + *(table_base + val*4) }
+    // Read the jump table from the binary and show case targets.
+    if let Some(binary) = ctx.binary {
+        let mut i = 0;
+        while i < lines.len() {
+            let lt = lines[i].trim().to_string();
+            // Look for the jump table load: "RAX = 0xNNN[REG];" or "RCX = (0xNNN[...])"
+            // followed by "return REG + 0xNNN;"
+            if lt.contains("[") && !lt.contains("RBP") && !lt.contains("var_") {
+                // Try to extract the table address from patterns like 0xNNN[
+                for prefix in ["0x"] {
+                    if let Some(addr_start) = lt.find(prefix) {
+                        let after = &lt[addr_start + 2..];
+                        if let Some(bracket) = after.find('[') {
+                            let hex_str = &after[..bracket];
+                            if let Ok(table_va) = u64::from_str_radix(hex_str, 16) {
+                                if table_va > 0x200 {
+                                    // Try to read this as a jump table of signed 32-bit offsets
+                                    if let Some(fo) = va_to_file_offset(table_va, binary) {
+                                        // Check if previous line has a bounds check: if (X > N)
+                                        let max_case = if i > 0 {
+                                            let prev = lines[i.saturating_sub(6)..i].iter()
+                                                .find(|l| l.trim().starts_with("if ("))
+                                                .map(|l| l.trim().to_string())
+                                                .unwrap_or_default();
+                                            // Extract N from "if (param > N)" or "if (X > N)"
+                                            if let Some(gt) = prev.find(" > ") {
+                                                let after_gt = &prev[gt + 3..];
+                                                let end = after_gt.find(')').unwrap_or(after_gt.len());
+                                                after_gt[..end].parse::<usize>().ok()
+                                            } else { None }
+                                        } else { None };
+
+                                        let num_cases = max_case.unwrap_or(7).min(32) + 1;
+                                        if fo + num_cases * 4 <= binary.len() {
+                                            let mut cases = Vec::new();
+                                            let mut all_valid = true;
+                                            for c in 0..num_cases {
+                                                let entry_off = fo + c * 4;
+                                                let rel_offset = i32::from_le_bytes([
+                                                    binary[entry_off], binary[entry_off+1],
+                                                    binary[entry_off+2], binary[entry_off+3],
+                                                ]);
+                                                let target_va = (table_va as i64 + rel_offset as i64) as u64;
+                                                // Try to read a string at the target
+                                                if let Some(s) = try_read_string(target_va, ctx) {
+                                                    cases.push(format!("case {}: \"{}\"", c, s));
+                                                } else if let Some(name) = ctx.imports.get(&target_va) {
+                                                    cases.push(format!("case {}: {}", c, name));
+                                                } else {
+                                                    cases.push(format!("case {}: 0x{:x}", c, target_va));
+                                                    if target_va > 0x10000000 || (rel_offset.abs() as u64 > 0x10000) {
+                                                        all_valid = false;
+                                                    }
+                                                }
+                                            }
+                                            if all_valid && !cases.is_empty() {
+                                                let indent = lines[i].len() - lines[i].trim_start().len();
+                                                let pad = " ".repeat(indent);
+                                                // Replace the table load line with switch/case comment
+                                                let case_str = cases.join(", ");
+                                                lines[i] = format!("{}// switch table: {}", pad, case_str);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    break; // only try one prefix
+                }
+            }
+            i += 1;
+        }
+    }
+
     // #FMTCALL: Fix printf/snprintf where format string is in RAX and float in XMM0.
     // Pattern: XMM0 = expr; RAX = "fmt"; snprintf(buf, N, N) → snprintf(buf, N, "fmt", expr)
     {
