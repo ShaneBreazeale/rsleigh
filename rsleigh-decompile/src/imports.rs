@@ -91,7 +91,13 @@ fn find_matching_angle(s: &str, start: usize) -> Option<usize> {
 /// Build a map of address → import function name from a binary.
 pub fn resolve_imports(binary: &[u8]) -> HashMap<u64, String> {
     let mut map = HashMap::new();
-    let Ok(obj) = goblin::Object::parse(binary) else { return map };
+    let Ok(obj) = goblin::Object::parse(binary) else {
+        // Fallback: try manual PE import parsing for malformed binaries
+        if binary.len() > 0x40 && &binary[0..2] == b"MZ" {
+            resolve_pe_manual(binary, &mut map);
+        }
+        return map;
+    };
 
     match &obj {
         goblin::Object::Elf(elf) => resolve_elf(elf, binary, &mut map),
@@ -539,6 +545,104 @@ fn resolve_pe(pe: &goblin::pe::PE, binary: &[u8], map: &mut HashMap<u64, String>
             if export.rva != 0 {
                 map.insert(export.rva as u64 + base, name.to_string());
             }
+        }
+    }
+}
+
+/// Manual PE import parsing for malformed binaries that goblin can't handle.
+/// Parses the PE header, section table, and import directory with error tolerance.
+/// Skips corrupted entries gracefully instead of failing entirely.
+fn resolve_pe_manual(binary: &[u8], map: &mut HashMap<u64, String>) {
+    if binary.len() < 0x80 { return; }
+    let pe_off = u32::from_le_bytes(binary[0x3c..0x40].try_into().unwrap_or([0;4])) as usize;
+    if pe_off + 24 > binary.len() || &binary[pe_off..pe_off+4] != b"PE\0\0" { return; }
+
+    let opt_off = pe_off + 24;
+    let magic = u16::from_le_bytes(binary[opt_off..opt_off+2].try_into().unwrap_or([0;2]));
+    let is_64 = magic == 0x20b;
+    let ptr_size: usize = if is_64 { 8 } else { 4 };
+    let image_base = if is_64 {
+        u64::from_le_bytes(binary.get(opt_off+24..opt_off+32)
+            .and_then(|s| s.try_into().ok()).unwrap_or([0;8]))
+    } else {
+        u32::from_le_bytes(binary.get(opt_off+28..opt_off+32)
+            .and_then(|s| s.try_into().ok()).unwrap_or([0;4])) as u64
+    };
+
+    // Parse section table
+    let num_sec = u16::from_le_bytes(binary[pe_off+6..pe_off+8].try_into().unwrap_or([0;2])) as usize;
+    let opt_hdr_size = u16::from_le_bytes(binary[pe_off+20..pe_off+22].try_into().unwrap_or([0;2])) as usize;
+    let sec_off = opt_off + opt_hdr_size;
+    struct Sec { va: u64, vsz: u64, raw: u64 }
+    let mut sections: Vec<Sec> = Vec::new();
+    for i in 0..num_sec.min(32) {
+        let off = sec_off + i * 40;
+        if off + 40 > binary.len() { break; }
+        sections.push(Sec {
+            va: u32::from_le_bytes(binary[off+12..off+16].try_into().unwrap_or([0;4])) as u64,
+            vsz: u32::from_le_bytes(binary[off+8..off+12].try_into().unwrap_or([0;4])) as u64,
+            raw: u32::from_le_bytes(binary[off+20..off+24].try_into().unwrap_or([0;4])) as u64,
+        });
+    }
+    let rva_to_off = |rva: u64| -> Option<usize> {
+        for s in &sections {
+            if rva >= s.va && rva < s.va + s.vsz {
+                return Some((s.raw + (rva - s.va)) as usize);
+            }
+        }
+        None
+    };
+
+    // Import directory RVA
+    if opt_off + 108 > binary.len() { return; }
+    let import_rva = u32::from_le_bytes(binary[opt_off+104..opt_off+108].try_into().unwrap_or([0;4])) as u64;
+    if import_rva == 0 { return; }
+    let Some(imp_off) = rva_to_off(import_rva) else { return; };
+
+    // Walk import descriptors with error tolerance
+    for i in 0..100 {
+        let off = imp_off + i * 20;
+        if off + 20 > binary.len() { break; }
+        let ilt_rva = u32::from_le_bytes(binary[off..off+4].try_into().unwrap_or([0;4])) as u64;
+        let name_rva = u32::from_le_bytes(binary[off+12..off+16].try_into().unwrap_or([0;4])) as u64;
+        let iat_rva = u32::from_le_bytes(binary[off+16..off+20].try_into().unwrap_or([0;4])) as u64;
+        if ilt_rva == 0 && name_rva == 0 { break; }
+
+        // Skip descriptors with invalid name RVA (anti-analysis technique)
+        let Some(name_off) = rva_to_off(name_rva) else { continue; };
+        if name_off >= binary.len() { continue; }
+
+        // Read import entries from ILT or IAT
+        let source_rva = if ilt_rva != 0 { ilt_rva } else { iat_rva };
+        let Some(source_off) = rva_to_off(source_rva) else { continue; };
+        let ordinal_flag: u64 = if is_64 { 0x8000000000000000 } else { 0x80000000 };
+
+        for j in 0..1000 {
+            let entry_off = source_off + j * ptr_size;
+            if entry_off + ptr_size > binary.len() { break; }
+            let raw_entry = if ptr_size == 4 {
+                u32::from_le_bytes(binary[entry_off..entry_off+4].try_into().unwrap_or([0;4])) as u64
+            } else {
+                u64::from_le_bytes(binary[entry_off..entry_off+8].try_into().unwrap_or([0;8]))
+            };
+            if raw_entry == 0 { break; }
+
+            let iat_addr = image_base + iat_rva + (j as u64) * ptr_size as u64;
+            if raw_entry & ordinal_flag != 0 {
+                // Ordinal import — skip (no name)
+            } else if let Some(hint_off) = rva_to_off(raw_entry) {
+                if hint_off + 3 < binary.len() {
+                    let name_start = hint_off + 2;
+                    if let Some(end) = binary[name_start..].iter().position(|&b| b == 0) {
+                        if let Ok(name) = std::str::from_utf8(&binary[name_start..name_start + end]) {
+                            if !name.is_empty() && name.len() < 256 {
+                                map.insert(iat_addr, name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            // Skip entries with invalid hint RVA (corrupted/anti-analysis)
         }
     }
 }
