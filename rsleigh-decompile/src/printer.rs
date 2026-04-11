@@ -1748,6 +1748,57 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #PARAMS: Replace bare register names with parameter names when available.
+    // The SSA names params as param_0, param_1 but the printer sometimes outputs
+    // the raw register (RDI, RSI, etc.) when the value is used directly without
+    // going through the named SSA variable.
+    if !param_names.is_empty() {
+        let reg_to_param: Vec<(&str, &str)> = vec![
+            ("RDI", ""), ("EDI", ""), ("DIL", ""),  // param_0
+            ("RSI", ""), ("ESI", ""), ("SIL", ""),  // param_1
+            ("RDX", ""), ("EDX", ""), ("DL", ""),   // param_2
+            ("RCX", ""), ("ECX", ""), ("CL", ""),   // param_3
+        ];
+        // Map register base offset to param index
+        let reg_param_map: &[(u64, usize)] = &[(56, 0), (48, 1), (16, 2), (8, 3)]; // RDI, RSI, RDX, RCX offsets
+        let _ = (reg_to_param, reg_param_map); // just documenting the mapping
+
+        // Simple approach: in conditions and call args, replace bare register names
+        // Only replace when the register appears as a standalone word (not part of a larger expr)
+        let x86_arg_regs: [(&str, usize); 8] = [
+            ("RDI", 0), ("EDI", 0), ("RSI", 1), ("ESI", 1),
+            ("RDX", 2), ("EDX", 2), ("RCX", 3), ("ECX", 3),
+        ];
+        for line in &mut lines {
+            for (reg, idx) in &x86_arg_regs {
+                if *idx < param_names.len() && line.contains(reg) {
+                    // Only replace standalone register references (not part of R14, R15, etc.)
+                    // Check that the character before and after is not alphanumeric
+                    let pname = &param_names[*idx];
+                    let l = line.clone();
+                    let mut result = String::new();
+                    let mut i = 0;
+                    let bytes = l.as_bytes();
+                    let rlen = reg.len();
+                    while i < bytes.len() {
+                        if i + rlen <= bytes.len() && &l[i..i+rlen] == *reg {
+                            let before_ok = i == 0 || !bytes[i-1].is_ascii_alphanumeric();
+                            let after_ok = i + rlen >= bytes.len() || !bytes[i+rlen].is_ascii_alphanumeric();
+                            if before_ok && after_ok {
+                                result.push_str(pname);
+                                i += rlen;
+                                continue;
+                            }
+                        }
+                        result.push(bytes[i] as char);
+                        i += 1;
+                    }
+                    *line = result;
+                }
+            }
+        }
+    }
+
     // #LLM: Clean up patterns that confuse LLM analysis.
 
     // Strip __isoc99_ prefix from scanf variants
@@ -3162,8 +3213,15 @@ fn format_const(val: u64, size: u32) -> String {
     if val == 0 { return "0".to_string(); }
     // Small positive values in decimal for readability
     if val < 1000 { return format!("{}", val); }
+    // Power-of-2 constants in decimal (common thresholds: 1024, 4096, 65536, etc.)
+    if val.is_power_of_two() && val <= 0x100000000 {
+        return format!("{}", val);
+    }
+    // Power-of-2 minus 1 (common masks/thresholds: 0x3ff=1023, 0xfffff=1048575)
+    if val < 0x100000000 && (val + 1).is_power_of_two() {
+        return format!("{}", val);
+    }
     // Try decoding as ASCII string (little-endian packed bytes on stack)
-    // e.g., 0x6e5f6c6c69775f75 → "u_will_n"
     if val > 0xFFFF && size >= 4 {
         if let Some(s) = try_decode_ascii_const(val, size) {
             return format!("\"{}\"", s);
