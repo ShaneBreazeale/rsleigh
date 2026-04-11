@@ -3450,26 +3450,39 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 for (old_reg, new_name) in &rename_map {
                     if !line.contains(old_reg.as_str()) { continue; }
                     // Replace as whole-word only (not inside function names or strings)
+                    // Use byte-safe whole-word replacement
+                    // Split on the register name, check word boundaries at each split point
+                    let old_bytes = old_reg.as_bytes();
                     let mut result = String::new();
-                    let mut in_quote = false;
+                    let bytes = line.as_bytes();
                     let mut pos = 0;
-                    while pos < line.len() {
-                        if line.as_bytes()[pos] == b'"' { in_quote = !in_quote; }
-                        if !in_quote && line[pos..].starts_with(old_reg.as_str()) {
-                            let before = if pos > 0 { line.as_bytes()[pos - 1] } else { b' ' };
-                            let after_pos = pos + old_reg.len();
-                            let after = if after_pos < line.len() { line.as_bytes()[after_pos] } else { b' ' };
-                            // Word boundary: not alphanumeric/underscore on either side
+                    while pos < bytes.len() {
+                        if pos + old_bytes.len() <= bytes.len()
+                            && &bytes[pos..pos + old_bytes.len()] == old_bytes
+                        {
+                            let before = if pos > 0 { bytes[pos - 1] } else { b' ' };
+                            let after_pos = pos + old_bytes.len();
+                            let after = if after_pos < bytes.len() { bytes[after_pos] } else { b' ' };
                             let is_word = !before.is_ascii_alphanumeric() && before != b'_'
                                 && !after.is_ascii_alphanumeric() && after != b'_';
                             if is_word {
                                 result.push_str(new_name);
-                                pos += old_reg.len();
+                                pos += old_bytes.len();
                                 continue;
                             }
                         }
-                        result.push(line.as_bytes()[pos] as char);
-                        pos += 1;
+                        // Advance by one UTF-8 character
+                        let ch_len = if bytes[pos] < 0x80 { 1 }
+                            else if bytes[pos] < 0xE0 { 2 }
+                            else if bytes[pos] < 0xF0 { 3 }
+                            else { 4 };
+                        let end = (pos + ch_len).min(bytes.len());
+                        if let Ok(s) = std::str::from_utf8(&bytes[pos..end]) {
+                            result.push_str(s);
+                        } else {
+                            result.push(bytes[pos] as char);
+                        }
+                        pos = end;
                     }
                     *line = result;
                 }
