@@ -4148,68 +4148,75 @@ int main(int argc, char** argv) {
         // --- Validate add() ---
         if let Some(addr) = find_addr("add") {
             let output = decompile_func(addr, &mut dec);
-            assert!(output.contains("var_4") || output.contains("EDI") || output.contains("param_0") || output.contains(" a"),
-                "add(): should reference first argument\n{}", output);
-            assert!(output.contains("var_8") || output.contains("ESI") || output.contains("param_1") || output.contains(" b"),
-                "add(): should reference second argument\n{}", output);
-            assert!(output.contains("+"),
-                "add(): should contain addition operator\n{}", output);
-            assert!(output.contains("return"),
-                "add(): should contain return\n{}", output);
-            // Check DWARF parameter naming when dSYM is available
+            assert!(output.contains("return") && output.contains("+"),
+                "add(): should be 'return a + b'\n{}", output);
             let dsym_exists = std::path::Path::new(&format!("{}.dSYM", binary_path)).exists();
-            if dsym_exists && (output.contains(" a") && output.contains(" b")) {
-                eprintln!("  add() DWARF parameter names resolved (a, b)");
+            if dsym_exists {
+                assert!(output.contains("a + b") || output.contains("a +"),
+                    "add(): DWARF should resolve params to a, b\n{}", output);
             }
-            eprintln!("  add() validated");
+            // Should be concise — ideally 1 line
+            let non_empty = output.lines().filter(|l| !l.trim().is_empty()).count();
+            assert!(non_empty <= 3, "add(): should be <=3 lines, got {}\n{}", non_empty, output);
+            eprintln!("  add() validated ({}L)", non_empty);
         }
 
         // --- Validate factorial() ---
         if let Some(addr) = find_addr("factorial") {
             let output = decompile_func(addr, &mut dec);
-            assert!(output.contains("if"),
-                "factorial(): should contain if statement\n{}", output);
-            assert!(output.contains("factorial") || output.contains(&format!("func_{:x}", addr)),
+            assert!(output.contains("if"), "factorial(): should contain if\n{}", output);
+            assert!(output.contains("factorial("),
                 "factorial(): should contain recursive call\n{}", output);
-            assert!(output.contains("1"),
-                "factorial(): should contain base case value 1\n{}", output);
-            assert!(output.contains("*") || output.contains("IMUL"),
-                "factorial(): should contain multiplication\n{}", output);
+            assert!(output.contains("return") && output.contains("*"),
+                "factorial(): should have return with multiplication\n{}", output);
+            assert!(output.contains("1"), "factorial(): should contain base case 1\n{}", output);
+            assert!(output.contains("n - 1") || output.contains("n-1") || output.contains("n +"),
+                "factorial(): should show n-1 in recursive call\n{}", output);
+            let dsym_exists = std::path::Path::new(&format!("{}.dSYM", binary_path)).exists();
+            if dsym_exists {
+                assert!(output.contains(" n ") || output.contains("(n ") || output.contains(" n)"),
+                    "factorial(): DWARF should resolve param to n\n{}", output);
+            }
             eprintln!("  factorial() validated");
         }
 
         // --- Validate reverse_string() ---
         if let Some(addr) = find_addr("reverse_string") {
             let output = decompile_func(addr, &mut dec);
-            assert!(output.contains("while") || output.contains("if"),
-                "reverse_string(): should contain loop or conditional\n{}", output);
-            assert!(output.contains("strlen") || output.contains("func_") || output.contains("len"),
-                "reverse_string(): should reference strlen/len\n{}", output);
-            assert!(output.contains("return"),
-                "reverse_string(): should return\n{}", output);
+            assert!(output.contains("while") || output.contains("for"),
+                "reverse_string(): should contain loop\n{}", output);
+            assert!(output.contains("strlen"),
+                "reverse_string(): should call strlen\n{}", output);
+            let dsym_exists = std::path::Path::new(&format!("{}.dSYM", binary_path)).exists();
+            if dsym_exists {
+                assert!(output.contains("str") || output.contains("param_0"),
+                    "reverse_string(): should reference str param\n{}", output);
+            }
             eprintln!("  reverse_string() validated");
         }
 
         // --- Validate main() ---
         if let Some(addr) = find_addr("main") {
             let output = decompile_func(addr, &mut dec);
-            // String literals should resolve
+            // String literals
             assert!(output.contains("add(3, 4)") || output.contains("add(3,4)"),
                 "main(): should contain 'add(3, 4)' string literal\n{}", output);
             assert!(output.contains("factorial(5)"),
                 "main(): should contain 'factorial(5)' string literal\n{}", output);
             assert!(output.contains("hello world"),
                 "main(): should contain 'hello world' string literal\n{}", output);
-            // Import resolution
-            assert!(output.contains("printf"),
-                "main(): should resolve printf import\n{}", output);
-            // Function calls
-            assert!(output.contains("add(") || output.contains("add ()"),
-                "main(): should call add()\n{}", output);
-            assert!(output.contains("factorial(") || output.contains("factorial ()"),
-                "main(): should call factorial()\n{}", output);
+            // Import + function resolution
+            assert!(output.contains("printf("), "main(): should resolve printf\n{}", output);
+            assert!(output.contains("add("), "main(): should call add()\n{}", output);
+            assert!(output.contains("factorial("), "main(): should call factorial()\n{}", output);
             assert!(output.contains("reverse_string("),
                 "main(): should call reverse_string()\n{}", output);
+            assert!(output.contains("strcpy("), "main(): should call strcpy()\n{}", output);
+            assert!(output.contains("return 0") || output.contains("return;"),
+                "main(): should return\n{}", output);
+            // Should NOT contain raw hex for string addresses
+            assert!(!output.contains("0x100000"),
+                "main(): should not have unresolved Mach-O addresses\n{}", output);
             eprintln!("  main() validated");
         }
 
