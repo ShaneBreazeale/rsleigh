@@ -1388,9 +1388,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let hex_str = &new_line[abs_pos..hex_end];
                 if let Ok(val) = u64::from_str_radix(&hex_str[2..], 16) {
                     if val > 0x200 {
-                        // Try string literal (require >= 4 chars to avoid false positives)
+                        // Try string literal (require >= 2 chars in call args, >= 4 elsewhere)
                         if let Some(s) = try_read_string(val, ctx) {
-                            if s.len() < 4 { search_from = hex_end; continue; }
+                            // Short strings (2-3 chars) only if inside a function call like printf(0x...)
+                            let in_call = new_line[..abs_pos].contains('(');
+                            let min_len = if in_call { 2 } else { 4 };
+                            if s.len() < min_len { search_from = hex_end; continue; }
                             let escaped = format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"));
                             new_line = format!("{}{}{}", &new_line[..abs_pos], escaped, &new_line[hex_end..]);
                             search_from = abs_pos + escaped.len();
@@ -2277,6 +2280,28 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     lines.remove(i);
                     continue;
                 }
+            }
+            i += 1;
+        }
+    }
+
+    // #MISC: Quick text cleanups.
+    for line in &mut lines {
+        // free(*(0)) → free(NULL)
+        *line = line.replace("free(*(0))", "free(NULL)");
+        // *(0) as a standalone value is NULL dereference — often a placeholder
+        if line.contains("*(0)") && !line.contains("free") {
+            *line = line.replace("*(0)", "NULL");
+        }
+    }
+
+    // Remove "free(NULL);" lines — they're no-ops
+    {
+        let mut i = 0;
+        while i < lines.len() {
+            if lines[i].trim() == "free(NULL);" {
+                lines.remove(i);
+                continue;
             }
             i += 1;
         }
@@ -3890,7 +3915,7 @@ fn format_const_ctx(val: u64, size: u32, ctx: &PrintCtx) -> String {
             // Short strings at random addresses are almost always false positives
             // from float constants, flag fields, or padding bytes.
             // Real short strings are handled by the post-processor for puts("").
-            if s.is_empty() || s.len() < 4 { /* fall through to hex */ }
+            if s.is_empty() || s.len() < 2 { /* fall through to hex */ }
             else { return format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")); }
         }
         // Try import/global name (e.g., GOT entry for stdin/stdout)
