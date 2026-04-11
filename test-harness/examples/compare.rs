@@ -31,7 +31,10 @@ fn run() {
     };
     let path = std::path::Path::new(&binary_path);
 
-    let obj = goblin::Object::parse(&data).unwrap();
+    let obj = match goblin::Object::parse(&data) {
+        Ok(o) => o,
+        Err(e) => { eprintln!("Could not parse binary: {}", e); return; }
+    };
 
     // Auto-detect architecture and extract segments + symbols
     let (arch, segs, symbols) = match &obj {
