@@ -1989,9 +1989,62 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                                             if all_valid && !cases.is_empty() {
                                                 let indent = lines[i].len() - lines[i].trim_start().len();
                                                 let pad = " ".repeat(indent);
-                                                // Replace the table load line with switch/case comment
-                                                let case_str = cases.join(", ");
-                                                lines[i] = format!("{}// switch table: {}", pad, case_str);
+                                                let inner_pad = format!("{}    ", pad);
+                                                // Find the switch variable from the bounds check
+                                                let switch_var = if i > 0 {
+                                                    let prev_lines = &lines[i.saturating_sub(6)..i];
+                                                    prev_lines.iter().rev()
+                                                        .find(|l| l.trim().starts_with("if ("))
+                                                        .and_then(|l| {
+                                                            let t = l.trim();
+                                                            let after_if = t.strip_prefix("if (")?;
+                                                            let gt = after_if.find(" > ")?;
+                                                            Some(after_if[..gt].to_string())
+                                                        })
+                                                } else { None };
+                                                let var_name = switch_var.as_deref().unwrap_or("?");
+
+                                                // Build switch/case block
+                                                let mut switch_lines = Vec::new();
+                                                switch_lines.push(format!("{}switch ({}) {{", pad, var_name));
+                                                for case in &cases {
+                                                    // Parse "case N: VALUE"
+                                                    if let Some(colon) = case.find(": ") {
+                                                        let case_num = &case[..colon];
+                                                        let value = &case[colon + 2..];
+                                                        switch_lines.push(format!("{}{}: return {};", inner_pad, case_num, value));
+                                                    }
+                                                }
+                                                switch_lines.push(format!("{}}}", pad));
+
+                                                // Replace the table load line + surrounding boilerplate
+                                                // Remove the bounds check if/else and return lines
+                                                let remove_start = if i > 0 {
+                                                    // Look back for the if (var > N) line
+                                                    let mut rs = i;
+                                                    for k in (0..i).rev() {
+                                                        if lines[k].trim().starts_with("if (") && lines[k].trim().contains(" > ") {
+                                                            rs = k;
+                                                            break;
+                                                        }
+                                                    }
+                                                    rs
+                                                } else { i };
+
+                                                // Look forward for the closing } and return
+                                                let mut remove_end = i + 1;
+                                                for k in (i + 1)..lines.len().min(i + 5) {
+                                                    let kt = lines[k].trim();
+                                                    if kt.starts_with("return") || kt == "}" || kt.starts_with("} else") {
+                                                        remove_end = k + 1;
+                                                    } else { break; }
+                                                }
+
+                                                // Replace the range with switch block
+                                                let drain_range = remove_start..remove_end;
+                                                lines.splice(drain_range, switch_lines);
+                                                // Don't increment i — reprocess
+                                                continue;
                                             }
                                         }
                                     }
