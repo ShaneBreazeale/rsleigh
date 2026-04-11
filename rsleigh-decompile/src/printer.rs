@@ -2095,18 +2095,45 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // S_ISREG: (st_mode & 0xf000) == 32768
         *line = line.replace("& 0xf00-32768 == 0", "& 0xf000) == 0x8000 /* S_ISREG */");
         *line = line.replace("& 0xf000 == 32768", "& 0xf000) == 0x8000 /* S_ISREG */");
-        // Common errno / signal values
         // ASCII char constants in comparisons
-        if line.contains("- 46 == 0") { *line = line.replace("- 46 == 0", "== '.'"); }
-        if line.contains("- 47 == 0") { *line = line.replace("- 47 == 0", "== '/'"); }
-        if line.contains("== 10)") && !line.contains("\"") {
-            *line = line.replace("== 10)", "== '\\n')");
+        let ascii_chars: &[(i32, &str)] = &[
+            (9, "'\\t'"), (10, "'\\n'"), (13, "'\\r'"), (32, "' '"),
+            (34, "'\"'"), (39, "'\\''"), (44, "','"), (46, "'.'"),
+            (47, "'/'"), (48, "'0'"), (57, "'9'"), (58, "':'"),
+            (59, "';'"), (61, "'='"), (63, "'?'"), (65, "'A'"),
+            (70, "'F'"), (90, "'Z'"), (91, "'['"), (92, "'\\\\'"),
+            (93, "']'"), (95, "'_'"), (97, "'a'"), (102, "'f'"),
+            (122, "'z'"), (123, "'{'"), (125, "'}'"),
+        ];
+        for (val, ch) in ascii_chars {
+            // Match: == N), != N), > N), < N), >= N), <= N) where N is the ASCII value
+            // But only in conditions (after if/while), not in general expressions
+            if line.contains(&format!("== {})", val)) || line.contains(&format!("!= {})", val))
+                || line.contains(&format!("> {})", val)) || line.contains(&format!("< {})", val))
+                || line.contains(&format!(">= {})", val)) || line.contains(&format!("<= {})", val))
+                || line.contains(&format!("- {} ==", val))
+            {
+                if !line.contains("\"") || line.contains("if (") || line.contains("while (") {
+                    *line = line.replace(&format!("== {})", val), &format!("== {})", ch));
+                    *line = line.replace(&format!("!= {})", val), &format!("!= {})", ch));
+                    *line = line.replace(&format!("> {})", val), &format!("> {})", ch));
+                    *line = line.replace(&format!("< {})", val), &format!("< {})", ch));
+                    *line = line.replace(&format!(">= {})", val), &format!(">= {})", ch));
+                    *line = line.replace(&format!("<= {})", val), &format!("<= {})", ch));
+                    *line = line.replace(&format!("- {} ==", val), &format!("== {}  //", ch));
+                }
+            }
         }
-        if line.contains("!= 10)") && !line.contains("\"") {
-            *line = line.replace("!= 10)", "!= '\\n')");
-        }
-        // dirent d_name offset: [21] is typically d_name in struct dirent
-        // Clean up: path[21] == '.' → ent->d_name == '.'
+
+        // macOS ctype: __maskrune(FLAGS) → isXXX() function names
+        *line = line.replace("__maskrune(16384)", "isspace()");
+        *line = line.replace("& 16384", "/* isspace */");
+        *line = line.replace("__maskrune(1024)", "isdigit()");
+        *line = line.replace("__maskrune(256)", "isalpha()");
+        *line = line.replace("__maskrune(768)", "isalnum()");
+        *line = line.replace("__maskrune(8192)", "isupper()");
+        *line = line.replace("__maskrune(4096)", "islower()");
+        *line = line.replace("__maskrune(32768)", "isprint()");
     }
 
     // #EMPTY_WHILE: Remove empty while loop bodies (structure recovery artifacts).
@@ -2133,6 +2160,58 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
         // "perror(R12[R14])" → "perror(argv[i])" when in arg-processing context
         // This is hard to fix perfectly, leave as-is for now
+    }
+
+    // #DEADREG: Remove stale register-only assignments that aren't used.
+    // Lines like "R14 = RBX + 8;" or "R15 = *(RSP);" where the register
+    // doesn't appear in any subsequent line within the same scope.
+    {
+        let x86_regs = ["RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP",
+                         "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15",
+                         "EAX", "EBX", "ECX", "EDX", "ESI", "EDI",
+                         "R8D", "R9D", "R10D", "R11D", "R12D", "R13D", "R14D", "R15D",
+                         "AL", "BL", "CL", "DL"];
+        let mut i = 0;
+        while i < lines.len() {
+            let lt = lines[i].trim().to_string();
+            // Match: REG = expr; (simple register assignment)
+            if lt.ends_with(';') && lt.contains(" = ") && !lt.starts_with("if ")
+                && !lt.starts_with("while ") && !lt.starts_with("return ")
+                && !lt.starts_with("//") && !lt.starts_with("var_")
+                && !lt.starts_with("*") && !lt.contains("->")
+                && !lt.contains('[')
+            {
+                let lhs = lt.split(" = ").next().unwrap_or("");
+                if x86_regs.contains(&lhs) {
+                    // Check if this register is used in any later line in the same scope
+                    let my_indent = lines[i].len() - lines[i].trim_start().len();
+                    let mut used = false;
+                    for j in (i + 1)..lines.len() {
+                        let jt = lines[j].trim();
+                        let j_indent = lines[j].len() - lines[j].trim_start().len();
+                        // Stop at scope boundary
+                        if j_indent < my_indent && !jt.is_empty() { break; }
+                        if jt == "}" || jt.starts_with("} else") { break; }
+                        // Check if the register appears in this line (not as LHS of assignment)
+                        if jt.contains(lhs) {
+                            // Make sure it's not just another assignment to the same reg
+                            let is_reassign = jt.starts_with(&format!("{} = ", lhs));
+                            if !is_reassign {
+                                used = true;
+                                break;
+                            } else {
+                                break; // reassigned before use — dead
+                            }
+                        }
+                    }
+                    if !used {
+                        lines.remove(i);
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
     }
 
     // #NEG1: Replace 0xffffffffffffffff and 4294967295 with -1.
