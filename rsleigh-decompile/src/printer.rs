@@ -1584,6 +1584,47 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #STACKSTR: Merge consecutive string constant assignments into one string.
+    // Matches var_XX = "..."; or REG = "..."; patterns (stack string init)
+    {
+        let mut i = 0;
+        while i < lines.len() {
+            let lt = lines[i].trim().to_string();
+            // Match: IDENTIFIER = "...";
+            if lt.contains(" = \"") && lt.ends_with("\";") && !lt.starts_with("if ") && !lt.starts_with("while ") {
+                let mut merged = String::new();
+                let mut end = i;
+                let mut count = 0;
+                for j in i..lines.len() {
+                    let jt = lines[j].trim();
+                    if jt.contains(" = \"") && jt.ends_with("\";") && !jt.starts_with("if ") {
+                        if let Some(q1) = jt.find('"') {
+                            if let Some(q2) = jt.rfind('"') {
+                                if q2 > q1 {
+                                    merged.push_str(&jt[q1+1..q2]);
+                                    end = j;
+                                    count += 1;
+                                }
+                            }
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                if count >= 3 && merged.len() >= 6 {
+                    let indent = lines[i].len() - lines[i].trim_start().len();
+                    let pad = " ".repeat(indent);
+                    let var_name = lt.split(' ').next().unwrap_or("buf");
+                    for idx in (i + 1..=end).rev() { lines.remove(idx); }
+                    lines[i] = format!("{}// stack string: \"{}\"", pad, merged);
+                    // Keep the first var assignment for reference
+                    // Actually just show the merged string as a comment
+                }
+            }
+            i += 1;
+        }
+    }
+
     // Remove consecutive blank lines
     let mut result = String::new();
     let mut prev_blank = false;
@@ -2901,6 +2942,13 @@ fn format_const(val: u64, size: u32) -> String {
     if val == 0 { return "0".to_string(); }
     // Small positive values in decimal for readability
     if val < 1000 { return format!("{}", val); }
+    // Try decoding as ASCII string (little-endian packed bytes on stack)
+    // e.g., 0x6e5f6c6c69775f75 → "u_will_n"
+    if val > 0xFFFF && size >= 4 {
+        if let Some(s) = try_decode_ascii_const(val, size) {
+            return format!("\"{}\"", s);
+        }
+    }
     // Check for negative values (sign bit set)
     let sign_bit = match size {
         1 => 0x80, 2 => 0x8000, 4 => 0x80000000, 8 => 0x8000000000000000, _ => 0,
@@ -2912,6 +2960,34 @@ fn format_const(val: u64, size: u32) -> String {
         if neg <= 0x10000 { return format!("-0x{:x}", neg); }
     }
     format!("0x{:x}", val)
+}
+
+/// Try to decode a constant value as packed ASCII bytes (little-endian).
+/// Returns Some("text") if ALL bytes are printable ASCII (or null terminator).
+fn try_decode_ascii_const(val: u64, size: u32) -> Option<String> {
+    let nbytes = match size { 4 => 4, 8 => 8, _ => return None };
+    let bytes = val.to_le_bytes();
+    let mut s = String::new();
+    let mut all_ascii = true;
+    let mut printable_count = 0;
+    for i in 0..nbytes {
+        let b = bytes[i as usize];
+        if b == 0 { break; } // null terminator — end of string
+        if b >= 0x20 && b <= 0x7e {
+            s.push(b as char);
+            printable_count += 1;
+        } else {
+            all_ascii = false;
+            break;
+        }
+    }
+    // Require at least 3 printable chars to avoid false positives on small numbers
+    // that happen to have ASCII-range bytes
+    if all_ascii && printable_count >= 3 {
+        Some(s)
+    } else {
+        None
+    }
 }
 
 fn try_read_string(va: u64, ctx: &PrintCtx) -> Option<String> {
