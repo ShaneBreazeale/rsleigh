@@ -1387,7 +1387,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             if hex_end > abs_pos + 2 {
                 let hex_str = &new_line[abs_pos..hex_end];
                 if let Ok(val) = u64::from_str_radix(&hex_str[2..], 16) {
-                    if val > 0x200 && val < 0x10000000 {
+                    if val > 0x200 {
                         // Try string literal
                         if let Some(s) = try_read_string(val, ctx) {
                             let escaped = format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"));
@@ -1620,6 +1620,29 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     // Keep the first var assignment for reference
                     // Actually just show the merged string as a comment
                 }
+            }
+            i += 1;
+        }
+    }
+
+    // #XMM: Simplify XMM zero-init patterns (XORPS XMM0,XMM0 → memset(0) for structs)
+    for line in &mut lines {
+        // Pattern: var = XMM0 ^ XMM0 >> ... (long chain) → var = 0
+        if line.contains("XMM0 ^ XMM0") || line.contains("XMM0 >> 32 ^ XMM0") {
+            if let Some(eq_pos) = line.find(" = ") {
+                let var_part = &line[..eq_pos + 3];
+                *line = format!("{}0; // zero-init", var_part);
+            }
+        }
+    }
+
+    // #DEDUP: Remove exact duplicate consecutive lines (from nested call unwinding)
+    {
+        let mut i = 0;
+        while i + 1 < lines.len() {
+            if !lines[i].trim().is_empty() && lines[i].trim() == lines[i + 1].trim() {
+                lines.remove(i + 1);
+                continue;
             }
             i += 1;
         }
@@ -3046,9 +3069,14 @@ fn try_read_string(va: u64, ctx: &PrintCtx) -> Option<String> {
     let s = std::str::from_utf8(&slice[..null_pos]).ok()?;
     // Reject strings that look like compiler metadata or partial data
     // Reject strings that look like compiler metadata, partial data, or non-strings
-    if s.contains("GCC:") || s.contains("clang") || s.starts_with(".")
+    if s.contains("GCC:") || s.contains("clang")
         || s.contains("ubuntu") || s.contains("20160") || s.contains("2017")
         || s.contains("Debian")
+        // Reject ELF section names like .comment, .note, .debug_info, .symtab, .rodata
+        // These are > 5 chars, all lowercase+underscore after the dot.
+        // Allow file extensions (.html, .css, .js, .json), paths (./www), ".."
+        || (s.starts_with(".") && s.len() > 5
+            && s.chars().skip(1).all(|c| c.is_ascii_lowercase() || c == '_'))
         || s.starts_with(")") || s.starts_with("]")
         || (s.len() <= 4 && s.chars().all(|c| c.is_ascii_digit()))
         // Reject strings that are ALL digits or version-like (X.Y.Z)
