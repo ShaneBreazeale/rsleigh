@@ -6,7 +6,7 @@ pub fn resolve_imports(binary: &[u8]) -> HashMap<u64, String> {
     let Ok(obj) = goblin::Object::parse(binary) else { return map };
 
     match &obj {
-        goblin::Object::Elf(elf) => resolve_elf(elf, &mut map),
+        goblin::Object::Elf(elf) => resolve_elf(elf, binary, &mut map),
         goblin::Object::Mach(goblin::mach::Mach::Binary(macho)) => {
             resolve_macho(macho, binary, &mut map);
         }
@@ -18,8 +18,68 @@ pub fn resolve_imports(binary: &[u8]) -> HashMap<u64, String> {
     map
 }
 
-fn resolve_elf(elf: &goblin::elf::Elf, map: &mut HashMap<u64, String>) {
-    // Dynamic imports
+fn resolve_elf(elf: &goblin::elf::Elf, binary: &[u8], map: &mut HashMap<u64, String>) {
+    // Build GOT address → symbol name map from PLT relocations
+    let mut got_to_name: HashMap<u64, String> = HashMap::new();
+    for reloc in elf.pltrelocs.iter() {
+        if let Some(sym) = elf.dynsyms.get(reloc.r_sym) {
+            if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
+                if !name.is_empty() {
+                    got_to_name.insert(reloc.r_offset, name.to_string());
+                    // Also map the GOT entry address directly
+                    map.insert(reloc.r_offset, name.to_string());
+                }
+            }
+        }
+    }
+
+    // Find .plt section and map PLT stub addresses to names
+    // Each PLT entry is typically 16 bytes (x86-64): jmp [GOT]; push idx; jmp resolver
+    for sh in &elf.section_headers {
+        let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
+        if name == ".plt" || name == ".plt.got" || name == ".plt.sec" {
+            let entry_size = if sh.sh_entsize > 0 { sh.sh_entsize } else { 16 };
+            let plt_start = sh.sh_addr;
+            let n_entries = sh.sh_size / entry_size;
+            let file_off = sh.sh_offset as usize;
+
+            // Skip the first entry (PLT[0] is the resolver stub)
+            for i in 1..n_entries {
+                let stub_addr = plt_start + i * entry_size;
+                let off = file_off + (i * entry_size) as usize;
+
+                // Decode the JMP [rip+disp32] at the start of the PLT entry
+                if off + 6 <= binary.len() && binary[off] == 0xff && binary[off + 1] == 0x25 {
+                    let disp = i32::from_le_bytes([
+                        binary[off + 2], binary[off + 3],
+                        binary[off + 4], binary[off + 5],
+                    ]);
+                    let got_entry = (stub_addr + 6).wrapping_add(disp as u64);
+                    if let Some(name) = got_to_name.get(&got_entry) {
+                        map.insert(stub_addr, name.clone());
+                    }
+                }
+                // Also try: indirect JMP via endbr64 prefix (CET-enabled PLT)
+                // endbr64 = F3 0F 1E FA, then FF 25 disp32
+                else if off + 10 <= binary.len()
+                    && binary[off] == 0xf3 && binary[off + 1] == 0x0f
+                    && binary[off + 2] == 0x1e && binary[off + 3] == 0xfa
+                    && binary[off + 4] == 0xff && binary[off + 5] == 0x25
+                {
+                    let disp = i32::from_le_bytes([
+                        binary[off + 6], binary[off + 7],
+                        binary[off + 8], binary[off + 9],
+                    ]);
+                    let got_entry = (stub_addr + 10).wrapping_add(disp as u64);
+                    if let Some(name) = got_to_name.get(&got_entry) {
+                        map.insert(stub_addr, name.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // Dynamic imports (non-PLT)
     for sym in elf.dynsyms.iter() {
         if sym.is_import() && sym.st_value != 0 {
             if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
@@ -27,14 +87,7 @@ fn resolve_elf(elf: &goblin::elf::Elf, map: &mut HashMap<u64, String>) {
             }
         }
     }
-    // PLT relocations → stub addresses
-    for reloc in elf.pltrelocs.iter() {
-        if let Some(sym) = elf.dynsyms.get(reloc.r_sym) {
-            if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
-                if !name.is_empty() { map.insert(reloc.r_offset, name.to_string()); }
-            }
-        }
-    }
+
     // Named functions from .symtab
     for sym in elf.syms.iter() {
         if sym.st_type() == goblin::elf::sym::STT_FUNC && sym.st_value != 0 {

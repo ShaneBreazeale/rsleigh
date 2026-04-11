@@ -3,10 +3,13 @@
 
 fn main() {
     let t = std::thread::Builder::new()
-        .stack_size(32 * 1024 * 1024)
+        .stack_size(64 * 1024 * 1024)
         .spawn(run)
         .unwrap();
-    t.join().unwrap();
+    match t.join() {
+        Ok(()) => {}
+        Err(_) => eprintln!("Thread panicked (likely stack overflow in decoder)"),
+    }
 }
 
 fn run() {
@@ -110,13 +113,19 @@ fn run() {
         let decode_max = func_max.min(max);
 
         while io < decode_max {
-            match dec.decode(&bytes[io..], fa + io as u64) {
-                Ok(inst) => {
+            // Catch panics from individual instruction decodes (stack overflow)
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                dec.decode(&bytes[io..], fa + io as u64)
+            }));
+            match result {
+                Ok(Ok(inst)) => {
                     let l = inst.len as usize;
+                    if l == 0 { io += 1; continue; } // avoid infinite loop
                     insts.push((fa + io as u64, inst));
                     io += l;
                 }
-                Err(_) => break,
+                Ok(Err(_)) => break,
+                Err(_) => { io += 1; } // skip bad instruction
             }
         }
         rsleigh_decompile::decompile_with_binary(
@@ -141,7 +150,19 @@ fn run() {
 
     for name in &target_funcs {
         if let Some((addr, _)) = symbols.iter().find(|(_, n)| n == name.as_str()) {
-            let output = decompile_func(*addr, &mut dec);
+            let func_addr = *addr;
+            // Flush before decompiling in case the decoder aborts
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            let output = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                decompile_func(func_addr, &mut dec)
+            })) {
+                Ok(o) => o,
+                Err(_) => {
+                    println!("=== {} (CRASHED — stack overflow in decoder) ===\n---", name);
+                    continue;
+                }
+            };
             println!("=== {} ({} instructions) ===", name,
                 /* count instructions in the function */
                 {

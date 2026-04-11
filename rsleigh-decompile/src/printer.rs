@@ -2374,8 +2374,17 @@ fn try_read_string(va: u64, ctx: &PrintCtx) -> Option<String> {
             })?
         }
         goblin::Object::Elf(elf) => {
+            // Only read strings from data sections (.rodata, .data, .dynstr)
+            // Skip .comment, .note, .debug sections to avoid false matches
             elf.section_headers.iter().find_map(|sh| {
-                if sh.sh_addr != 0 && va >= sh.sh_addr && va < sh.sh_addr + sh.sh_size {
+                if sh.sh_addr == 0 || va < sh.sh_addr || va >= sh.sh_addr + sh.sh_size {
+                    return None;
+                }
+                // SHT_PROGBITS (1) with SHF_ALLOC (2) — loaded into memory
+                let is_alloc = sh.sh_flags & 0x2 != 0;
+                // Reject executable sections (code, not data)
+                let is_exec = sh.sh_flags & 0x4 != 0;
+                if is_alloc && !is_exec {
                     Some((sh.sh_offset + (va - sh.sh_addr)) as usize)
                 } else { None }
             })?
@@ -2392,11 +2401,13 @@ fn try_read_string(va: u64, ctx: &PrintCtx) -> Option<String> {
         _ => return None,
     };
     if file_offset >= binary.len() { return None; }
-    let max = 80.min(binary.len() - file_offset);
+    let max = 200.min(binary.len() - file_offset);
     let slice = &binary[file_offset..file_offset + max];
     let null_pos = slice.iter().position(|&b| b == 0)?;
-    if null_pos < 2 { return None; }
+    if null_pos < 2 || null_pos > 120 { return None; } // reject very long "strings"
     let s = std::str::from_utf8(&slice[..null_pos]).ok()?;
+    // Reject strings that look like compiler metadata
+    if s.contains("GCC:") || s.contains("clang") || s.starts_with(".") { return None; }
     if s.chars().all(|c| c.is_ascii_graphic() || c == ' ' || c == '\n' || c == '\t') {
         Some(s.to_string())
     } else { None }
