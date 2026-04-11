@@ -74,6 +74,7 @@ fn print_stmts_with_tracker(stmts: &[StructuredStmt], ssa: &SsaCfg, ctx: &PrintC
 /// Text-level post-processing to clean up common patterns.
 fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, String>, param_names: &[String], struct_fields: &HashMap<u64, String>) {
     let mut lines: Vec<String> = out.lines().map(|l| l.to_string()).collect();
+
     let mut i = 0;
     while i < lines.len() {
         // #4: Hide stack canary boilerplate
@@ -637,6 +638,38 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     *line = line.replace(&pattern, &replacement);
                 }
             }
+        }
+    }
+
+    // Normalize FS_OFFSET->field28 → __stack_chk_guard (TLS canary access)
+    // Must run after struct field conversion which creates the ->field28 pattern
+    for line in &mut lines {
+        *line = line.replace("FS_OFFSET->field28", "__stack_chk_guard");
+    }
+
+    // Remove stack canary check blocks: if (... ^ __stack_chk_guard ...) { __stack_chk_fail(); }
+    {
+        let mut j = 0;
+        while j < lines.len() {
+            let lt = lines[j].trim().to_string();
+            if lt.contains("__stack_chk_guard") && lt.starts_with("if (") {
+                let mut depth = 0;
+                let mut end = None;
+                for k in j..lines.len() {
+                    if lines[k].contains('{') { depth += 1; }
+                    if lines[k].contains('}') { depth -= 1; if depth == 0 { end = Some(k); break; } }
+                }
+                if let Some(end_idx) = end {
+                    for idx in (j..=end_idx).rev() { lines.remove(idx); }
+                    continue;
+                }
+            }
+            // Also remove standalone canary lines: RAX = ... ^ __stack_chk_guard;
+            if lt.contains("__stack_chk_guard") && !lt.starts_with("if ") {
+                lines.remove(j);
+                continue;
+            }
+            j += 1;
         }
     }
 
@@ -2482,8 +2515,16 @@ fn try_read_string(va: u64, ctx: &PrintCtx) -> Option<String> {
     let null_pos = slice.iter().position(|&b| b == 0)?;
     if null_pos < 2 || null_pos > 120 { return None; } // reject very long "strings"
     let s = std::str::from_utf8(&slice[..null_pos]).ok()?;
-    // Reject strings that look like compiler metadata
-    if s.contains("GCC:") || s.contains("clang") || s.starts_with(".") { return None; }
+    // Reject strings that look like compiler metadata or partial data
+    // Reject strings that look like compiler metadata, partial data, or non-strings
+    if s.contains("GCC:") || s.contains("clang") || s.starts_with(".")
+        || s.contains("ubuntu") || s.contains("20160") || s.contains("2017")
+        || s.contains("5.4.0") || s.contains("7.3.0") || s.contains("Debian")
+        || s.starts_with(")") || s.starts_with("]")
+        || (s.len() <= 4 && s.chars().all(|c| c.is_ascii_digit()))
+        // Reject strings that are ALL digits (look like version numbers)
+        || s.chars().all(|c| c.is_ascii_digit() || c == '.')
+    { return None; }
     if s.chars().all(|c| c.is_ascii_graphic() || c == ' ' || c == '\n' || c == '\t') {
         Some(s.to_string())
     } else { None }
