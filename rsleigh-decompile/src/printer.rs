@@ -1864,6 +1864,65 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #CALLRET: Inline call return values into subsequent conditions.
+    // Pattern: func(...); if (0 == 0) { ... } → if (func(...) == 0) { ... }
+    // The call return (in EAX) isn't captured by the SSA because CALL P-code
+    // doesn't write to RAX. The condition check reads the pre-call EAX value
+    // which is 0 or unknown. Fix by detecting call-then-condition patterns.
+    {
+        let mut i = 0;
+        while i + 1 < lines.len() {
+            let lt = lines[i].trim().to_string();
+            let next = lines[i + 1].trim().to_string();
+            // Match: func_call(...); followed by if (0 == 0), if (0 != 0), if (EAX == 0), etc.
+            if lt.ends_with(';') && lt.contains('(') && !lt.contains(" = ")
+                && !lt.starts_with("if ") && !lt.starts_with("while ") && !lt.starts_with("return ")
+                && !lt.starts_with("//") && !lt.starts_with("var_")
+            {
+                // Extract the call expression (remove trailing ;)
+                let call_expr = lt.trim_end_matches(';').trim();
+
+                // Check if next line is: if (0 == 0), if (0 != 0), if (EAX == 0), etc.
+                let is_zero_cond = next.starts_with("if (0 == 0)")
+                    || next.starts_with("if (0 != 0)")
+                    || next.starts_with("if (0 == 0 ")  // with trailing &&
+                    || next.starts_with("if (0 != 0 ");
+                let is_eax_cond = next.starts_with("if (EAX == ")
+                    || next.starts_with("if (EAX != ")
+                    || next.starts_with("if (EAX < ")
+                    || next.starts_with("if (EAX > ")
+                    || next.starts_with("if (EAX <= ")
+                    || next.starts_with("if (EAX >= ");
+                // Also match: if (var_N == 0) right after a call — often the return check
+                let is_var_zero = next.starts_with("if (var_") &&
+                    (next.contains(" == 0)") || next.contains(" != 0)"));
+
+                if is_zero_cond {
+                    let indent = lines[i + 1].len() - lines[i + 1].trim_start().len();
+                    let pad = " ".repeat(indent);
+                    // Replace: "if (0 == 0)" → "if (call_expr == 0)"
+                    // and "if (0 != 0)" → "if (call_expr != 0)"
+                    let new_cond = if next.contains("0 != 0") {
+                        next.replace("0 != 0", &format!("{} != 0", call_expr))
+                    } else {
+                        next.replace("0 == 0", &format!("{} == 0", call_expr))
+                    };
+                    lines[i + 1] = format!("{}{}", pad, new_cond.trim());
+                    lines.remove(i);
+                    continue;
+                } else if is_eax_cond {
+                    let indent = lines[i + 1].len() - lines[i + 1].trim_start().len();
+                    let pad = " ".repeat(indent);
+                    let new_cond = next.replacen("EAX", call_expr, 1);
+                    lines[i + 1] = format!("{}{}", pad, new_cond.trim());
+                    lines.remove(i);
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+
     // #SBORROW: Clean up leftover SBORROW flag patterns.
     // These are raw signed-borrow flag checks that weren't recovered to comparisons.
     // They're always redundant with adjacent comparisons. Remove the SBORROW lines.
