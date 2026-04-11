@@ -25,7 +25,7 @@ fn run() {
     };
     let path = std::path::Path::new(binary_path);
 
-    // Parse Mach-O
+    // Parse binary (Mach-O or ELF)
     let obj = goblin::Object::parse(&data).unwrap();
     let (segs, symbols): (Vec<(u64, u64, u64)>, Vec<(u64, String)>) = match &obj {
         goblin::Object::Mach(goblin::mach::Mach::Binary(m)) => {
@@ -50,8 +50,35 @@ fn run() {
             }
             (segs, syms)
         }
+        goblin::Object::Elf(elf) => {
+            let segs: Vec<(u64, u64, u64)> = elf.section_headers.iter()
+                .filter(|sh| sh.sh_flags & 0x4 != 0) // SHF_EXECINSTR
+                .map(|sh| (sh.sh_addr, sh.sh_size, sh.sh_offset))
+                .collect();
+            let mut syms: Vec<(u64, String)> = Vec::new();
+            for sym in elf.syms.iter() {
+                if sym.st_type() == goblin::elf::sym::STT_FUNC && sym.st_value != 0 {
+                    if let Some(name) = elf.strtab.get_at(sym.st_name) {
+                        if !name.is_empty() && !name.starts_with("_") {
+                            syms.push((sym.st_value, name.to_string()));
+                        }
+                    }
+                }
+            }
+            // Also get dynamic symbols for imports
+            for sym in elf.dynsyms.iter() {
+                if sym.st_type() == goblin::elf::sym::STT_FUNC && sym.st_value != 0 {
+                    if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
+                        if !name.is_empty() {
+                            syms.push((sym.st_value, name.to_string()));
+                        }
+                    }
+                }
+            }
+            (segs, syms)
+        }
         _ => {
-            eprintln!("Not Mach-O");
+            eprintln!("Unsupported binary format");
             return;
         }
     };
