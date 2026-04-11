@@ -24,10 +24,14 @@ pub fn recover_structure(ssa: &SsaCfg, cfg: &Cfg) -> Vec<StructuredStmt> {
     let mut result = Vec::new();
 
     emit_region(ssa, cfg, &dom, &pdom, &back_edges, cfg.entry,
-                &mut emitted, &mut result);
+                &mut emitted, &mut result, 0);
 
     result
 }
+
+/// Maximum recursion depth for structure recovery.
+/// Prevents stack overflow on deeply nested or pathological CFGs.
+const MAX_STRUCTURE_DEPTH: usize = 256;
 
 fn emit_region(
     ssa: &SsaCfg,
@@ -38,7 +42,12 @@ fn emit_region(
     start: BlockId,
     emitted: &mut Vec<bool>,
     out: &mut Vec<StructuredStmt>,
+    depth: usize,
 ) {
+    if depth >= MAX_STRUCTURE_DEPTH {
+        out.push(StructuredStmt::Goto(0)); // bail on too-deep nesting
+        return;
+    }
     let mut current = start;
 
     loop {
@@ -96,7 +105,7 @@ fn emit_region(
                             // including blocks after the loop
                             let exit_was_emitted = emitted[exit.0];
                             emitted[exit.0] = true;
-                            emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body);
+                            emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body, depth + 1);
                             emitted[exit.0] = exit_was_emitted; // restore for later processing
                             out.push(StructuredStmt::While { cond: *cond, negate, body });
                             current = exit;
@@ -130,7 +139,7 @@ fn emit_region(
                     // Mark exit block as emitted to bound the loop body
                     let exit_was_emitted = emitted[exit.0];
                     emitted[exit.0] = true;
-                    emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body);
+                    emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body, depth + 1);
                     emitted[exit.0] = exit_was_emitted;
 
                     out.push(StructuredStmt::While {
@@ -149,10 +158,10 @@ fn emit_region(
                 let mut else_body = Vec::new();
 
                 if *taken != merge {
-                    emit_region(ssa, cfg, dom, pdom, back_edges, *taken, emitted, &mut then_body);
+                    emit_region(ssa, cfg, dom, pdom, back_edges, *taken, emitted, &mut then_body, depth + 1);
                 }
                 if *fallthrough != merge {
-                    emit_region(ssa, cfg, dom, pdom, back_edges, *fallthrough, emitted, &mut else_body);
+                    emit_region(ssa, cfg, dom, pdom, back_edges, *fallthrough, emitted, &mut else_body, depth + 1);
                 }
 
                 if else_body.is_empty() {
@@ -195,7 +204,7 @@ fn emit_region(
                             let mut body = Vec::new();
                             let exit_was_emitted = emitted[exit.0];
                             emitted[exit.0] = true;
-                            emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body);
+                            emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body, depth + 1);
                             emitted[exit.0] = exit_was_emitted;
                             out.push(StructuredStmt::While { cond: *cond, negate, body });
                             current = exit;

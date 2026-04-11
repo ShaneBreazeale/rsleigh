@@ -1089,7 +1089,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         for line in &mut lines {
             // Pattern: "RBP/EBP - N" with decimal offset
             while let Some(_pos) = line.find(&minus_pat) {
-                let num_start = line.find(&minus_pat).unwrap() + minus_pat.len();
+                let num_start = line.find(&minus_pat).unwrap_or(0) + minus_pat.len();
                 if line[num_start..].starts_with("0x") {
                     break; // hex handled below
                 }
@@ -1112,7 +1112,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             }
             // Pattern: "RBP/EBP - 0xNN"
             while let Some(_pos) = line.find(&minus_hex_pat) {
-                let hex_start = line.find(&minus_hex_pat).unwrap() + minus_hex_pat.len();
+                let hex_start = line.find(&minus_hex_pat).unwrap_or(0) + minus_hex_pat.len();
                 let hex_end = line[hex_start..].find(|c: char| !c.is_ascii_hexdigit())
                     .map(|e| hex_start + e).unwrap_or(line.len());
                 let hex_str = line[hex_start..hex_end].to_string();
@@ -1132,7 +1132,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             }
             // Fallback: "RBP/EBP + 0xNN" where NN is large (signed-byte negative in unsigned form)
             while let Some(_pos) = line.find(&plus_hex_pat) {
-                let hex_start = line.find(&plus_hex_pat).unwrap() + plus_hex_pat.len();
+                let hex_start = line.find(&plus_hex_pat).unwrap_or(0) + plus_hex_pat.len();
                 let hex_end = line[hex_start..].find(|c: char| !c.is_ascii_hexdigit())
                     .map(|e| hex_start + e).unwrap_or(line.len());
                 let hex_str = line[hex_start..hex_end].to_string();
@@ -2456,7 +2456,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
 
                     // Verify sign extraction: REG = OTHER >> 31
                     if rhs0.ends_with(" >> 31") {
-                        let src_reg = rhs0.strip_suffix(" >> 31").unwrap().to_string();
+                        let src_reg = rhs0.strip_suffix(" >> 31").unwrap_or_default().to_string();
 
                         // Verify arithmetic shift: same src >> K
                         if let Some(shr_pos) = rhs1.find(" >> ") {
@@ -2848,12 +2848,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // Build the for loop
             let pad = " ".repeat(indent);
             let has_init = init_line.as_ref().map_or(false, |(_, text)| {
-                let eq = text.find(" = ").unwrap();
+                let eq = text.find(" = ").unwrap_or(0);
                 &text[..eq] == inc_var
             });
 
             if has_init {
-                let (init_idx, init_text) = init_line.unwrap();
+                let (init_idx, init_text) = init_line.expect("init_line guaranteed by has_init");
                 let init = init_text.trim_end_matches(';');
                 lines[init_idx] = format!("{}for ({}; {}; {}) {{", pad, init, cond, inc_expr);
                 lines.remove(while_idx); // remove old while line (now at init_idx + 1)
@@ -3324,7 +3324,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // Step 1: Find the GOT base from the thunk pattern
         // Look for: "REGVAR = REGVAR + 0xNNNN;" after a thunk call
         let mut got_base: Option<(String, u64)> = None;
-        let mut got_add_line: Option<usize> = None;
+        let mut _got_add_line: Option<usize> = None;
 
         for (i, line) in lines.iter().enumerate() {
             let t = line.trim();
@@ -3341,7 +3341,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                             // We don't have the exact return addr here, but the offset is
                             // what matters for relative resolution. Store the var name + offset.
                             got_base = Some((lhs.to_string(), offset));
-                            got_add_line = Some(i);
+                            _got_add_line = Some(i);
                         }
                     }
                 }

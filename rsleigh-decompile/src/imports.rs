@@ -120,9 +120,9 @@ fn resolve_elf(elf: &goblin::elf::Elf, binary: &[u8], map: &mut HashMap<u64, Str
             let file_off = sh.sh_offset as usize;
 
             // Skip the first entry (PLT[0] is the resolver stub)
-            for i in 1..n_entries {
-                let stub_addr = plt_start + i * entry_size;
-                let off = file_off + (i * entry_size) as usize;
+            for i in 1..n_entries.min(10000) { // cap at 10K entries for safety
+                let Some(stub_addr) = plt_start.checked_add(i.checked_mul(entry_size).unwrap_or(u64::MAX)) else { break; };
+                let Some(off) = file_off.checked_add((i * entry_size) as usize) else { break; };
 
                 // Decode the JMP [addr] at the start of the PLT entry
                 if off + 6 <= binary.len() && binary[off] == 0xff && binary[off + 1] == 0x25 {
@@ -430,9 +430,9 @@ fn resolve_pe(pe: &goblin::pe::PE, binary: &[u8], map: &mut HashMap<u64, String>
                     let entry_off = iat_off + i * ptr_size;
                     if entry_off + ptr_size > binary.len() { break; }
                     let raw_entry = if ptr_size == 4 {
-                        u32::from_le_bytes(binary[entry_off..entry_off+4].try_into().unwrap()) as u64
+                        u32::from_le_bytes(binary[entry_off..entry_off+4].try_into().unwrap_or([0;4])) as u64
                     } else {
-                        u64::from_le_bytes(binary[entry_off..entry_off+8].try_into().unwrap())
+                        u64::from_le_bytes(binary[entry_off..entry_off+8].try_into().unwrap_or([0;8]))
                     };
                     if raw_entry == 0 { break; }
 

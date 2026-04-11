@@ -172,13 +172,51 @@ pub enum StructuredStmt {
     Label(u64),
 }
 
+/// Sentinel VarDef returned for out-of-bounds VarId lookups.
+/// Prevents panics on malformed/adversarial input.
+/// Safe VarDef lookup from a slice — returns sentinel for OOB access.
+pub fn safe_var(vars: &[VarDef], id: VarId) -> &VarDef {
+    vars.get(id.0 as usize).unwrap_or(&SENTINEL_VARDEF)
+}
+
+static SENTINEL_VARDEF: std::sync::LazyLock<VarDef> = std::sync::LazyLock::new(|| VarDef {
+    id: VarId(u32::MAX),
+    varnode: Varnode { space: pcode_ir::AddressSpaceId::Const, offset: 0, size: 0 },
+    expr: Expr::Unknown,
+    size: 0,
+    use_count: 0,
+    param_name: None,
+    call_return: false,
+    inferred_type: InferredType::Unknown,
+});
+
 impl SsaCfg {
+    /// Safe variable lookup — returns a sentinel for out-of-bounds VarId
+    /// instead of panicking. This is critical for handling malformed binaries
+    /// that produce pathological P-code with invalid varnode references.
     pub fn var(&self, id: VarId) -> &VarDef {
-        &self.vars[id.0 as usize]
+        self.vars.get(id.0 as usize).unwrap_or(&SENTINEL_VARDEF)
     }
 
     pub fn var_mut(&mut self, id: VarId) -> &mut VarDef {
-        &mut self.vars[id.0 as usize]
+        let idx = id.0 as usize;
+        if idx >= self.vars.len() {
+            // Extend with sentinel entries to accommodate the index
+            // This shouldn't happen in normal operation but prevents panic
+            while self.vars.len() <= idx {
+                self.vars.push(VarDef {
+                    id: VarId(self.vars.len() as u32),
+                    varnode: Varnode { space: pcode_ir::AddressSpaceId::Const, offset: 0, size: 0 },
+                    expr: Expr::Unknown,
+                    size: 0,
+                    use_count: 0,
+                    param_name: None,
+                    call_return: false,
+                    inferred_type: InferredType::Unknown,
+                });
+            }
+        }
+        &mut self.vars[idx]
     }
 
     pub fn new_var(&mut self, varnode: Varnode, expr: Expr, size: u32) -> VarId {
