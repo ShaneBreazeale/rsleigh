@@ -1847,6 +1847,17 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     }
                 }
             }
+            // Simplify "* (1.0 / N.0)" → "/ N.0" (reciprocal resolved at SSA level)
+            if line.contains("* (1.0 / ") {
+                if let Some(pos) = line.find("* (1.0 / ") {
+                    if let Some(close) = line[pos + 9..].find(')') {
+                        let divisor = &line[pos + 9..pos + 9 + close];
+                        let before = line[..pos].trim_end();
+                        let after = &line[pos + 9 + close + 1..];
+                        *line = format!("{} / {}{}", before, divisor, after);
+                    }
+                }
+            }
             // Also simplify INT2FLOAT(x) → (double)x
             *line = line.replace("INT2FLOAT(", "(double)(");
         }
@@ -3028,8 +3039,11 @@ fn get_rbp_offset(id: VarId, ssa: &SsaCfg) -> Option<u64> {
 }
 
 fn get_const_val(id: VarId, ssa: &SsaCfg) -> Option<u64> {
-    let vdef = ssa.var(id);
-    match &vdef.expr {
+    get_const_val_expr(&ssa.var(id).expr, ssa)
+}
+
+fn get_const_val_expr(expr: &Expr, ssa: &SsaCfg) -> Option<u64> {
+    match expr {
         Expr::Const(val, _) => Some(*val),
         Expr::Var(inner) => {
             let inner_def = ssa.var(*inner);
@@ -3233,6 +3247,29 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
             // Try stack variable name
             if let Some(offset) = get_rbp_offset(*ptr, ssa) {
                 return format!("var_{:x}", offset);
+            }
+            // Try reading float constant from binary (for FloatMult patterns)
+            if let Some(binary) = ctx.binary {
+                let ptr_val = get_const_val_expr(&ssa.var(*ptr).expr, ssa);
+                if let Some(addr) = ptr_val {
+                    if let Some(fo) = va_to_file_offset(addr, binary) {
+                        if fo + 8 <= binary.len() {
+                            let bytes: [u8; 8] = binary[fo..fo+8].try_into().unwrap_or([0;8]);
+                            let fval = f64::from_le_bytes(bytes);
+                            if fval != 0.0 && fval.is_finite() && fval.abs() < 1.0e20 && fval.abs() > 1.0e-20 {
+                                // Check if it's a clean value
+                                let recip = 1.0 / fval;
+                                if recip > 1.0 && (recip - recip.round()).abs() < 0.001 {
+                                    // Reciprocal of integer — likely used in division
+                                    return format!("(1.0 / {}.0)", recip.round() as u64);
+                                }
+                                // Clean float constant
+                                let s = format!("{}", fval);
+                                if s.len() <= 12 { return s; }
+                            }
+                        }
+                    }
+                }
             }
             let p = format_addr(*ptr, ssa, ctx);
             format!("*({})", p)
