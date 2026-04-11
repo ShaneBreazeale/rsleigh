@@ -1996,6 +1996,84 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // This is hard to fix perfectly, leave as-is for now
     }
 
+    // #NEG1: Replace 0xffffffffffffffff and 4294967295 with -1.
+    for line in &mut lines {
+        *line = line.replace("0xffffffffffffffff", "-1");
+        *line = line.replace("4294967295", "-1");
+        // Also 0xffffffff for 32-bit -1
+        if line.contains("0xffffffff") && !line.contains("0xffffffff0") && !line.contains("0xffffffff8") {
+            *line = line.replace("0xffffffff", "-1");
+        }
+    }
+
+    // #CALLRET2: Extend call-return inlining for more patterns.
+    // Pattern: strcmp(args); if (param_N == 0) → if (strcmp(args) == 0)
+    // When a call is followed by an if checking a param/register that represents
+    // the return value (often param_2 for RDX, or var_N).
+    {
+        let mut i = 0;
+        while i + 1 < lines.len() {
+            let lt = lines[i].trim().to_string();
+            let next = lines[i + 1].trim().to_string();
+            // Match: call(...); if (SIMPLE_VAR == 0) or if (SIMPLE_VAR != 0)
+            if lt.ends_with(';') && lt.contains('(') && !lt.contains(" = ")
+                && !lt.starts_with("if ") && !lt.starts_with("while ")
+                && !lt.starts_with("return ") && !lt.starts_with("//")
+            {
+                let call_expr = lt.trim_end_matches(';').trim();
+                // Check for: if (var_N == 0), if (var_N != 0), if (param_N == 0)
+                let cond_inline = if next.starts_with("if (var_") || next.starts_with("if (param_") {
+                    // Check it's a simple == 0 or != 0 check
+                    (next.contains(" == 0)") || next.contains(" != 0)"))
+                        && !next.contains("&&") && !next.contains("||")
+                } else { false };
+
+                if cond_inline {
+                    let indent = lines[i + 1].len() - lines[i + 1].trim_start().len();
+                    let pad = " ".repeat(indent);
+                    // Extract the var/param name from the condition
+                    if let Some(paren_start) = next.find("if (") {
+                        let after_if = &next[paren_start + 4..];
+                        if let Some(space) = after_if.find(' ') {
+                            let var_name = &after_if[..space];
+                            let rest = &after_if[space..];
+                            // Replace var with call expression
+                            let new_cond = format!("if ({}{}", call_expr, rest);
+                            lines[i + 1] = format!("{}{}", pad, new_cond);
+                            lines.remove(i);
+                            continue;
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
+    // #CPP_NEST: Truncate deeply nested C++ constructor/allocator chains.
+    // alloc_ctor(alloc_ctor(alloc_ctor(...))) → alloc_ctor(...)
+    for line in &mut lines {
+        // Count nesting depth of specific C++ functions
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for func in ["alloc_ctor", "string_ctor", "string_dtor"] {
+                let nested = format!("{}({}(", func, func);
+                if line.contains(&nested) {
+                    // Find the inner call and keep only the outermost
+                    let inner = format!("{}(", func);
+                    if let Some(pos) = line.find(&nested) {
+                        // Remove one level of nesting
+                        let before = &line[..pos + func.len() + 1]; // "alloc_ctor("
+                        let after_nested = &line[pos + nested.len()..]; // skip inner "alloc_ctor("
+                        *line = format!("{}{}", before, after_nested);
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
     // #LLM: Clean up patterns that confuse LLM analysis.
 
     // Strip __isoc99_ prefix from scanf variants
