@@ -1618,7 +1618,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 if count >= 3 && merged.len() >= 6 {
                     let indent = lines[i].len() - lines[i].trim_start().len();
                     let pad = " ".repeat(indent);
-                    let var_name = lt.split(' ').next().unwrap_or("buf");
+                    let _var_name = lt.split(' ').next().unwrap_or("buf");
                     for idx in (i + 1..=end).rev() { lines.remove(idx); }
                     lines[i] = format!("{}// stack string: \"{}\"", pad, merged);
                     // Keep the first var assignment for reference
@@ -1702,7 +1702,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     }
                     if let Some(close_pos) = close {
                         // Replace: func(arg1, arg2, ...) → func(arg1)
-                        let new_line = format!("{}{}){}", &line[..comma_pos], "", &line[close_pos + 1..]);
+                        let _new_line = format!("{}{}){}", &line[..comma_pos], "", &line[close_pos + 1..]);
                         let first_arg = &line[args_start..comma_pos];
                         *line = format!("{}{}({}){}", &line[..start], func, first_arg, &line[close_pos + 1..]);
                     }
