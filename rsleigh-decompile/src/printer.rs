@@ -3275,6 +3275,47 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // Remove consecutive blank lines
     let mut result = String::new();
     let mut prev_blank = false;
+    // #DEDUP_ESP_STORE: Remove "*(uint32_t*)(ESP) = CALL(...);" when the same call
+    // appears on the previous line. These are x86-32 cdecl return value pushes.
+    {
+        let mut i = 1;
+        while i < lines.len() {
+            let lt = lines[i].trim();
+            if lt.starts_with("*(uint32_t*)(ESP) = ") || lt.starts_with("*(int*)(ESP) = ") {
+                let rhs = if let Some(r) = lt.find(" = ") { &lt[r + 3..] } else { "" };
+                let prev = lines[i - 1].trim();
+                // If the RHS matches the previous line exactly (with semicolon)
+                if !rhs.is_empty() && prev == rhs {
+                    lines.remove(i);
+                    continue;
+                }
+                // Also remove bare "*(uint32_t*)(ESP) = PREV_CALL;" where prev line is "CALL;"
+                if !rhs.is_empty() && prev.ends_with(';') && rhs.ends_with(';') {
+                    let prev_expr = prev.trim_end_matches(';');
+                    let rhs_expr = rhs.trim_end_matches(';');
+                    if prev_expr == rhs_expr {
+                        lines.remove(i);
+                        continue;
+                    }
+                }
+                // Remove "*(uint32_t*)(ESP) = VALUE;" when the next line is a call
+                // that already shows VALUE as its argument (cdecl arg push)
+                if i + 1 < lines.len() {
+                    let next = lines[i + 1].trim();
+                    if next.contains('(') && next.ends_with(';') {
+                        // Check if the ESP store value appears as an arg in the next call
+                        let stored_val = rhs.trim_end_matches(';').trim();
+                        if next.contains(stored_val) && !stored_val.is_empty() {
+                            lines.remove(i);
+                            continue;
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
     // #ELF32_PIE: Hide __x86.get_pc_thunk boilerplate and resolve GOT-relative addresses.
     // Pattern: "__x86.get_pc_thunk.bx(...);" → remove
     //          "iVarN = iVarN + 0xNNNN;" → extract GOT base, remove
