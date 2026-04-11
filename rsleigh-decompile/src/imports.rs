@@ -12,9 +12,21 @@ fn demangle_name(name: &str) -> String {
     // Try C++ demangling
     if let Ok(sym) = cpp_demangle::Symbol::new(name.as_bytes()) {
         let Ok(demangled) = sym.demangle() else { return clean; };
-        let demangled = demangled;
-        // Simplify common patterns
-        simplify_cpp_name(&demangled)
+        // Strip parameter list: "func(int, char*)" → "func"
+        // But keep the full name for overloaded operators
+        let simplified = simplify_cpp_name(&demangled);
+        // Strip trailing parameter list for cleaner call display.
+        // "phttp::Initialize()" → "phttp::Initialize"
+        // "operator new(unsigned long)" → "operator new" (keep operator name)
+        // "signal_handler(int)" → "signal_handler"
+        if let Some(paren) = simplified.find('(') {
+            let before = &simplified[..paren];
+            // Keep the part before the first '(' as the function name
+            if !before.is_empty() && !before.ends_with('>') {
+                return before.to_string();
+            }
+        }
+        simplified
     } else {
         clean
     }
@@ -227,10 +239,11 @@ fn resolve_macho(macho: &goblin::mach::MachO, binary: &[u8], map: &mut HashMap<u
     for sym in macho.symbols() {
         if let Ok((name, nlist)) = sym {
             let clean = name.strip_prefix('_').unwrap_or(name);
-            all_symbols.push((clean.to_string(), nlist.n_value, nlist.n_type));
+            let demangled = demangle_name(clean);
+            all_symbols.push((demangled.clone(), nlist.n_value, nlist.n_type));
             // Defined symbols (type 0x0e = N_SECT)
-            if nlist.n_type & 0x0e == 0x0e && nlist.n_value != 0 && !clean.is_empty() {
-                map.insert(nlist.n_value, clean.to_string());
+            if nlist.n_type & 0x0e == 0x0e && nlist.n_value != 0 && !demangled.is_empty() {
+                map.insert(nlist.n_value, demangled);
             }
         }
     }
