@@ -1340,41 +1340,69 @@ fn name_parameters(ssa: &mut SsaCfg) {
     if entry >= ssa.blocks.len() { return; }
 
     let mut param_idx = 0u32;
-    let stmts = &ssa.blocks[entry].stmts;
+    let mut named_offsets = std::collections::HashSet::new();
+    let mut to_name: Vec<(usize, String, u64)> = Vec::new();
 
-    for stmt in stmts {
+    // Pass 1: Collect params from Unknown expressions (unoptimized code)
+    let stmts: Vec<Stmt> = ssa.blocks[entry].stmts.clone();
+    for stmt in &stmts {
         if let Stmt::Assign(var_id) = stmt {
             let vdef = &ssa.vars[var_id.0 as usize];
-            // Check if the RHS is an Unknown (function input) from an arg register
             if let Expr::Unknown = &vdef.expr {
                 if vdef.varnode.space == AddressSpaceId::Register
                     && ARG_REG_OFFSETS.contains(&vdef.varnode.offset)
+                    && !named_offsets.contains(&vdef.varnode.offset)
                 {
-                    ssa.vars[var_id.0 as usize].param_name = Some(format!("param_{}", param_idx));
+                    to_name.push((var_id.0 as usize, format!("param_{}", param_idx), vdef.varnode.offset));
+                    named_offsets.insert(vdef.varnode.offset);
                     param_idx += 1;
-                    continue;
                 }
-            }
-            // Also: stack store from arg register → the stored value is a param
-            // var_8 = EDI → var_8 is param_0
-            if vdef.varnode.space == AddressSpaceId::Register {
-                // Skip — these are intermediate copies, handled by the stack store below
             }
         }
         if let Stmt::Store { val, .. } = stmt {
-            // If the stored value comes from an arg register assignment, name it
             let vdef = &ssa.vars[val.0 as usize];
             if vdef.param_name.is_none() {
                 if let Expr::Unknown = &vdef.expr {
                     if vdef.varnode.space == AddressSpaceId::Register
                         && ARG_REG_OFFSETS.contains(&vdef.varnode.offset)
-                        && vdef.param_name.is_none()
+                        && !named_offsets.contains(&vdef.varnode.offset)
                     {
-                        ssa.vars[val.0 as usize].param_name = Some(format!("param_{}", param_idx));
+                        to_name.push((val.0 as usize, format!("param_{}", param_idx), vdef.varnode.offset));
+                        named_offsets.insert(vdef.varnode.offset);
                         param_idx += 1;
                     }
                 }
             }
+        }
+    }
+    for (v, name, _) in &to_name {
+        ssa.vars[*v].param_name = Some(name.clone());
+    }
+
+    // Pass 2: For optimized code, also check for arg registers used as function inputs
+    // that weren't marked Unknown. Scan ALL vars for arg register reads that have no
+    // prior definition in the function (i.e., they come from the caller).
+    if param_idx == 0 {
+        let mut to_name: Vec<(usize, String)> = Vec::new();
+        for &offset in ARG_REG_OFFSETS.iter() {
+            if named_offsets.contains(&offset) { continue; }
+            for v in 0..ssa.vars.len() {
+                let vdef = &ssa.vars[v];
+                if vdef.varnode.space == AddressSpaceId::Register
+                    && vdef.varnode.offset == offset
+                    && vdef.param_name.is_none()
+                {
+                    if matches!(&vdef.expr, Expr::Unknown | Expr::Phi(_)) {
+                        to_name.push((v, format!("param_{}", param_idx)));
+                        named_offsets.insert(offset);
+                        param_idx += 1;
+                        break;
+                    }
+                }
+            }
+        }
+        for (v, name) in to_name {
+            ssa.vars[v].param_name = Some(name);
         }
     }
 }
