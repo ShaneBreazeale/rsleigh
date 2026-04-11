@@ -67,7 +67,7 @@
 ---
 === divide_by_7 (12 instructions) ===
   RAX = EDI;
-  RCX = (RAX * 0xffffffff92492493) >> 0x20 & 0x3f;
+  RCX = (RAX / 7) >> 0x20 & 0x3f;
   EAX = EAX + ECX;
   ECX = EAX >> 0x1f & 0x1f;
   EAX = EAX >> 2 & 0x1f;
@@ -277,7 +277,7 @@
 ---
 === modulo_10 (132 instructions) ===
   RAX = EDI;
-  RCX = RAX * 0x66666667;
+  RCX = RAX / 10;
   RDX = RCX >> 0x3f & 0x3f;
   RCX = RCX >> 0x22 & 0x3f;
   ECX = RCX + RCX * 4;

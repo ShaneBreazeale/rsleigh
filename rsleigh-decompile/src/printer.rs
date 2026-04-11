@@ -265,6 +265,20 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         *line = line.replace("0 - ", "-");
         // x + -y → x - y
         *line = line.replace(" + -", " - ");
+        // Division by constant via multiply-shift: x * MAGIC → x / N
+        // Well-known magic numbers from compiler optimizations
+        for (magic, divisor) in [
+            ("0xffffffff92492493", "7"), ("0x92492493", "7"),
+            ("0x66666667", "10"), ("0xcccccccd", "10"),
+            ("0x55555556", "3"), ("0xaaaaaaab", "3"),
+            ("0x2aaaaaab", "6"), ("0x24924925", "7"),
+            ("0x38e38e39", "9"), ("0x51eb851f", "100"),
+        ] {
+            if line.contains(magic) {
+                *line = line.replace(&format!("* {}", magic), &format!("/ {}", divisor));
+                // Also clean up the shift: >> 0x20 after division is already handled
+            }
+        }
         // Hide IDIV remainder: EDX = ... % ... (almost never useful to display)
         if line.contains("EDX = ") && line.contains(" % ") {
             *line = String::new();
