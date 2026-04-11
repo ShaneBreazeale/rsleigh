@@ -33,6 +33,8 @@ rsleigh is a working end-to-end disassembly and decompilation pipeline for 6 arc
 - **Global variable naming** — repeated addresses → `DAT_14008b128`
 - **Malware analysis annotations** — 24 suspicious APIs flagged (VirtualAlloc, CreateRemoteThread, etc.), Win32 constants (STILL_ACTIVE, PAGE_EXECUTE_READWRITE), stack cookie detection
 - **PE function discovery** — entry point + CALL-target scanning for stripped binaries
+- **Malformed PE support** — manual PE parser fallback for corrupted import directories (Stuxnet)
+- **x86-32 cdecl argument tracking** — `CreateProcessA(var_54, 0, 0, 134217728, ...)` with all args
 - **Security hardening** — bounds-checked VarId, recursion limits, checked arithmetic, fuzz tests
 - **CLI tool** — `rsleigh` binary for decompiling any supported binary
 - **Spectra integration** — native backend with ASM/P-code/decompiler views
@@ -50,6 +52,9 @@ rsleigh is a working end-to-end disassembly and decompilation pipeline for 6 arc
 | Function signature | `void FUN_140001100(...)` | `int func_140001100(...)` |
 | Param count (Win64) | 3 (correct) | 3 (correct) |
 | Global naming | `DAT_14008b128` | `DAT_14008b128` |
+| Malware annotations | None | `⚠ spawn process`, `⚠ registry modification` |
+| Malformed PE | Crashes on Stuxnet | Manual fallback with 48 kernel APIs resolved |
+| PE32 cdecl args | `CreateProcessA(0, param_1, ...)` | `CreateProcessA(var_54, 0, 0, 134217728, ...)` |
 | vtable resolution | `std::bad_array_new_length::vftable` | `0x14004a830` |
 | C++ demangling | Yes (ELF) | Yes (ELF + Mach-O) |
 

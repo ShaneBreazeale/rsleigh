@@ -165,6 +165,8 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - Stack alias resolution: var_c → var_8 → param_0 chain
 - Save/restore elision: register spills across calls hidden
 - Import name resolution: ELF PLT/GOT (CET bnd jmp), Mach-O indirect, PE IAT (UPX-unpacked)
+- Manual PE import fallback: handles malformed binaries with corrupted import directories (Stuxnet)
+- x86-32 cdecl argument tracking: stack-pushed args resolved from ESP-relative stores
 - ELF32 PIE: GOT-relative string resolution, __x86.get_pc_thunk hiding
 - DWARF debug info: parameter names from `.debug_info` (DWARF4/5, macOS dSYM auto-discovery)
 - String literal detection from read-only binary sections (filters .data, magic constants)

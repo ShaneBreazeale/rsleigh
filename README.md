@@ -130,7 +130,7 @@ phttp::Server::ListenAndRun();
 phttp::Shutdown();
 ```
 
-Tested against 30+ CTF binaries from CSAW, HSCTF, DiceCTF, Google CTF, hkcert, Crypto-Cat, fbctf, and Crypto-Cat Phoenix. Tested on Sysinternals PE64 tools (PsExec, strings64, whois64), tinyssh, phttp, and a real Wildfire malware sample.
+Tested against 30+ CTF binaries from CSAW, HSCTF, DiceCTF, Google CTF, hkcert, Crypto-Cat, fbctf, and Phoenix. Tested on Sysinternals PE64 tools (PsExec, strings64, whois64), tinyssh, phttp, and real malware samples from theZoo (WannaCry, Stuxnet/Duqu, Dyre, Emotet, Wildfire).
 
 ## Architectures
 
@@ -143,7 +143,7 @@ Tested against 30+ CTF binaries from CSAW, HSCTF, DiceCTF, Google CTF, hkcert, C
 | MIPS32 | 900+ | FPU, DSP, MIPS16, microMIPS |
 | RISC-V 64 | 500+ | RV64GC + F/D/B/K/P/Q/V/C |
 
-**Binary formats:** ELF (32/64), Mach-O (x86-64, AArch64), PE (32/64) — auto-detected from headers. Function discovery from symbols, exports, and CALL-target scanning for stripped binaries.
+**Binary formats:** ELF (32/64), Mach-O (x86-64, AArch64), PE (32/64) — auto-detected from headers. Function discovery from symbols, exports, and CALL-target scanning for stripped binaries. Fallback manual PE parser handles malformed binaries with anti-analysis tricks (Stuxnet, packed malware).
 
 ## How it works
 
@@ -236,6 +236,8 @@ The decompiler is hardened for untrusted input:
 - x86-32 sequential TEST/JNZ patterns sometimes nest incorrectly
 - Register-indirect calls (`CALL EDI` loaded from IAT) not resolved to import names
 - Stack frame reconstruction — buffer sizes not inferred from access patterns
+- Packed malware — only stub functions visible (Emotet); need unpacking first
+- Windows API type annotations — `HANDLE`, `HMODULE` not shown (uses `long`/`int`)
 
 ## License
 
