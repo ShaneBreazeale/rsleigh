@@ -74,7 +74,7 @@ pub fn decompile_with_binary(
                     let synth_addr = *addr + 1; // +1 byte offset as synthetic
                     expanded.push((synth_addr, pcode_ir::Instruction {
                         ops: fall_ops,
-                        len: (target - synth_addr).max(1), // span to the target
+                        len: target.saturating_sub(synth_addr).max(1), // span to the target
                         disassembly: String::new(),
                     }));
                     continue;

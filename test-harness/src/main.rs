@@ -4011,6 +4011,52 @@ mod tests {
             "  edge-case tests passed (random decode rates: x86={}/1000 aarch64={}/1000 arm32={}/1000 mips={}/1000 riscv={}/1000)",
             decoded[0], decoded[1], decoded[2], decoded[3], decoded[4]
         );
+
+        // Decompiler fuzz: feed random decoded instructions through the decompiler.
+        // This catches panics in the SSA/fold/structure/printer passes on pathological P-code.
+        let mut decompile_ok = 0u64;
+        let mut decompile_err = 0u64;
+        let mut dec = rsleigh_api::Decoder::new(rsleigh_api::Architecture::X86_64);
+        let mut rng2: u64 = 0xcafebabe;
+        for _ in 0..200 {
+            // Generate a random "function" of 2-8 instructions
+            let mut insts = Vec::new();
+            let mut addr = 0x1000u64;
+            let n_insts = 2 + (rng2 % 7) as usize;
+            rng2 = rng2.wrapping_mul(6364136223846793005).wrapping_add(3);
+            for _ in 0..n_insts {
+                let mut buf = [0u8; 16];
+                for b in &mut buf {
+                    rng2 = rng2.wrapping_mul(6364136223846793005).wrapping_add(3);
+                    *b = (rng2 >> 33) as u8;
+                }
+                if let Ok(inst) = dec.decode(&buf, addr) {
+                    let len = inst.len;
+                    insts.push((addr, inst));
+                    addr += len;
+                }
+            }
+            if insts.is_empty() { continue; }
+            // Run the decompiler with catch_unwind
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                rsleigh_decompile::decompile(rsleigh_api::Architecture::X86_64, &insts)
+            }));
+            match result {
+                Ok(_) => decompile_ok += 1,
+                Err(e) => {
+                    let msg = e.downcast_ref::<String>().map(|s| s.as_str())
+                        .or_else(|| e.downcast_ref::<&str>().copied())
+                        .unwrap_or("unknown");
+                    eprintln!("  DECOMPILER PANIC: {} (insts={})", msg, insts.len());
+                    decompile_err += 1;
+                }
+            }
+        }
+        eprintln!(
+            "  decompiler fuzz: {}/{} ok, {} panics",
+            decompile_ok, decompile_ok + decompile_err, decompile_err
+        );
+        assert_eq!(decompile_err, 0, "Decompiler panicked on random input!");
     }
 
     // ---- Decompiler validation tests ----
