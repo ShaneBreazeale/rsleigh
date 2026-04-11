@@ -37,34 +37,7 @@ let pseudocode = rsleigh_decompile::decompile_with_binary(
 
 ## Decompiler output
 
-Given real compiled C functions (see `test-harness/fixtures/compare_test.c`):
-
-```c
-int add(int a, int b) { return a + b; }
-int factorial(int n) { if (n <= 1) return 1; return n * factorial(n - 1); }
-int sum_array(int* arr, int len) {
-    int total = 0;
-    for (int i = 0; i < len; i++) total += arr[i];
-    return total;
-}
-int string_length(const char* s) {
-    int len = 0; while (*s) { len++; s++; } return len;
-}
-int manhattan_distance(Point* a, Point* b) {
-    int dx = a->x - b->x, dy = a->y - b->y;
-    if (dx < 0) dx = -dx; if (dy < 0) dy = -dy;
-    return dx + dy;
-}
-int binary_search(int* arr, int len, int target) { /* ... */ }
-int main() {
-    printf("add(3,4) = %d\n", add(3, 4));
-    printf("factorial(6) = %d\n", factorial(6));
-    /* ... 8 more printf calls with function results ... */
-    return 0;
-}
-```
-
-rsleigh produces (with DWARF debug info), compared against Ghidra 12:
+### Compiled C functions (with DWARF debug info, vs Ghidra 12)
 
 ```
 // add() — matches Ghidra
@@ -91,29 +64,6 @@ while (*(s) != 0) {
 }
 return len;
 
-// manhattan_distance() — DWARF struct field names
-EAX = (a->y) - b->y;
-if (a < 0) { dx = -dx; }
-if (dy < 0) { dy = -dy; }
-return dx - dy;
-
-// list_sum() — linked list with DWARF field names
-while (head != 0) {
-    sum = *(head) + sum;
-    head = head->next;
-}
-return sum;
-
-// binary_search() — complex control flow with array access
-while (hi >= lo) {
-    mid = lo + ECX;
-    if (target != arr[mid]) {
-        if (target <= arr[mid]) { hi = mid - 1; }
-        else { lo = mid + 1; }
-    } else { return; }
-}
-return -0x1;
-
 // main() — correct imports, string literals, return
 printf("add(3,4) = %d\n", add(3, 4));
 printf("factorial(6) = %d\n", factorial(6));
@@ -121,28 +71,92 @@ printf("sum = %d\n", sum_array(nums, 5));
 printf("strlen = %d\n", string_length("hello world"));
 printf("manhattan = %d\n", manhattan_distance(a, b));
 printf("day = %s\n", day_name(3));
-printf("search(23) = %d\n", binary_search(sorted, 0xa, 0x17));
+printf("search(23) = %d\n", binary_search(sorted, 10, 23));
 return 0;
 ```
 
-With `-O2` optimized code, rsleigh handles:
+### Real CTF binaries (stripped ELF, no source)
+
+Tested against 16+ binaries from CSAW Red 2020, Nightmare, UTCTF, and picoCTF:
+
 ```
-// CMOV conditional select (branchless max)
+// CSAW warmup — buffer overflow + win function (immediately visible)
+write(1, "-Warm Up-\n", 10);
+write(1, "WOW:", 4);
+sprintf(buf, "%p\n", easy);      // leaks easy() address
+write(1, buf, 9);
+gets(buf);                        // overflow here
+// easy():
+system("cat flag.txt");
+
+// CSAW worstcodeever play() — heap menu (full string + function resolution)
+while (var_c <= 49) {
+    puts("What would you like to do?");
+    puts("	1. Add a friend");
+    puts("	2. Remove a friend");
+    puts("	3. Display a friend");
+    puts("	4. Edit a friend");
+    printf("> ");
+    __isoc99_scanf("%d", buf);
+    if (var_10 != 1) {
+        if (var_10 != 2) {
+            if (var_10 != 3) {
+                if (var_10 == 4) { edit_friend(); }
+            } else { display(); }
+        } else { remove_friend(); }
+    } else { add_friend(); }
+}
+
+// CSAW concrete_trap — multi-stage CTF (PIE binary, all strings resolved)
+init();
+puts("Welcome to my intricate trap, where all who are not me shall fail.");
+stage1();
+if (0 == 0) {
+    fail();
+    puts("I am slightly convinced you are me. Proceed.");
+    stage2();
+    ...
+    puts("Amazing");
+    give_flag();
+}
+
+// Integer exploitation puzzle
+if (0x1064deadbeef4601 * *(param_0[8]) == 0xd1038d2e07b42569) {
+    system("/bin/sh");
+}
+
+// Bad seed CTF — predictable PRNG
+time(0);
+srand(0);                         // seed is always 0!
+rand();
+puts("Welcome to the number guessing game!");
+if (var_10 != var_c) {
+    puts("Sorry. Try again, wrong guess!");
+} else {
+    puts("You won. Guess was right! Here's your flag:");
+    giveFlag();
+}
+```
+
+### -O2 optimized code
+
+```
+// CMOV conditional select (branchless max/abs)
 if (EDI > ESI) { return EDI; }
+return ESI;
 
-// Division by constant (compiler multiply-shift trick)
-RCX = (RAX / 7) >> 0x20;
+if (EDI > 0) { return EDI; }
+return -EDI;
 
-// Bit counting loop (register-only, no stack)
-while (EDI > 1) {
-    EDX = EDI & 1;
-    EAX = EAX + EDX;
-    ECX = ECX >> 1;
+// GCD with recovered loop condition (from TEST + JNE flags)
+while (EAX % EDX != 0) {
+    EDX = EAX;
+    EAX = EAX / ECX;
 }
 
 // Constant folding in main (compiler inlined everything)
 printf("add(3,4) = %d\n", 7);
-printf("factorial(6) = %d\n", 0x2d0);
+printf("factorial(6) = %d\n", 720);
 ```
 
 The decompiler pipeline: P-code -> CFG -> SSA -> expression folding -> structure recovery -> C printer.
@@ -154,28 +168,42 @@ What it does:
 - DWARF local variable recovery (`var_10` -> `i`, `var_c` -> `len`)
 - DWARF struct field names (`ptr->field4` -> `ptr->y`, `head->field8` -> `head->next`)
 - Deep SSA condition operand resolution (`EAX != 0` -> `*(s) != 0` through Load chains)
+- Condition recovery from eliminated flags (traces SSA tree when DCE removes flag writes)
 - Condition recovery (x86 flag patterns including SBORROW, JLE, JBE -> readable comparisons)
+- IntNeg condition tracing (`NEG x; CMOVS` -> `if (x > 0)` instead of `if (SF)`)
+- TEST same-register recovery (`TEST EDX,EDX; JNE` -> `EDX != 0` not `EDX != EDX`)
 - Recursive BoolNot unwrapping (`!(a < b)` -> `a >= b`, CMOV conditions)
 - Condition canonicalization (`1 < n` -> `n > 1`)
 - While loop negation (exit conditions properly inverted)
 - Self-loop body recovery (-O2 tight loops: block branches to itself)
-- CMOV/CSEL expansion (intra-instruction branches -> proper if/else control flow)
+- CMOV/CSEL expansion with else-branch inference (branchless max/min/abs)
 - Loop body variable resolution (registers traced to underlying stack vars through SSA)
 - If/else and while loop recovery from CFG back-edges and dominators
 - Call return value inlining (`printf("...", add(3, 4))`)
 - Function argument display (`factorial(5)` not `factorial()`)
 - Return value inference (prefers local accumulators over parameters)
-- Import name resolution via Mach-O indirect symbol table (`printf`, `strlen`)
+- Import name resolution: Mach-O indirect symbol table, ELF PLT/GOT stubs
+- ELF global variable resolution (`friend_list`, `f_index`, `stdout` from .symtab)
+- C++ symbol demangling (`_ZStlsISt11char_traitsIcEE...` -> `cout_write`)
+- `@@GLIBC` version suffix stripping from ELF symbols
+- PIE binary string resolution (low addresses resolved via .rodata sections)
 - Division-by-constant recognition (`x * 0x92492493` -> `x / 7`)
 - `__chk` suffix stripping (`__strcpy_chk` -> `strcpy`)
-- String literal detection (`0x100000624` -> `"hello world"`)
+- String literal detection with UTF-8 support (`0x100000624` -> `"hello world"`)
+- Empty string literal support (`puts("")` not `puts(0x401440)`)
 - Array access syntax with scaling (`*(uint8_t*)(base + idx * 4)` -> `base[idx]`)
+- Array index canonicalization (`RDX[friend_type]` -> `friend_type[RDX]`)
 - Dead code elimination (unused flag writes, IDIV remainder, register shuffling)
-- Stack canary preamble/epilogue detection and removal
+- Stack canary detection and removal (Mach-O `___stack_chk_guard`, ELF `FS_OFFSET`)
+- setvbuf init boilerplate collapse (stdout/stdin/stderr -> single comment)
+- `__TMC_END__` -> `stdout` normalization
+- `*(stdout)` / `*(stdin)` simplification in call arguments
+- Nested void call unwinding (`fgets(puts("msg"), 64, stdin)` -> separate statements)
+- Phi node removal from output (SSA artifacts stripped)
 - Save/restore elision (register spills across calls hidden)
 - Register copy tracking and inlining at print time
 - Sequential register assignment chaining (`ECX = len - 1; ECX = ECX - i` -> `ECX = (len - 1) - i`)
-- Swap pattern detection (`str[i] = str[j]; str[j] = AL` -> `str[j] = str[i]`)
+- Cross-block expression folding (`EAX = -EDI; if (...) {...} return EAX` -> `return -EDI`)
 - IDIV dividend noise removal (`EDX << 0x20 | X` -> `X`)
 - Constant propagation for loop-invariant register values
 
@@ -214,6 +242,7 @@ rsleigh/
 - **Compiled code patterns** — stack canary (FS:[0x28]), stack alignment (AND RSP,-16), indirect calls/jumps, switch tables, SETcc, REP MOVSB, LOCK XADD, SSE2 ADDSD/MOVSD, SYSCALL, PLT/GOT sequences, TBZ/TBNZ, CSET/CSINC, post-index loads, memory barriers, thread pointer reads.
 - **Ghidra differential fixtures** — ~300 instructions compared against Ghidra's P-code output
 - **Ghidra decompiler comparison** — 11 functions (add, factorial, sum_array, string_length, manhattan_distance, day_name, list_sum, binary_search, apply, main) decompiled side-by-side with Ghidra 12 (`cargo run -p test-harness --example compare`)
+- **CTF binary validation** — 16+ real CTF binaries from CSAW Red, Nightmare, UTCTF decompiled successfully (buffer overflows, heap menus, integer exploitation, bad seeds, C++ reversing)
 - **Corpus validation** — 278 real instructions across all architectures, decode without panic
 - **Fuzz tests** — 5000 random byte sequences (empty, truncated, garbage), zero panics
 - **Decompiler validation** — compiles C source with `-g`, decompiles with rsleigh, asserts string literals, import names, DWARF parameter names, conditions, function calls, return values
