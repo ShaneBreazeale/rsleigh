@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use pcode_ir::{PcodeOp, AddressSpaceId, Instruction};
+use pcode_ir::{PcodeOp, AddressSpaceId, Instruction, Varnode};
 use crate::ir::*;
 
 /// Build a control flow graph from decoded instructions.
@@ -110,6 +110,8 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
             match last_op {
                 PcodeOp::Return { .. } => {
                     ops.pop();
+                    // Strip x86-32 return boilerplate (Load ret_addr from [ESP]; IntAdd ESP, 4)
+                    strip_return_pop_ops(&mut ops);
                     Terminator::Return
                 }
                 PcodeOp::Branch { dest } if dest.space == AddressSpaceId::Ram => {
@@ -145,14 +147,20 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                         CallTarget::Indirect(*dest)
                     };
                     ops.pop();
+                    // Strip x86-32 return address push (IntSub ESP + Store [ESP])
+                    strip_call_push_ops(&mut ops);
                     let fallthrough = leader_to_block.get(&next_inst_addr)
                         .copied()
                         .unwrap_or(BlockId(block_idx));
                     Terminator::Call { target, fallthrough }
                 }
                 PcodeOp::CallInd { dest } => {
-                    let target = CallTarget::Indirect(*dest);
+                    // Try to resolve indirect calls through constant Load
+                    // (e.g., CALL dword ptr [IAT_addr] → Load tmp, [const]; CallInd tmp)
+                    let target = resolve_callind_target(&ops, dest);
                     ops.pop();
+                    // Strip x86-32 return address push (IntSub ESP + Store [ESP])
+                    strip_call_push_ops(&mut ops);
                     let fallthrough = leader_to_block.get(&next_inst_addr)
                         .copied()
                         .unwrap_or(BlockId(block_idx));
@@ -183,6 +191,82 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
         entry: BlockId(0),
         blocks,
     }
+}
+
+/// x86-32 ESP register: offset 16, size 4.
+const ESP_OFFSET_32: u64 = 16;
+const ESP_SIZE_32: u32 = 4;
+
+/// Check if a varnode is the x86-32 ESP register.
+fn is_esp(vn: &Varnode) -> bool {
+    vn.space == AddressSpaceId::Register && vn.offset == ESP_OFFSET_32 && vn.size == ESP_SIZE_32
+}
+
+/// Strip x86-32 CALL return address push from the end of a block's ops.
+///
+/// x86-32 CALL generates: Subpiece, IntSub ESP, Store [ESP] ret_addr, CallInd
+/// After popping the CallInd, strip the preceding Store+IntSub+Subpiece.
+fn strip_call_push_ops(ops: &mut Vec<(u64, PcodeOp)>) {
+    // Pattern (from end): Store { ptr: ESP-derived, val: ret_addr }, IntSub ESP
+    // The Store writes the return address to [ESP], preceded by IntSub ESP, 4
+    // There may also be a Subpiece extracting the return address constant.
+
+    // Strip Store [ESP-like], val — the return address push
+    if let Some((_, PcodeOp::Store { ptr, .. })) = ops.last() {
+        if is_esp(ptr) || ptr.space == AddressSpaceId::Unique {
+            ops.pop();
+        }
+    }
+    // Strip IntSub ESP, ESP, 4 — the stack pointer decrement
+    if let Some((_, PcodeOp::IntSub { out, .. })) = ops.last() {
+        if is_esp(out) {
+            ops.pop();
+        }
+    }
+    // Strip Subpiece for return address constant extraction
+    if let Some((_, PcodeOp::Subpiece { .. })) = ops.last() {
+        ops.pop();
+    }
+}
+
+/// Strip x86-32 RET boilerplate ops from the end of a block's ops.
+///
+/// x86-32 RET generates: Load ret_addr from [ESP], IntAdd ESP 4, Return
+/// After popping Return, strip the Load and IntAdd.
+fn strip_return_pop_ops(ops: &mut Vec<(u64, PcodeOp)>) {
+    // Strip IntAdd ESP, ESP, 4 — stack pointer increment
+    if let Some((_, PcodeOp::IntAdd { out, .. })) = ops.last() {
+        if is_esp(out) {
+            ops.pop();
+        }
+    }
+    // Strip Load ret_addr from [ESP]
+    if let Some((_, PcodeOp::Load { out, .. })) = ops.last() {
+        // The loaded value is the return address (EIP)
+        if out.space == AddressSpaceId::Register && out.offset == 256 {
+            // 256 = EIP offset in x86-32 register space
+            ops.pop();
+        }
+    }
+}
+
+/// Resolve a CallInd target by scanning backwards for the Load that produced the
+/// dest varnode. If the Load reads from a constant address (e.g., IAT entry in PE),
+/// return CallTarget::Direct(addr) so the import map can resolve it.
+fn resolve_callind_target(ops: &[(u64, PcodeOp)], dest: &pcode_ir::Varnode) -> CallTarget {
+    // Scan backwards for a Load whose output matches the CallInd dest varnode
+    for (_addr, op) in ops.iter().rev() {
+        if let PcodeOp::Load { out, ptr, .. } = op {
+            if out.space == dest.space && out.offset == dest.offset && out.size == dest.size {
+                // Found the Load — check if the pointer is a constant (IAT-style)
+                if ptr.space == AddressSpaceId::Const {
+                    return CallTarget::Direct(ptr.offset);
+                }
+                break;
+            }
+        }
+    }
+    CallTarget::Indirect(*dest)
 }
 
 impl Cfg {

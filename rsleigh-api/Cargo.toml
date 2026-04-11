@@ -7,6 +7,7 @@ description = "Spectra integration API for rsleigh — decode instructions and e
 [dependencies]
 pcode-ir = { path = "../pcode-ir" }
 x86-root = { path = "../generated/x86-root" }
+x86-32-root = { path = "../generated/x86-32-root" }
 aarch64-root = { path = "../generated/aarch64-root" }
 riscv-root = { path = "../generated/riscv-root" }
 mips-root = { path = "../generated/mips-root" }

@@ -1038,77 +1038,113 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
-    // Resolve RBP-relative addresses to DWARF local names
-    // Handles "RBP - N" (decimal), "RBP - 0xNN" (hex), "RBP + 0xNN" (legacy)
-    for line in &mut lines {
-        // Pattern: "RBP - N" with decimal offset
-        while let Some(pos) = line.find("RBP - ") {
-            let num_start = pos + 6;
-            if line[num_start..].starts_with("0x") {
-                break; // hex handled below
-            }
-            let num_end = line[num_start..].find(|c: char| !c.is_ascii_digit())
-                .map(|e| num_start + e).unwrap_or(line.len());
-            let num_str = &line[num_start..num_end];
-            if let Ok(offset) = num_str.parse::<u64>() {
-                let var_name = format!("var_{:x}", offset);
-                let resolved = aliases.get(&var_name).cloned()
-                    .or_else(|| {
-                        let adj = format!("var_{:x}", offset + 8);
-                        aliases.get(&adj).cloned()
-                    });
-                if let Some(name) = resolved {
-                    let old = format!("RBP - {}", num_str);
-                    *line = line.replace(&old, &name);
+    // Remove x86-32 ESP boilerplate lines: stack adjustments and prologue noise.
+    lines.retain(|line| {
+        let t = line.trim();
+        // Remove "ESP = ESP - 4;" and "ESP = ESP + N;" (cdecl stack cleanup)
+        if t.starts_with("ESP = ESP - ") && t.ends_with(';') { return false; }
+        if t.starts_with("ESP = ESP + ") && t.ends_with(';') { return false; }
+        // Remove "ESP = (ESP + N) - 4;" and similar compound forms
+        if t.starts_with("ESP = (ESP") && t.ends_with(';') && !t.contains("func_")
+            && !t.contains("var_") && !t.contains("param_")
+        { return false; }
+        // Remove "ESP = param_..." (prologue ESP init)
+        if t.starts_with("ESP = param_") && t.ends_with(';') { return false; }
+        // Remove "*(uint32_t*)(ESP) = EBP;" (push EBP) and other prologue pushes
+        if t == "*(uint32_t*)(ESP) = EBP;" { return false; }
+        if t == "*(uint32_t*)(ESP) = EBX;" { return false; }
+        if t == "*(uint32_t*)(ESP) = ESI;" { return false; }
+        if t == "*(uint32_t*)(ESP) = EDI;" { return false; }
+        // Remove "*(uint32_t*)(ESP) = 0x40xxxx;" (return address pushes)
+        if t.starts_with("*(uint32_t*)(ESP) = 0x40") && t.ends_with(';') { return false; }
+        if t.starts_with("*(uint32_t*)(ESP) = 0x41") && t.ends_with(';') { return false; }
+        if t.starts_with("*(uint32_t*)(ESP) = 0x42") && t.ends_with(';') { return false; }
+        // Remove standalone ESP stores of constants that are PUSH boilerplate
+        // "*(uint32_t*)(ESP) = -1;" (SEH frame sentinel)
+        if t == "*(uint32_t*)(ESP) = -1;" { return false; }
+        true
+    });
+
+    // Resolve RBP/EBP-relative addresses to local variable names.
+    // Uses DWARF names when available, otherwise auto-generates var_N names.
+    // Handles "RBP - N", "EBP - N" (decimal and hex), and legacy "RBP + 0xNN" patterns.
+    for bp_reg in &["RBP", "EBP"] {
+        let minus_pat = format!("{} - ", bp_reg);
+        let minus_hex_pat = format!("{} - 0x", bp_reg);
+        let plus_hex_pat = format!("{} + 0x", bp_reg);
+
+        for line in &mut lines {
+            // Pattern: "RBP/EBP - N" with decimal offset
+            while let Some(_pos) = line.find(&minus_pat) {
+                let num_start = line.find(&minus_pat).unwrap() + minus_pat.len();
+                if line[num_start..].starts_with("0x") {
+                    break; // hex handled below
+                }
+                let num_end = line[num_start..].find(|c: char| !c.is_ascii_digit())
+                    .map(|e| num_start + e).unwrap_or(line.len());
+                let num_str = &line[num_start..num_end].to_string();
+                if let Ok(offset) = num_str.parse::<u64>() {
+                    let var_name = format!("var_{:x}", offset);
+                    let resolved = aliases.get(&var_name).cloned()
+                        .or_else(|| {
+                            let adj = format!("var_{:x}", offset + 8);
+                            aliases.get(&adj).cloned()
+                        })
+                        .unwrap_or(var_name); // auto-name when no DWARF
+                    let old = format!("{} - {}", bp_reg, num_str);
+                    *line = line.replace(&old, &resolved);
                     continue;
                 }
+                break;
             }
-            break;
-        }
-        // Pattern: "RBP - 0xNN"
-        while let Some(pos) = line.find("RBP - 0x") {
-            let hex_start = pos + 8;
-            let hex_end = line[hex_start..].find(|c: char| !c.is_ascii_hexdigit())
-                .map(|e| hex_start + e).unwrap_or(line.len());
-            let hex_str = &line[hex_start..hex_end];
-            if let Ok(offset) = u64::from_str_radix(hex_str, 16) {
-                let var_name = format!("var_{:x}", offset);
-                let resolved = aliases.get(&var_name).cloned()
-                    .or_else(|| {
-                        let adj = format!("var_{:x}", offset + 8);
-                        aliases.get(&adj).cloned()
-                    });
-                if let Some(name) = resolved {
-                    let old = format!("RBP - 0x{}", hex_str);
-                    *line = line.replace(&old, &name);
+            // Pattern: "RBP/EBP - 0xNN"
+            while let Some(_pos) = line.find(&minus_hex_pat) {
+                let hex_start = line.find(&minus_hex_pat).unwrap() + minus_hex_pat.len();
+                let hex_end = line[hex_start..].find(|c: char| !c.is_ascii_hexdigit())
+                    .map(|e| hex_start + e).unwrap_or(line.len());
+                let hex_str = line[hex_start..hex_end].to_string();
+                if let Ok(offset) = u64::from_str_radix(&hex_str, 16) {
+                    let var_name = format!("var_{:x}", offset);
+                    let resolved = aliases.get(&var_name).cloned()
+                        .or_else(|| {
+                            let adj = format!("var_{:x}", offset + 8);
+                            aliases.get(&adj).cloned()
+                        })
+                        .unwrap_or(var_name);
+                    let old = format!("{} - 0x{}", bp_reg, hex_str);
+                    *line = line.replace(&old, &resolved);
                     continue;
                 }
+                break;
             }
-            break;
-        }
-        // Fallback: "RBP + 0xNN" where NN is signed-byte negative (pre-fix IR)
-        while let Some(pos) = line.find("RBP + 0x") {
-            let hex_start = pos + 8;
-            let hex_end = line[hex_start..].find(|c: char| !c.is_ascii_hexdigit())
-                .map(|e| hex_start + e).unwrap_or(line.len());
-            let hex_str = &line[hex_start..hex_end];
-            if let Ok(val) = u64::from_str_radix(hex_str, 16) {
-                if val >= 0x80 && val < 0x100 {
-                    let neg_off = 0x100 - val;
+            // Fallback: "RBP/EBP + 0xNN" where NN is large (signed-byte negative in unsigned form)
+            while let Some(_pos) = line.find(&plus_hex_pat) {
+                let hex_start = line.find(&plus_hex_pat).unwrap() + plus_hex_pat.len();
+                let hex_end = line[hex_start..].find(|c: char| !c.is_ascii_hexdigit())
+                    .map(|e| hex_start + e).unwrap_or(line.len());
+                let hex_str = line[hex_start..hex_end].to_string();
+                if let Ok(val) = u64::from_str_radix(&hex_str, 16) {
+                    // Large values are actually negative offsets (e.g., 0xfffffffc = -4)
+                    let neg_off = if val >= 0xffffff00 {
+                        0x100000000u64 - val // 32-bit sign extension
+                    } else if val >= 0x80 && val < 0x100 {
+                        0x100 - val // 8-bit sign extension
+                    } else {
+                        break; // positive offset (args above EBP), skip
+                    };
                     let var_name = format!("var_{:x}", neg_off);
                     let resolved = aliases.get(&var_name).cloned()
                         .or_else(|| {
                             let adj = format!("var_{:x}", neg_off + 8);
                             aliases.get(&adj).cloned()
-                        });
-                    if let Some(name) = resolved {
-                        let old = format!("RBP + 0x{}", hex_str);
-                        *line = line.replace(&old, &name);
-                        continue;
-                    }
+                        })
+                        .unwrap_or(var_name);
+                    let old = format!("{} + 0x{}", bp_reg, hex_str);
+                    *line = line.replace(&old, &resolved);
+                    continue;
                 }
+                break;
             }
-            break;
         }
     }
 
@@ -3981,7 +4017,8 @@ fn format_const(val: u64, size: u32) -> String {
         return format!("{}", val);
     }
     // Try decoding as ASCII string (little-endian packed bytes on stack)
-    if val > 0xFFFF && size >= 4 {
+    // But skip values that look like virtual addresses (would produce false positives)
+    if val > 0xFFFF && size >= 4 && !looks_like_address(val) {
         if let Some(s) = try_decode_ascii_const(val, size) {
             return format!("\"{}\"", s);
         }
@@ -4001,6 +4038,19 @@ fn format_const(val: u64, size: u32) -> String {
 
 /// Try to decode a constant value as packed ASCII bytes (little-endian).
 /// Returns Some("text") if ALL bytes are printable ASCII (or null terminator).
+/// Check if a value looks like a virtual address (common image base ranges).
+/// Used to avoid false-positive ASCII string decoding of address constants.
+fn looks_like_address(val: u64) -> bool {
+    // PE32 typical: 0x00400000..0x10000000
+    // PE64 typical: 0x140000000..0x180000000
+    // ELF typical: 0x08000000..0x10000000 or 0x400000..0x800000
+    // Mach-O typical: 0x100000000..0x200000000
+    (val >= 0x00400000 && val < 0x10000000)
+        || (val >= 0x08000000 && val < 0x10000000)
+        || (val >= 0x100000000 && val < 0x200000000)
+        || (val >= 0x140000000 && val < 0x180000000)
+}
+
 fn try_decode_ascii_const(val: u64, size: u32) -> Option<String> {
     let nbytes = match size { 4 => 4, 8 => 8, _ => return None };
     let bytes = val.to_le_bytes();
@@ -4098,9 +4148,13 @@ fn try_read_string(va: u64, ctx: &PrintCtx) -> Option<String> {
             let rva = va.checked_sub(pe.image_base as u64)? as u64;
             pe.sections.iter().find_map(|s| {
                 let sr = s.virtual_address as u64;
-                if rva >= sr && rva < sr + s.virtual_size as u64 {
-                    Some((s.pointer_to_raw_data as u64 + (rva - sr)) as usize)
-                } else { None }
+                if rva < sr || rva >= sr + s.virtual_size as u64 { return None; }
+                // Only read strings from read-only data sections (.rdata)
+                // Skip .data (writable globals), .text (code), .rsrc (resources)
+                let is_writable = s.characteristics & 0x80000000 != 0; // IMAGE_SCN_MEM_WRITE
+                let is_exec = s.characteristics & 0x20000000 != 0;     // IMAGE_SCN_MEM_EXECUTE
+                if is_writable || is_exec { return None; }
+                Some((s.pointer_to_raw_data as u64 + (rva - sr)) as usize)
             })?
         }
         _ => return None,

@@ -9,9 +9,12 @@ const FLAG_OFFSETS: &[u64] = &[
     256, 257, 258, 259, 261, 262, 263, 264,   // ARM64
 ];
 
-const RSP_OFFSET: u64 = 32;
+const RSP_OFFSET: u64 = 32;   // x86-64 RSP
+const ESP_OFFSET: u64 = 16;   // x86-32 ESP
 const RIP_OFFSET: u64 = 648;
 pub const RAX_OFFSET: u64 = 0;
+#[allow(dead_code)]
+const ECX_OFFSET_32: u64 = 4; // x86-32 ECX (thiscall this pointer)
 
 /// x86-64 SysV ABI argument register offsets.
 const ARG_REG_OFFSETS: &[u64] = &[56, 48, 16, 8, 128, 136]; // RDI, RSI, RDX, RCX, R8, R9
@@ -830,8 +833,15 @@ fn detect_return_values(ssa: &mut SsaCfg) {
 
 // ---- Call Arguments ----
 
-/// Collect argument register writes before each Call and attach them.
+/// Collect argument register writes (x86-64) or stack pushes (x86-32) before each Call.
 fn collect_call_arguments(ssa: &mut SsaCfg) {
+    // Detect x86-32 mode: any variable uses ESP (offset 16, size 4)
+    let is_x86_32 = ssa.vars.iter().any(|v| {
+        v.varnode.space == AddressSpaceId::Register
+            && v.varnode.offset == ESP_OFFSET
+            && v.varnode.size == 4
+    });
+
     for bi in 0..ssa.blocks.len() {
         // Check if block ends with a Call terminator
         let call_info = match &ssa.blocks[bi].terminator {
@@ -842,30 +852,16 @@ fn collect_call_arguments(ssa: &mut SsaCfg) {
         };
 
         if let Some((target, fallthrough)) = call_info {
-            // Collect argument register VarIds from the block's statements
-            let mut args: Vec<(u64, VarId)> = Vec::new();
-            for stmt in &ssa.blocks[bi].stmts {
-                if let Stmt::Assign(var_id) = stmt {
-                    let vdef = &ssa.vars[var_id.0 as usize];
-                    if vdef.varnode.space == AddressSpaceId::Register
-                        && ARG_REG_OFFSETS.contains(&vdef.varnode.offset)
-                    {
-                        // Remove any previous assignment to same register
-                        args.retain(|(off, _)| *off != vdef.varnode.offset);
-                        args.push((vdef.varnode.offset, *var_id));
-                    }
-                }
-            }
+            let args = if is_x86_32 {
+                collect_stack_args_from_block(&ssa.blocks[bi].stmts, &ssa.vars, ssa.blocks[bi].stmts.len())
+            } else {
+                collect_reg_args_from_block(&ssa.blocks[bi].stmts, &ssa.vars, ssa.blocks[bi].stmts.len())
+            };
 
             if !args.is_empty() {
-                // Sort by ABI order: RDI, RSI, RDX, RCX, R8, R9
-                args.sort_by_key(|(off, _)| {
-                    ARG_REG_OFFSETS.iter().position(|o| o == off).unwrap_or(99)
-                });
-                let arg_ids: Vec<VarId> = args.iter().map(|(_, v)| *v).collect();
                 ssa.blocks[bi].terminator = SsaTerminator::Call {
                     target,
-                    args: arg_ids,
+                    args,
                     fallthrough,
                 };
             }
@@ -873,35 +869,343 @@ fn collect_call_arguments(ssa: &mut SsaCfg) {
 
         // Also check for Call statements within the block
         for si in 0..ssa.blocks[bi].stmts.len() {
-            if let Stmt::Call { target, args, out } = &ssa.blocks[bi].stmts[si] {
-                if !args.is_empty() { continue; } // Already has args
-                let target = target.clone();
-                let out = *out;
-                // Look backward for arg register writes
-                let mut call_args: Vec<(u64, VarId)> = Vec::new();
-                for j in (0..si).rev() {
-                    if let Stmt::Assign(var_id) = &ssa.blocks[bi].stmts[j] {
-                        let vdef = &ssa.vars[var_id.0 as usize];
-                        if vdef.varnode.space == AddressSpaceId::Register
-                            && ARG_REG_OFFSETS.contains(&vdef.varnode.offset)
-                        {
-                            if !call_args.iter().any(|(off, _)| *off == vdef.varnode.offset) {
-                                call_args.push((vdef.varnode.offset, *var_id));
-                            }
-                        }
-                    }
-                    // Stop at previous call or branch
-                    if matches!(&ssa.blocks[bi].stmts[j], Stmt::Call { .. }) { break; }
-                }
-                if !call_args.is_empty() {
-                    call_args.sort_by_key(|(off, _)| {
-                        ARG_REG_OFFSETS.iter().position(|o| o == off).unwrap_or(99)
-                    });
-                    let arg_ids: Vec<VarId> = call_args.iter().map(|(_, v)| *v).collect();
-                    ssa.blocks[bi].stmts[si] = Stmt::Call { target, args: arg_ids, out };
+            let is_call_no_args = matches!(&ssa.blocks[bi].stmts[si],
+                Stmt::Call { args, .. } if args.is_empty());
+            if !is_call_no_args { continue; }
+
+            let args = if is_x86_32 {
+                collect_stack_args_from_block(&ssa.blocks[bi].stmts, &ssa.vars, si)
+            } else {
+                collect_reg_args_from_block(&ssa.blocks[bi].stmts, &ssa.vars, si)
+            };
+
+            if !args.is_empty() {
+                if let Stmt::Call { target, out, .. } = &ssa.blocks[bi].stmts[si] {
+                    let target = target.clone();
+                    let out = *out;
+                    ssa.blocks[bi].stmts[si] = Stmt::Call { target, args, out };
                 }
             }
         }
+    }
+}
+
+/// Collect x86-64 register-based arguments before a call (original logic).
+fn collect_reg_args_from_block(stmts: &[Stmt], vars: &[VarDef], up_to: usize) -> Vec<VarId> {
+    let mut args: Vec<(u64, VarId)> = Vec::new();
+    for j in (0..up_to).rev() {
+        if let Stmt::Assign(var_id) = &stmts[j] {
+            let vdef = &vars[var_id.0 as usize];
+            if vdef.varnode.space == AddressSpaceId::Register
+                && ARG_REG_OFFSETS.contains(&vdef.varnode.offset)
+            {
+                if !args.iter().any(|(off, _)| *off == vdef.varnode.offset) {
+                    args.push((vdef.varnode.offset, *var_id));
+                }
+            }
+        }
+        if matches!(&stmts[j], Stmt::Call { .. }) { break; }
+    }
+    args.sort_by_key(|(off, _)| {
+        ARG_REG_OFFSETS.iter().position(|o| o == off).unwrap_or(99)
+    });
+    args.into_iter().map(|(_, v)| v).collect()
+}
+
+/// Collect x86-32 stack-pushed arguments before a call.
+///
+/// Scans backward from `up_to` for Store { addr: ESP-derived, val } patterns.
+/// Arguments are pushed right-to-left (cdecl), so first push = last arg.
+/// Returns them in correct call order.
+fn collect_stack_args_from_block(stmts: &[Stmt], vars: &[VarDef], up_to: usize) -> Vec<VarId> {
+    let mut pushed_values: Vec<VarId> = Vec::new();
+    let mut i = up_to;
+
+    while i > 0 {
+        i -= 1;
+        match &stmts[i] {
+            Stmt::Store { addr, val } => {
+                let addr_def = &vars[addr.0 as usize];
+                if is_esp_var(addr_def, vars) {
+                    pushed_values.push(*val);
+                    continue;
+                }
+                // Non-ESP store — could be a memory write between pushes, skip
+                continue;
+            }
+            Stmt::Assign(v) => {
+                let vdef = &vars[v.0 as usize];
+                // Skip ESP writes (IntSub ESP, 4) — they're PUSH boilerplate
+                if vdef.varnode.space == AddressSpaceId::Register
+                    && vdef.varnode.offset == ESP_OFFSET
+                    && vdef.varnode.size == 4
+                {
+                    continue;
+                }
+                // Skip flag writes
+                if FLAG_OFFSETS.contains(&vdef.varnode.offset) {
+                    continue;
+                }
+                // Skip Unique-space temporaries (address computation, etc.)
+                if vdef.varnode.space == AddressSpaceId::Unique {
+                    continue;
+                }
+                // Other register writes between pushes — these could be thiscall
+                // ECX setup or general register preparation. Stop scanning.
+                break;
+            }
+            Stmt::Call { .. } => break, // Previous call — stop
+        }
+    }
+
+    // Arguments pushed right-to-left: first pushed = last argument
+    // We collected bottom-up, so reverse for correct order
+    pushed_values.reverse();
+    pushed_values
+}
+
+/// Check if a VarDef is ESP-derived (direct ESP or computed from ESP via IntSub).
+fn is_esp_var(vdef: &VarDef, vars: &[VarDef]) -> bool {
+    if vdef.varnode.space == AddressSpaceId::Register
+        && vdef.varnode.offset == ESP_OFFSET
+        && vdef.varnode.size == 4
+    {
+        return true;
+    }
+    // Check Unique-space vars that are computed from ESP
+    if vdef.varnode.space == AddressSpaceId::Unique {
+        match &vdef.expr {
+            Expr::BinOp(BinOpKind::Sub, left, _) | Expr::BinOp(BinOpKind::Add, left, _) => {
+                let left_def = &vars[left.0 as usize];
+                return left_def.varnode.space == AddressSpaceId::Register
+                    && left_def.varnode.offset == ESP_OFFSET
+                    && left_def.varnode.size == 4;
+            }
+            Expr::Var(v) => {
+                let inner = &vars[v.0 as usize];
+                return inner.varnode.space == AddressSpaceId::Register
+                    && inner.varnode.offset == ESP_OFFSET
+                    && inner.varnode.size == 4;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Collect x86-32 stack-pushed arguments before each Call.
+///
+/// In 32-bit x86 P-code, function arguments are pushed via:
+///   IntSub ESP, ESP, 4
+///   Store [ESP], arg_value
+///
+/// This function scans backward from each Call, collects the pushed values,
+/// and attaches them as call arguments. The ESP manipulations and stores
+/// are marked dead (use_count zeroed) so they get eliminated.
+#[allow(dead_code)]
+fn collect_stack_call_arguments(ssa: &mut SsaCfg) {
+    // Only applies to x86-32 (ESP is 4 bytes at offset 16)
+    // Detect by checking if any var uses ESP_OFFSET with size 4
+    let has_esp = ssa.vars.iter().any(|v| {
+        v.varnode.space == AddressSpaceId::Register
+            && v.varnode.offset == ESP_OFFSET
+            && v.varnode.size == 4
+    });
+    if !has_esp { return; }
+
+    for bi in 0..ssa.blocks.len() {
+        // Handle Call terminators
+        let call_info = match &ssa.blocks[bi].terminator {
+            SsaTerminator::Call { target, args, fallthrough } if args.is_empty() => {
+                Some((target.clone(), *fallthrough))
+            }
+            _ => None,
+        };
+
+        if let Some((target, fallthrough)) = call_info {
+            let (args, dead_stmts) = find_stack_pushes(&ssa.blocks[bi].stmts, &ssa.vars);
+            if !args.is_empty() {
+                ssa.blocks[bi].terminator = SsaTerminator::Call {
+                    target,
+                    args,
+                    fallthrough,
+                };
+                // Mark the ESP adjustments and stores as dead
+                for idx in dead_stmts {
+                    match &ssa.blocks[bi].stmts[idx] {
+                        Stmt::Assign(v) => { ssa.vars[v.0 as usize].use_count = 0; }
+                        Stmt::Store { addr, val } => {
+                            // Don't fully zero — just let dead code handle it
+                            let _ = (addr, val);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // Handle Call statements within the block
+        for si in (0..ssa.blocks[bi].stmts.len()).rev() {
+            let is_call_no_args = matches!(&ssa.blocks[bi].stmts[si],
+                Stmt::Call { args, .. } if args.is_empty());
+            if !is_call_no_args { continue; }
+
+            let (args, _dead) = find_stack_pushes(&ssa.blocks[bi].stmts[..si], &ssa.vars);
+            if !args.is_empty() {
+                if let Stmt::Call { target, out, .. } = &ssa.blocks[bi].stmts[si] {
+                    let target = target.clone();
+                    let out = *out;
+                    ssa.blocks[bi].stmts[si] = Stmt::Call { target, args, out };
+                }
+            }
+        }
+    }
+}
+
+/// Scan backward through statements to find PUSH patterns (IntSub ESP + Store [ESP]).
+/// Returns (arg_values in call order, indices of dead statements).
+fn find_stack_pushes(stmts: &[Stmt], vars: &[VarDef]) -> (Vec<VarId>, Vec<usize>) {
+    let mut pushed_values: Vec<VarId> = Vec::new();
+    let mut dead_indices: Vec<usize> = Vec::new();
+    let mut i = stmts.len();
+
+    // The last push is the return address — skip it
+    // Pattern: Store { addr: esp_var, val: ret_addr_const }
+    // preceded by Assign(esp_var) where esp_var is IntSub(old_esp, 4)
+    let mut skip_first = true;
+
+    while i > 0 {
+        i -= 1;
+
+        // Look for Store { addr, val } where addr is an ESP-derived variable
+        if let Stmt::Store { addr, val } = &stmts[i] {
+            let addr_def = &vars[addr.0 as usize];
+            // Check if addr is ESP or derived from ESP via IntSub
+            let is_esp_store = is_esp_derived(addr_def, vars);
+            if is_esp_store {
+                if skip_first {
+                    // This is the return address push — skip it
+                    skip_first = false;
+                    dead_indices.push(i);
+                    // Also mark the preceding IntSub ESP as dead
+                    if i > 0 {
+                        if let Stmt::Assign(v) = &stmts[i - 1] {
+                            if is_esp_write(&vars[v.0 as usize]) {
+                                dead_indices.push(i - 1);
+                                i -= 1;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                // This is an argument push
+                pushed_values.push(*val);
+                dead_indices.push(i);
+                // Mark preceding IntSub ESP as dead
+                if i > 0 {
+                    if let Stmt::Assign(v) = &stmts[i - 1] {
+                        if is_esp_write(&vars[v.0 as usize]) {
+                            dead_indices.push(i - 1);
+                            i -= 1;
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+
+        // Stop at non-push statements (but allow ESP adjustments between pushes)
+        if let Stmt::Assign(v) = &stmts[i] {
+            if is_esp_write(&vars[v.0 as usize]) {
+                dead_indices.push(i);
+                continue;
+            }
+        }
+
+        // Stop scanning at anything else (another call, branch, or non-ESP assign)
+        if matches!(&stmts[i], Stmt::Call { .. }) { break; }
+        // Non-ESP assigns between pushes are OK (e.g., flag writes from CMP)
+        if let Stmt::Assign(v) = &stmts[i] {
+            let vdef = &vars[v.0 as usize];
+            if FLAG_OFFSETS.contains(&vdef.varnode.offset) {
+                continue;
+            }
+        }
+        break;
+    }
+
+    // Arguments were pushed right-to-left, so the first push is the last arg.
+    // We collected them bottom-up, so reverse to get call order.
+    pushed_values.reverse();
+    (pushed_values, dead_indices)
+}
+
+/// Eliminate x86-32 ESP noise: mark ESP writes and stack stores as dead code.
+///
+/// In 32-bit mode, every PUSH/CALL generates explicit ESP manipulation that clutters
+/// the output. This pass marks as dead:
+/// - ESP = ESP - 4 / ESP = ESP + N (stack adjustments)
+/// - Store [ESP], value (push values, including return addresses)
+/// - Return address constants pushed before calls
+fn eliminate_esp_noise(ssa: &mut SsaCfg) {
+    let has_esp = ssa.vars.iter().any(|v| {
+        v.varnode.space == AddressSpaceId::Register
+            && v.varnode.offset == ESP_OFFSET
+            && v.varnode.size == 4
+    });
+    if !has_esp { return; }
+
+    for bi in 0..ssa.blocks.len() {
+        for si in 0..ssa.blocks[bi].stmts.len() {
+            match &ssa.blocks[bi].stmts[si] {
+                // Mark ESP writes as dead (ESP = ESP +/- N)
+                Stmt::Assign(v) => {
+                    let vdef = &ssa.vars[v.0 as usize];
+                    if is_esp_write(vdef) {
+                        ssa.vars[v.0 as usize].use_count = 0;
+                    }
+                }
+                // Mark stores to ESP-derived addresses as dead (push values)
+                Stmt::Store { addr, val } => {
+                    let addr_def = &ssa.vars[addr.0 as usize];
+                    if is_esp_derived(addr_def, &ssa.vars) {
+                        // Check if the stored value is a return address constant
+                        // (0x40xxxx range — code addresses pushed before calls)
+                        let val_def = &ssa.vars[val.0 as usize];
+                        let is_ret_addr = matches!(&val_def.expr, Expr::Const(v, _)
+                            if *v >= 0x400000 && *v < 0x500000);
+                        if is_ret_addr {
+                            ssa.vars[val.0 as usize].use_count = 0;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Check if a VarDef is an ESP write (direct assignment to ESP register).
+fn is_esp_write(vdef: &VarDef) -> bool {
+    vdef.varnode.space == AddressSpaceId::Register
+        && vdef.varnode.offset == ESP_OFFSET
+        && vdef.varnode.size == 4
+}
+
+/// Check if a VarDef is derived from ESP (either directly ESP or IntSub(ESP, N)).
+fn is_esp_derived(vdef: &VarDef, vars: &[VarDef]) -> bool {
+    if is_esp_write(vdef) { return true; }
+    // Check if it's defined as IntSub(ESP_var, const) or just a copy of ESP
+    match &vdef.expr {
+        Expr::BinOp(BinOpKind::Sub, left, _right) => {
+            let left_def = &vars[left.0 as usize];
+            is_esp_write(left_def)
+        }
+        Expr::Var(v) => {
+            let inner = &vars[v.0 as usize];
+            is_esp_write(inner)
+        }
+        _ => false,
     }
 }
 

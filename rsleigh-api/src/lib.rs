@@ -21,6 +21,8 @@ pub use pcode_ir::{AddressSpaceId, DecodeError, Instruction, PcodeOp, Varnode};
 pub enum Architecture {
     /// x86-64 (AMD64 / Intel 64), 64-bit mode.
     X86_64,
+    /// x86-32 (IA-32), 32-bit protected mode.
+    X86_32,
     /// AArch64 (ARMv8-A, 64-bit).
     AArch64,
     /// ARM32 (ARMv7 + Thumb).
@@ -36,7 +38,7 @@ impl Architecture {
     pub fn addr_size(&self) -> u32 {
         match self {
             Architecture::X86_64 | Architecture::AArch64 | Architecture::RiscV64 => 8,
-            Architecture::ARM32 | Architecture::MIPS32 => 4,
+            Architecture::X86_32 | Architecture::ARM32 | Architecture::MIPS32 => 4,
         }
     }
 
@@ -46,6 +48,7 @@ impl Architecture {
     pub fn register_name(&self, offset: u64, size: u32) -> Option<&'static str> {
         match self {
             Architecture::X86_64 => x86_root::register_name(offset, size),
+            Architecture::X86_32 => x86_32_root::register_name(offset, size),
             Architecture::AArch64 => aarch64_root::register_name(offset, size),
             Architecture::ARM32 => arm32_root::register_name(offset, size),
             Architecture::MIPS32 => mips_root::register_name(offset, size),
@@ -67,6 +70,10 @@ enum DecoderInner {
     X86_64 {
         context: x86_root::ContextMemory,
         global_set: x86_root::GlobalSet,
+    },
+    X86_32 {
+        context: x86_32_root::ContextMemory,
+        global_set: x86_32_root::GlobalSet,
     },
     AArch64 {
         context: aarch64_root::ContextMemory,
@@ -104,6 +111,23 @@ impl Decoder {
                     c
                 });
                 DecoderInner::X86_64 {
+                    context: ctx,
+                    global_set: gs,
+                }
+            }
+            Architecture::X86_32 => {
+                // x86-32 uses its own slaspec with native 32-bit registers (ESP not RSP)
+                // Default: 32-bit protected mode (addrsize=1, opsize=1)
+                let mut ctx = x86_32_root::ContextMemory::default();
+                ctx.write_addrsize(1);
+                ctx.write_opsize(1);
+                let gs = x86_32_root::GlobalSet::new({
+                    let mut c = x86_32_root::ContextMemory::default();
+                    c.write_addrsize(1);
+                    c.write_opsize(1);
+                    c
+                });
+                DecoderInner::X86_32 {
                     context: ctx,
                     global_set: gs,
                 }
@@ -160,6 +184,22 @@ impl Decoder {
                 pcode_ir::optimize(&mut ops);
                 Ok(Instruction {
                     len: inst_next - addr,
+                    disassembly: format_display(&display),
+                    ops,
+                })
+            }
+            DecoderInner::X86_32 {
+                context,
+                global_set,
+            } => {
+                let mut ctx = *context;
+                let addr32 = addr as u32;
+                let (inst_next, display, mut ops) =
+                    x86_32_root::parse_instruction(bytes, &mut ctx, addr32, global_set)
+                        .ok_or(DecodeError::UnknownInstruction)?;
+                pcode_ir::optimize(&mut ops);
+                Ok(Instruction {
+                    len: (inst_next - addr32) as u64,
                     disassembly: format_display(&display),
                     ops,
                 })

@@ -16,11 +16,12 @@ Wired into Spectra as a native analysis backend replacing the Ghidra JVM daemon.
 
 ## Current Status
 
-**Working end-to-end for 5 architectures:**
+**Working end-to-end for 6 architectures:**
 
 | Architecture | Constructors | Extensions |
 |---|---|---|
 | x86-64 | 5700+ | full |
+| x86-32 | 4200+ | SSE/AVX, PE32 import resolution |
 | AArch64 | 3500+ | NEON + SVE |
 | ARM32 | 1200+ | ARMv7 + Thumb |
 | MIPS32 | 900+ | FPU + DSP + MIPS16 + microMIPS |
@@ -64,7 +65,8 @@ rsleigh/
 │   └── dwarf.rs               ← DWARF debug info parsing (gimli) + macOS dSYM
 ├── rsleigh-generate/           ← CLI: parse slaspecs, write generated crate source
 ├── generated/                  ← Output crates (gitignored /out/ dirs)
-│   ├── x86-{shared,subtables,instr-00..07,root}/
+│   ├── x86-{shared,subtables,instr-00..07,root}/       (64-bit)
+│   ├── x86-32-{shared,subtables,instr-00..03,root}/    (32-bit, native ESP/EBP)
 │   ├── aarch64-{shared,subtables,instr-00..03,root}/
 │   ├── arm32-*, mips-*, riscv-*/
 ├── test-harness/               ← golden tests, corpus, fuzz, decompiler validation
@@ -114,6 +116,11 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 
 5-pass pipeline: CFG → SSA → fold → structure recovery → C printer
 
+**CFG builder (cfg.rs):**
+- CallInd resolution: `CALL [IAT_addr]` → traces Load source to constant, converts to Direct
+- x86-32 CALL boilerplate stripping: removes return address push from P-code ops
+- x86-32 RET boilerplate stripping: removes stack pop from P-code ops
+
 **Fold passes (fold.rs):**
 - Algebraic simplification (x & x → x, x ^ x → 0)
 - Single-use temp inlining
@@ -123,7 +130,8 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
   (BoolAnd(BoolNot(ZF), IntEq(OF,SF)) → JG → `a > b`)
 - Call return value propagation
 - Parameter naming from ABI registers
-- Call argument collection from arg register writes
+- Call argument collection from arg register writes (x86-64)
+- Stack-pushed argument collection for cdecl/thiscall (x86-32)
 
 **Printer (printer.rs):**
 - RegTracker: per-block register value tracking at print time
@@ -131,9 +139,12 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - Stack alias resolution: var_c → var_8 → param_0 chain
 - Save/restore elision: register spills across calls hidden
 - Store-before-return elision
-- Import name resolution from PLT/GOT stubs
+- Import name resolution from PLT/GOT stubs (ELF/Mach-O) and IAT (PE32/PE64)
+- PE IAT resolution: walks import descriptors, handles UPX-unpacked binaries with zeroed ILT
 - DWARF debug info: parameter names from `.debug_info` (DWARF4/5, macOS dSYM auto-discovery)
-- String literal detection from binary sections
+- String literal detection from read-only binary sections (filters out writable .data)
+- EBP/RBP-relative stack variable auto-naming (var_N) with DWARF override
+- x86-32 ESP boilerplate elimination (PUSH/POP noise, return address pushes)
 
 ### Peephole Optimizer (`pcode-ir/src/lib.rs`)
 
@@ -153,6 +164,9 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - **Type inference** — all variables are register-width integers
 - **Expression nesting depth** — some redundant register loads remain visible
 - **Loop conditions** — `while (OF == SF)` not always recovered to source comparison
+- **x86-32 control flow** — sequential TEST/JNZ patterns sometimes nest incorrectly
+- **x86-32 register-indirect calls** — `CALL EDI` where EDI was loaded from IAT earlier
+  in the function not resolved to import names (only direct IAT calls resolved)
 
 ---
 

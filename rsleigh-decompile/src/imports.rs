@@ -86,7 +86,7 @@ pub fn resolve_imports(binary: &[u8]) -> HashMap<u64, String> {
         goblin::Object::Mach(goblin::mach::Mach::Binary(macho)) => {
             resolve_macho(macho, binary, &mut map);
         }
-        goblin::Object::PE(pe) => resolve_pe(pe, &mut map),
+        goblin::Object::PE(pe) => resolve_pe(pe, binary, &mut map),
         _ => {
         }
     }
@@ -344,18 +344,92 @@ fn resolve_macho(macho: &goblin::mach::MachO, binary: &[u8], map: &mut HashMap<u
     }
 }
 
-fn resolve_pe(pe: &goblin::pe::PE, map: &mut HashMap<u64, String>) {
-    for import in pe.imports.iter() {
-        if import.rva != 0 {
-            let addr = import.rva as u64 + pe.image_base as u64;
-            map.insert(addr, import.name.to_string());
+/// Walk PE import descriptors and map IAT addresses → function names.
+///
+/// goblin's `pe.imports[].rva` points to the ILT (Import Lookup Table), but code
+/// references the IAT (Import Address Table). We walk the import descriptors to get
+/// IAT base addresses, then resolve names from either the ILT or (when ILT is zeroed,
+/// e.g. UPX-unpacked binaries) directly from the IAT entries which contain hint/name RVAs.
+fn resolve_pe(pe: &goblin::pe::PE, binary: &[u8], map: &mut HashMap<u64, String>) {
+    let base = pe.image_base as u64;
+    let ptr_size = if pe.is_64 { 8usize } else { 4usize };
+    let ordinal_flag: u64 = if pe.is_64 { 0x8000000000000000 } else { 0x80000000 };
+
+    // RVA → file offset using section table
+    let rva_to_off = |rva: u64| -> Option<usize> {
+        for s in &pe.sections {
+            let va = s.virtual_address as u64;
+            let vsz = s.virtual_size as u64;
+            let fo = s.pointer_to_raw_data as u64;
+            if rva >= va && rva < va + vsz {
+                return Some((fo + (rva - va)) as usize);
+            }
+        }
+        None
+    };
+
+    // Read a null-terminated ASCII name from a hint/name table entry
+    let read_hint_name = |rva: u64| -> Option<String> {
+        let off = rva_to_off(rva)?;
+        if off + 3 > binary.len() { return None; }
+        // Skip 2-byte hint, read null-terminated name
+        let name_start = off + 2;
+        let name_end = binary[name_start..].iter().position(|&b| b == 0)?;
+        let name = std::str::from_utf8(&binary[name_start..name_start + name_end]).ok()?;
+        if name.is_empty() { return None; }
+        Some(name.to_string())
+    };
+
+    if let Some(ref import_data) = pe.import_data {
+        for entry in &import_data.import_data {
+            let iat_rva = entry.import_directory_entry.import_address_table_rva as u64;
+            if iat_rva == 0 { continue; }
+
+            if let Some(ref ilt) = entry.import_lookup_table {
+                // goblin parsed the ILT — use it for names, but map to IAT addresses
+                for (i, lookup) in ilt.iter().enumerate() {
+                    let iat_addr = base + iat_rva + (i as u64) * ptr_size as u64;
+                    match lookup {
+                        goblin::pe::import::SyntheticImportLookupTableEntry::HintNameTableRVA((_, ref hint_entry)) => {
+                            map.insert(iat_addr, hint_entry.name.to_string());
+                        }
+                        goblin::pe::import::SyntheticImportLookupTableEntry::OrdinalNumber(ord) => {
+                            map.insert(iat_addr, format!("{}!ordinal_{}", entry.name, ord));
+                        }
+                    }
+                }
+            } else {
+                // ILT is missing (e.g., UPX-unpacked). Walk the IAT directly:
+                // on disk, IAT entries still contain hint/name RVAs (not resolved yet).
+                let Some(iat_off) = rva_to_off(iat_rva) else { continue };
+                let mut i = 0usize;
+                loop {
+                    let entry_off = iat_off + i * ptr_size;
+                    if entry_off + ptr_size > binary.len() { break; }
+                    let raw_entry = if ptr_size == 4 {
+                        u32::from_le_bytes(binary[entry_off..entry_off+4].try_into().unwrap()) as u64
+                    } else {
+                        u64::from_le_bytes(binary[entry_off..entry_off+8].try_into().unwrap())
+                    };
+                    if raw_entry == 0 { break; }
+
+                    let iat_addr = base + iat_rva + (i as u64) * ptr_size as u64;
+                    if raw_entry & ordinal_flag != 0 {
+                        map.insert(iat_addr, format!("{}!ordinal_{}", entry.name, raw_entry & 0xffff));
+                    } else if let Some(name) = read_hint_name(raw_entry) {
+                        map.insert(iat_addr, name);
+                    }
+                    i += 1;
+                    if i > 10000 { break; }
+                }
+            }
         }
     }
+
     for export in pe.exports.iter() {
         if let Some(name) = export.name {
             if export.rva != 0 {
-                let addr = export.rva as u64 + pe.image_base as u64;
-                map.insert(addr, name.to_string());
+                map.insert(export.rva as u64 + base, name.to_string());
             }
         }
     }

@@ -100,7 +100,7 @@ fn run() {
             let arch = if pe.is_64 {
                 rsleigh_api::Architecture::X86_64
             } else {
-                eprintln!("32-bit PE not supported (no x86-32 decoder)"); return;
+                rsleigh_api::Architecture::X86_32
             };
             let base = pe.image_base as u64;
             let segs: Vec<(u64, u64, u64)> = pe.sections.iter()

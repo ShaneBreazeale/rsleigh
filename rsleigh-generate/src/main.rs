@@ -7,17 +7,24 @@ fn main() {
     let archs: Vec<&str> = if args.len() > 1 {
         args[1..].iter().map(|s| s.as_str()).collect()
     } else {
-        vec!["x86-64", "aarch64", "riscv", "mips", "arm32"]
+        vec!["x86-64", "x86-32", "aarch64", "riscv", "mips", "arm32"]
     };
 
     for arch in &archs {
         match *arch {
-            "x86-64" | "x86" => generate_arch(
+            "x86-64" => generate_arch(
                 "x86-64",
                 Path::new("slaspec/x86/x86-64.slaspec"),
                 "x86",
                 200,
                 8,
+            ),
+            "x86-32" | "x86" => generate_arch(
+                "x86-32",
+                Path::new("slaspec/x86/x86.slaspec"),
+                "x86-32",
+                200,
+                4,
             ),
             "aarch64" | "arm64" => generate_arch(
                 "aarch64",
