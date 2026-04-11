@@ -3581,6 +3581,95 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #PHI_CLEANUP: Remove phi() artifacts from output.
+    // Pattern: "return phi(...);" → "return 0;" (use first arg, which is the common value)
+    for line in &mut lines {
+        let t = line.trim();
+        if t.starts_with("return phi(") && t.ends_with(");") {
+            let inner = &t["return phi(".len()..t.len() - 2];
+            // Use the first argument of the phi
+            if let Some(comma) = inner.find(',') {
+                let first = inner[..comma].trim();
+                let pad = " ".repeat(line.len() - line.trim_start().len());
+                *line = format!("{}return {};", pad, first);
+            }
+        }
+        // Also clean up inline phi() in expressions
+        if line.contains("phi(") && !line.contains("return phi(") {
+            // Replace phi(X, Y) with X (first operand)
+            while let Some(pos) = line.find("phi(") {
+                let after = &line[pos + 4..];
+                if let Some(close) = after.find(')') {
+                    let inner = &after[..close];
+                    let first = inner.split(',').next().unwrap_or("?").trim();
+                    let old = format!("phi({})", inner);
+                    *line = line.replace(&old, first);
+                } else { break; }
+            }
+        }
+    }
+
+    // #INCREMENT: Simplify "var = var + 1" to "var++" and "var = var - 1" to "var--"
+    for line in &mut lines {
+        let t = line.trim().to_string();
+        if let Some(eq) = t.find(" = ") {
+            let lhs = &t[..eq];
+            let rhs = t[eq + 3..].trim_end_matches(';');
+            if rhs == format!("{} + 1", lhs) {
+                let pad = " ".repeat(line.len() - line.trim_start().len());
+                *line = format!("{}{}++;", pad, lhs);
+            } else if rhs == format!("{} - 1", lhs) {
+                let pad = " ".repeat(line.len() - line.trim_start().len());
+                *line = format!("{}{}--;", pad, lhs);
+            }
+        }
+    }
+
+    // #ELSE_IF: Collapse nested "} else { if (" chains into flat "} else if ("
+    // Re-indents body to match the original if-block level.
+    {
+        // Find the indent of the first "if (" at each nesting level
+        let base_indent = lines.iter()
+            .find(|l| l.trim().starts_with("if (") && l.trim().ends_with('{'))
+            .map(|l| l.len() - l.trim_start().len())
+            .unwrap_or(0);
+
+        let mut i = 0;
+        while i + 1 < lines.len() {
+            let lt = lines[i].trim().to_string();
+            let next = lines[i + 1].trim().to_string();
+            if lt == "} else {" && next.starts_with("if (") {
+                let pad = " ".repeat(base_indent);
+                let body_pad = " ".repeat(base_indent + 4);
+                lines[i] = format!("{}}} else {}", pad, next);
+                lines.remove(i + 1);
+                // Re-indent body and remove the extra closing brace
+                let mut depth = 0i32;
+                let mut close_to_remove = None;
+                for j in (i + 1)..lines.len() {
+                    let jt = lines[j].trim().to_string();
+                    if jt.ends_with('{') { depth += 1; }
+                    if jt == "}" {
+                        if depth == 0 {
+                            close_to_remove = Some(j);
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    // Re-indent non-empty body lines to match base level
+                    if depth == 0 && !jt.is_empty() {
+                        lines[j] = format!("{}{}", body_pad, jt);
+                    }
+                }
+                if let Some(j) = close_to_remove {
+                    lines.remove(j);
+                }
+                continue;
+            }
+            i += 1;
+        }
+    }
+
     // #PUTCHAR_ASCII: Display putchar(10) as putchar('\n'), etc.
     for line in &mut lines {
         *line = line.replace("putchar(10)", "putchar('\\n')")
