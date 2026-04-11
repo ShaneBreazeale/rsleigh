@@ -77,52 +77,44 @@ if (n > 1) {
     return 1;
 }
 
-// sum_array() — loop body with correct variable resolution
-total = 0;
-i = 0;
+// sum_array() — near-Ghidra quality
 while (len > i) {
     total = arr[i] + total;
     i = i + 1;
 }
+return total;
 
-// string_length() — correct loop variables
-len = 0;
-while (EAX != 0) {
+// string_length() — pointer dereference in condition
+while (*(s) != 0) {
     len = len + 1;
     s = s + 1;
 }
+return len;
 
-// manhattan_distance() — struct field access
-EAX = (a->field4) - b->field4;
-dx = 0 - dx;
-dy = 0 - dy;
-return dx + dy;
+// manhattan_distance() — DWARF struct field names
+EAX = (a->y) - b->y;
+if (a < 0) { dx = -dx; }
+if (dy < 0) { dy = -dy; }
+return dx - dy;
 
-// list_sum() — linked list traversal
-sum = 0;
+// list_sum() — linked list with DWARF field names
 while (head != 0) {
     sum = *(head) + sum;
-    head = head->field8;
+    head = head->next;
 }
+return sum;
 
-// binary_search() — complex control flow
-lo = 0;
-hi = len - 1;
+// binary_search() — complex control flow with array access
 while (hi >= lo) {
-    mid = lo + EAX;
-    if (EAX != target) {
-        EAX = arr[mid];
-        if (target <= EAX) {
-            hi = mid - 1;
-        } else {
-            lo = mid + 1;
-        }
-    } else {
-        return mid;
-    }
+    mid = lo + ECX;
+    if (target != arr[mid]) {
+        if (target <= arr[mid]) { hi = mid - 1; }
+        else { lo = mid + 1; }
+    } else { return; }
 }
+return -0x1;
 
-// main() — correct import resolution + string literals
+// main() — correct imports, string literals, return
 printf("add(3,4) = %d\n", add(3, 4));
 printf("factorial(6) = %d\n", factorial(6));
 printf("sum = %d\n", sum_array(nums, 5));
@@ -133,6 +125,26 @@ printf("search(23) = %d\n", binary_search(sorted, 0xa, 0x17));
 return 0;
 ```
 
+With `-O2` optimized code, rsleigh handles:
+```
+// CMOV conditional select (branchless max)
+if (EDI > ESI) { return EDI; }
+
+// Division by constant (compiler multiply-shift trick)
+RCX = (RAX / 7) >> 0x20;
+
+// Bit counting loop (register-only, no stack)
+while (EDI > 1) {
+    EDX = EDI & 1;
+    EAX = EAX + EDX;
+    ECX = ECX >> 1;
+}
+
+// Constant folding in main (compiler inlined everything)
+printf("add(3,4) = %d\n", 7);
+printf("factorial(6) = %d\n", 0x2d0);
+```
+
 The decompiler pipeline: P-code -> CFG -> SSA -> expression folding -> structure recovery -> C printer.
 
 What it does:
@@ -140,20 +152,25 @@ What it does:
 - Stack variable naming (`var_8` instead of `*(RBP - 0x8)`)
 - Parameter detection from ABI registers, with DWARF name recovery (`param_0` -> `a`)
 - DWARF local variable recovery (`var_10` -> `i`, `var_c` -> `len`)
-- Struct field access detection (`ptr[4]` -> `ptr->field4`)
-- Condition recovery (x86 flag patterns -> comparisons, ARM64 NG/ZR/OV -> comparisons)
+- DWARF struct field names (`ptr->field4` -> `ptr->y`, `head->field8` -> `head->next`)
+- Deep SSA condition operand resolution (`EAX != 0` -> `*(s) != 0` through Load chains)
+- Condition recovery (x86 flag patterns including SBORROW, JLE, JBE -> readable comparisons)
+- Recursive BoolNot unwrapping (`!(a < b)` -> `a >= b`, CMOV conditions)
 - Condition canonicalization (`1 < n` -> `n > 1`)
 - While loop negation (exit conditions properly inverted)
+- Self-loop body recovery (-O2 tight loops: block branches to itself)
+- CMOV/CSEL expansion (intra-instruction branches -> proper if/else control flow)
 - Loop body variable resolution (registers traced to underlying stack vars through SSA)
 - If/else and while loop recovery from CFG back-edges and dominators
 - Call return value inlining (`printf("...", add(3, 4))`)
 - Function argument display (`factorial(5)` not `factorial()`)
-- Return value inference for non-void functions
+- Return value inference (prefers local accumulators over parameters)
 - Import name resolution via Mach-O indirect symbol table (`printf`, `strlen`)
+- Division-by-constant recognition (`x * 0x92492493` -> `x / 7`)
 - `__chk` suffix stripping (`__strcpy_chk` -> `strcpy`)
 - String literal detection (`0x100000624` -> `"hello world"`)
 - Array access syntax with scaling (`*(uint8_t*)(base + idx * 4)` -> `base[idx]`)
-- Dead code elimination (unused flag writes, register shuffling)
+- Dead code elimination (unused flag writes, IDIV remainder, register shuffling)
 - Stack canary preamble/epilogue detection and removal
 - Save/restore elision (register spills across calls hidden)
 - Register copy tracking and inlining at print time
