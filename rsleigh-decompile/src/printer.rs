@@ -3691,6 +3691,51 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Convert ->fieldN to array indexing [N/element_size] when offset is aligned.
+    // offset divisible by 8 → [N/8] (64-bit pointer array)
+    // offset divisible by 4 but not 8 → [N/4] (32-bit int array)
+    // otherwise keep ->fieldN (likely a real struct field)
+    for line in &mut lines {
+        if !line.contains("->field") { continue; }
+        let mut result_line = String::new();
+        let bytes = line.as_bytes();
+        let mut pos = 0;
+        let arrow_field = b"->field";
+        while pos < bytes.len() {
+            if pos + arrow_field.len() <= bytes.len()
+                && &bytes[pos..pos + arrow_field.len()] == arrow_field
+            {
+                // Collect hex digits after "->field"
+                let hex_start = pos + arrow_field.len();
+                let mut hex_end = hex_start;
+                while hex_end < bytes.len() && (bytes[hex_end] as char).is_ascii_hexdigit() {
+                    hex_end += 1;
+                }
+                if hex_end > hex_start {
+                    let hex_str = std::str::from_utf8(&bytes[hex_start..hex_end]).unwrap_or("");
+                    if let Ok(offset) = u64::from_str_radix(hex_str, 16) {
+                        if offset > 0 && offset % 8 == 0 {
+                            result_line.push_str(&format!("[{}]", offset / 8));
+                            pos = hex_end;
+                            continue;
+                        } else if offset > 0 && offset % 4 == 0 {
+                            result_line.push_str(&format!("[{}]", offset / 4));
+                            pos = hex_end;
+                            continue;
+                        }
+                    }
+                }
+                // Not aligned or couldn't parse — keep original
+                result_line.push_str("->");
+                pos += 2; // skip past "->"
+                continue;
+            }
+            result_line.push(bytes[pos] as char);
+            pos += 1;
+        }
+        *line = result_line;
+    }
+
     for line in &lines {
         let is_blank = line.trim().is_empty();
         if is_blank && prev_blank { continue; }
