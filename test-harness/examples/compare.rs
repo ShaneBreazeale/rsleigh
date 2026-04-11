@@ -1,5 +1,6 @@
-/// Compare rsleigh decompiler output against Ghidra for a test binary.
-/// Usage: cargo run -p test-harness --example compare
+/// Compare rsleigh decompiler output for a binary.
+/// Usage: cargo run -p test-harness --example compare -- <binary> [func1 func2 ...]
+/// Supports: ELF (x86-64, AArch64, ARM32, MIPS32), Mach-O (x86-64, AArch64), PE (x86-64)
 
 fn main() {
     let t = std::thread::Builder::new()
@@ -12,30 +13,38 @@ fn main() {
     }
 }
 
-fn run() {
-    let binary_path = std::env::args().nth(1).unwrap_or_else(|| "/tmp/compare_test".to_string());
-    let binary_path = binary_path.as_str();
-    let data = match std::fs::read(binary_path) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("Could not read {}: {}", binary_path, e);
-            eprintln!("Compile it first:");
-            eprintln!("  cc -arch x86_64 -g -O0 -c -o /tmp/compare_test.o /tmp/compare_test.c");
-            eprintln!("  cc -arch x86_64 -g -O0 -o /tmp/compare_test /tmp/compare_test.o");
-            eprintln!("  dsymutil /tmp/compare_test");
-            return;
-        }
-    };
-    let path = std::path::Path::new(binary_path);
+/// Runtime-internal symbols to hide from auto-discovery.
+const HIDDEN_SYMS: &[&str] = &[
+    "deregister_tm_clones", "register_tm_clones", "frame_dummy",
+    "__do_global_dtors_aux", "__libc_csu_init", "__libc_csu_fini",
+    "_dl_relocate_static_pie", "__do_global_ctors_aux",
+];
 
-    // Parse binary (Mach-O or ELF)
+fn run() {
+    let binary_path = std::env::args().nth(1).unwrap_or_else(|| {
+        eprintln!("Usage: compare <binary> [func1 func2 ...]");
+        std::process::exit(1);
+    });
+    let data = match std::fs::read(&binary_path) {
+        Ok(d) => d,
+        Err(e) => { eprintln!("Could not read {}: {}", binary_path, e); return; }
+    };
+    let path = std::path::Path::new(&binary_path);
+
     let obj = goblin::Object::parse(&data).unwrap();
-    let (segs, symbols): (Vec<(u64, u64, u64)>, Vec<(u64, String)>) = match &obj {
+
+    // Auto-detect architecture and extract segments + symbols
+    let (arch, segs, symbols) = match &obj {
         goblin::Object::Mach(goblin::mach::Mach::Binary(m)) => {
+            let arch = match m.header.cputype() {
+                7 | 0x01000007 => rsleigh_api::Architecture::X86_64,  // CPU_TYPE_X86_64
+                12 | 0x0100000c => rsleigh_api::Architecture::AArch64, // CPU_TYPE_ARM64
+                _ => { eprintln!("Unsupported Mach-O CPU type: {}", m.header.cputype()); return; }
+            };
             let mut segs = Vec::new();
             for seg in &m.segments {
-                for sec_result in seg.sections() {
-                    for sec in sec_result {
+                if let Ok(secs) = seg.sections() {
+                    for sec in secs {
                         segs.push((sec.0.addr, sec.0.size, sec.0.offset as u64));
                     }
                 }
@@ -51,9 +60,17 @@ fn run() {
                     }
                 }
             }
-            (segs, syms)
+            (arch, segs, syms)
         }
         goblin::Object::Elf(elf) => {
+            let arch = match elf.header.e_machine {
+                0x3E => rsleigh_api::Architecture::X86_64,   // EM_X86_64
+                0xB7 => rsleigh_api::Architecture::AArch64,  // EM_AARCH64
+                0x28 => rsleigh_api::Architecture::ARM32,    // EM_ARM
+                0x08 => rsleigh_api::Architecture::MIPS32,   // EM_MIPS
+                0xF3 => rsleigh_api::Architecture::RiscV64,  // EM_RISCV
+                m => { eprintln!("Unsupported ELF machine: {:#x}", m); return; }
+            };
             let segs: Vec<(u64, u64, u64)> = elf.section_headers.iter()
                 .filter(|sh| sh.sh_flags & 0x4 != 0) // SHF_EXECINSTR
                 .map(|sh| (sh.sh_addr, sh.sh_size, sh.sh_offset))
@@ -68,7 +85,6 @@ fn run() {
                     }
                 }
             }
-            // Also get dynamic symbols for imports
             for sym in elf.dynsyms.iter() {
                 if sym.st_type() == goblin::elf::sym::STT_FUNC && sym.st_value != 0 {
                     if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
@@ -78,73 +94,83 @@ fn run() {
                     }
                 }
             }
-            (segs, syms)
+            (arch, segs, syms)
         }
-        _ => {
-            eprintln!("Unsupported binary format");
-            return;
+        goblin::Object::PE(pe) => {
+            let arch = if pe.is_64 {
+                rsleigh_api::Architecture::X86_64
+            } else {
+                eprintln!("32-bit PE not supported (no x86-32 decoder)"); return;
+            };
+            let base = pe.image_base as u64;
+            let segs: Vec<(u64, u64, u64)> = pe.sections.iter()
+                .filter(|s| s.characteristics & 0x20000000 != 0) // IMAGE_SCN_MEM_EXECUTE
+                .map(|s| (
+                    base + s.virtual_address as u64,
+                    s.virtual_size as u64,
+                    s.pointer_to_raw_data as u64,
+                ))
+                .collect();
+            let mut syms: Vec<(u64, String)> = Vec::new();
+            // PE exports as function symbols
+            for export in pe.exports.iter() {
+                if let Some(name) = export.name {
+                    if export.rva != 0 {
+                        syms.push((base + export.rva as u64, name.to_string()));
+                    }
+                }
+            }
+            if syms.is_empty() {
+                eprintln!("PE binary has no exported symbols. Use a tool like dumpbin to find function addresses.");
+            }
+            (arch, segs, syms)
         }
+        _ => { eprintln!("Unsupported binary format"); return; }
     };
 
-    let mut dec = rsleigh_api::Decoder::new(rsleigh_api::Architecture::X86_64);
+    eprintln!("Architecture: {:?}, {} segments, {} symbols", arch, segs.len(), symbols.len());
+
+    let mut dec = rsleigh_api::Decoder::new(arch);
 
     let decompile_func = |fa: u64, dec: &mut rsleigh_api::Decoder| -> String {
         let off = segs.iter().find_map(|(va, sz, fo)| {
-            if fa >= *va && fa < va + sz {
-                Some(fo + (fa - va))
-            } else {
-                None
-            }
+            if fa >= *va && fa < va + sz { Some(fo + (fa - va)) } else { None }
         });
-        let Some(off) = off else {
-            return String::new();
-        };
-        let max = 2048.min(data.len() - off as usize);
+        let Some(off) = off else { return String::new(); };
+        let max = 4096.min(data.len() - off as usize);
         let bytes = &data[off as usize..off as usize + max];
         let mut io = 0usize;
         let mut insts = Vec::new();
-        // Find the next function's start address to bound decoding
         let next_func = symbols.iter()
             .filter(|(a, _)| *a > fa)
             .map(|(a, _)| *a)
             .min()
             .unwrap_or(fa + max as u64);
-        let func_max = (next_func - fa) as usize;
-        let decode_max = func_max.min(max);
+        let decode_max = ((next_func - fa) as usize).min(max);
 
         while io < decode_max {
-            // Catch panics from individual instruction decodes (stack overflow)
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 dec.decode(&bytes[io..], fa + io as u64)
             }));
             match result {
                 Ok(Ok(inst)) => {
                     let l = inst.len as usize;
-                    if l == 0 { io += 1; continue; } // avoid infinite loop
+                    if l == 0 { io += 1; continue; }
                     insts.push((fa + io as u64, inst));
                     io += l;
                 }
                 Ok(Err(_)) => break,
-                Err(_) => { io += 1; } // skip bad instruction
+                Err(_) => { io += 1; }
             }
         }
-        rsleigh_decompile::decompile_with_binary(
-            rsleigh_api::Architecture::X86_64,
-            &insts,
-            Some(&data),
-            Some(path),
-        )
+        rsleigh_decompile::decompile_with_binary(arch, &insts, Some(&data), Some(path))
     };
 
-    // If specific functions are named on the command line, use those.
-    // Otherwise decompile all non-underscore symbols.
     let cli_funcs: Vec<String> = std::env::args().skip(2).collect();
     let target_funcs: Vec<String> = if cli_funcs.is_empty() {
         symbols.iter()
             .filter(|(_, n)| !n.starts_with('_') && !n.starts_with("dyld") && !n.is_empty()
-                && !["deregister_tm_clones", "register_tm_clones", "frame_dummy",
-                      "__do_global_dtors_aux", "__libc_csu_init", "__libc_csu_fini",
-                      "_dl_relocate_static_pie"].contains(&n.as_str()))
+                && !HIDDEN_SYMS.contains(&n.as_str()))
             .map(|(_, n)| n.clone())
             .collect()
     } else {
@@ -154,7 +180,6 @@ fn run() {
     for name in &target_funcs {
         if let Some((addr, _)) = symbols.iter().find(|(_, n)| n == name.as_str()) {
             let func_addr = *addr;
-            // Flush before decompiling in case the decoder aborts
             use std::io::Write;
             let _ = std::io::stdout().flush();
             let output = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -162,13 +187,12 @@ fn run() {
             })) {
                 Ok(o) => o,
                 Err(_) => {
-                    println!("=== {} (CRASHED — stack overflow in decoder) ===\n---", name);
+                    println!("=== {} (CRASHED) ===\n---", name);
                     continue;
                 }
             };
-            // Count instructions from the decompiled output (avoids redundant decode pass)
             let inst_count = output.lines().filter(|l| !l.trim().is_empty()).count();
-            println!("=== {} ({} instructions) ===", name, inst_count);
+            println!("=== {} ({} lines) ===", name, inst_count);
             for line in output.lines() {
                 if !line.trim().is_empty() {
                     println!("  {}", line);
