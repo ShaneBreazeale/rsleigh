@@ -2335,6 +2335,33 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Simplify "var - N == 0" → "var == N" (moved before switch detection)
+    for line in &mut lines {
+        let l = line.clone();
+        if l.contains(" - ") && (l.contains(" == 0)") || l.contains(" != 0)")) {
+            if let Some(if_start) = l.find("if (") {
+                let cond = &l[if_start + 4..];
+                if let Some(close) = cond.rfind(')') {
+                    let inner = &cond[..close];
+                    if let Some(eq_pos) = inner.rfind(" == 0").or(inner.rfind(" != 0")) {
+                        let before_eq = &inner[..eq_pos];
+                        let op = if inner[eq_pos..].starts_with(" == 0") { "==" } else { "!=" };
+                        if let Some(minus) = before_eq.rfind(" - ") {
+                            let lhs = &before_eq[..minus];
+                            let rhs_val = before_eq[minus + 3..].trim();
+                            if rhs_val.len() <= 20 && !rhs_val.contains('(') {
+                                let indent = line.len() - line.trim_start().len();
+                                let pad = " ".repeat(indent);
+                                let rest = &l[if_start + 4 + close + 1..];
+                                *line = format!("{}if ({} {} {}){}", pad, lhs, op, rhs_val, rest);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // #SWITCH2: Detect if-else chains on the same variable as switch/case.
     // Pattern: if (*(v) == 3) { ... } else { if (*(v) == 4) { ... } else { if (*(v) == 5) { ... } } }
     // → switch(*(v)) { case 3: ... case 4: ... case 5: ... }
@@ -2350,35 +2377,21 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 if let Some(eq_pos) = cond.find(" == ") {
                     let var_name = &cond[..eq_pos];
                     let first_val = &cond[eq_pos+4..];
-                    // Count how many consecutive else-if blocks check the same variable
                     let mut cases = vec![first_val.to_string()];
-                    let mut j = i + 1;
-                    let mut depth = 1i32;
-                    while j < lines.len() && depth > 0 {
+                    let check = format!("if ({} == ", var_name);
+                    let my_indent = lines[i].len() - lines[i].trim_start().len();
+                    for j in (i+1)..lines.len() {
                         let jt = lines[j].trim();
-                        if jt.contains('{') { depth += jt.matches('{').count() as i32; }
-                        if jt.contains('}') { depth -= jt.matches('}').count() as i32; }
-                        if depth == 0 {
-                            // Check next line for "} else {"
-                            if j + 1 < lines.len() {
-                                let next = lines[j+1].trim();
-                                if next.starts_with("} else {") || next == "} else {" {
-                                    // Check line after for another if with same var
-                                    if j + 2 < lines.len() {
-                                        let inner = lines[j+2].trim();
-                                        let check = format!("if ({} == ", var_name);
-                                        if inner.starts_with(&check) && inner.ends_with(") {") {
-                                            let val = &inner[check.len()..inner.len()-3];
-                                            cases.push(val.to_string());
-                                            depth = 1;
-                                            j += 2;
-                                            continue;
-                                        }
-                                    }
-                                }
-                            }
+                        if jt.starts_with(&check) && jt.ends_with(") {") {
+                            let val = &jt[check.len()..jt.len()-3];
+                            cases.push(val.to_string());
                         }
-                        j += 1;
+                        // Stop at end of the outermost block
+                        // (when we see a line at same or lesser indent that isn't part of the chain)
+                        let j_indent = lines[j].len() - lines[j].trim_start().len();
+                        if j_indent <= my_indent && !jt.is_empty() && !jt.starts_with('}')
+                            && !jt.starts_with("if (") && !jt.starts_with("} else")
+                        { break; }
                     }
                     if cases.len() >= 3 {
                         let indent = lines[i].len() - lines[i].trim_start().len();
