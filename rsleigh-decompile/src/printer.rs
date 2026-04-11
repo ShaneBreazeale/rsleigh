@@ -1138,10 +1138,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let hex_str = line[hex_start..hex_end].to_string();
                 if let Ok(val) = u64::from_str_radix(&hex_str, 16) {
                     // Large values are actually negative offsets (e.g., 0xfffffffc = -4)
-                    let neg_off = if val >= 0xffffff00 {
-                        0x100000000u64 - val // 32-bit sign extension
+                    let neg_off = if val >= 0xffffff00 && val <= 0xFFFFFFFF {
+                        0x100000000u64.saturating_sub(val) // 32-bit sign extension
+                    } else if val >= 0xffffffffffffff00 {
+                        0u64.wrapping_sub(val) // 64-bit sign extension
                     } else if val >= 0x80 && val < 0x100 {
-                        0x100 - val // 8-bit sign extension
+                        0x100u64.saturating_sub(val) // 8-bit sign extension
                     } else {
                         break; // positive offset (args above EBP), skip
                     };
