@@ -25,9 +25,9 @@ fn resolve_elf(elf: &goblin::elf::Elf, binary: &[u8], map: &mut HashMap<u64, Str
         if let Some(sym) = elf.dynsyms.get(reloc.r_sym) {
             if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
                 if !name.is_empty() {
-                    got_to_name.insert(reloc.r_offset, name.to_string());
-                    // Also map the GOT entry address directly
-                    map.insert(reloc.r_offset, name.to_string());
+                    let clean = name.split("@@").next().unwrap_or(name).to_string();
+                    got_to_name.insert(reloc.r_offset, clean.clone());
+                    map.insert(reloc.r_offset, clean);
                 }
             }
         }
@@ -84,7 +84,9 @@ fn resolve_elf(elf: &goblin::elf::Elf, binary: &[u8], map: &mut HashMap<u64, Str
         if sym.st_value != 0 {
             if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
                 if !name.is_empty() {
-                    map.insert(sym.st_value, name.to_string());
+                    // Strip version suffix (e.g., "stdin@@GLIBC_2.2.5" → "stdin")
+                    let clean = name.split("@@").next().unwrap_or(name);
+                    map.insert(sym.st_value, clean.to_string());
                 }
             }
         }
@@ -95,19 +97,23 @@ fn resolve_elf(elf: &goblin::elf::Elf, binary: &[u8], map: &mut HashMap<u64, Str
         if let Some(sym) = elf.dynsyms.get(reloc.r_sym) {
             if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
                 if !name.is_empty() && reloc.r_offset != 0 {
-                    // Map the GOT entry address so *(addr) resolves to the name
-                    map.entry(reloc.r_offset).or_insert_with(|| name.to_string());
+                    let clean = name.split("@@").next().unwrap_or(name);
+                    map.entry(reloc.r_offset).or_insert_with(|| clean.to_string());
                 }
             }
         }
     }
 
-    // Named functions from .symtab
+    // Named functions and global objects from .symtab
     for sym in elf.syms.iter() {
-        if sym.st_type() == goblin::elf::sym::STT_FUNC && sym.st_value != 0 {
+        if (sym.st_type() == goblin::elf::sym::STT_FUNC
+            || sym.st_type() == goblin::elf::sym::STT_OBJECT)
+            && sym.st_value != 0
+        {
             if let Some(name) = elf.strtab.get_at(sym.st_name) {
                 if !name.is_empty() && !name.starts_with("FUN_") {
-                    map.insert(sym.st_value, name.to_string());
+                    let clean = name.split("@@").next().unwrap_or(name);
+                    map.insert(sym.st_value, clean.to_string());
                 }
             }
         }

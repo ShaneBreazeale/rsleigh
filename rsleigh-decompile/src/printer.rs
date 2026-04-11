@@ -649,10 +649,26 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
-    // Normalize FS_OFFSET->field28 → __stack_chk_guard (TLS canary access)
-    // Must run after struct field conversion which creates the ->field28 pattern
+    // Normalize FS_OFFSET canary accesses → __stack_chk_guard
+    // The TLS canary at FS:0x28 may appear as FS_OFFSET->field28, FS_OFFSET->_IO_write_ptr,
+    // or other names depending on DWARF struct info loaded
     for line in &mut lines {
         *line = line.replace("FS_OFFSET->field28", "__stack_chk_guard");
+        // FS_OFFSET->_IO_write_ptr is a mis-named canary field (struct offset 0x28 matches FILE layout)
+        *line = line.replace("FS_OFFSET->_IO_write_ptr", "__stack_chk_guard");
+        // Generic: any FS_OFFSET->fieldXX or FS_OFFSET[XX] access is the canary
+        if line.contains("FS_OFFSET") && !line.contains("__stack_chk_guard") {
+            // Replace FS_OFFSET references with __stack_chk_guard
+            if let Some(fs_pos) = line.find("FS_OFFSET") {
+                // Find the end of the FS_OFFSET->xxx or *(FS_OFFSET + xxx) expression
+                let after = &line[fs_pos..];
+                let end = after.find(|c: char| c == ')' || c == ';' || c == ' ')
+                    .map(|p| fs_pos + p)
+                    .unwrap_or(line.len());
+                let replacement = format!("{}{}{}", &line[..fs_pos], "__stack_chk_guard", &line[end..]);
+                *line = replacement;
+            }
+        }
     }
 
     // Remove stack canary check blocks: if (... ^ __stack_chk_guard ...) { __stack_chk_fail(); }
@@ -674,6 +690,38 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             }
             // Also remove standalone canary lines: RAX = ... ^ __stack_chk_guard;
             if lt.contains("__stack_chk_guard") && !lt.starts_with("if ") {
+                lines.remove(j);
+                continue;
+            }
+            j += 1;
+        }
+    }
+
+    // Simplify *(stdout) → stdout, *(stdin) → stdin, *(stderr) → stderr
+    // These are loaded via GOT pointer dereference but should appear as the symbol
+    for line in &mut lines {
+        *line = line.replace("*(stdout)", "stdout");
+        *line = line.replace("*(stdin)", "stdin");
+        *line = line.replace("*(stderr)", "stderr");
+    }
+
+    // Clean up "RAX = stdout;" or "RAX = stdin;" lines before function calls
+    // These are intermediate loads that should be elided
+    {
+        let mut j = 0;
+        while j + 1 < lines.len() {
+            let lt = lines[j].trim().to_string();
+            if (lt == "RAX = stdout;" || lt == "RAX = stdin;" || lt == "RAX = stderr;")
+                && lines.get(j + 1).map_or(false, |next| {
+                    let nt = next.trim();
+                    nt.contains("(RAX") || nt.contains(", RAX")
+                })
+            {
+                // Replace RAX in the next line with the symbol name
+                let sym = if lt.contains("stdout") { "stdout" }
+                    else if lt.contains("stdin") { "stdin" }
+                    else { "stderr" };
+                lines[j + 1] = lines[j + 1].replace("RAX", sym);
                 lines.remove(j);
                 continue;
             }
@@ -2656,24 +2704,32 @@ fn try_read_string(va: u64, ctx: &PrintCtx) -> Option<String> {
     let obj = goblin::Object::parse(binary).ok()?;
     let file_offset = match &obj {
         goblin::Object::Mach(goblin::mach::Mach::Binary(macho)) => {
+            // Only read strings from __TEXT segment (read-only, contains __cstring)
+            // Skip __DATA/__DATA_CONST (global vars, GOT pointers)
             macho.segments.iter().find_map(|seg| {
+                let segname = seg.name().ok().unwrap_or("").trim_end_matches('\0');
+                if segname != "__TEXT" { return None; }
                 if va >= seg.vmaddr && va < seg.vmaddr + seg.vmsize {
                     Some((seg.fileoff + (va - seg.vmaddr)) as usize)
                 } else { None }
             })?
         }
         goblin::Object::Elf(elf) => {
-            // Only read strings from data sections (.rodata, .data, .dynstr)
-            // Skip .comment, .note, .debug sections to avoid false matches
+            // Only read strings from read-only data sections (.rodata, .dynstr)
+            // Skip .bss (no data), .data (global vars), .comment, .note, .debug
             elf.section_headers.iter().find_map(|sh| {
                 if sh.sh_addr == 0 || va < sh.sh_addr || va >= sh.sh_addr + sh.sh_size {
                     return None;
                 }
+                // SHT_NOBITS (8) = .bss — no actual data in file
+                if sh.sh_type == 8 { return None; }
                 // SHT_PROGBITS (1) with SHF_ALLOC (2) — loaded into memory
                 let is_alloc = sh.sh_flags & 0x2 != 0;
                 // Reject executable sections (code, not data)
                 let is_exec = sh.sh_flags & 0x4 != 0;
-                if is_alloc && !is_exec {
+                // Reject writable sections (.data, .bss — global vars, not strings)
+                let is_write = sh.sh_flags & 0x1 != 0;
+                if is_alloc && !is_exec && !is_write {
                     Some((sh.sh_offset + (va - sh.sh_addr)) as usize)
                 } else { None }
             })?
@@ -2693,17 +2749,31 @@ fn try_read_string(va: u64, ctx: &PrintCtx) -> Option<String> {
     let max = 200.min(binary.len() - file_offset);
     let slice = &binary[file_offset..file_offset + max];
     let null_pos = slice.iter().position(|&b| b == 0)?;
-    if null_pos < 2 || null_pos > 120 { return None; } // reject very long "strings"
+    if null_pos > 120 { return None; } // reject very long "strings"
+    // Allow empty strings (null_pos == 0) and single-char strings (null_pos == 1)
+    if null_pos == 0 { return Some(String::new()); }
     let s = std::str::from_utf8(&slice[..null_pos]).ok()?;
     // Reject strings that look like compiler metadata or partial data
     // Reject strings that look like compiler metadata, partial data, or non-strings
     if s.contains("GCC:") || s.contains("clang") || s.starts_with(".")
         || s.contains("ubuntu") || s.contains("20160") || s.contains("2017")
-        || s.contains("5.4.0") || s.contains("7.3.0") || s.contains("Debian")
+        || s.contains("Debian")
         || s.starts_with(")") || s.starts_with("]")
         || (s.len() <= 4 && s.chars().all(|c| c.is_ascii_digit()))
-        // Reject strings that are ALL digits (look like version numbers)
+        // Reject strings that are ALL digits or version-like (X.Y.Z)
         || s.chars().all(|c| c.is_ascii_digit() || c == '.')
+        // Reject strings containing version patterns like "7.5.0", "4) 7.5.0"
+        || {
+            let has_version = s.split(|c: char| !c.is_ascii_digit() && c != '.')
+                .any(|part| {
+                    let dots: Vec<&str> = part.split('.').collect();
+                    dots.len() >= 2 && dots.iter().all(|d| !d.is_empty() && d.len() <= 3 && d.chars().all(|c| c.is_ascii_digit()))
+                });
+            has_version && null_pos < 20
+        }
+        // Reject strings from inside .bss/.data global arrays that happen to contain
+        // readable text from adjacent sections (e.g., GCC version string fragments)
+        || (null_pos <= 8 && s.bytes().any(|b| b < 0x20 && b != b'\n' && b != b'\t'))
     { return None; }
     if s.chars().all(|c| c.is_ascii_graphic() || c == ' ' || c == '\n' || c == '\t') {
         Some(s.to_string())
