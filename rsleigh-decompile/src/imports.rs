@@ -1,5 +1,81 @@
 use std::collections::HashMap;
 
+/// Demangle a C++ symbol name if applicable, returning a simplified form.
+fn demangle_name(name: &str) -> String {
+    // Strip @@ version suffix first
+    let clean = name.split("@@").next().unwrap_or(name);
+    // Strip __chk suffix (e.g., __strcpy_chk → strcpy)
+    let clean = if clean.starts_with("__") && clean.ends_with("_chk") {
+        &clean[2..clean.len()-4]
+    } else { clean };
+    let clean = clean.to_string();
+    // Try C++ demangling
+    if let Ok(sym) = cpp_demangle::Symbol::new(name.as_bytes()) {
+        let Ok(demangled) = sym.demangle() else { return clean; };
+        let demangled = demangled;
+        // Simplify common patterns
+        simplify_cpp_name(&demangled)
+    } else {
+        clean
+    }
+}
+
+/// Simplify demangled C++ names for readability.
+fn simplify_cpp_name(name: &str) -> String {
+    // std::operator<<(std::basic_ostream<char, ...>&, char const*)
+    // → cout << (just show the operator)
+    if name.contains("operator<<") && name.contains("basic_ostream") && name.contains("char const*") {
+        return "cout_write".to_string();
+    }
+    if name.contains("operator<<") && name.contains("basic_ostream") {
+        return "cout_write".to_string();
+    }
+    if name.contains("operator>>") && name.contains("basic_istream") {
+        return "cin_read".to_string();
+    }
+    // std::basic_string<char, ...>::basic_string(...) → string()
+    if name.contains("basic_string") && name.contains("::basic_string") {
+        return "string_ctor".to_string();
+    }
+    if name.contains("basic_string") && name.contains("::~basic_string") {
+        return "string_dtor".to_string();
+    }
+    // std::basic_ifstream<char, ...>::basic_ifstream(...) → ifstream()
+    if name.contains("basic_ifstream") && name.contains("::basic_ifstream") {
+        return "ifstream_ctor".to_string();
+    }
+    // std::allocator<char>::allocator() → alloc_ctor
+    if name.contains("allocator") && name.contains("::allocator") {
+        return "alloc_ctor".to_string();
+    }
+    if name.contains("allocator") && name.contains("::~allocator") {
+        return "alloc_dtor".to_string();
+    }
+    // For other C++ names, strip std:: prefix and template args
+    let mut s = name.replace("std::", "");
+    // Remove template parameters for readability
+    while let Some(start) = s.find('<') {
+        if let Some(end) = find_matching_angle(&s, start) {
+            s = format!("{}{}", &s[..start], &s[end + 1..]);
+        } else {
+            break;
+        }
+    }
+    // Clean up whitespace
+    s = s.replace("  ", " ").trim().to_string();
+    if s.len() > 60 { s.truncate(60); }
+    s
+}
+
+fn find_matching_angle(s: &str, start: usize) -> Option<usize> {
+    let mut depth = 0;
+    for (i, c) in s[start..].char_indices() {
+        if c == '<' { depth += 1; }
+        if c == '>' { depth -= 1; if depth == 0 { return Some(start + i); } }
+    }
+    None
+}
+
 /// Build a map of address → import function name from a binary.
 pub fn resolve_imports(binary: &[u8]) -> HashMap<u64, String> {
     let mut map = HashMap::new();
@@ -25,7 +101,7 @@ fn resolve_elf(elf: &goblin::elf::Elf, binary: &[u8], map: &mut HashMap<u64, Str
         if let Some(sym) = elf.dynsyms.get(reloc.r_sym) {
             if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
                 if !name.is_empty() {
-                    let clean = name.split("@@").next().unwrap_or(name).to_string();
+                    let clean = demangle_name(name);
                     got_to_name.insert(reloc.r_offset, clean.clone());
                     map.insert(reloc.r_offset, clean);
                 }
@@ -84,9 +160,7 @@ fn resolve_elf(elf: &goblin::elf::Elf, binary: &[u8], map: &mut HashMap<u64, Str
         if sym.st_value != 0 {
             if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
                 if !name.is_empty() {
-                    // Strip version suffix (e.g., "stdin@@GLIBC_2.2.5" → "stdin")
-                    let clean = name.split("@@").next().unwrap_or(name);
-                    map.insert(sym.st_value, clean.to_string());
+                    map.insert(sym.st_value, demangle_name(name));
                 }
             }
         }
@@ -97,8 +171,7 @@ fn resolve_elf(elf: &goblin::elf::Elf, binary: &[u8], map: &mut HashMap<u64, Str
         if let Some(sym) = elf.dynsyms.get(reloc.r_sym) {
             if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
                 if !name.is_empty() && reloc.r_offset != 0 {
-                    let clean = name.split("@@").next().unwrap_or(name);
-                    map.entry(reloc.r_offset).or_insert_with(|| clean.to_string());
+                    map.entry(reloc.r_offset).or_insert_with(|| demangle_name(name));
                 }
             }
         }
@@ -112,8 +185,7 @@ fn resolve_elf(elf: &goblin::elf::Elf, binary: &[u8], map: &mut HashMap<u64, Str
         {
             if let Some(name) = elf.strtab.get_at(sym.st_name) {
                 if !name.is_empty() && !name.starts_with("FUN_") {
-                    let clean = name.split("@@").next().unwrap_or(name);
-                    map.insert(sym.st_value, clean.to_string());
+                    map.insert(sym.st_value, demangle_name(name));
                 }
             }
         }

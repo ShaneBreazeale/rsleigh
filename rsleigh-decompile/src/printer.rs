@@ -1404,50 +1404,96 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         *line = new_line;
     }
 
-    // #NESTED: Remove void function calls nested inside other call arguments.
+    // #NESTED: Remove void/IO function calls nested inside other call arguments.
     // Pattern: func2(func1("..."), size, stream)  →  func1("..."); func2(buf, size, stream)
-    // When func1 is a void function (puts, printf without format return), it shouldn't
-    // appear as an argument to func2.
+    // Run iteratively to handle multiple levels of nesting.
     let void_funcs = ["puts", "printf", "fprintf", "fputs", "perror",
-                       "exit", "abort", "_exit", "free"];
-    for line in &mut lines {
-        let trimmed = line.trim().to_string();
-        // Look for patterns like outer_func(inner_func(...), ...)
-        for vf in &void_funcs {
-            let pattern = format!("{}(", vf);
-            // Check if a void func appears inside another function's argument list
-            // by looking for func_name( before it and , or ) after its closing paren
-            if let Some(inner_pos) = trimmed.find(&pattern) {
-                if inner_pos > 0 {
-                    let before = trimmed[..inner_pos].trim_end();
-                    // If the character before the void func is ( or , it's nested
-                    if before.ends_with('(') || before.ends_with(',') {
-                        // Find the matching closing paren for the inner call
-                        let inner_start = inner_pos + pattern.len();
-                        let mut depth = 1;
-                        let mut inner_end = inner_start;
-                        for (i, c) in trimmed[inner_start..].char_indices() {
-                            if c == '(' { depth += 1; }
-                            if c == ')' { depth -= 1; if depth == 0 { inner_end = inner_start + i + 1; break; } }
-                        }
-                        if depth == 0 {
-                            // Extract the inner call and remove it from args
-                            let inner_call = &trimmed[inner_pos..inner_end];
-                            let mut after = trimmed[inner_end..].trim_start().to_string();
-                            if after.starts_with(',') { after = after[1..].trim_start().to_string(); }
-                            let indent = line.len() - line.trim_start().len();
-                            let pad = " ".repeat(indent);
-                            // Replace with: inner_call;\n  outer(remaining_args)
-                            let remaining = format!("{}{}{}", &trimmed[..inner_pos], "buf", &after);
-                            // But only if the remaining line is valid
-                            if remaining.contains('(') {
-                                *line = format!("{}{};\n{}{}", pad, inner_call, pad, remaining.trim());
+                       "exit", "abort", "_exit", "free",
+                       "write", "read", "fgets", "fread", "fwrite",
+                       "sprintf", "snprintf", "strcspn", "strtok", "strcmp",
+                       "fflush", "fclose", "fopen", "setvbuf",
+                       "cout_write", "cin_read"];
+    for _round in 0..4 {  // iterate to peel nested layers
+        let mut changed = false;
+        for line in &mut lines {
+            let trimmed = line.trim().to_string();
+            for vf in &void_funcs {
+                let pattern = format!("{}(", vf);
+                if let Some(inner_pos) = trimmed.find(&pattern) {
+                    if inner_pos > 0 {
+                        let before = trimmed[..inner_pos].trim_end();
+                        if before.ends_with('(') || before.ends_with(',') {
+                            let inner_start = inner_pos + pattern.len();
+                            let mut depth = 1;
+                            let mut inner_end = inner_start;
+                            for (i, c) in trimmed[inner_start..].char_indices() {
+                                if c == '(' { depth += 1; }
+                                if c == ')' { depth -= 1; if depth == 0 { inner_end = inner_start + i + 1; break; } }
+                            }
+                            if depth == 0 {
+                                let inner_call = trimmed[inner_pos..inner_end].to_string();
+                                let after = trimmed[inner_end..].trim_start().to_string();
+                                let indent = line.len() - line.trim_start().len();
+                                let pad = " ".repeat(indent);
+                                // Build remaining: replace inner call with "buf", keeping proper comma separation
+                                let before_inner = &trimmed[..inner_pos];
+                                let after_clean = if after.starts_with(',') {
+                                    format!(", {}", after[1..].trim_start())
+                                } else {
+                                    after.clone()
+                                };
+                                let remaining = format!("{}buf{}", before_inner, after_clean);
+                                if remaining.contains('(') {
+                                    *line = format!("{}{};\n{}{}", pad, inner_call, pad, remaining.trim());
+                                    changed = true;
+                                    break;
+                                }
                             }
                         }
                     }
                 }
             }
         }
+        if !changed { break; }
+    }
+
+    // #SETVBUF: Collapse setvbuf init boilerplate.
+    // Pattern: RAX = *(stdout); setvbuf(RAX, 0, 2, 0); setvbuf(stdin, 0, 2, 0); ...
+    // → single comment or simplified init block
+    {
+        let mut j = 0;
+        while j < lines.len() {
+            let lt = lines[j].trim();
+            // Remove "RAX = *(stdout_sym);" — this is just loading stdout
+            if lt.starts_with("RAX = ") && (lt.contains("__TMC_END__") || lt.contains("stdout")) && lt.ends_with(';') {
+                lines.remove(j);
+                continue;
+            }
+            // Collapse consecutive setvbuf lines into one comment
+            if lt.starts_with("setvbuf(") {
+                let mut end = j;
+                while end + 1 < lines.len() && lines[end + 1].trim().starts_with("setvbuf(") {
+                    end += 1;
+                }
+                if end > j {
+                    // Multiple setvbuf calls — replace with a single comment
+                    let indent = lines[j].len() - lines[j].trim_start().len();
+                    let pad = " ".repeat(indent);
+                    for idx in (j + 1..=end).rev() { lines.remove(idx); }
+                    lines[j] = format!("{}// setvbuf init (stdout, stdin, stderr)", pad);
+                    j += 1;
+                    continue;
+                }
+            }
+            j += 1;
+        }
+    }
+
+    // #TMC: Replace __TMC_END__ with stdout in remaining lines
+    // __TMC_END__ is the GOT entry for stdout in many GCC-compiled binaries
+    for line in &mut lines {
+        *line = line.replace("*(__TMC_END__)", "stdout");
+        *line = line.replace("__TMC_END__", "stdout");
     }
 
     // #PHI: Remove phi() noise from output
