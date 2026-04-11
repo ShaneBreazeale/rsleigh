@@ -4,7 +4,7 @@ Compile Ghidra's SLEIGH architecture specs into native Rust decoders that disass
 
 ## What it does
 
-rsleigh parses `.slaspec` files (the same architecture definitions Ghidra ships), generates Rust code that decodes machine instructions into [P-code IR](https://ghidra.re/courses/languages/html/pcoderef.html), then decompiles that IR into readable pseudocode with string literals, import names, DWARF variable recovery, and control flow reconstruction.
+rsleigh parses `.slaspec` files (the same architecture definitions Ghidra ships), generates Rust code that decodes machine instructions into [P-code IR](https://ghidra.re/courses/languages/html/pcoderef.html), then decompiles that IR into readable pseudocode with function signatures, typed local variables, string literals, import names, DWARF variable recovery, and control flow reconstruction.
 
 It is the disassembly and decompilation backend for [Spectra](https://github.com/ShaneBreazeale/spectra), replacing the Ghidra JVM daemon entirely.
 
@@ -46,64 +46,89 @@ if (stage1() == 0) {
 From compiled C with DWARF debug info:
 
 ```c
-// factorial() — cleaner than Ghidra (no temp variable)
-if (n > 1) {
-    return n * factorial(n - 1);
-} else {
-    return 1;
+int factorial(int n) {
+    if (n > 1) {
+        return n * factorial(n - 1);
+    } else {
+        return 1;
+    }
 }
 
-// main() — imports, string literals, nested calls
-printf("add(3,4) = %d\n", add(3, 4));
-printf("factorial(6) = %d\n", factorial(6));
-printf("sum = %d\n", sum_array(nums, 5));
-printf("strlen = %d\n", string_length("hello world"));
-return 0;
+int main(void) {
+    printf("add(3,4) = %d\n", add(3, 4));
+    printf("factorial(6) = %d\n", factorial(6));
+    printf("sum = %d\n", sum_array(nums, 5));
+    printf("strlen = %d\n", string_length("hello world"));
+    return 0;
+}
 ```
 
 From real CTF binaries (stripped ELF, no source):
 
 ```c
-// Buffer overflow — win function visible immediately
-write(1, "-Warm Up-\n", 10);
-sprintf(buf, "%p\n", easy);      // leaks easy() address
-gets(buf);                        // overflow here
+// hkcert UAF — win function immediately visible
+void get_shell(void) {
+    system("/bin/sh");
+}
+
+// Crypto-Cat login — buffer overflow with all strings resolved
+puts("Enter admin password: ");
+gets(var_12);                        // overflow here
+strcmp(var_12);
+puts("Correct Password!");
 
 // Heap menu — full string + import resolution
-puts("What would you like to do?");
-puts("\t1. Add a friend");
-if (var_10 == 4) { edit_friend(); }
-else if (var_10 == 3) { display(); }
-else if (var_10 == 2) { remove_friend(); }
-else { add_friend(); }
+void menu(long param_0) {
+    print("Welcome to ABC Zoo!!!");
+    print("1) Add animal");
+    printf("> ");
+    scanf("%d", buf);
+}
 ```
 
 From -O2 optimized code:
 
 ```c
-// Branchless max (CMOV expansion)
-if (EDI > ESI) { return EDI; }
-return ESI;
+// Division by constant recognized
+return RAX % 3;                      // was: x * 0x55555556 >> 32
 
-// Compiler-inlined constants
-printf("add(3,4) = %d\n", 7);
-printf("factorial(6) = %d\n", 720);
+// Switch/case from jump table
+switch (d) {
+    case 0: return "Sunday";
+    case 1: return "Monday";
+    ...
+}
+
+// For-loop recovery
+for (; len > i; i++) {
+    total = arr[i] + total;
+}
 ```
 
-Tested against 25+ CTF binaries from CSAW, HSCTF, DiceCTF, Google CTF, Nightmare, and UTCTF.
+From C++ binaries (Mach-O, demangled):
+
+```c
+phttp::Initialize();
+phttp::Server::Server();
+pthread_create();
+phttp::Server::ListenAndRun();
+phttp::Shutdown();
+```
+
+Tested against 30+ CTF binaries from CSAW, HSCTF, DiceCTF, Google CTF, hkcert, Crypto-Cat, and fbctf. Tested on Sysinternals PE64 tools (PsExec, strings64, whois64) and tinyssh.
 
 ## Architectures
 
 | Architecture | Constructors | Notes |
 |---|---|---|
-| x86-64 | 5700+ | Full instruction set |
-| x86-32 | 4200+ | SSE/AVX, PE32 IAT resolution |
+| x86-64 | 5700+ | Full instruction set, Windows x64 + SysV calling conventions |
+| x86-32 | 4200+ | SSE/AVX, PE32 IAT, cdecl/thiscall, ELF32 PIE string resolution |
 | AArch64 | 3500+ | NEON + SVE |
 | ARM32 | 1200+ | ARMv7 + Thumb |
 | MIPS32 | 900+ | FPU, DSP, MIPS16, microMIPS |
 | RISC-V 64 | 500+ | RV64GC + F/D/B/K/P/Q/V/C |
 
-**Binary formats:** ELF, Mach-O, PE — auto-detected from headers.
+**Binary formats:** ELF (32/64), Mach-O (x86-64, AArch64), PE (32/64) — auto-detected from headers. Function discovery from symbols, exports, and CALL-target scanning for stripped binaries.
 
 ## How it works
 
@@ -117,11 +142,11 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 
 **Decompiler pipeline (5 passes):**
 
-1. **CFG** — P-code to basic blocks, branch resolution, IAT call target resolution
-2. **SSA** — Static single assignment with phi insertion
-3. **Fold** — Expression folding, dead code elimination, condition recovery from x86/ARM flags, call argument collection (register ABI for x86-64, stack pushes for x86-32 cdecl)
-4. **Structure** — If/else and while loop recovery via dominators and back-edges
-5. **Printer** — C emission with register tracking, copy elision, import resolution (PLT/GOT, IAT), DWARF name recovery, string literal detection, stack variable naming
+1. **CFG** — P-code to basic blocks, branch resolution, IAT call target resolution, x86-32 CALL/RET boilerplate stripping
+2. **SSA** — Iterative dataflow with phi insertion (multi-pass convergence for loop-carried variables)
+3. **Fold** — Expression folding, dead code elimination, condition recovery, type inference (signed/float/pointer/bool), calling convention detection (SysV/Win64/cdecl), division-by-constant recognition, modulo pattern matching
+4. **Structure** — If/else, while/for loop recovery, switch/case from jump tables, depth-limited recursion (max 256)
+5. **Printer** — Function signatures with typed params, local variable declarations, Ghidra-style auto-naming (iVar/lVar), C++ demangling, import resolution (PLT/GOT/IAT), errno recognition, string literal detection, ELF32 PIE GOT-relative resolution, stack noise elimination
 
 ## Rust API
 
@@ -167,7 +192,7 @@ rsleigh/
 
 ## Tests
 
-~6000 assertions across 9 categories:
+~6000 assertions across 10 categories:
 
 - **Golden P-code** — 145 exact decode assertions across all architectures
 - **Stress/boundary** — sign-extension, overflow, REX prefix, SIB addressing edge cases
@@ -177,15 +202,25 @@ rsleigh/
 - **Ghidra differential** — ~300 instructions compared against Ghidra's P-code output
 - **Decompiler comparison** — 11 functions decompiled side-by-side with Ghidra 12
 - **CTF validation** — 30+ real binaries decompiled successfully
-- **Fuzz** — 5000 random byte sequences, zero panics
+- **Decoder fuzz** — 1000 random byte sequences, zero panics
+- **Decompiler fuzz** — 200 random instruction sequences through full pipeline, zero panics
+
+## Security
+
+The decompiler is hardened for untrusted input:
+- Bounds-checked VarId access (sentinel return for OOB, no panics)
+- Recursion depth limit (256) in structure recovery
+- Checked arithmetic in PLT/GOT/IAT offset calculations
+- Decompiler fuzz test catches panics from pathological P-code
+- Zero `unsafe` blocks in the decompiler and API crates
 
 ## Known limitations
 
-- No type inference — all variables are register-width integers
+- Expression completeness — some register values not traced back to their defining expression
 - Loop conditions not always recovered to source-level comparisons
 - x86-32 sequential TEST/JNZ patterns sometimes nest incorrectly
 - Register-indirect calls (`CALL EDI` loaded from IAT) not resolved to import names
-- JVM/WASM-only SLEIGH features (`ExprNew`, `ExprCPool`) return 0
+- No RTTI/vtable resolution for C++ binaries
 
 ## License
 

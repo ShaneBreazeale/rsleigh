@@ -7,98 +7,87 @@
 
 ## Current State
 
-rsleigh is a working end-to-end disassembly and decompilation pipeline for 6 architectures. It parses Ghidra `.slaspec` files, generates native Rust decoders, and decompiles P-code IR into C-like pseudocode. Integrated into Spectra as the native analysis backend.
+rsleigh is a working end-to-end disassembly and decompilation pipeline for 6 architectures, producing Ghidra-comparable output for many function types. Tested against Sysinternals PE64 tools (PsExec, strings64), tinyssh, real CTF binaries, and compiled C/C++ code.
 
 ### Completed Milestones
 
 - **SLEIGH parser + codegen** — parses all 6 architecture slaspecs, generates split Rust crates
-- **Decoder API** — `rsleigh-api` decodes instructions across x86-64, x86-32, AArch64, ARM32, MIPS32, RISC-V 64
-- **P-code IR + optimizer** — `pcode-ir` crate with peephole optimization (no_std, zero deps)
-- **5-pass decompiler** — CFG → SSA → fold → structure → print, producing readable C pseudocode
-- **Type inference** — signed/unsigned/float/pointer/bool propagation from P-code operation context
-- **Import resolution** — ELF PLT/GOT, Mach-O indirect symbols, PE IAT (including UPX-unpacked)
+- **Decoder API** — x86-64, x86-32, AArch64, ARM32, MIPS32, RISC-V 64
+- **P-code IR + optimizer** — peephole optimization (no_std, zero deps)
+- **5-pass decompiler** — CFG → SSA → fold → structure → print
+- **Iterative SSA dataflow** — multi-pass convergence for loop headers and merge points
+- **Type inference** — signed/unsigned/float/pointer/bool from P-code operation context
+- **Calling convention detection** — SysV (Linux/macOS), Windows x64, x86-32 cdecl/thiscall
+- **Import resolution** — ELF PLT/GOT (CET-enabled), Mach-O indirect symbols, PE IAT (UPX-unpacked)
+- **C++ demangling** — ELF and Mach-O symbol demangling via cpp_demangle
+- **Function signatures** — typed parameters, return type, real function names from symbols
+- **Local variable declarations** — Ghidra-style `long lVar1; int iVar2;` blocks
+- **Array indexing** — `param_0[2]` from struct field offsets
+- **Pattern recognition** — division-by-constant, modulo, for-loops, switch/case, string merging
 - **DWARF debug info** — parameter names, local variables, struct fields (DWARF4/5, macOS dSYM)
-- **Binary format support** — ELF, Mach-O, PE32/PE64 auto-detected
+- **Errno recognition** — `__error()` + store → `errno = N /* EINVAL */`
+- **ELF32 PIE support** — GOT-relative string resolution, __x86.get_pc_thunk hiding
+- **PE function discovery** — entry point + CALL-target scanning for stripped binaries
+- **Security hardening** — bounds-checked VarId, recursion limits, checked arithmetic, fuzz tests
 - **CLI tool** — `rsleigh` binary for decompiling any supported binary
-- **Spectra integration** — native backend with ASM/P-code/decompiler views, syntax highlighting
-- **Test suite** — 9 categories, ~6000 assertions, 30+ CTF binaries, zero fuzz panics
+- **Spectra integration** — native backend with ASM/P-code/decompiler views
+
+### Ghidra Comparison (PsExec64.exe)
+
+| Feature | Ghidra 11.3 | rsleigh |
+|---|---|---|
+| Array indexing | `param_1[2] = 0` | `param_0[2] = 0` |
+| String resolution | `"bad array new length"` | `"bad array new length"` |
+| Local declarations | `ulonglong uVar2;` | `long lVar1;` |
+| Function signature | `void FUN_140001100(...)` | `int func_140001100(...)` |
+| Param count (Win64) | 3 (correct) | 3 (correct) |
+| vtable resolution | `std::bad_array_new_length::vftable` | `0x14004a830` |
+| C++ demangling | Yes (ELF) | Yes (ELF + Mach-O) |
 
 ---
 
 ## Active Work
 
-### Decompiler Quality
+### Expression Completeness (P1)
+- Register values not always traced back to their defining expression
+- `iVar1 * factorial(n - 1)` should show `n * factorial(n - 1)`
+- Root cause: `format_var` shows auto-named register instead of SSA expression
+- Needs SSA-level provenance tracking (distinguishing call returns from param copies)
+- Printer-level Var chain following was attempted but caused regressions
 
-**Control flow structure recovery** (P1)
+### Control Flow Structure Recovery (P1)
 - Sequential TEST/JNZ patterns sometimes nest incorrectly as deep if/else trees
-- Should produce flat sequential `if (!result) { error(); }` blocks
-- Root cause: dominator-based structure recovery in `structure.rs` doesn't distinguish
-  sequential guards from nested conditionals
-- Fix: detect chains of blocks with single-statement bodies targeting the same merge point
+- Dominator-based recovery doesn't distinguish sequential guards from nested conditionals
 
-**Register-indirect call resolution** (P2)
-- `CALL EDI` where EDI was loaded from IAT earlier in the function not resolved
-- Direct IAT calls (`CALL [0x428298]`) already resolve via `resolve_callind_target`
-- Need: forward dataflow tracking for register values loaded from known IAT addresses
-- Scope: `fold.rs` constant propagation needs to track through register copies
+### RTTI / Vtable Resolution (P2)
+- PE `.rdata` section contains vtable pointers with RTTI type info
+- Could resolve `0x14004a830` → `std::bad_array_new_length::vftable`
+- Requires parsing PE exception directory and type descriptors
 
-**CMOV/CSEL return value recovery** (P2)
-- `max_val` and `abs_val` at -O2 show empty `return;` instead of the conditional value
-- CMOV expansion creates synthetic if/else blocks but the value doesn't flow to return
-- Fix: track the output register of CMOV through the merge point to the return
-
-**x86-32 ESP noise** (P3)
-- Function prologues still show some raw ESP manipulation
-- SSA-level stack argument collection works but prologue/epilogue PUSH/POP of
-  callee-saved registers still visible
-- Fix: recognize and elide EBP frame setup + callee-saved register save/restore patterns
-
-### Type System
-
-**Deeper pointer inference** (P2)
+### Pointer Type Propagation (P2)
+- `long param_0` should be `undefined8 *param_0` when used as array base
 - Track pointer arithmetic: `ptr + offset` stays pointer, `ptr - ptr` → integer
-- Infer pointee types from Load/Store sizes: `*(int*)(ptr)` when loading 4 bytes through a pointer
-- Struct field access: consecutive loads at known offsets from same base → struct fields
-
-**Float constant display** (P3)
-- Float constants loaded from binary memory should display as `1.0f`, `3.14`, etc.
-- Currently shows hex addresses for constants loaded via `MOVSD xmm0, [rip+offset]`
-- Partial support exists for reciprocal detection (`* *(addr)` → `/ 1024.0`)
-
-### Architecture Support
-
-**PE32 calling convention refinement** (P2)
-- stdcall: callee cleans stack (detected via `RET N`)
-- fastcall: first 2 args in ECX/EDX, rest on stack
-- Currently only cdecl (caller-cleans) and basic thiscall (ECX=this)
-
-**MIPS delay slots** (P3)
-- Delay slot instruction should be folded into the branch semantics
-- Currently emitted as a separate instruction after the branch
+- Infer pointee types from Load/Store sizes
 
 ---
 
 ## Future Work
 
-### Near-term (well-understood, bounded scope)
+### Near-term
+- **do-while loop detection** — Ghidra detects these, rsleigh only has while
+- **Pointer cast cleanup** — `*(uint64_t*)(param_0)` → `*param_0` when type is known
+- **Windows API constant annotation** — `0xfffffff5` → `STD_ERROR_HANDLE`
+- **Return value propagation** — `return param_0` instead of `return 0x14004a830`
 
-- **Division-by-constant pattern matching** — recognize `x * 0x92492493 >> 34` as `x / 7`
-- **Switch/case recovery** — jump table detection works, need structured `switch` output
-- **For-loop recovery** — detect `init; while (cond) { body; increment; }` → `for` loops
-- **String concatenation** — consecutive `printf` / `puts` with related strings → single operation
-
-### Medium-term (significant engineering)
-
+### Medium-term
 - **Interprocedural analysis** — propagate types and signatures across call boundaries
 - **Stack frame reconstruction** — infer local variable layout from access patterns
-- **Array/struct type recovery** — base+index*scale patterns → array access, field offsets → structs
-- **Calling convention auto-detection** — infer from stack behavior instead of assuming
+- **Full struct/array type recovery** — base+index*scale → typed arrays
 
-### Long-term (research-grade)
-
-- **Full type inference** — Hindley-Milner style constraint solving across the function
-- **Higher-level pattern recovery** — vtable dispatch, exception handling, coroutines
-- **Cross-function decompilation** — inline small callees, propagate constants across calls
+### Long-term
+- **Constraint-based type inference** — Hindley-Milner across the function
+- **vtable dispatch recognition** — virtual method calls → readable form
+- **Cross-function decompilation** — inline small callees, propagate constants
 
 ---
 
@@ -110,9 +99,12 @@ rsleigh is a working end-to-end disassembly and decompilation pipeline for 6 arc
 bytes + addr → Decoder (rsleigh-api) → Instruction { disassembly, ops: Vec<PcodeOp> }
                                                     ↓
                          Decompiler (rsleigh-decompile):
-                           CFG → SSA → fold (type inference, conditions, args)
-                                         → structure (if/else, while)
-                                           → printer (C output, imports, DWARF, strings)
+                           CFG (branch resolution, IAT, CALL stripping)
+                             → SSA (iterative dataflow, phi insertion)
+                               → fold (type inference, conditions, args, calling conv)
+                                 → structure (if/else, while/for, switch, depth limit)
+                                   → printer (signatures, declarations, auto-naming,
+                                              demangling, imports, DWARF, strings, errno)
 ```
 
 ---
@@ -129,4 +121,5 @@ bytes + addr → Decoder (rsleigh-api) → Instruction { disassembly, ops: Vec<P
 | Ghidra differential | ~300 | P-code output compared against Ghidra |
 | Decompiler comparison | 11 | Side-by-side with Ghidra 12 |
 | CTF validation | 30+ | Real stripped binaries decompiled successfully |
-| Fuzz | 5000 | Random bytes, zero panics |
+| Decoder fuzz | 1000 | Random bytes, zero panics |
+| Decompiler fuzz | 200 | Random instruction sequences through full pipeline, zero panics |

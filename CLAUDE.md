@@ -117,6 +117,12 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 
 5-pass pipeline: CFG → SSA → fold → structure recovery → C printer
 
+**SSA builder (ssa.rs):**
+- Iterative dataflow: multi-pass convergence (max 4 passes) for loop headers and merge points
+- Multi-predecessor blocks inherit from first processed predecessor
+- Blocks re-processed when predecessor exit vars change (fixes back-edges)
+- Phi insertion at join points from converged exit maps
+
 **CFG builder (cfg.rs):**
 - CallInd resolution: `CALL [IAT_addr]` → traces Load source to constant, converts to Direct
 - x86-32 CALL boilerplate stripping: removes return address push from P-code ops
@@ -130,9 +136,13 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - Condition recovery: compound Jcc patterns → comparisons
   (BoolAnd(BoolNot(ZF), IntEq(OF,SF)) → JG → `a > b`)
 - Call return value propagation
-- Parameter naming from ABI registers
-- Call argument collection from arg register writes (x86-64)
+- Parameter naming from ABI registers (SysV or Windows x64, auto-detected)
+- Call argument collection from arg register writes (x86-64 SysV: RDI/RSI/RDX/RCX/R8/R9,
+  Windows x64: RCX/RDX/R8/R9)
 - Stack-pushed argument collection for cdecl/thiscall (x86-32)
+- Division-by-constant recognition (multiply+shift → `x / 7`, SAR+ADD → `x / 7`)
+- Modulo pattern matching (`x - (x/D)*D` → `x % D`)
+- Loop body preservation (register writes in back-edge blocks protected from DCE)
 - **Type inference** (3-phase: seed → forward → backward propagation):
   - Float: FloatAdd/FloatMult/Int2Float → `float`/`double`
   - Signed: SDiv/SLess/Sext/Neg → `int`/`int64_t`
@@ -141,17 +151,31 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
   - Bool: comparisons, flag registers → boolean context
 
 **Printer (printer.rs):**
+- Function signatures: `int func_name(long param_0, int param_1)` with typed return
+- Local variable declarations: `long lVar1; int iVar2;` Ghidra-style block
+- Auto-named registers: `R14` → `lVar1`, `R12D` → `iVar2`, `DIL` → `bVar1`
+- Array indexing: `->field10` → `[2]` for aligned offsets
+- C++ demangling: `_ZN5phttp10InitializeEv` → `phttp::Initialize` (ELF + Mach-O)
+- Errno recognition: `__error(); *(uint32_t*)(RAX) = 22` → `errno = 22 /* EINVAL */`
+- POSIX errno annotations: `== 4 /* EINTR */`, `!= 35 /* EAGAIN */`
 - RegTracker: per-block register value tracking at print time
 - Call return inlining: `printf("...", add(3, 4))` not `add(); printf("...", add())`
 - Stack alias resolution: var_c → var_8 → param_0 chain
 - Save/restore elision: register spills across calls hidden
-- Store-before-return elision
-- Import name resolution from PLT/GOT stubs (ELF/Mach-O) and IAT (PE32/PE64)
-- PE IAT resolution: walks import descriptors, handles UPX-unpacked binaries with zeroed ILT
+- Import name resolution: ELF PLT/GOT (CET bnd jmp), Mach-O indirect, PE IAT (UPX-unpacked)
+- ELF32 PIE: GOT-relative string resolution, __x86.get_pc_thunk hiding
 - DWARF debug info: parameter names from `.debug_info` (DWARF4/5, macOS dSYM auto-discovery)
-- String literal detection from read-only binary sections (filters out writable .data)
-- EBP/RBP-relative stack variable auto-naming (var_N) with DWARF override
-- x86-32 ESP boilerplate elimination (PUSH/POP noise, return address pushes)
+- String literal detection from read-only binary sections (filters .data, magic constants)
+- For-loop recovery: `while` + increment → `for (; cond; i++)`
+- Switch/case: jump table → `switch (d) { case 0: return "Sunday"; }`
+- Division-by-constant display: `x * 0x55555556 >> 32` → `x / 3`
+- Modulo display: `x/D * D; x - result` → `x % D`
+- Consecutive printf/puts merging into single call
+- Dead store before return removal
+- Unreachable return after complete if/else removal
+- Constant-vs-constant comparison folding
+- x86-32 ESP / x86-64 RSP stack noise elimination
+- Duplicate ESP/RSP store dedup (cdecl arg push noise)
 
 ### Peephole Optimizer (`pcode-ir/src/lib.rs`)
 
@@ -168,13 +192,15 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 
 - **ExprValue::Context** returns 0 (not used by x86/ARM/RISC-V)
 - **ExprNew / ExprCPool** returns 0 (JVM/WASM only)
-- **Type inference** — basic signed/float/pointer/bool propagation implemented;
-  no full constraint-based inference, no struct/array recovery, no interprocedural types
-- **Expression nesting depth** — some redundant register loads remain visible
+- **Expression completeness** — some register values not traced back to their defining
+  expression (e.g., `iVar1 * factorial(n-1)` instead of `n * factorial(n-1)`)
+- **Type inference** — basic signed/float/pointer/bool propagation; no constraint-based
+  inference, no struct/array recovery, no interprocedural types
+- **RTTI / vtable resolution** — PE vtable addresses shown as hex, not resolved to C++ type names
 - **Loop conditions** — `while (OF == SF)` not always recovered to source comparison
 - **x86-32 control flow** — sequential TEST/JNZ patterns sometimes nest incorrectly
-- **x86-32 register-indirect calls** — `CALL EDI` where EDI was loaded from IAT earlier
-  in the function not resolved to import names (only direct IAT calls resolved)
+- **Register-indirect calls** — `CALL EDI` where EDI was loaded from IAT earlier
+  not resolved to import names (only direct IAT calls resolved)
 
 ---
 
