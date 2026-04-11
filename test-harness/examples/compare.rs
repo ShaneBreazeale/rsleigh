@@ -121,8 +121,31 @@ fn run() {
                     }
                 }
             }
+            // If no exports, discover functions from entry point + CALL targets
             if syms.is_empty() {
-                eprintln!("PE binary has no exported symbols. Use a tool like dumpbin to find function addresses.");
+                let entry = base + pe.entry as u64;
+                syms.push((entry, "entry".to_string()));
+                // Scan .text for E8 (CALL rel32) to discover function addresses
+                for seg in &segs {
+                    let (va, sz, fo) = *seg;
+                    let fo = fo as usize;
+                    let sz = (sz as usize).min(data.len().saturating_sub(fo));
+                    for i in 0..sz.saturating_sub(5) {
+                        if data[fo + i] == 0xE8 {
+                            let rel = i32::from_le_bytes([
+                                data[fo+i+1], data[fo+i+2], data[fo+i+3], data[fo+i+4],
+                            ]);
+                            let call_site = va + i as u64;
+                            let target = (call_site as i64 + 5 + rel as i64) as u64;
+                            if target >= va && target < va + sz as u64 && target != call_site + 5 {
+                                syms.push((target, format!("func_{:x}", target)));
+                            }
+                        }
+                    }
+                }
+                syms.sort_by_key(|s| s.0);
+                syms.dedup_by_key(|s| s.0);
+                eprintln!("Discovered {} functions from CALL targets", syms.len());
             }
             (arch, segs, syms)
         }
