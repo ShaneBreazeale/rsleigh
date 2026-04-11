@@ -1462,6 +1462,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             }
         }
         if !changed { break; }
+        // Re-split lines after unwinding (unwinder inserts \n within entries)
+        lines = lines.iter().flat_map(|l| l.split('\n').map(|s| s.to_string())).collect();
     }
 
     // #SETVBUF: Collapse setvbuf init boilerplate.
@@ -1638,13 +1640,32 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
-    // #DEDUP: Remove exact duplicate consecutive lines (from nested call unwinding)
+    // #DEDUP: Remove duplicate call lines within the same scope.
+    // The nested-call unwinding can create the same call line multiple times.
+    // Remove non-consecutive duplicates of function calls at the same indent level.
     {
         let mut i = 0;
-        while i + 1 < lines.len() {
-            if !lines[i].trim().is_empty() && lines[i].trim() == lines[i + 1].trim() {
-                lines.remove(i + 1);
-                continue;
+        while i < lines.len() {
+            let lt = lines[i].trim().to_string();
+            let indent = lines[i].len() - lines[i].trim_start().len();
+            // Only dedup function calls (contain "(" and end with ";")
+            if !lt.is_empty() && lt.contains('(') && lt.ends_with(';')
+                && !lt.starts_with("if ") && !lt.starts_with("while ")
+                && !lt.starts_with("for ") && !lt.starts_with("return ")
+            {
+                // Check if an identical line exists later at the same indent
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let jt = lines[j].trim();
+                    let j_indent = lines[j].len() - lines[j].trim_start().len();
+                    if j_indent == indent && jt == lt {
+                        lines.remove(j);
+                        continue;
+                    }
+                    // Stop at scope boundaries (different indent going down, or closing brace)
+                    if j_indent < indent && !jt.is_empty() { break; }
+                    j += 1;
+                }
             }
             i += 1;
         }
