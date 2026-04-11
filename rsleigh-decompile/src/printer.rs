@@ -2214,7 +2214,14 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         ];
         for (val, ch) in ascii_chars {
             // Match: == N), != N), > N), < N), >= N), <= N) where N is the ASCII value
-            // But only in conditions (after if/while), not in general expressions
+            // Only in conditions with byte-sized operands (string/char comparisons).
+            // Guard: require a byte-sized context indicator — uint8_t cast, char pointer
+            // deref *(s), or a known string function (strcmp, strncmp, fgets, etc.)
+            let has_byte_context = line.contains("uint8_t") || line.contains("*(s")
+                || line.contains("*(param_") || line.contains("strcmp")
+                || line.contains("strncmp") || line.contains("fgets")
+                || line.contains("char") || line.contains("[");
+            if !has_byte_context { continue; }
             if line.contains(&format!("== {})", val)) || line.contains(&format!("!= {})", val))
                 || line.contains(&format!("> {})", val)) || line.contains(&format!("< {})", val))
                 || line.contains(&format!(">= {})", val)) || line.contains(&format!("<= {})", val))
@@ -2223,13 +2230,24 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 if !line.contains("\"") || line.contains("if (") || line.contains("while (") {
                     *line = line.replace(&format!("== {})", val), &format!("== {})", ch));
                     *line = line.replace(&format!("!= {})", val), &format!("!= {})", ch));
-                    *line = line.replace(&format!("> {})", val), &format!("> {})", ch));
-                    *line = line.replace(&format!("< {})", val), &format!("< {})", ch));
-                    *line = line.replace(&format!(">= {})", val), &format!(">= {})", ch));
-                    *line = line.replace(&format!("<= {})", val), &format!("<= {})", ch));
+                    // Use " > " (with spaces) to avoid matching ">>" shift operators
+                    *line = line.replace(&format!(" > {})", val), &format!(" > {})", ch));
+                    *line = line.replace(&format!(" < {})", val), &format!(" < {})", ch));
+                    *line = line.replace(&format!(" >= {})", val), &format!(" >= {})", ch));
+                    *line = line.replace(&format!(" <= {})", val), &format!(" <= {})", ch));
                     *line = line.replace(&format!("- {} ==", val), &format!("== {}  //", ch));
                 }
             }
+        }
+
+        // Remove x86 shift mask noise: ">> N & 31" → ">> N", "<< N & 63" → "<< N"
+        // x86 shifts implicitly mask the count; the P-code emits an explicit IntAnd.
+        // Only strip when directly after a shift expression (not standalone & 31).
+        if line.contains(">> ") && line.contains(" & 31") {
+            *line = line.replace(" & 31", "");
+        }
+        if line.contains(">> ") && line.contains(" & 63") {
+            *line = line.replace(" & 63", "");
         }
 
         // macOS ctype: __maskrune(FLAGS) → isXXX() function names
@@ -4039,17 +4057,39 @@ fn format_const(val: u64, size: u32) -> String {
 
 /// Try to decode a constant value as packed ASCII bytes (little-endian).
 /// Returns Some("text") if ALL bytes are printable ASCII (or null terminator).
-/// Check if a value looks like a virtual address (common image base ranges).
-/// Used to avoid false-positive ASCII string decoding of address constants.
+/// Check if a value looks like a virtual address or magic constant that
+/// should NOT be decoded as packed ASCII.
 fn looks_like_address(val: u64) -> bool {
     // PE32 typical: 0x00400000..0x10000000
     // PE64 typical: 0x140000000..0x180000000
     // ELF typical: 0x08000000..0x10000000 or 0x400000..0x800000
     // Mach-O typical: 0x100000000..0x200000000
-    (val >= 0x00400000 && val < 0x10000000)
+    if (val >= 0x00400000 && val < 0x10000000)
         || (val >= 0x08000000 && val < 0x10000000)
         || (val >= 0x100000000 && val < 0x200000000)
         || (val >= 0x140000000 && val < 0x180000000)
+    {
+        return true;
+    }
+    // Constants with repeating byte patterns are almost always compiler-generated
+    // magic multiply constants for division (e.g., 0x66666667 for /10 in 32-bit,
+    // 0x6666666666666667 for /10 in 64-bit, 0x92492493 for /7).
+    // These should NOT be decoded as ASCII strings.
+    if val > 0xFFFF {
+        let nbytes = if val > 0xFFFFFFFF { 8 } else { 4 };
+        let bytes = val.to_le_bytes();
+        let unique_bytes: std::collections::HashSet<u8> = bytes[..nbytes].iter().copied().collect();
+        // If fewer than 3 unique byte values, it's likely a magic constant
+        if unique_bytes.len() <= 2 { return true; }
+        // Also catch near-repeating patterns where most bytes are the same
+        // (e.g., 0x92492493 has bytes [0x93, 0x24, 0x49, 0x92] — 4 unique, but
+        //  the nibble pattern is diagnostic of a magic constant)
+        if nbytes == 4 && unique_bytes.len() <= 4 {
+            // Check if the value is in the typical magic multiply range (> 0x10000000)
+            if val > 0x10000000 { return true; }
+        }
+    }
+    false
 }
 
 fn try_decode_ascii_const(val: u64, size: u32) -> Option<String> {
