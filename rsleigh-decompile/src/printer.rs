@@ -3540,6 +3540,108 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #WIN32_CONSTANTS: Annotate Windows API constants for malware analysis.
+    for line in &mut lines {
+        // Process status
+        *line = line.replace("== 259)", "== 259 /* STILL_ACTIVE */)");
+        *line = line.replace("!= 259)", "!= 259 /* STILL_ACTIVE */)");
+        // GetStdHandle
+        *line = line.replace("(0xfffffff5)", "(STD_ERROR_HANDLE)");
+        *line = line.replace("(0xfffffff6)", "(STD_OUTPUT_HANDLE)");
+        *line = line.replace("(0xfffffff4)", "(STD_INPUT_HANDLE)");
+        // Memory protection
+        *line = line.replace(", 0x40)", ", PAGE_EXECUTE_READWRITE)");
+        *line = line.replace(", 0x04)", ", PAGE_READWRITE)");
+        *line = line.replace(", 0x20)", ", PAGE_EXECUTE_READ)");
+        // Allocation type
+        *line = line.replace(", 0x3000,", ", MEM_COMMIT|MEM_RESERVE,");
+        *line = line.replace(", 0x1000,", ", MEM_COMMIT,");
+        // Socket
+        *line = line.replace("socket(2, 1, 0)", "socket(AF_INET, SOCK_STREAM, 0)");
+        *line = line.replace("socket(2, 2, 0)", "socket(AF_INET, SOCK_DGRAM, 0)");
+        // Signal
+        *line = line.replace("signal(13, 1)", "signal(SIGPIPE, SIG_IGN)");
+        // File access
+        *line = line.replace(", 0x80000000)", ", GENERIC_READ)");
+        *line = line.replace(", 0xc0000000)", ", GENERIC_READ|GENERIC_WRITE)");
+        *line = line.replace(", 0x40000000)", ", GENERIC_WRITE)");
+        // CreateFile disposition
+        *line = line.replace(", 3)", ", OPEN_EXISTING)").replace(", 2)", ", CREATE_ALWAYS)");
+        // WaitForSingleObject
+        *line = line.replace(", 0xffffffff)", ", INFINITE)");
+        *line = line.replace(", -1)", ", INFINITE)");
+        // Registry
+        *line = line.replace("(0xffffffff80000001)", "(HKEY_CURRENT_USER)");
+        *line = line.replace("(0xffffffff80000002)", "(HKEY_LOCAL_MACHINE)");
+        *line = line.replace("(0x80000001)", "(HKEY_CURRENT_USER)");
+        *line = line.replace("(0x80000002)", "(HKEY_LOCAL_MACHINE)");
+    }
+
+    // #SUSPICIOUS_API: Flag dangerous/suspicious Windows API calls for malware analysis.
+    {
+        let suspicious: &[(&str, &str)] = &[
+            ("VirtualAlloc", "⚠ allocate executable memory"),
+            ("VirtualAllocEx", "⚠ remote memory allocation"),
+            ("VirtualProtect", "⚠ change memory protection"),
+            ("WriteProcessMemory", "⚠ write to remote process"),
+            ("CreateRemoteThread", "⚠ remote code injection"),
+            ("NtCreateThreadEx", "⚠ remote thread creation"),
+            ("CreateProcess", "⚠ spawn process"),
+            ("ShellExecute", "⚠ execute command"),
+            ("WinExec", "⚠ execute command"),
+            ("URLDownloadToFile", "⚠ download file"),
+            ("InternetOpen", "⚠ network access"),
+            ("HttpSendRequest", "⚠ HTTP request"),
+            ("WSAStartup", "⚠ network initialization"),
+            ("connect(", "⚠ network connection"),
+            ("bind(", "⚠ listen for connections"),
+            ("GetProcAddress", "dynamic API resolution"),
+            ("LoadLibrary", "dynamic DLL loading"),
+            ("RegSetValue", "⚠ registry modification"),
+            ("RegCreateKey", "⚠ registry modification"),
+            ("CryptEncrypt", "⚠ encryption"),
+            ("CryptDecrypt", "⚠ decryption"),
+            ("IsDebuggerPresent", "⚠ anti-debug check"),
+            ("CheckRemoteDebuggerPresent", "⚠ anti-debug check"),
+            ("NtQueryInformationProcess", "⚠ anti-debug / process info"),
+        ];
+        for line in &mut lines {
+            for (api, annotation) in suspicious {
+                if line.contains(api) && !line.contains("//") {
+                    *line = format!("{} // {}", line.trim_end(), annotation);
+                    break;
+                }
+            }
+        }
+    }
+
+    // #STACK_COOKIE: Annotate XOR with RSP/RBP as security cookie check.
+    for line in &mut lines {
+        let t = line.trim();
+        if t.contains("^ RSP") || t.contains("^ RBP") || t.contains("^ ESP") || t.contains("^ EBP") {
+            if !t.contains("//") {
+                *line = format!("{} // stack cookie", line.trim_end());
+            }
+        }
+    }
+
+    // #DYNAMIC_RESOLVE: Annotate GetProcAddress + indirect call pattern.
+    {
+        let mut i = 0;
+        while i < lines.len() {
+            if lines[i].contains("GetProcAddress") && !lines[i].contains("//") {
+                // Check if nearby lines store to a global and call through it
+                for j in i+1..(i+4).min(lines.len()) {
+                    if lines[j].contains("(*") && lines[j].contains("DAT_") && !lines[j].contains("//") {
+                        *&mut lines[j] = format!("{} // call resolved API", lines[j].trim_end());
+                        break;
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
     // #GLOBAL_NAMES: Name repeated hex addresses as DAT_xxx (global variables).
     // When a hex address 0x1400NNNNN appears 2+ times, it's likely a global variable.
     {
