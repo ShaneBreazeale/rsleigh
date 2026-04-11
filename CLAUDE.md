@@ -137,9 +137,11 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
   (BoolAnd(BoolNot(ZF), IntEq(OF,SF)) → JG → `a > b`)
 - Call return value propagation
 - Parameter naming from ABI registers (SysV or Windows x64, auto-detected)
-- Call argument collection from arg register writes (x86-64 SysV: RDI/RSI/RDX/RCX/R8/R9,
-  Windows x64: RCX/RDX/R8/R9)
-- Stack-pushed argument collection for cdecl/thiscall (x86-32)
+- Call argument collection (runs BEFORE fold to prevent DCE of arg registers):
+  - x86-64 SysV: RDI/RSI/RDX/RCX/R8/R9
+  - Windows x64: RCX/RDX/R8/R9 (auto-detected from PE format)
+  - x86-32 cdecl/thiscall: stack-pushed arguments
+  - Result: `GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlInitUnicodeString")`
 - Division-by-constant recognition (multiply+shift → `x / 7`, SAR+ADD → `x / 7`)
 - Modulo pattern matching (`x - (x/D)*D` → `x % D`)
 - Loop body preservation (register writes in back-edge blocks protected from DCE)
@@ -176,6 +178,22 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - Constant-vs-constant comparison folding
 - x86-32 ESP / x86-64 RSP stack noise elimination
 - Duplicate ESP/RSP store dedup (cdecl arg push noise)
+- MSVC RTTI vtable resolution: vtable → COL → TypeDescriptor → class name
+- Wide string support (UTF-16LE): `L"ntdll.dll"`, `L"Software\\Sysinternals"`
+- Global variable naming: repeated addresses → `DAT_14008b128`
+- Phi artifact cleanup: `return phi(0, 0)` → `return 0`
+- Increment shorthand: `len = len + 1` → `len++`
+- Else-if chain collapse: nested `} else { if (` → flat `} else if (`
+- Void return removal: trailing `return;` in void functions
+- Putchar ASCII: `putchar(10)` → `putchar('\n')`
+- Pointer deref simplification: `*(uint64_t*)(param_0)` → `*param_0`
+- **Malware analysis annotations:**
+  - Win32 constants: STILL_ACTIVE, PAGE_EXECUTE_READWRITE, MEM_COMMIT, HKEY_LOCAL_MACHINE, etc.
+  - Suspicious API flagging (24 APIs): VirtualAlloc, WriteProcessMemory, CreateRemoteThread,
+    GetProcAddress, IsDebuggerPresent, RegSetValue, URLDownloadToFile, etc.
+  - Stack cookie detection: `lVar ^ RSP` → `// stack cookie`
+  - Dynamic resolve pattern: GetProcAddress + indirect call → `// call resolved API`
+- Duplicate ESP/RSP store dedup (cdecl arg push noise)
 
 ### Peephole Optimizer (`pcode-ir/src/lib.rs`)
 
@@ -196,7 +214,7 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
   expression (e.g., `iVar1 * factorial(n-1)` instead of `n * factorial(n-1)`)
 - **Type inference** — basic signed/float/pointer/bool propagation; no constraint-based
   inference, no struct/array recovery, no interprocedural types
-- **RTTI / vtable resolution** — PE vtable addresses shown as hex, not resolved to C++ type names
+- **Stack frame reconstruction** — buffer sizes not inferred from access patterns
 - **Loop conditions** — `while (OF == SF)` not always recovered to source comparison
 - **x86-32 control flow** — sequential TEST/JNZ patterns sometimes nest incorrectly
 - **Register-indirect calls** — `CALL EDI` where EDI was loaded from IAT earlier

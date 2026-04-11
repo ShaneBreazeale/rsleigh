@@ -105,6 +105,21 @@ for (; len > i; i++) {
 }
 ```
 
+From PE64 binaries (PsExec, with malware analysis annotations):
+
+```c
+// Dynamic API resolution — arguments fully visible
+GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlInitUnicodeString"); // dynamic API resolution
+GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtOpenFile"); // dynamic API resolution
+
+// RTTI vtable resolution
+*param_0 = std::bad_array_new_length::vftable;
+
+// Registry operations with annotations
+RegCreateKeyExW(..., HKEY_LOCAL_MACHINE); // ⚠ registry modification
+IsDebuggerPresent(); // ⚠ anti-debug check
+```
+
 From C++ binaries (Mach-O, demangled):
 
 ```c
@@ -115,7 +130,7 @@ phttp::Server::ListenAndRun();
 phttp::Shutdown();
 ```
 
-Tested against 30+ CTF binaries from CSAW, HSCTF, DiceCTF, Google CTF, hkcert, Crypto-Cat, and fbctf. Tested on Sysinternals PE64 tools (PsExec, strings64, whois64) and tinyssh.
+Tested against 30+ CTF binaries from CSAW, HSCTF, DiceCTF, Google CTF, hkcert, Crypto-Cat, fbctf, and Crypto-Cat Phoenix. Tested on Sysinternals PE64 tools (PsExec, strings64, whois64), tinyssh, phttp, and a real Wildfire malware sample.
 
 ## Architectures
 
@@ -220,7 +235,7 @@ The decompiler is hardened for untrusted input:
 - Loop conditions not always recovered to source-level comparisons
 - x86-32 sequential TEST/JNZ patterns sometimes nest incorrectly
 - Register-indirect calls (`CALL EDI` loaded from IAT) not resolved to import names
-- No RTTI/vtable resolution for C++ binaries
+- Stack frame reconstruction — buffer sizes not inferred from access patterns
 
 ## License
 

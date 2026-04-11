@@ -27,6 +27,11 @@ rsleigh is a working end-to-end disassembly and decompilation pipeline for 6 arc
 - **DWARF debug info** — parameter names, local variables, struct fields (DWARF4/5, macOS dSYM)
 - **Errno recognition** — `__error()` + store → `errno = N /* EINVAL */`
 - **ELF32 PIE support** — GOT-relative string resolution, __x86.get_pc_thunk hiding
+- **Call argument tracking** — function args visible inline: `GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlInitUnicodeString")`
+- **RTTI vtable resolution** — `*param_0 = std::bad_array_new_length::vftable` from PE RTTI metadata
+- **Wide string support** — UTF-16LE: `L"ntdll.dll"`, `L"Software\\Sysinternals"`
+- **Global variable naming** — repeated addresses → `DAT_14008b128`
+- **Malware analysis annotations** — 24 suspicious APIs flagged (VirtualAlloc, CreateRemoteThread, etc.), Win32 constants (STILL_ACTIVE, PAGE_EXECUTE_READWRITE), stack cookie detection
 - **PE function discovery** — entry point + CALL-target scanning for stripped binaries
 - **Security hardening** — bounds-checked VarId, recursion limits, checked arithmetic, fuzz tests
 - **CLI tool** — `rsleigh` binary for decompiling any supported binary
@@ -36,11 +41,15 @@ rsleigh is a working end-to-end disassembly and decompilation pipeline for 6 arc
 
 | Feature | Ghidra 11.3 | rsleigh |
 |---|---|---|
+| Call arguments | `GetProcAddress(pHVar2, "RtlInit...")` | `GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlInit...")` |
 | Array indexing | `param_1[2] = 0` | `param_0[2] = 0` |
 | String resolution | `"bad array new length"` | `"bad array new length"` |
+| Wide strings | `L"ntdll.dll"` | `L"ntdll.dll"` |
+| RTTI vtables | `std::bad_array_new_length::vftable` | `std::bad_array_new_length::vftable` |
 | Local declarations | `ulonglong uVar2;` | `long lVar1;` |
 | Function signature | `void FUN_140001100(...)` | `int func_140001100(...)` |
 | Param count (Win64) | 3 (correct) | 3 (correct) |
+| Global naming | `DAT_14008b128` | `DAT_14008b128` |
 | vtable resolution | `std::bad_array_new_length::vftable` | `0x14004a830` |
 | C++ demangling | Yes (ELF) | Yes (ELF + Mach-O) |
 
@@ -59,15 +68,20 @@ rsleigh is a working end-to-end disassembly and decompilation pipeline for 6 arc
 - Sequential TEST/JNZ patterns sometimes nest incorrectly as deep if/else trees
 - Dominator-based recovery doesn't distinguish sequential guards from nested conditionals
 
-### RTTI / Vtable Resolution (P2)
-- PE `.rdata` section contains vtable pointers with RTTI type info
-- Could resolve `0x14004a830` → `std::bad_array_new_length::vftable`
-- Requires parsing PE exception directory and type descriptors
+### Stack Frame Reconstruction (P2)
+- Buffer sizes not inferred from access patterns
+- `long lVar1` should be `char buf[32]` when memset(lVar1, 0, 32) is visible
+- Scan all Store/Load ops to stack-relative addresses, cluster by offset, infer sizes
 
 ### Pointer Type Propagation (P2)
 - `long param_0` should be `undefined8 *param_0` when used as array base
 - Track pointer arithmetic: `ptr + offset` stays pointer, `ptr - ptr` → integer
 - Infer pointee types from Load/Store sizes
+
+### Return Value → Argument Chaining (P3)
+- `pHVar2 = GetModuleHandleW(L"ntdll.dll"); GetProcAddress(pHVar2, ...)` 
+- Currently the return value assignment isn't shown; Ghidra creates a named local
+- Need: when a call return register is used in the next call, emit assignment
 
 ---
 
