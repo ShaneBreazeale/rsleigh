@@ -271,7 +271,8 @@ fn eliminate_dead(ssa: &mut SsaCfg) {
                         && !(is_arg_reg && precedes_call)
                     { dead_indices.push(i); continue; }
 
-                    collect_expr_reads(&vdef.expr, &ssa.vars, &mut read_after);
+                    let mut visited = std::collections::HashSet::new();
+                    collect_expr_reads_inner(&vdef.expr, &ssa.vars, &mut read_after, &mut visited);
                 }
                 Stmt::Store { addr, val } => {
                     let val_def = &ssa.vars[val.0 as usize];
@@ -299,14 +300,20 @@ fn eliminate_dead(ssa: &mut SsaCfg) {
 }
 
 fn collect_var_reads(id: VarId, vars: &[VarDef], reads: &mut std::collections::HashSet<(u64, u32)>) {
+    let mut visited = std::collections::HashSet::new();
+    collect_var_reads_inner(id, vars, reads, &mut visited);
+}
+
+fn collect_var_reads_inner(id: VarId, vars: &[VarDef], reads: &mut std::collections::HashSet<(u64, u32)>, visited: &mut std::collections::HashSet<u32>) {
+    if !visited.insert(id.0) { return; } // cycle detection
     let vdef = &vars[id.0 as usize];
     if vdef.varnode.space == AddressSpaceId::Register {
         reads.insert((vdef.varnode.offset, vdef.varnode.size));
     }
-    collect_expr_reads(&vdef.expr, vars, reads);
+    collect_expr_reads_inner(&vdef.expr, vars, reads, visited);
 }
 
-fn collect_expr_reads(expr: &Expr, vars: &[VarDef], reads: &mut std::collections::HashSet<(u64, u32)>) {
+fn collect_expr_reads_inner(expr: &Expr, vars: &[VarDef], reads: &mut std::collections::HashSet<(u64, u32)>, visited: &mut std::collections::HashSet<u32>) {
     match expr {
         Expr::Var(id) => {
             let v = &vars[id.0 as usize];
@@ -315,11 +322,11 @@ fn collect_expr_reads(expr: &Expr, vars: &[VarDef], reads: &mut std::collections
             }
         }
         Expr::BinOp(_, l, r) => {
-            collect_var_reads(*l, vars, reads);
-            collect_var_reads(*r, vars, reads);
+            collect_var_reads_inner(*l, vars, reads, visited);
+            collect_var_reads_inner(*r, vars, reads, visited);
         }
-        Expr::UnaryOp(_, i) | Expr::Load(i) => collect_var_reads(*i, vars, reads),
-        Expr::Phi(inputs) => { for i in inputs { collect_var_reads(*i, vars, reads); } }
+        Expr::UnaryOp(_, i) | Expr::Load(i) => collect_var_reads_inner(*i, vars, reads, visited),
+        Expr::Phi(inputs) => { for i in inputs { collect_var_reads_inner(*i, vars, reads, visited); } }
         _ => {}
     }
 }
@@ -612,6 +619,11 @@ fn trace_to_cmp_with_zero(result_id: VarId, ssa: &SsaCfg, zero_id: Option<VarId>
 /// Resolve a CMP operand through register copies to find the underlying value.
 /// REG = Var(other_reg) → follow; REG = Load(stack) → use the Load.
 fn resolve_cmp_operand(id: VarId, ssa: &SsaCfg) -> VarId {
+    resolve_cmp_operand_depth(id, ssa, 8)
+}
+
+fn resolve_cmp_operand_depth(id: VarId, ssa: &SsaCfg, depth: u32) -> VarId {
+    if depth == 0 { return id; }
     let v = &ssa.vars[id.0 as usize];
     // Follow register-to-register copies
     if v.varnode.space == AddressSpaceId::Register {
@@ -638,7 +650,7 @@ fn resolve_cmp_operand(id: VarId, ssa: &SsaCfg) -> VarId {
     // Follow Unique space vars
     if v.varnode.space == AddressSpaceId::Unique {
         if let Expr::Var(src) = &v.expr {
-            return resolve_cmp_operand(*src, ssa);
+            return resolve_cmp_operand_depth(*src, ssa, depth - 1);
         }
     }
     id
