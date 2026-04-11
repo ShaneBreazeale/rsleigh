@@ -2420,13 +2420,13 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             lines[i] = format!("{}{} = {} / {};", pad, dest.trim(), src_var, divisor);
             // Remove subsequent lines that are part of the division pattern
             // (sign-extraction >> 63, the actual shift >> N, and sign correction + lines)
-            let mut j = i + 1;
-            while j < lines.len() {
-                let jt = lines[j].trim();
+            let mut _j = i + 1;
+            while _j < lines.len() {
+                let jt = lines[_j].trim();
                 if jt.contains(">> 63;") || jt.contains(">> 31;") {
-                    lines.remove(j); // sign extraction
+                    lines.remove(_j); // sign extraction
                 } else if jt.contains(&format!(">> {};", shift)) {
-                    lines.remove(j); // the division shift
+                    lines.remove(_j); // the division shift
                 } else {
                     break;
                 }
@@ -5036,7 +5036,7 @@ fn try_read_string(va: u64, ctx: &PrintCtx) -> Option<String> {
                 // Check individual sections within __TEXT
                 if let Ok(sections) = seg.sections() {
                     for (sec, _) in &sections {
-                        let sname = std::str::from_utf8(&sec.sectname).unwrap_or("")
+                        let _sname = std::str::from_utf8(&sec.sectname).unwrap_or("")
                             .trim_end_matches('\0');
                         if va >= sec.addr && va < sec.addr + sec.size {
                             let fo = (sec.offset as u64 + (va - sec.addr)) as usize;
