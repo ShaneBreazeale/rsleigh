@@ -1799,6 +1799,59 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #FLOAT: Resolve floating-point reciprocal multiplication.
+    // Pattern: INT2FLOAT(x) * *(0xNNN) where the memory holds 1/N.0
+    // → x / N.0
+    if let Some(binary) = ctx.binary {
+        for line in &mut lines {
+            // Match: EXPR * *(0xNNN) or EXPR * *("") (false string from float constants)
+            if line.contains("* *(") && (line.contains("double)") || line.contains("XMM") || line.contains("FLOAT")) {
+                // Find the *(addr) part
+                if let Some(star_pos) = line.rfind("* *(") {
+                    let after = &line[star_pos + 4..];
+                    if let Some(close) = after.find(')') {
+                        let addr_str = &after[..close];
+                        // Try to parse as hex address
+                        let addr_val = if addr_str.starts_with("0x") {
+                            u64::from_str_radix(&addr_str[2..], 16).ok()
+                        } else if addr_str == "\"\"" || addr_str.starts_with('"') {
+                            // False string from float constant at an address with leading zeros.
+                            // We can't recover the original address, but we know it's a float
+                            // reciprocal. Replace the whole multiplication with a generic form.
+                            let before = line[..star_pos].trim_end();
+                            let after_paren = &line[star_pos + 4 + close + 1..];
+                            *line = format!("{} / N.0{}", before, after_paren);
+                            continue;
+                        } else {
+                            None
+                        };
+                        if let Some(va) = addr_val {
+                            // Try to read 8 bytes as a double
+                            if let Some(fo) = va_to_file_offset(va, binary) {
+                                if fo + 8 <= binary.len() {
+                                    let bytes: [u8; 8] = binary[fo..fo+8].try_into().unwrap_or([0;8]);
+                                    let fval = f64::from_le_bytes(bytes);
+                                    if fval != 0.0 && fval.is_finite() {
+                                        let recip = 1.0 / fval;
+                                        // Check if it's a clean reciprocal (integer)
+                                        if recip > 1.0 && (recip - recip.round()).abs() < 0.001 {
+                                            let divisor = recip.round() as u64;
+                                            let before = line[..star_pos].trim_end();
+                                            let after_paren = &line[star_pos + 4 + close + 1..];
+                                            *line = format!("{} / {}.0{}", before, divisor, after_paren);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Also simplify INT2FLOAT(x) → (double)x
+            *line = line.replace("INT2FLOAT(", "(double)(");
+        }
+    }
+
     // #LLM: Clean up patterns that confuse LLM analysis.
 
     // Strip __isoc99_ prefix from scanf variants
@@ -3199,7 +3252,10 @@ fn format_const_ctx(val: u64, size: u32, ctx: &PrintCtx) -> String {
     // Try string literal
     if size >= 4 && val > 0x200 {
         if let Some(s) = try_read_string(val, ctx) {
-            return format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"));
+            // Skip empty strings — these are usually float constants or padding
+            // (the first byte is 0x00 which try_read_string returns as "")
+            if s.is_empty() { /* fall through to hex */ }
+            else { return format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")); }
         }
         // Try import/global name (e.g., GOT entry for stdin/stdout)
         if let Some(name) = ctx.imports.get(&val) {
@@ -3265,6 +3321,38 @@ fn try_decode_ascii_const(val: u64, size: u32) -> Option<String> {
         Some(s)
     } else {
         None
+    }
+}
+
+/// Convert a virtual address to file offset using binary section/segment info.
+fn va_to_file_offset(va: u64, binary: &[u8]) -> Option<usize> {
+    let obj = goblin::Object::parse(binary).ok()?;
+    match &obj {
+        goblin::Object::Mach(goblin::mach::Mach::Binary(m)) => {
+            m.segments.iter().find_map(|seg| {
+                if va >= seg.vmaddr && va < seg.vmaddr + seg.vmsize {
+                    Some((seg.fileoff + (va - seg.vmaddr)) as usize)
+                } else { None }
+            })
+        }
+        goblin::Object::Elf(elf) => {
+            elf.section_headers.iter().find_map(|sh| {
+                if sh.sh_addr != 0 && va >= sh.sh_addr && va < sh.sh_addr + sh.sh_size {
+                    Some((sh.sh_offset + (va - sh.sh_addr)) as usize)
+                } else { None }
+            })
+        }
+        goblin::Object::PE(pe) => {
+            let base = pe.image_base as u64;
+            let rva = va.checked_sub(base)?;
+            pe.sections.iter().find_map(|s| {
+                let sr = s.virtual_address as u64;
+                if rva >= sr && rva < sr + s.virtual_size as u64 {
+                    Some((s.pointer_to_raw_data as u64 + (rva - sr)) as usize)
+                } else { None }
+            })
+        }
+        _ => None,
     }
 }
 
