@@ -27,8 +27,9 @@ Wired into Spectra as a native analysis backend replacing the Ghidra JVM daemon.
 | MIPS32 | 900+ | FPU + DSP + MIPS16 + microMIPS |
 | RISC-V 64 | 500+ | F/D/B/K/P/Q/V/C |
 
-**4 test suites:** 23 golden P-code assertions, 301 corpus instructions, 5000 fuzz
-attempts (zero panics), decompiler validation against compiled C source.
+**9 test categories, ~6000 assertions:** golden P-code, stress/boundary, functional
+sequences, bug probes, compiled code patterns, Ghidra differential, decompiler
+comparison, CTF binary validation, fuzz (5000 random byte sequences, zero panics).
 
 **Decompiler output (real binary, with DWARF debug info):**
 ```
@@ -132,6 +133,12 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - Parameter naming from ABI registers
 - Call argument collection from arg register writes (x86-64)
 - Stack-pushed argument collection for cdecl/thiscall (x86-32)
+- **Type inference** (3-phase: seed → forward → backward propagation):
+  - Float: FloatAdd/FloatMult/Int2Float → `float`/`double`
+  - Signed: SDiv/SLess/Sext/Neg → `int`/`int64_t`
+  - Unsigned: Div/Less/Zext → `uint32_t`/`uint64_t`
+  - Pointer: Load/Store addresses → pointer type
+  - Bool: comparisons, flag registers → boolean context
 
 **Printer (printer.rs):**
 - RegTracker: per-block register value tracking at print time
@@ -161,7 +168,8 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 
 - **ExprValue::Context** returns 0 (not used by x86/ARM/RISC-V)
 - **ExprNew / ExprCPool** returns 0 (JVM/WASM only)
-- **Type inference** — all variables are register-width integers
+- **Type inference** — basic signed/float/pointer/bool propagation implemented;
+  no full constraint-based inference, no struct/array recovery, no interprocedural types
 - **Expression nesting depth** — some redundant register loads remain visible
 - **Loop conditions** — `while (OF == SF)` not always recovered to source comparison
 - **x86-32 control flow** — sequential TEST/JNZ patterns sometimes nest incorrectly
