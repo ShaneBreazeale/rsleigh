@@ -940,8 +940,7 @@ fn detect_return_values(ssa: &mut SsaCfg) {
 /// Collect argument register writes (x86-64) or stack pushes (x86-32) before each Call.
 fn collect_call_arguments(ssa: &mut SsaCfg) {
     // Use the calling convention set by fold_with_cc, not heuristic detection.
-    // The old ESP_OFFSET=16 heuristic collided with EDX (also offset 16 in x86-64).
-    let is_x86_32 = arg_reg_offsets().is_empty(); // Cdecl32 has no register args
+    let is_x86_32 = arg_reg_offsets().is_empty();
 
     for bi in 0..ssa.blocks.len() {
         // Check if block ends with a Call terminator

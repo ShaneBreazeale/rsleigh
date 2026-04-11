@@ -100,7 +100,11 @@ pub fn decompile_with_binary(
     let cc = if let Some(binary) = binary {
         if let Ok(obj) = goblin::Object::parse(binary) {
             match &obj {
-                goblin::Object::PE(_) => fold::CallingConv::Win64,
+                goblin::Object::PE(pe) => if pe.is_64 {
+                    fold::CallingConv::Win64
+                } else {
+                    fold::CallingConv::Cdecl32 // PE32 uses cdecl stack-based args
+                },
                 _ => match arch {
                     Architecture::X86_32 | Architecture::ARM32 | Architecture::MIPS32
                         => fold::CallingConv::Cdecl32,
