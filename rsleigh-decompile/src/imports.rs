@@ -124,29 +124,52 @@ fn resolve_elf(elf: &goblin::elf::Elf, binary: &[u8], map: &mut HashMap<u64, Str
                 let stub_addr = plt_start + i * entry_size;
                 let off = file_off + (i * entry_size) as usize;
 
-                // Decode the JMP [rip+disp32] at the start of the PLT entry
+                // Decode the JMP [addr] at the start of the PLT entry
                 if off + 6 <= binary.len() && binary[off] == 0xff && binary[off + 1] == 0x25 {
-                    let disp = i32::from_le_bytes([
+                    let raw_addr = u32::from_le_bytes([
                         binary[off + 2], binary[off + 3],
                         binary[off + 4], binary[off + 5],
                     ]);
-                    let got_entry = (stub_addr + 6).wrapping_add(disp as u64);
+                    // 64-bit: RIP-relative (signed displacement from next instruction)
+                    // 32-bit: absolute GOT address
+                    let is_64bit = elf.header.e_machine == 0x3E; // EM_X86_64
+                    let got_entry = if is_64bit {
+                        (stub_addr + 6).wrapping_add(raw_addr as i32 as i64 as u64)
+                    } else {
+                        raw_addr as u64 // absolute address for 32-bit
+                    };
                     if let Some(name) = got_to_name.get(&got_entry) {
                         map.insert(stub_addr, name.clone());
                     }
                 }
                 // Also try: indirect JMP via endbr64 prefix (CET-enabled PLT)
-                // endbr64 = F3 0F 1E FA, then FF 25 disp32
-                else if off + 10 <= binary.len()
+                // endbr64 = F3 0F 1E FA, then BND JMP *[rip+disp32] = F2 FF 25 disp32
+                // or without BND: FF 25 disp32
+                else if off + 4 <= binary.len()
                     && binary[off] == 0xf3 && binary[off + 1] == 0x0f
                     && binary[off + 2] == 0x1e && binary[off + 3] == 0xfa
-                    && binary[off + 4] == 0xff && binary[off + 5] == 0x25
                 {
+                    // After endbr64 (4 bytes), check for:
+                    // FF 25 disp32 (plain jmp *[rip+disp])
+                    // F2 FF 25 disp32 (bnd jmp *[rip+disp])
+                    let jmp_off = off + 4;
+                    let (disp_off, rip_len) = if jmp_off + 6 <= binary.len()
+                        && binary[jmp_off] == 0xff && binary[jmp_off + 1] == 0x25
+                    {
+                        (jmp_off + 2, 6u64) // plain jmp: 6 bytes from endbr64+jmp to next
+                    } else if jmp_off + 7 <= binary.len()
+                        && binary[jmp_off] == 0xf2 && binary[jmp_off + 1] == 0xff
+                        && binary[jmp_off + 2] == 0x25
+                    {
+                        (jmp_off + 3, 7u64) // bnd jmp: 7 bytes from jmp start
+                    } else {
+                        continue;
+                    };
                     let disp = i32::from_le_bytes([
-                        binary[off + 6], binary[off + 7],
-                        binary[off + 8], binary[off + 9],
+                        binary[disp_off], binary[disp_off + 1],
+                        binary[disp_off + 2], binary[disp_off + 3],
                     ]);
-                    let got_entry = (stub_addr + 10).wrapping_add(disp as u64);
+                    let got_entry = (stub_addr + 4 + rip_len).wrapping_add(disp as u64);
                     if let Some(name) = got_to_name.get(&got_entry) {
                         map.insert(stub_addr, name.clone());
                     }
