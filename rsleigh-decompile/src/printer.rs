@@ -3275,6 +3275,147 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // Remove consecutive blank lines
     let mut result = String::new();
     let mut prev_blank = false;
+    // #ELF32_PIE: Hide __x86.get_pc_thunk boilerplate and resolve GOT-relative addresses.
+    // Pattern: "__x86.get_pc_thunk.bx(...);" → remove
+    //          "iVarN = iVarN + 0xNNNN;" → extract GOT base, remove
+    //          "iVarN - 0xNNNN" or "iVarN + 0xNNNN - 0xMMMM" → resolve to string/addr
+    {
+        // Step 1: Find the GOT base from the thunk pattern
+        // Look for: "REGVAR = REGVAR + 0xNNNN;" after a thunk call
+        let mut got_base: Option<(String, u64)> = None;
+        let mut got_add_line: Option<usize> = None;
+
+        for (i, line) in lines.iter().enumerate() {
+            let t = line.trim();
+            // Find "iVarN = iVarN + 0xNNNN;" pattern (GOT base addition)
+            if let Some(eq) = t.find(" = ") {
+                let lhs = &t[..eq];
+                let rhs = t[eq + 3..].trim_end_matches(';');
+                if rhs.starts_with(lhs) && rhs.contains(" + 0x") {
+                    if let Some(plus) = rhs.find(" + 0x") {
+                        let hex_str = &rhs[plus + 5..];
+                        if let Ok(offset) = u64::from_str_radix(hex_str, 16) {
+                            // The thunk returns the address of the instruction after the call.
+                            // GOT base = thunk_return_addr + offset
+                            // We don't have the exact return addr here, but the offset is
+                            // what matters for relative resolution. Store the var name + offset.
+                            got_base = Some((lhs.to_string(), offset));
+                            got_add_line = Some(i);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some((ref got_var, got_offset)) = got_base {
+            // Step 2: Remove thunk calls and GOT base addition lines
+            lines.retain(|line| {
+                let t = line.trim();
+                if t.contains("__x86.get_pc_thunk") { return false; }
+                false == false // keep all others for now
+            });
+            // Re-find the GOT add line (index may have shifted)
+            let mut i = 0;
+            while i < lines.len() {
+                let t = lines[i].trim();
+                if t.contains(&format!("{} + 0x{:x}", got_var, got_offset))
+                    && t.starts_with(got_var.as_str())
+                {
+                    lines.remove(i);
+                    continue;
+                }
+                i += 1;
+            }
+
+            // Step 3: Resolve GOT-relative expressions
+            // Pattern: "GOT_VAR - 0xNNNN" → compute absolute address, try string resolution
+            // We need to know the actual address. For ELF32 PIE, the thunk call is at a known
+            // address. But we don't have it here. Instead, we can compute from the binary:
+            // look for the .got section address.
+            if let Some(binary) = ctx.binary {
+                if let Ok(obj) = goblin::Object::parse(binary) {
+                    if let goblin::Object::Elf(elf) = &obj {
+                        // Find .got or _GLOBAL_OFFSET_TABLE_ address
+                        // Find the GOT base: prefer _GLOBAL_OFFSET_TABLE_ symbol
+                        // (most accurate), then .got.plt section address.
+                        let got_addr = elf.syms.iter()
+                            .find(|s| elf.strtab.get_at(s.st_name) == Some("_GLOBAL_OFFSET_TABLE_"))
+                            .map(|s| s.st_value)
+                            .or_else(|| {
+                                elf.section_headers.iter()
+                                    .find(|sh| elf.shdr_strtab.get_at(sh.sh_name) == Some(".got.plt"))
+                                    .map(|sh| sh.sh_addr)
+                            });
+
+                        if let Some(got_addr) = got_addr {
+                            for line in &mut lines {
+                                // Replace "GOT_VAR - 0xNNNN" with resolved value
+                                let pattern_minus = format!("{} - 0x", got_var);
+                                if line.contains(&pattern_minus) {
+                                    // Find all occurrences
+                                    let mut new_line = line.clone();
+                                    while let Some(pos) = new_line.find(&pattern_minus) {
+                                        let hex_start = pos + pattern_minus.len();
+                                        let hex_end = new_line[hex_start..].find(|c: char| !c.is_ascii_hexdigit())
+                                            .map(|e| hex_start + e).unwrap_or(new_line.len());
+                                        let hex_str = &new_line[hex_start..hex_end];
+                                        if let Ok(displacement) = u64::from_str_radix(hex_str, 16) {
+                                            let resolved_addr = got_addr.wrapping_sub(displacement);
+                                            // Try to read a string at this address
+                                            if let Some(s) = try_read_string(resolved_addr, ctx) {
+                                                if s.len() >= 2 {
+                                                    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+                                                    let old = format!("{}{}", pattern_minus, hex_str);
+                                                    new_line = new_line.replace(&old, &format!("\"{}\"", escaped));
+                                                    continue;
+                                                }
+                                            }
+                                            // Fall back to hex address
+                                            let old = format!("{}{}", pattern_minus, hex_str);
+                                            new_line = new_line.replace(&old, &format!("0x{:x}", resolved_addr));
+                                        }
+                                        break; // avoid infinite loop
+                                    }
+                                    *line = new_line;
+                                }
+
+                                // Also handle "GOT_VAR + 0xOFFSET - 0xDISP" pattern
+                                let pattern_plus = format!("{} + 0x{:x} - 0x", got_var, got_offset);
+                                if line.contains(&pattern_plus) {
+                                    let mut new_line = line.clone();
+                                    while let Some(pos) = new_line.find(&pattern_plus) {
+                                        let hex_start = pos + pattern_plus.len();
+                                        let hex_end = new_line[hex_start..].find(|c: char| !c.is_ascii_hexdigit())
+                                            .map(|e| hex_start + e).unwrap_or(new_line.len());
+                                        let hex_str = &new_line[hex_start..hex_end];
+                                        if let Ok(displacement) = u64::from_str_radix(hex_str, 16) {
+                                            let resolved_addr = got_addr.wrapping_sub(displacement);
+                                            if let Some(s) = try_read_string(resolved_addr, ctx) {
+                                                if s.len() >= 2 {
+                                                    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+                                                    let old = format!("{}{}", pattern_plus, hex_str);
+                                                    new_line = new_line.replace(&old, &format!("\"{}\"", escaped));
+                                                    continue;
+                                                }
+                                            }
+                                            let old = format!("{}{}", pattern_plus, hex_str);
+                                            new_line = new_line.replace(&old, &format!("0x{:x}", resolved_addr));
+                                        }
+                                        break;
+                                    }
+                                    *line = new_line;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Remove remaining thunk lines (even if GOT base wasn't found)
+        lines.retain(|line| !line.trim().contains("__x86.get_pc_thunk"));
+    }
+
     // #STACK_NOISE: Remove XMM zero-init noise and RSP-relative stores that are
     // stack frame initialization (not meaningful program logic).
     lines.retain(|line| {
