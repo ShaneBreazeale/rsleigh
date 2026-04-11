@@ -92,7 +92,12 @@ fn emit_region(
                             };
 
                             let mut body = Vec::new();
+                            // Mark exit block as emitted to prevent loop body from
+                            // including blocks after the loop
+                            let exit_was_emitted = emitted[exit.0];
+                            emitted[exit.0] = true;
                             emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body);
+                            emitted[exit.0] = exit_was_emitted; // restore for later processing
                             out.push(StructuredStmt::While { cond: *cond, negate, body });
                             current = exit;
                             continue;
@@ -104,9 +109,6 @@ fn emit_region(
             SsaTerminator::CBranch { cond, taken, fallthrough } => {
                 // Check if this is a loop header
                 if is_loop_header {
-                    // Determine which branch goes to the loop body vs exit.
-                    // The body is the successor that eventually leads back to this header.
-                    // The exit is the other successor.
                     let back_source = back_edges.iter()
                         .find(|(_, header)| *header == current)
                         .map(|(src, _)| *src);
@@ -125,7 +127,11 @@ fn emit_region(
                     if is_self_loop {
                         emit_block_stmts(block, &mut body);
                     }
+                    // Mark exit block as emitted to bound the loop body
+                    let exit_was_emitted = emitted[exit.0];
+                    emitted[exit.0] = true;
                     emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body);
+                    emitted[exit.0] = exit_was_emitted;
 
                     out.push(StructuredStmt::While {
                         cond: *cond,
@@ -187,7 +193,10 @@ fn emit_region(
                                 (*fall, *taken, true)
                             };
                             let mut body = Vec::new();
+                            let exit_was_emitted = emitted[exit.0];
+                            emitted[exit.0] = true;
                             emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body);
+                            emitted[exit.0] = exit_was_emitted;
                             out.push(StructuredStmt::While { cond: *cond, negate, body });
                             current = exit;
                             continue;

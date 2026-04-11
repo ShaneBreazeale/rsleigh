@@ -1864,6 +1864,68 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #FMTCALL: Fix printf/snprintf where format string is in RAX and float in XMM0.
+    // Pattern: XMM0 = expr; RAX = "fmt"; snprintf(buf, N, N) → snprintf(buf, N, "fmt", expr)
+    {
+        let printf_fns = ["printf", "snprintf", "fprintf", "sprintf"];
+        let mut i = 0;
+        while i < lines.len() {
+            let lt = lines[i].trim().to_string();
+            let is_printf_call = printf_fns.iter().any(|f| lt.starts_with(&format!("{}(", f)));
+            if !is_printf_call { i += 1; continue; }
+
+            let mut fmt_str = String::new();
+            let mut fmt_line = None;
+            let mut xmm_expr = String::new();
+            let mut xmm_line = None;
+
+            for j in (0..i).rev() {
+                let jt = lines[j].trim();
+                if jt.is_empty() { continue; }
+                if jt.starts_with("RAX = \"") && jt.ends_with("\";") {
+                    fmt_str = jt.strip_prefix("RAX = ").unwrap_or("").trim_end_matches(';').trim().to_string();
+                    fmt_line = Some(j);
+                } else if jt.starts_with("XMM0 = ") && jt.ends_with(';') {
+                    xmm_expr = jt.strip_prefix("XMM0 = ").unwrap_or("").trim_end_matches(';').trim().to_string();
+                    xmm_line = Some(j);
+                } else {
+                    break;
+                }
+            }
+
+            if !fmt_str.is_empty() {
+                let indent = lines[i].len() - lines[i].trim_start().len();
+                let pad = " ".repeat(indent);
+                if let Some(paren) = lt.find('(') {
+                    let func_name = &lt[..paren];
+                    let args_str = &lt[paren + 1..lt.len().saturating_sub(2)];
+                    let args: Vec<&str> = args_str.splitn(3, ", ").collect();
+                    let has_float_fmt = fmt_str.contains("%f") || fmt_str.contains("%.1f")
+                        || fmt_str.contains("%.2f") || fmt_str.contains("%lf")
+                        || fmt_str.contains("%e") || fmt_str.contains("%g");
+                    let float_arg = if has_float_fmt && !xmm_expr.is_empty() {
+                        format!(", {}", xmm_expr)
+                    } else { String::new() };
+
+                    let new_call = if func_name == "printf" {
+                        format!("{}printf({}{});", pad, fmt_str, float_arg)
+                    } else if args.len() >= 2 {
+                        format!("{}{}({}, {}, {}{});", pad, func_name, args[0], args[1], fmt_str, float_arg)
+                    } else { lt.clone() };
+
+                    lines[i] = new_call;
+                    let mut to_remove = Vec::new();
+                    if let Some(j) = fmt_line { to_remove.push(j); }
+                    if let Some(j) = xmm_line { to_remove.push(j); }
+                    to_remove.sort_unstable();
+                    for j in to_remove.into_iter().rev() { lines.remove(j); if j < i { i -= 1; } }
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+
     // #CALLRET: Inline call return values into subsequent conditions.
     // Pattern: func(...); if (0 == 0) { ... } → if (func(...) == 0) { ... }
     // The call return (in EAX) isn't captured by the SSA because CALL P-code
