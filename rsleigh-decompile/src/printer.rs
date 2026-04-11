@@ -1894,7 +1894,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     || next.starts_with("if (EAX <= ")
                     || next.starts_with("if (EAX >= ");
                 // Also match: if (var_N == 0) right after a call — often the return check
-                let is_var_zero = next.starts_with("if (var_") &&
+                let _is_var_zero = next.starts_with("if (var_") &&
                     (next.contains(" == 0)") || next.contains(" != 0)"));
 
                 if is_zero_cond {
@@ -2035,7 +2035,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     if let Some(paren_start) = next.find("if (") {
                         let after_if = &next[paren_start + 4..];
                         if let Some(space) = after_if.find(' ') {
-                            let var_name = &after_if[..space];
+                            let _var_name = &after_if[..space];
                             let rest = &after_if[space..];
                             // Replace var with call expression
                             let new_cond = format!("if ({}{}", call_expr, rest);
@@ -2061,7 +2061,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let nested = format!("{}({}(", func, func);
                 if line.contains(&nested) {
                     // Find the inner call and keep only the outermost
-                    let inner = format!("{}(", func);
+                    let _inner = format!("{}(", func);
                     if let Some(pos) = line.find(&nested) {
                         // Remove one level of nesting
                         let before = &line[..pos + func.len() + 1]; // "alloc_ctor("
