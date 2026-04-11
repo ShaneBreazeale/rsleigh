@@ -814,20 +814,61 @@ fn is_comparison(kind: BinOpKind) -> bool {
 // ---- Return Values ----
 
 fn detect_return_values(ssa: &mut SsaCfg) {
-    for block in &mut ssa.blocks {
-        if let SsaTerminator::Return(ref mut ret_val) = block.terminator {
+    // Also check x86-32 EAX (offset 0, size 4) and ARM64 x0/w0 (offset 0)
+    let ret_reg_offset = RAX_OFFSET;
+
+    for bi in 0..ssa.blocks.len() {
+        if let SsaTerminator::Return(ref ret_val) = ssa.blocks[bi].terminator {
             if ret_val.is_some() { continue; }
-            for stmt in block.stmts.iter().rev() {
-                if let Stmt::Assign(var_id) = stmt {
-                    let vdef = &ssa.vars[var_id.0 as usize];
-                    if vdef.varnode.space == AddressSpaceId::Register
-                        && vdef.varnode.offset == RAX_OFFSET
-                        && vdef.varnode.size >= 4
-                    {
-                        *ret_val = Some(*var_id);
-                        break;
+        } else { continue; }
+
+        // Look backwards in this block for RAX/EAX assignment
+        let mut found = None;
+        for stmt in ssa.blocks[bi].stmts.iter().rev() {
+            if let Stmt::Assign(var_id) = stmt {
+                let vdef = &ssa.vars[var_id.0 as usize];
+                if vdef.varnode.space == AddressSpaceId::Register
+                    && vdef.varnode.offset == ret_reg_offset
+                    && vdef.varnode.size >= 4
+                {
+                    found = Some(*var_id);
+                    break;
+                }
+            }
+        }
+
+        // If not found in this block, check predecessors (handles CMOV patterns
+        // where the return register was set in a preceding conditional block)
+        if found.is_none() {
+            for pred_bi in 0..ssa.blocks.len() {
+                if pred_bi == bi { continue; }
+                let flows_to_bi = match &ssa.blocks[pred_bi].terminator {
+                    SsaTerminator::Fallthrough(b) | SsaTerminator::Branch(b) => b.0 == bi,
+                    SsaTerminator::CBranch { taken, fallthrough, .. } => taken.0 == bi || fallthrough.0 == bi,
+                    SsaTerminator::Call { fallthrough, .. } => fallthrough.0 == bi,
+                    _ => false,
+                };
+                if !flows_to_bi { continue; }
+
+                for stmt in ssa.blocks[pred_bi].stmts.iter().rev() {
+                    if let Stmt::Assign(var_id) = stmt {
+                        let vdef = &ssa.vars[var_id.0 as usize];
+                        if vdef.varnode.space == AddressSpaceId::Register
+                            && vdef.varnode.offset == ret_reg_offset
+                            && vdef.varnode.size >= 4
+                        {
+                            found = Some(*var_id);
+                            break;
+                        }
                     }
                 }
+                if found.is_some() { break; }
+            }
+        }
+
+        if let Some(var_id) = found {
+            if let SsaTerminator::Return(ref mut ret_val) = ssa.blocks[bi].terminator {
+                *ret_val = Some(var_id);
             }
         }
     }

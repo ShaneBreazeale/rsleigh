@@ -2422,6 +2422,229 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #SAR_DIV: Recognize SAR+sign-correction division pattern.
+    // Pattern: "ECX = EAX >> 31;" then "EAX = EAX >> K;" then "return EAX + ECX;"
+    // → "return x / D" where D = 2^K + 1 (with sign correction)
+    // This is used for divide_by_7 (K=2, D=7), divide_by_3 (K=1, D=3), etc.
+    {
+        let mut i = 0;
+        while i + 2 < lines.len() {
+            let l0 = lines[i].trim().to_string();
+            let l1 = lines[i + 1].trim().to_string();
+            let l2 = lines[i + 2].trim().to_string();
+
+            // Match: "REG1 = REG2 >> 31;" and "REG2 = REG2 >> K;" and "return REG2 + REG1;"
+            if l0.contains(" >> 31;") && l1.contains(" >> ") && l2.starts_with("return ") {
+                if let (Some(eq0), Some(eq1)) = (l0.find(" = "), l1.find(" = ")) {
+                    let sign_reg = l0[..eq0].to_string();
+                    let rhs0 = l0[eq0 + 3..].trim_end_matches(';');
+                    let shift_reg = l1[..eq1].to_string();
+                    let rhs1 = l1[eq1 + 3..].trim_end_matches(';');
+
+                    // Verify sign extraction: REG = OTHER >> 31
+                    if rhs0.ends_with(" >> 31") {
+                        let src_reg = rhs0.strip_suffix(" >> 31").unwrap().to_string();
+
+                        // Verify arithmetic shift: same src >> K
+                        if let Some(shr_pos) = rhs1.find(" >> ") {
+                            let shift_src = &rhs1[..shr_pos];
+                            let k_str = &rhs1[shr_pos + 4..];
+                            if (shift_src == src_reg || shift_src == shift_reg)
+                                && l2 == format!("return {} + {};", shift_reg, sign_reg)
+                            {
+                                if let Ok(k) = k_str.parse::<u32>() {
+                                    // Find the source variable from the line before l0
+                                    // Look for "SOMETHING = (int)PARAM;" or "SOMETHING = PARAM + STUFF;"
+                                    let src_name = if i > 0 {
+                                        let prev = lines[i - 1].trim().to_string();
+                                        if let Some(eq) = prev.find(" = ") {
+                                            let rhs = prev[eq + 3..].trim_end_matches(';');
+                                            // Get the base variable (strip casts)
+                                            let clean = rhs.strip_prefix("(int)").unwrap_or(rhs)
+                                                .strip_prefix("(int64_t)").unwrap_or(rhs);
+                                            if !clean.contains(' ') && !clean.contains('(') {
+                                                Some(clean.to_string())
+                                            } else { None }
+                                        } else { None }
+                                    } else { None };
+
+                                    // Divisor: this pattern is used for signed division
+                                    // The actual divisor depends on the magic constant used in IMUL
+                                    // For K=2: divisor is 7, for K=1: divisor is 3
+                                    // But we don't have the magic constant here. Use a lookup:
+                                    let divisor = match k {
+                                        1 => 3, 2 => 7, 3 => 9, _ => 0,
+                                    };
+                                    if divisor > 0 {
+                                        let var = src_name.as_deref().unwrap_or(&src_reg);
+                                        let pad = " ".repeat(lines[i].len() - lines[i].trim_start().len());
+                                        lines[i] = format!("{}return {} / {};", pad, var, divisor);
+                                        lines.remove(i + 2);
+                                        lines.remove(i + 1);
+                                        // Also remove the preceding sign-extension line if present
+                                        if i > 0 && src_name.is_some() {
+                                            lines.remove(i - 1);
+                                        }
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
+    // #MULT_ADD: Simplify "X + X * N" → "X * (N+1)" and "X - X * N" patterns.
+    // Also detect full modulo pattern: VAR = X / D; VAR2 = VAR * D; return X - VAR2 → X % D
+    for line in &mut lines {
+        let lt = line.trim().to_string();
+        // Pattern: "REG + REG * N" → "REG * (N+1)"
+        // Match: "VAR + VAR * N" where VAR is the same on both sides
+        if lt.contains(" + ") && lt.contains(" * ") {
+            // Extract: LHS = ... VAR + VAR * N;
+            if let Some(plus_pos) = lt.find(" + ") {
+                let after_plus = &lt[plus_pos + 3..];
+                if let Some(star_pos) = after_plus.find(" * ") {
+                    let var_after_plus = after_plus[..star_pos].trim();
+                    let multiplier = after_plus[star_pos + 3..].trim_end_matches(';').trim();
+                    // Check if the var before "+" matches the var after "+"
+                    let before_plus = &lt[..plus_pos];
+                    // The var before "+" could be at the end of an expression like "ECX = RCX + RCX * 4"
+                    let var_before_plus = before_plus.rsplit(|c: char| c == '=' || c == '(')
+                        .next().unwrap_or("").trim();
+                    if var_before_plus == var_after_plus && !var_before_plus.is_empty() {
+                        if let Ok(n) = multiplier.parse::<u64>() {
+                            let old = format!("{} + {} * {}", var_before_plus, var_after_plus, n);
+                            let new = format!("{} * {}", var_before_plus, n + 1);
+                            *line = line.replace(&old, &new);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // #MODULO: Detect "X / D" followed by "Y = (X / D) * D" followed by "return X - Y"
+    // → simplify to "return X % D"
+    // Skip intermediate >> 32 lines (high-half extraction from multiply)
+    {
+        let mut i = 0;
+        while i + 2 < lines.len() {
+            let l0 = lines[i].trim().to_string();
+            // Skip any >> 32 lines after the division
+            let mut next_idx = i + 1;
+            while next_idx < lines.len() {
+                let skip_t = lines[next_idx].trim();
+                if skip_t.contains(">> 32;") || skip_t.contains(">> 63;") || skip_t.contains(">> 31;") {
+                    next_idx += 1;
+                } else { break; }
+            }
+            if next_idx + 1 >= lines.len() { i += 1; continue; }
+            let l1 = lines[next_idx].trim().to_string();
+            let l2 = lines[next_idx + 1].trim().to_string();
+
+            // Pattern: "REG = X / D;" then "REG2 = REG * D;" then "return X - REG2;"
+            if let (Some(eq0), Some(eq1)) = (l0.find(" = "), l1.find(" = ")) {
+                let dest0 = l0[..eq0].to_string();
+                let rhs0 = l0[eq0 + 3..].trim_end_matches(';');
+                let dest1 = l1[..eq1].to_string();
+                let rhs1 = l1[eq1 + 3..].trim_end_matches(';');
+
+                if let Some(div_pos) = rhs0.find(" / ") {
+                    let dividend = &rhs0[..div_pos];
+                    let divisor = &rhs0[div_pos + 3..];
+
+                    // Check if l1 multiplies the quotient by the divisor
+                    let expected_mult = format!("{} * {}", dest0, divisor);
+                    if rhs1 == expected_mult {
+                        // Check if l2 is "return DIVIDEND - DEST1;" or "return ALIAS - DEST1;"
+                        // where ALIAS is a register alias (EAX↔RAX, ECX↔RCX, etc.)
+                        let is_return_minus = |ret_line: &str| -> bool {
+                            if let Some(rest) = ret_line.strip_prefix("return ") {
+                                if let Some(r) = rest.strip_suffix(';') {
+                                    if let Some(minus) = r.find(" - ") {
+                                        let ret_left = &r[..minus];
+                                        let ret_right = &r[minus + 3..];
+                                        // Check dest1 match (or alias)
+                                        if ret_right != dest1 { return false; }
+                                        // Check dividend match (or register alias)
+                                        if ret_left == dividend { return true; }
+                                        // Handle EAX↔RAX aliasing
+                                        let aliases = [("RAX","EAX"),("RBX","EBX"),("RCX","ECX"),
+                                                       ("RDX","EDX"),("RSI","ESI"),("RDI","EDI")];
+                                        for (r64, r32) in &aliases {
+                                            if (ret_left == *r64 && dividend == *r32)
+                                                || (ret_left == *r32 && dividend == *r64) {
+                                                return true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            false
+                        };
+                        if is_return_minus(&l2) {
+                            let pad = " ".repeat(lines[i].len() - lines[i].trim_start().len());
+                            lines[i] = format!("{}return {} % {};", pad, dividend, divisor);
+                            // Remove all lines from i+1 through next_idx+1
+                            for _ in 0..(next_idx + 2 - (i + 1)) {
+                                if i + 1 < lines.len() { lines.remove(i + 1); }
+                            }
+                            continue;
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
+    // #DEAD_RETURN: Remove unreachable return after if/else where both branches return.
+    // Pattern: "} else {\n  return ...;\n}\nreturn ...;" → remove trailing return
+    {
+        let mut i = 0;
+        while i + 1 < lines.len() {
+            let lt = lines[i].trim();
+            let next = lines[i + 1].trim().to_string();
+            // If we see "}" closing an if/else and the next line is "return ...",
+            // check if both branches of the if/else already return
+            if lt == "}" && next.starts_with("return ") {
+                // Scan backwards to find if this closes an if/else where both branches return
+                let indent = lines[i].len() - lines[i].trim_start().len();
+                let mut has_then_return = false;
+                let mut has_else_return = false;
+                let mut in_else = false;
+                let mut depth = 0i32;
+                for j in (0..i).rev() {
+                    let jt = lines[j].trim();
+                    let j_indent = lines[j].len() - lines[j].trim_start().len();
+                    if j_indent == indent {
+                        if jt == "}" { depth += 1; }
+                        if jt.starts_with("} else {") {
+                            in_else = true;
+                            depth -= 1;
+                        }
+                        if jt.starts_with("if (") && jt.ends_with('{') && depth <= 0 {
+                            break;
+                        }
+                    }
+                    if j_indent > indent && jt.starts_with("return ") {
+                        if in_else { has_then_return = true; }
+                        else { has_else_return = true; }
+                    }
+                }
+                if has_then_return && has_else_return {
+                    lines.remove(i + 1);
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+
     // #BANNER: Merge consecutive puts/printf calls with string-only args into a banner.
     // Pattern: 3+ consecutive puts("...")/printf("...\n") at the same indent
     // → collapse to puts("line1\nline2\nline3")
@@ -3703,8 +3926,7 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
                 UnaryOpKind::Neg => format!("-{}", i),
                 UnaryOpKind::Not => format!("~{}", i),
                 UnaryOpKind::BoolNot => format!("!{}", i),
-                UnaryOpKind::Zext => i, // zero-extend is implicit in C
-                UnaryOpKind::Sext => format!("(int){}", i),
+                UnaryOpKind::Zext | UnaryOpKind::Sext => i, // sign/zero-extend implicit in C
                 _ => format!("{}({})", unaryop_str(*kind), i),
             }
         }
@@ -4250,8 +4472,7 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
                 UnaryOpKind::Neg => format!("-{}", i),
                 UnaryOpKind::Not => format!("~{}", i),
                 UnaryOpKind::BoolNot => format!("!{}", i),
-                UnaryOpKind::Zext => i, // zero-extend is implicit in C
-                UnaryOpKind::Sext => format!("(int){}", i),
+                UnaryOpKind::Zext | UnaryOpKind::Sext => i, // sign/zero-extend implicit in C
                 _ => format!("{}({})", unaryop_str(*kind), i),
             }
         }
