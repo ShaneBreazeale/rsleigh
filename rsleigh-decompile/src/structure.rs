@@ -71,6 +71,34 @@ fn emit_region(
                 break;
             }
             SsaTerminator::Fallthrough(next) | SsaTerminator::Branch(next) => {
+                // Check if this fallthrough/call block is a loop header.
+                // This handles patterns like: call readdir → cbranch (result != NULL?)
+                // where the back-edge targets this block, not the CBranch block.
+                if is_loop_header {
+                    // The condition is at the next block (which should be a CBranch)
+                    let next_block = &ssa.blocks[next.0];
+                    if let SsaTerminator::CBranch { cond, taken, fallthrough } = &next_block.terminator {
+                        if !emitted[next.0] {
+                            emitted[next.0] = true;
+                            // Emit the next block's statements (e.g., the condition check)
+                            emit_block_stmts(next_block, out);
+
+                            let (body_start, exit, negate) = if can_reach(cfg, *taken, current, emitted)
+                                || can_reach_limited(cfg, *taken, current, cfg.blocks.len())
+                            {
+                                (*taken, *fallthrough, false)
+                            } else {
+                                (*fallthrough, *taken, true)
+                            };
+
+                            let mut body = Vec::new();
+                            emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body);
+                            out.push(StructuredStmt::While { cond: *cond, negate, body });
+                            current = exit;
+                            continue;
+                        }
+                    }
+                }
                 current = *next;
             }
             SsaTerminator::CBranch { cond, taken, fallthrough } => {
@@ -144,6 +172,28 @@ fn emit_region(
                     args: args.clone(),
                     out: None,
                 });
+                // Check if this call block is a loop header (call-in-loop-condition pattern)
+                if is_loop_header {
+                    let next_block = &ssa.blocks[fallthrough.0];
+                    if let SsaTerminator::CBranch { cond, taken, fallthrough: fall } = &next_block.terminator {
+                        if !emitted[fallthrough.0] {
+                            emitted[fallthrough.0] = true;
+                            emit_block_stmts(next_block, out);
+                            let (body_start, exit, negate) = if can_reach(cfg, *taken, current, emitted)
+                                || can_reach_limited(cfg, *taken, current, cfg.blocks.len())
+                            {
+                                (*taken, *fall, false)
+                            } else {
+                                (*fall, *taken, true)
+                            };
+                            let mut body = Vec::new();
+                            emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body);
+                            out.push(StructuredStmt::While { cond: *cond, negate, body });
+                            current = exit;
+                            continue;
+                        }
+                    }
+                }
                 current = *fallthrough;
             }
             SsaTerminator::Indirect(_v) => {
