@@ -1,6 +1,6 @@
 === abs_val (52 instructions) ===
   EAX = -EDI;
-  if (!(!SF)) {
+  if (SF) {
       return EDI;
   }
 ---
@@ -15,16 +15,15 @@
           return ECX - 1;
       }
       if (ECX != 1) {
-          while (EDX <= R10D) {
+          while (EDX <= 4[RDI + 0]) {
               EDX = R10D;
-              R10D = 8[RDI + 0];
-              if (R10D < EDX) {
+              if (8[RDI + 0] < EDX) {
                   4[RDI + R8] = ?;
                   8[RDI + R8] = ?;
                   R8 = R8 + 2;
                   if (R9 - R8 + 2 == 0) {
                       if (CL & 1 != 0) {
-                          if (EDX > R9D) {
+                          if (EDX > 4[RDI + 0]) {
                               RDI[R8] = 4[RDI + 0];
                               4[RDI + R8] = ?;
                           }
@@ -42,7 +41,7 @@
 ---
 === count_bits (29 instructions) ===
   if (EDI != 0) {
-      while (!CF || ZF) {
+      while (EDI > 1) {
           EDX = EDI & 1;
           EAX = EAX + EDX;
           ECX = ECX >> 1;
@@ -75,13 +74,13 @@
 ---
 === dot_product (51 instructions) ===
   if (RCX > RDX + 1) {
-      if (!CF || ZF) {
+      if (EDX > 7) {
           EDX = ECX & 0x7ffffff8;
           EAX = (ECX >> 3 & 0x1f) & 0xfffffff;
           RAX = RAX << 5 & 0x3f;
           XMM0 = 0;
           XMM1 = 0;
-          while (RAX != R8 + 0x20) {
+          while (R8 + 0x20 != RAX) {
               XMM2 = RDI[R8];
               XMM4 = ?;
               XMM0 = ((XMM4 >> 0x20 + XMM4 >> 0x20) >> 0x40 + XMM4 >> 0x40) >> 0x60 + XMM4 >> 0x60;
@@ -100,7 +99,7 @@
           }
           return 0;
       } else {
-          while (RCX != RDX + 1) {
+          while (RDX + 1 != RCX) {
               R8D = (RSI[RDX]) * RDI[RDX];
               EAX = EAX + R8D;
           }
@@ -112,7 +111,7 @@
       return;
   }
   if (EDI < 9) {
-      while (!CF || ZF) {
+      while (EDI > 2) {
           EAX = 1 * EDI;
           ECX = RDI - 1;
       }
@@ -143,7 +142,7 @@
       return;
   }
   if (EDI < 9) {
-      while (!CF || ZF) {
+      while (EDI > 2) {
           EAX = EAX * EDI;
           ECX = RDI - 1;
       }
@@ -208,7 +207,7 @@
   } else {
       if (EDX == 0) {
           printf("words = %d\n", 0);
-          while (*(RAX) != 0x20) {
+          while (*(EAX) != 0x20) {
               EAX = 0 << 0x20 | 0xc / 0;
           }
           printf("gcd(12,8) = %d\n");
@@ -247,7 +246,7 @@
       }
       R9B = R9B | SIL | DL;
       if (EAX == R9 + 2) {
-          while (R13 != R9 + 0x20) {
+          while (R9 + 0x20 != R13) {
               XMM2 = (((XMM2 + XMM0) >> 0x20 + XMM0 >> 0x20) >> 0x40 + XMM0 >> 0x40) >> 0x60 + XMM0 >> 0x60;
               XMM0 = (((XMM0 + XMM1) >> 0x20 + XMM1 >> 0x20) >> 0x40 + XMM1 >> 0x40) >> 0x60 + XMM1 >> 0x60;
               *(__uint128_t*)(-0x10 + RBX + R9) = XMM2 + XMM0 >> 0x20 + *(-0x10 + R12 + R9) >> 0x20 >> 0x40 + *(-0x10 + R12 + R9) >> 0x40 >> 0x60 + *(-0x10 + R12 + R9) >> 0x60;
@@ -271,7 +270,7 @@
   }
 ---
 === max_val (15 instructions) ===
-  if (!!ZF && OF != SF) {
+  if (EDI > ESI) {
       return EDI;
   }
 ---

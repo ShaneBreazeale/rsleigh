@@ -9,9 +9,9 @@
   while (hi >= lo) {
       EAX = EAX / 2;
       mid = lo + ECX;
-      if (EAX != target) {
+      if (target != arr[mid]) {
           EAX = arr[mid];
-          if (target <= EAX) {
+          if (target <= arr[mid]) {
               hi = mid - 1;
           } else {
               lo = mid + 1;
@@ -24,7 +24,7 @@
 ---
 === day_name (39 instructions) ===
   RAX = day - 6;
-  if (!CF || ZF) {
+  if (0x99d > 6) {
       return "Unknown";
   } else {
       RCX = 0x1000006b4;

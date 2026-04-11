@@ -1919,23 +1919,39 @@ fn format_cond_operand(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTra
     if let Some(ref name) = vdef.param_name {
         return name.clone();
     }
-    // If the expression is a stack Load, use the stack variable name
-    // For conditions, only resolve to DWARF names or param names, NOT to
-    // computed store aliases (which reflect initial values, not loop iteration values)
+    // If the expression is a Load, resolve to stack var name or pointer deref
     if let Expr::Load(ptr) = &vdef.expr {
         if let Some(offset) = get_rbp_offset(*ptr, ssa) {
             let name = format!("var_{:x}", offset);
             let resolved = resolve_stack_alias(&name, tracker);
-            // Accept: DWARF names (starts with lowercase letter) and param_N
             let is_good_name = resolved.starts_with("param_")
                 || (resolved != name && !resolved.contains('(') && !resolved.contains(' ')
                     && resolved.chars().next().map_or(false, |c| c.is_ascii_lowercase())
-                    && !resolved.chars().all(|c| c.is_ascii_digit() || c == 'x') // reject "0", "0x1f"
+                    && !resolved.chars().all(|c| c.is_ascii_digit() || c == 'x')
                     && resolved.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
             if is_good_name {
                 return resolved;
             }
-            return name; // Fallback: raw var_N
+            return name;
+        }
+        // Non-stack Load: dereference a pointer (e.g., *s for string access)
+        let addr = format_cond_operand(*ptr, ssa, ctx, tracker);
+        return format!("*({})", addr);
+    }
+    // For registers, trace through the SSA to find the underlying expression
+    if vdef.varnode.space == AddressSpaceId::Register {
+        // Follow Var(inner) references
+        if let Expr::Var(inner) = &vdef.expr {
+            return format_cond_operand(*inner, ssa, ctx, tracker);
+        }
+        // Follow through Load (register loaded from memory)
+        if let Expr::Load(ptr) = &vdef.expr {
+            if let Some(offset) = get_rbp_offset(*ptr, ssa) {
+                let name = format!("var_{:x}", offset);
+                return resolve_stack_alias(&name, tracker);
+            }
+            let addr = format_cond_operand(*ptr, ssa, ctx, tracker);
+            return format!("*({})", addr);
         }
     }
     // For non-trivial expressions (BinOp, etc.), render directly from SSA
@@ -1992,6 +2008,15 @@ fn find_matching_paren(s: &str, pos: usize) -> Option<usize> {
 /// Negate a condition string for while loop display.
 /// "a <= b" → "a > b", "a == b" → "a != b", etc.
 fn negate_condition(cond: &str) -> String {
+    // Simplify double negation: !(!x) → x, !(!(x)) → x
+    if let Some(inner) = cond.strip_prefix("!(") {
+        if let Some(inner) = inner.strip_suffix(')') {
+            return inner.to_string();
+        }
+    }
+    if let Some(inner) = cond.strip_prefix('!') {
+        return inner.to_string();
+    }
     // Try to find and flip the operator
     for (op, neg) in [(" <= ", " > "), (" >= ", " < "), (" < ", " >= "), (" > ", " <= "),
                        (" == ", " != "), (" != ", " == ")] {

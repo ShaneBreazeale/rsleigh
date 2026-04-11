@@ -572,6 +572,25 @@ fn resolve_cmp_operand(id: VarId, ssa: &SsaCfg) -> VarId {
 fn classify_jcc_condition(cond_id: VarId, ssa: &SsaCfg) -> Option<(BinOpKind, bool)> {
     let vdef = &ssa.vars[cond_id.0 as usize];
 
+    // General BoolNot unwrapping: !cond → invert the inner condition
+    if let Expr::UnaryOp(UnaryOpKind::BoolNot, inner) = &vdef.expr {
+        if let Some((kind, swap)) = classify_jcc_condition(*inner, ssa) {
+            let inverted = match kind {
+                BinOpKind::Eq => BinOpKind::NotEq,
+                BinOpKind::NotEq => BinOpKind::Eq,
+                BinOpKind::Less => BinOpKind::LessEq,   // !(a < b) = a >= b = b <= a
+                BinOpKind::LessEq => BinOpKind::Less,    // !(a <= b) = a > b = b < a
+                BinOpKind::SLess => BinOpKind::SLessEq,  // !(a < b) = a >= b = b <= a
+                BinOpKind::SLessEq => BinOpKind::SLess,  // !(a <= b) = a > b = b < a
+                _ => return None,
+            };
+            // Invert: !(a < b) = b <= a, so swap stays the same but the kind flips.
+            // But !(a < b) = a >= b = b <= a. With swap, the operands are already swapped.
+            // We need: invert the comparison and flip swap.
+            return Some((inverted, !swap));
+        }
+    }
+
     // Helper: check ZF (x86=518) or ZR (ARM64=257)
     let is_zf = |id: VarId| is_flag_ref(id, 518, ssa) || is_flag_ref(id, 257, ssa);
     // Helper: check CF (x86=512) or CY (ARM64=258)
