@@ -310,6 +310,73 @@ impl RuntimeSigStore {
 
 static RUNTIME_SIGS: std::sync::OnceLock<RuntimeSigStore> = std::sync::OnceLock::new();
 
+/// Address-based learned type store for interprocedural propagation.
+/// Populated by two-pass decompilation: first pass learns types, second pass uses them.
+static LEARNED_SIGS: std::sync::OnceLock<std::sync::Mutex<HashMap<u64, &'static FuncSig>>> = std::sync::OnceLock::new();
+
+/// Register learned function types from the first decompilation pass.
+/// These are used by the second pass to type internal function parameters.
+pub fn register_learned_types(types: &[crate::LearnedFuncType]) {
+    let store = LEARNED_SIGS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut map = store.lock().unwrap();
+    for lt in types {
+        if lt.param_types.iter().all(|t| t.is_none()) && lt.return_type.is_none() {
+            continue;
+        }
+        let params: Vec<SigParam> = lt.param_types.iter().enumerate().map(|(i, dt)| {
+            SigParam {
+                name: leak_str(&format!("param_{}", i)),
+                ty: match dt {
+                    Some(s) => c_str_to_sigtype(s),
+                    None => SigType::Int,
+                },
+            }
+        }).collect();
+        let ret = match lt.return_type {
+            Some(s) => c_str_to_sigtype(s),
+            None => SigType::Void,
+        };
+        let sig = FuncSig {
+            name: leak_str(&format!("func_{:x}", lt.addr)),
+            ret,
+            params: Box::leak(params.into_boxed_slice()),
+            variadic: false,
+        };
+        map.insert(lt.addr, Box::leak(Box::new(sig)));
+    }
+}
+
+/// Look up a learned signature by function address.
+pub fn lookup_addr(addr: u64) -> Option<&'static FuncSig> {
+    let store = LEARNED_SIGS.get()?;
+    let map = store.lock().ok()?;
+    map.get(&addr).copied()
+}
+
+/// Map C type display string back to SigType.
+fn c_str_to_sigtype(s: &str) -> SigType {
+    match s {
+        "void" => SigType::Void,
+        "int" => SigType::Int,
+        "unsigned int" => SigType::UInt,
+        "long" => SigType::Long,
+        "unsigned long" => SigType::ULong,
+        "size_t" => SigType::SizeT,
+        "char *" => SigType::CharPtr,
+        "const char *" => SigType::ConstCharPtr,
+        "void *" => SigType::VoidPtr,
+        "const void *" => SigType::ConstVoidPtr,
+        "FILE *" => SigType::FilePtr,
+        "bool" => SigType::Bool,
+        "wchar_t *" => SigType::WCharPtr,
+        "const wchar_t *" => SigType::ConstWCharPtr,
+        "HANDLE" => SigType::Handle,
+        "DWORD" => SigType::DWord,
+        "LPVOID" => SigType::LpVoid,
+        _ => SigType::Int,
+    }
+}
+
 /// Load additional signatures from a Ghidra-exported JSON file.
 ///
 /// The JSON format is an array of objects:

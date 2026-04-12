@@ -180,7 +180,31 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
         return;
     }
 
-    // Decompile mode
+    // Decompile mode — two-pass for interprocedural type propagation
+    // Pass 1: quick decompile all targets to learn parameter/return types
+    if all_mode && targets.len() > 1 {
+        let mut learned: Vec<rsleigh_decompile::LearnedFuncType> = Vec::new();
+        for name in &targets {
+            let func_addr = if let Some(hex) = name.strip_prefix("0x").or_else(|| name.strip_prefix("0X")) {
+                u64::from_str_radix(hex, 16).ok()
+            } else {
+                symbols.iter().find(|(_, n)| n == name).map(|(a, _)| *a)
+            };
+            if let Some(func_addr) = func_addr {
+                let insts = decode_func(func_addr, &symbols, &segs, &data, &mut dec);
+                if !insts.is_empty() {
+                    if let Some(lt) = rsleigh_decompile::extract_learned_types(arch, &insts, Some(&data)) {
+                        learned.push(lt);
+                    }
+                }
+            }
+        }
+        if !learned.is_empty() {
+            rsleigh_decompile::signatures::register_learned_types(&learned);
+        }
+    }
+
+    // Pass 2: full decompilation with learned types available
     let mut results: Vec<serde_json::Value> = Vec::new();
 
     for name in &targets {

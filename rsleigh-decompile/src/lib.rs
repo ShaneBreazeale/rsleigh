@@ -213,3 +213,92 @@ pub fn decompile_with_binary(
     let structured = structure::recover_structure(&ssa, &cfg);
     printer::print_c(&structured, &ssa, arch, binary, &import_map, &local_var_names, &struct_fields, &func_name)
 }
+
+/// Learned type information for a function, extracted after decompilation.
+/// Used for two-pass interprocedural type propagation.
+#[derive(Debug, Clone)]
+pub struct LearnedFuncType {
+    pub addr: u64,
+    pub param_types: Vec<Option<&'static str>>,  // display_type per param (None = unknown)
+    pub return_type: Option<&'static str>,         // display_type of return value
+}
+
+/// Extract type information from a function's SSA (after fold pass).
+/// Call this after decompile_with_binary to learn parameter/return types,
+/// then register them as synthetic signatures for the second pass.
+pub fn extract_learned_types(
+    arch: Architecture,
+    instructions: &[(u64, Instruction)],
+    binary: Option<&[u8]>,
+) -> Option<LearnedFuncType> {
+    if instructions.is_empty() { return None; }
+
+    let mut expanded = Vec::new();
+    for (addr, inst) in instructions {
+        expanded.push((*addr, inst.clone()));
+    }
+
+    let cfg = cfg::build_cfg(&expanded);
+    if cfg.blocks.is_empty() { return None; }
+
+    let import_map = binary
+        .map(|b| imports::resolve_imports(b))
+        .unwrap_or_default();
+
+    let mut ssa = ssa::build_ssa(&cfg);
+
+    let cc = if let Some(binary) = binary {
+        if let Ok(obj) = goblin::Object::parse(binary) {
+            match &obj {
+                goblin::Object::PE(pe) => if pe.is_64 {
+                    fold::CallingConv::Win64
+                } else {
+                    fold::CallingConv::Cdecl32
+                },
+                _ => match arch {
+                    Architecture::X86_32 | Architecture::ARM32 | Architecture::MIPS32
+                        => fold::CallingConv::Cdecl32,
+                    _ => fold::CallingConv::SysV,
+                }
+            }
+        } else { fold::CallingConv::SysV }
+    } else { fold::CallingConv::SysV };
+
+    fold::fold_with_cc(&mut ssa, cc);
+    fold::apply_signature_names(&mut ssa, &import_map);
+    fold::propagate_signature_return_types(&mut ssa, &import_map);
+
+    let func_addr = instructions[0].0;
+
+    // Collect parameter types
+    let mut params: Vec<(u32, Option<&'static str>)> = Vec::new();
+    for v in &ssa.vars {
+        if let Some(ref name) = v.param_name {
+            if let Some(idx) = name.strip_prefix("param_").and_then(|s| s.parse::<u32>().ok()) {
+                params.push((idx, v.display_type));
+            }
+        }
+    }
+    params.sort_by_key(|(idx, _)| *idx);
+    params.dedup_by_key(|(idx, _)| *idx);
+    let param_types: Vec<Option<&'static str>> = params.into_iter().map(|(_, dt)| dt).collect();
+
+    // Collect return type
+    let mut return_type = None;
+    for block in &ssa.blocks {
+        if let ir::SsaTerminator::Return(Some(v)) = &block.terminator {
+            let vdef = ssa.var(*v);
+            if let Some(dt) = vdef.display_type {
+                return_type = Some(dt);
+            }
+            break;
+        }
+    }
+
+    // Only return if we learned something useful
+    if param_types.iter().any(|t| t.is_some()) || return_type.is_some() {
+        Some(LearnedFuncType { addr: func_addr, param_types, return_type })
+    } else {
+        None
+    }
+}

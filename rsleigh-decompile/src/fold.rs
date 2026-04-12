@@ -2025,14 +2025,13 @@ pub fn apply_signature_names(ssa: &mut SsaCfg, import_map: &std::collections::Ha
                 CallTarget::Direct(a) => *a,
                 CallTarget::Indirect(_) => return,
             };
-            let name = match import_map.get(&addr) {
-                Some(n) => n.as_str(),
-                None => return,
-            };
-            let sig = match crate::signatures::lookup(name) {
-                Some(s) => s,
-                None => return,
-            };
+            // Try import name → signature DB first, then learned types by address
+            let sig = if let Some(name) = import_map.get(&addr) {
+                crate::signatures::lookup(name)
+            } else {
+                None
+            }.or_else(|| crate::signatures::lookup_addr(addr));
+            let Some(sig) = sig else { return };
             for (i, arg_id) in args.iter().enumerate() {
                 if let Some(param) = sig.params.get(i) {
                     let var = &ssa.vars[arg_id.0 as usize];
@@ -2083,15 +2082,16 @@ pub fn propagate_signature_return_types(ssa: &mut SsaCfg, import_map: &std::coll
         for stmt in &block.stmts {
             if let Stmt::Call { target, out: Some(out_id), .. } = stmt {
                 if let CallTarget::Direct(addr) = target {
-                    if let Some(name) = import_map.get(addr) {
-                        if let Some(sig) = crate::signatures::lookup(name) {
-                            let ret_ty = sig.ret.to_inferred();
-                            let disp = sig.ret.c_str();
-                            if ret_ty != InferredType::Unknown {
-                                let var = &ssa.vars[out_id.0 as usize];
-                                if var.inferred_type == InferredType::Unknown {
-                                    type_updates.push((*out_id, ret_ty, Some(disp)));
-                                }
+                    let sig = import_map.get(addr)
+                        .and_then(|name| crate::signatures::lookup(name))
+                        .or_else(|| crate::signatures::lookup_addr(*addr));
+                    if let Some(sig) = sig {
+                        let ret_ty = sig.ret.to_inferred();
+                        let disp = sig.ret.c_str();
+                        if ret_ty != InferredType::Unknown {
+                            let var = &ssa.vars[out_id.0 as usize];
+                            if var.inferred_type == InferredType::Unknown {
+                                type_updates.push((*out_id, ret_ty, Some(disp)));
                             }
                         }
                     }
@@ -2102,22 +2102,21 @@ pub fn propagate_signature_return_types(ssa: &mut SsaCfg, import_map: &std::coll
         // SsaTerminator::Call — find call_return var in fallthrough block
         if let SsaTerminator::Call { target, fallthrough, .. } = &block.terminator {
             if let CallTarget::Direct(addr) = target {
-                if let Some(name) = import_map.get(addr) {
-                    if let Some(sig) = crate::signatures::lookup(name) {
-                        let ret_ty = sig.ret.to_inferred();
-                        let disp = sig.ret.c_str();
-                        if ret_ty != InferredType::Unknown {
-                            // Find the first call_return var in the fallthrough block
-                            let ft_idx = fallthrough.0;
-                            if ft_idx < ssa.blocks.len() {
-                                let ft_block = &ssa.blocks[ft_idx];
-                                for stmt in &ft_block.stmts {
-                                    if let Stmt::Assign(var_id) = stmt {
-                                        let var = &ssa.vars[var_id.0 as usize];
-                                        if var.call_return && var.inferred_type == InferredType::Unknown {
-                                            type_updates.push((*var_id, ret_ty, Some(disp)));
-                                            break;
-                                        }
+                let sig = import_map.get(addr)
+                    .and_then(|name| crate::signatures::lookup(name))
+                    .or_else(|| crate::signatures::lookup_addr(*addr));
+                if let Some(sig) = sig {
+                    let ret_ty = sig.ret.to_inferred();
+                    let disp = sig.ret.c_str();
+                    if ret_ty != InferredType::Unknown {
+                        let ft_idx = fallthrough.0;
+                        if ft_idx < ssa.blocks.len() {
+                            for stmt in &ssa.blocks[ft_idx].stmts {
+                                if let Stmt::Assign(var_id) = stmt {
+                                    let var = &ssa.vars[var_id.0 as usize];
+                                    if var.call_return && var.inferred_type == InferredType::Unknown {
+                                        type_updates.push((*var_id, ret_ty, Some(disp)));
+                                        break;
                                     }
                                 }
                             }
@@ -2162,5 +2161,29 @@ pub fn propagate_signature_return_types(ssa: &mut SsaCfg, import_map: &std::coll
             }
         }
         if !propagated { break; }
+    }
+
+    // Backward-propagate display types through Load chains.
+    // If var_A = Load(param_3) and var_A.display_type = "HANDLE",
+    // then param_3 holds a pointer to HANDLE → display_type = "HANDLE *".
+    // This makes function parameter types reflect what the callee expects.
+    for v in 0..ssa.vars.len() {
+        let disp = ssa.vars[v].display_type;
+        let Some(disp) = disp else { continue };
+        if let Expr::Load(ptr_id) = &ssa.vars[v].expr {
+            let ptr_idx = ptr_id.0 as usize;
+            if ptr_idx < ssa.vars.len() && ssa.vars[ptr_idx].display_type.is_none() {
+                // The pointer variable holds an address of <display_type>
+                // For function parameters, show as the pointed-to type (not ptr-to-ptr)
+                // because *(param_0) of type HANDLE means param_0 IS the HANDLE
+                // (x86-32 passes by value on the stack, Load fetches the param value)
+                if ssa.vars[ptr_idx].param_name.is_some() {
+                    ssa.vars[ptr_idx].display_type = Some(disp);
+                    if ssa.vars[ptr_idx].inferred_type == InferredType::Unknown {
+                        ssa.vars[ptr_idx].inferred_type = ssa.vars[v].inferred_type;
+                    }
+                }
+            }
+        }
     }
 }
