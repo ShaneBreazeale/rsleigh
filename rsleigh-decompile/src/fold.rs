@@ -104,7 +104,6 @@ fn fold_once(ssa: &mut SsaCfg) {
         ssa.vars[v].expr = simplify_expr(expr, &ssa.vars);
     }
     // Constant folding: evaluate BinOp(Const, Const) chains to single constants.
-    // This resolves obfuscated arithmetic like (0 ^ x) and chains of ops on constants.
     for v in 0..ssa.vars.len() {
         if matches!(&ssa.vars[v].expr, Expr::BinOp(_, _, _) | Expr::UnaryOp(_, _)) {
             if let Some((val, sz)) = const_fold_expr(&ssa.vars[v].expr, &ssa.vars) {
@@ -112,6 +111,8 @@ fn fold_once(ssa: &mut SsaCfg) {
             }
         }
     }
+    // MBA deobfuscation: deep algebraic simplification through expression trees.
+    mba_simplify(ssa);
 
     // Pass 3: Inline single-use Unique vars and all constants
     let inline_candidates: Vec<(VarId, Expr)> = (0..ssa.vars.len())
@@ -134,6 +135,479 @@ fn fold_once(ssa: &mut SsaCfg) {
 
     // Pass 4: Multi-level register copy propagation
     propagate_register_copies(ssa);
+}
+
+/// MBA (Mixed Boolean-Arithmetic) deobfuscation pass.
+///
+/// Two-phase approach inspired by msynth/SiMBA:
+/// Phase 1: Pattern-based — cancellation, absorption, double negation
+/// Phase 2: Oracle-based — evaluate expressions on sample inputs, match I/O
+///          behavior against a table of simple canonical forms
+fn mba_simplify(ssa: &mut SsaCfg) {
+    // Phase 1: Pattern-based simplification (fast, catches structural patterns)
+    for _pass in 0..4 {
+        let mut changed = false;
+        for v in 0..ssa.vars.len() {
+            let new_expr = mba_simplify_expr(v, &ssa.vars);
+            if let Some(new_expr) = new_expr {
+                ssa.vars[v].expr = new_expr;
+                changed = true;
+            }
+        }
+        if !changed { break; }
+    }
+
+    // Phase 2: Oracle-based truth table simplification
+    // For each expression with ≤ 3 base variables, evaluate on sample inputs
+    // and check if the I/O behavior matches a simpler expression.
+    mba_oracle_simplify(ssa);
+}
+
+/// Oracle-based MBA simplification using truth table matching.
+///
+/// For each complex expression (depth ≥ 3), find its base variables,
+/// evaluate on sample inputs, and check if the output matches a simpler form.
+fn mba_oracle_simplify(ssa: &mut SsaCfg) {
+    // Sample values for truth table evaluation (8-bit for speed, catches most MBA patterns)
+    const SAMPLES: &[u64] = &[0, 1, 2, 0x55, 0xAA, 0xFF, 0x0F, 0xF0,
+                               0x7F, 0x80, 0xDE, 0xAD, 0x42, 0x13, 0x37, 0xBE];
+
+    for _pass in 0..3 {
+        let mut changed = false;
+
+        for v in 0..ssa.vars.len() {
+            // Skip simple expressions (depth < 3)
+            let depth = expr_depth(&ssa.vars[v].expr, &ssa.vars, 0);
+            if depth < 3 { continue; }
+
+            // Find base variables (leaves that aren't constants)
+            let mut bases: Vec<VarId> = Vec::new();
+            collect_base_vars(&ssa.vars[v].expr, &ssa.vars, &mut bases, 0);
+            bases.sort_by_key(|id| id.0);
+            bases.dedup_by_key(|id| id.0);
+
+            // Only handle 1-3 base variables (tractable)
+            if bases.is_empty() || bases.len() > 3 { continue; }
+
+            let sz = ssa.vars[v].size;
+            let mask = if sz >= 8 { u64::MAX } else { (1u64 << (sz * 8)).wrapping_sub(1) };
+
+            // Evaluate the complex expression on all sample input combinations
+            let outputs = evaluate_expr_samples(&ssa.vars[v].expr, &ssa.vars, &bases, SAMPLES, mask);
+            if outputs.is_none() { continue; }
+            let outputs = outputs.unwrap();
+
+            // Try to find a simpler expression with the same I/O behavior
+            if let Some(simple) = find_simpler_match(&bases, &outputs, SAMPLES, mask, &ssa.vars, sz) {
+                ssa.vars[v].expr = simple;
+                changed = true;
+            }
+        }
+
+        if !changed { break; }
+    }
+}
+
+/// Compute expression depth (for filtering).
+fn expr_depth(expr: &Expr, vars: &[VarDef], depth: usize) -> usize {
+    if depth > 10 { return depth; } // prevent infinite recursion
+    match expr {
+        Expr::Const(_, _) | Expr::Unknown => 0,
+        Expr::Var(id) => {
+            if id.0 as usize >= vars.len() { return 0; }
+            expr_depth(&vars[id.0 as usize].expr, vars, depth + 1)
+        }
+        Expr::BinOp(_, left, right) => {
+            let ld = expr_depth(&vars[left.0 as usize].expr, vars, depth + 1);
+            let rd = expr_depth(&vars[right.0 as usize].expr, vars, depth + 1);
+            1 + ld.max(rd)
+        }
+        Expr::UnaryOp(_, inner) => {
+            1 + expr_depth(&vars[inner.0 as usize].expr, vars, depth + 1)
+        }
+        _ => 0,
+    }
+}
+
+/// Collect base variables (leaves of the expression tree that aren't constants).
+fn collect_base_vars(expr: &Expr, vars: &[VarDef], bases: &mut Vec<VarId>, depth: usize) {
+    if depth > 10 { return; }
+    match expr {
+        Expr::Const(_, _) => {}
+        Expr::Unknown => {}
+        Expr::Var(id) => {
+            if id.0 as usize >= vars.len() { return; }
+            let inner = &vars[id.0 as usize].expr;
+            if matches!(inner, Expr::Unknown) || matches!(inner, Expr::Load(_))
+                || matches!(inner, Expr::Phi(_)) || matches!(inner, Expr::FieldAccess(_, _))
+            {
+                bases.push(*id); // This is a base variable (input)
+            } else {
+                collect_base_vars(inner, vars, bases, depth + 1);
+            }
+        }
+        Expr::BinOp(_, left, right) => {
+            collect_base_vars(&Expr::Var(*left), vars, bases, depth + 1);
+            collect_base_vars(&Expr::Var(*right), vars, bases, depth + 1);
+        }
+        Expr::UnaryOp(_, inner) => {
+            collect_base_vars(&Expr::Var(*inner), vars, bases, depth + 1);
+        }
+        _ => {}
+    }
+}
+
+/// Evaluate an expression on all sample input combinations.
+/// Returns a vector of output values, one per sample combination.
+fn evaluate_expr_samples(
+    expr: &Expr, vars: &[VarDef], bases: &[VarId],
+    samples: &[u64], mask: u64,
+) -> Option<Vec<u64>> {
+    let n = samples.len();
+    let combos = match bases.len() {
+        1 => n,
+        2 => n * n,
+        3 => n.min(8) * n.min(8) * n.min(8), // limit 3-var combos
+        _ => return None,
+    };
+
+    let mut outputs = Vec::with_capacity(combos);
+    let mut env: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+
+    match bases.len() {
+        1 => {
+            for &s0 in samples {
+                env.clear();
+                env.insert(bases[0].0, s0);
+                let val = eval_expr(expr, vars, &env, mask, 0)?;
+                outputs.push(val);
+            }
+        }
+        2 => {
+            for &s0 in samples {
+                for &s1 in samples {
+                    env.clear();
+                    env.insert(bases[0].0, s0);
+                    env.insert(bases[1].0, s1);
+                    let val = eval_expr(expr, vars, &env, mask, 0)?;
+                    outputs.push(val);
+                }
+            }
+        }
+        3 => {
+            for &s0 in &samples[..samples.len().min(8)] {
+                for &s1 in &samples[..samples.len().min(8)] {
+                    for &s2 in &samples[..samples.len().min(8)] {
+                        env.clear();
+                        env.insert(bases[0].0, s0);
+                        env.insert(bases[1].0, s1);
+                        env.insert(bases[2].0, s2);
+                        let val = eval_expr(expr, vars, &env, mask, 0)?;
+                        outputs.push(val);
+                    }
+                }
+            }
+        }
+        _ => return None,
+    }
+
+    Some(outputs)
+}
+
+/// Symbolically evaluate an expression with given variable bindings.
+fn eval_expr(expr: &Expr, vars: &[VarDef], env: &std::collections::HashMap<u32, u64>, mask: u64, depth: usize) -> Option<u64> {
+    if depth > 20 { return None; }
+    match expr {
+        Expr::Const(val, _) => Some(*val & mask),
+        Expr::Unknown | Expr::Load(_) | Expr::Phi(_) | Expr::FieldAccess(_, _) => None,
+        Expr::Var(id) => {
+            if let Some(&val) = env.get(&id.0) {
+                Some(val & mask)
+            } else if (id.0 as usize) < vars.len() {
+                eval_expr(&vars[id.0 as usize].expr, vars, env, mask, depth + 1)
+            } else {
+                None
+            }
+        }
+        Expr::BinOp(kind, left, right) => {
+            let l = eval_expr(&Expr::Var(*left), vars, env, mask, depth + 1)?;
+            let r = eval_expr(&Expr::Var(*right), vars, env, mask, depth + 1)?;
+            let result = match kind {
+                BinOpKind::Add => l.wrapping_add(r),
+                BinOpKind::Sub => l.wrapping_sub(r),
+                BinOpKind::Mult => l.wrapping_mul(r),
+                BinOpKind::And => l & r,
+                BinOpKind::Or => l | r,
+                BinOpKind::Xor => l ^ r,
+                BinOpKind::Lsl => l.wrapping_shl((r & 63) as u32),
+                BinOpKind::Lsr => l.wrapping_shr((r & 63) as u32),
+                BinOpKind::Asr => ((l as i64).wrapping_shr((r & 63) as u32)) as u64,
+                _ => return None,
+            };
+            Some(result & mask)
+        }
+        Expr::UnaryOp(kind, inner) => {
+            let v = eval_expr(&Expr::Var(*inner), vars, env, mask, depth + 1)?;
+            let result = match kind {
+                UnaryOpKind::Neg => (-(v as i64)) as u64,
+                UnaryOpKind::Not => !v,
+                _ => return None,
+            };
+            Some(result & mask)
+        }
+    }
+}
+
+/// Try to find a simpler expression with the same I/O behavior.
+/// Tests all 1-op and 2-op combinations of the base variables.
+fn find_simpler_match(
+    bases: &[VarId], target_outputs: &[u64], samples: &[u64], mask: u64,
+    vars: &[VarDef], sz: u32,
+) -> Option<Expr> {
+    let n = bases.len();
+
+    // Candidate simple expressions to try:
+    // For 1 variable: x, ~x, -x, 0, const
+    // For 2 variables: x+y, x-y, x&y, x|y, x^y, x*y, x, y
+    // For 3 variables: x+y+z, x^y^z, x&y&z, etc. + all 2-var combos
+
+    // First check: is it a constant?
+    if target_outputs.iter().all(|&v| v == target_outputs[0]) {
+        return Some(Expr::Const(target_outputs[0], sz));
+    }
+
+    // Check single-variable expressions
+    for (bi, base) in bases.iter().enumerate() {
+        let base_outputs: Vec<u64> = compute_base_outputs(bi, n, samples, mask);
+
+        // x itself
+        if base_outputs == *target_outputs {
+            return Some(Expr::Var(*base));
+        }
+        // ~x
+        let neg: Vec<u64> = base_outputs.iter().map(|&v| (!v) & mask).collect();
+        if neg == *target_outputs {
+            return Some(Expr::UnaryOp(UnaryOpKind::Not, *base));
+        }
+        // -x
+        let minus: Vec<u64> = base_outputs.iter().map(|&v| ((-(v as i64)) as u64) & mask).collect();
+        if minus == *target_outputs {
+            return Some(Expr::UnaryOp(UnaryOpKind::Neg, *base));
+        }
+    }
+
+    // Check two-variable expressions
+    if n >= 2 {
+        for i in 0..n {
+            for j in (i+1)..n {
+                let a_outs = compute_base_outputs(i, n, samples, mask);
+                let b_outs = compute_base_outputs(j, n, samples, mask);
+
+                let ops: &[(BinOpKind, &str)] = &[
+                    (BinOpKind::Add, "+"), (BinOpKind::Sub, "-"),
+                    (BinOpKind::And, "&"), (BinOpKind::Or, "|"),
+                    (BinOpKind::Xor, "^"), (BinOpKind::Mult, "*"),
+                ];
+
+                for (op, _) in ops {
+                    let result: Vec<u64> = a_outs.iter().zip(b_outs.iter()).map(|(&a, &b)| {
+                        let r = match op {
+                            BinOpKind::Add => a.wrapping_add(b),
+                            BinOpKind::Sub => a.wrapping_sub(b),
+                            BinOpKind::And => a & b,
+                            BinOpKind::Or => a | b,
+                            BinOpKind::Xor => a ^ b,
+                            BinOpKind::Mult => a.wrapping_mul(b),
+                            _ => 0,
+                        };
+                        r & mask
+                    }).collect();
+
+                    if result == *target_outputs {
+                        return Some(Expr::BinOp(*op, bases[i], bases[j]));
+                    }
+
+                    // Also try b op a (for non-commutative ops)
+                    if matches!(op, BinOpKind::Sub) {
+                        let result_rev: Vec<u64> = b_outs.iter().zip(a_outs.iter()).map(|(&a, &b)| {
+                            (a.wrapping_sub(b)) & mask
+                        }).collect();
+                        if result_rev == *target_outputs {
+                            return Some(Expr::BinOp(*op, bases[j], bases[i]));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Compute the output values for a specific base variable across sample combinations.
+fn compute_base_outputs(base_idx: usize, n_bases: usize, samples: &[u64], mask: u64) -> Vec<u64> {
+    let n = samples.len();
+    let mut outputs = Vec::new();
+    match n_bases {
+        1 => {
+            for &s in samples {
+                outputs.push(s & mask);
+            }
+        }
+        2 => {
+            for (i, &s0) in samples.iter().enumerate() {
+                for (j, &s1) in samples.iter().enumerate() {
+                    outputs.push(if base_idx == 0 { s0 } else { s1 } & mask);
+                }
+            }
+        }
+        3 => {
+            let lim = samples.len().min(8);
+            for i in 0..lim {
+                for j in 0..lim {
+                    for k in 0..lim {
+                        let val = match base_idx {
+                            0 => samples[i],
+                            1 => samples[j],
+                            _ => samples[k],
+                        };
+                        outputs.push(val & mask);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    outputs
+}
+
+fn mba_simplify_expr(var_idx: usize, vars: &[VarDef]) -> Option<Expr> {
+    let expr = &vars[var_idx].expr;
+    match expr {
+        // Sub(a, Sub(a, b)) → Var(b)  [cancellation: a - (a - b) = b]
+        Expr::BinOp(BinOpKind::Sub, left, right) => {
+            if let Expr::BinOp(BinOpKind::Sub, inner_left, inner_right) = &vars[right.0 as usize].expr {
+                if left == inner_left || same_varnode(*left, *inner_left, vars) {
+                    return Some(Expr::Var(*inner_right));
+                }
+            }
+            // Sub(Add(a, b), a) → Var(b), Sub(Add(a, b), b) → Var(a)
+            if let Expr::BinOp(BinOpKind::Add, add_left, add_right) = &vars[left.0 as usize].expr {
+                if right == add_left || same_varnode(*right, *add_left, vars) {
+                    return Some(Expr::Var(*add_right));
+                }
+                if right == add_right || same_varnode(*right, *add_right, vars) {
+                    return Some(Expr::Var(*add_left));
+                }
+            }
+            // Sub(a, a) → 0 (already handled in simplify_expr but re-check after inlining)
+            if left == right || same_varnode(*left, *right, vars) {
+                return Some(Expr::Const(0, vars[left.0 as usize].size));
+            }
+            None
+        }
+        // Xor(a, Xor(a, b)) → Var(b)  [cancellation: a ^ (a ^ b) = b]
+        Expr::BinOp(BinOpKind::Xor, left, right) => {
+            if let Expr::BinOp(BinOpKind::Xor, inner_left, inner_right) = &vars[right.0 as usize].expr {
+                if left == inner_left || same_varnode(*left, *inner_left, vars) {
+                    return Some(Expr::Var(*inner_right));
+                }
+                if left == inner_right || same_varnode(*left, *inner_right, vars) {
+                    return Some(Expr::Var(*inner_left));
+                }
+            }
+            if let Expr::BinOp(BinOpKind::Xor, inner_left, inner_right) = &vars[left.0 as usize].expr {
+                if right == inner_left || same_varnode(*right, *inner_left, vars) {
+                    return Some(Expr::Var(*inner_right));
+                }
+                if right == inner_right || same_varnode(*right, *inner_right, vars) {
+                    return Some(Expr::Var(*inner_left));
+                }
+            }
+            // a ^ 0 → a (re-check after const folding resolved operands)
+            if is_const_zero(*right, vars) { return Some(Expr::Var(*left)); }
+            if is_const_zero(*left, vars) { return Some(Expr::Var(*right)); }
+            None
+        }
+        // Add(a, Neg(a)) → 0, Add(Neg(a), a) → 0 [cancellation]
+        Expr::BinOp(BinOpKind::Add, left, right) => {
+            if let Expr::UnaryOp(UnaryOpKind::Neg, inner) = &vars[right.0 as usize].expr {
+                if left == inner || same_varnode(*left, *inner, vars) {
+                    return Some(Expr::Const(0, vars[left.0 as usize].size));
+                }
+            }
+            if let Expr::UnaryOp(UnaryOpKind::Neg, inner) = &vars[left.0 as usize].expr {
+                if right == inner || same_varnode(*right, *inner, vars) {
+                    return Some(Expr::Const(0, vars[right.0 as usize].size));
+                }
+            }
+            // Add(Sub(a, b), b) → Var(a)
+            if let Expr::BinOp(BinOpKind::Sub, sub_left, sub_right) = &vars[left.0 as usize].expr {
+                if right == sub_right || same_varnode(*right, *sub_right, vars) {
+                    return Some(Expr::Var(*sub_left));
+                }
+            }
+            if let Expr::BinOp(BinOpKind::Sub, sub_left, sub_right) = &vars[right.0 as usize].expr {
+                if left == sub_right || same_varnode(*left, *sub_right, vars) {
+                    return Some(Expr::Var(*sub_left));
+                }
+            }
+            None
+        }
+        // And(a, Or(a, b)) → Var(a) [absorption]
+        // Or(a, And(a, b)) → Var(a) [absorption]
+        Expr::BinOp(BinOpKind::And, left, right) => {
+            // a & (a | b) → a
+            if let Expr::BinOp(BinOpKind::Or, or_left, _or_right) = &vars[right.0 as usize].expr {
+                if left == or_left || same_varnode(*left, *or_left, vars) {
+                    return Some(Expr::Var(*left));
+                }
+            }
+            if let Expr::BinOp(BinOpKind::Or, or_left, _or_right) = &vars[left.0 as usize].expr {
+                if right == or_left || same_varnode(*right, *or_left, vars) {
+                    return Some(Expr::Var(*right));
+                }
+            }
+            None
+        }
+        Expr::BinOp(BinOpKind::Or, left, right) => {
+            // a | (a & b) → a
+            if let Expr::BinOp(BinOpKind::And, and_left, _and_right) = &vars[right.0 as usize].expr {
+                if left == and_left || same_varnode(*left, *and_left, vars) {
+                    return Some(Expr::Var(*left));
+                }
+            }
+            if let Expr::BinOp(BinOpKind::And, and_left, _and_right) = &vars[left.0 as usize].expr {
+                if right == and_left || same_varnode(*right, *and_left, vars) {
+                    return Some(Expr::Var(*right));
+                }
+            }
+            None
+        }
+        // Double negation: Neg(Neg(x)) → x, Not(Not(x)) → x
+        Expr::UnaryOp(UnaryOpKind::Neg, inner) => {
+            if let Expr::UnaryOp(UnaryOpKind::Neg, inner2) = &vars[inner.0 as usize].expr {
+                return Some(Expr::Var(*inner2));
+            }
+            None
+        }
+        Expr::UnaryOp(UnaryOpKind::Not, inner) => {
+            if let Expr::UnaryOp(UnaryOpKind::Not, inner2) = &vars[inner.0 as usize].expr {
+                return Some(Expr::Var(*inner2));
+            }
+            None
+        }
+        // Mult by 0 after inlining
+        Expr::BinOp(BinOpKind::Mult, left, right) => {
+            if is_const_zero(*left, vars) || is_const_zero(*right, vars) {
+                return Some(Expr::Const(0, vars[left.0 as usize].size));
+            }
+            if is_const_one(*left, vars) { return Some(Expr::Var(*right)); }
+            if is_const_one(*right, vars) { return Some(Expr::Var(*left)); }
+            None
+        }
+        _ => None,
+    }
 }
 
 fn simplify_expr(expr: Expr, vars: &[VarDef]) -> Expr {
