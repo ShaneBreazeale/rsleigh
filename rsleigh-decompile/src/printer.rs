@@ -4298,33 +4298,28 @@ struct PrintCtx<'a> {
 fn generate_function_signature(out: &mut String, ssa: &SsaCfg, func_name: &str) {
     use crate::ir::InferredType;
 
+    // If this function has a known signature, use it for return type
+    let sig = crate::signatures::lookup(func_name);
+
     // Detect return type from Return terminators
     let mut return_type = "void";
     let mut _return_size = 0u32;
-    for block in &ssa.blocks {
-        if let SsaTerminator::Return(Some(v)) = &block.terminator {
-            let vdef = ssa.var(*v);
-            _return_size = vdef.size;
-            return_type = match (vdef.inferred_type, vdef.size) {
-                (InferredType::Float, 4) => "float",
-                (InferredType::Float, 8) => "double",
-                (InferredType::Signed, 1) => "char",
-                (InferredType::Signed, 4) => "int",
-                (InferredType::Signed, 8) => "long",
-                (InferredType::Pointer, _) => "void *",
-                (InferredType::Bool, _) => "bool",
-                (_, 1) => "uint8_t",
-                (_, 4) => "int",
-                (_, 8) => "long",
-                _ => "int",
-            };
-            break;
+    if let Some(sig) = sig {
+        return_type = sig.ret.c_str();
+    } else {
+        for block in &ssa.blocks {
+            if let SsaTerminator::Return(Some(v)) = &block.terminator {
+                let vdef = ssa.var(*v);
+                _return_size = vdef.size;
+                return_type = inferred_type_to_c(vdef.inferred_type, vdef.size);
+                break;
+            }
         }
+        // If no return terminator has a value, it's void
+        let has_return_val = ssa.blocks.iter().any(|b|
+            matches!(&b.terminator, SsaTerminator::Return(Some(_))));
+        if !has_return_val { return_type = "void"; }
     }
-    // If no return terminator has a value, it's void
-    let has_return_val = ssa.blocks.iter().any(|b|
-        matches!(&b.terminator, SsaTerminator::Return(Some(_))));
-    if !has_return_val { return_type = "void"; }
 
     // Collect parameters — variables with param_name set
     let mut params: Vec<(String, u32, InferredType)> = Vec::new();
@@ -4345,19 +4340,16 @@ fn generate_function_signature(out: &mut String, ssa: &SsaCfg, func_name: &str) 
         idx_a.cmp(&idx_b).then(a.0.cmp(&b.0))
     });
 
-    // Format parameter list
-    let param_strs: Vec<String> = params.iter().map(|(name, size, ty)| {
-        let type_name = match (*ty, *size) {
-            (InferredType::Float, 4) => "float",
-            (InferredType::Float, 8) => "double",
-            (InferredType::Signed, 1) => "char",
-            (InferredType::Signed, 4) => "int",
-            (InferredType::Signed, 8) => "long",
-            (InferredType::Pointer, _) | (_, 8) => "long",
-            (InferredType::Bool, _) => "bool",
-            (_, 1) => "uint8_t",
-            (_, 4) => "int",
-            _ => "int",
+    // Format parameter list — use signature types when available
+    let param_strs: Vec<String> = params.iter().enumerate().map(|(i, (name, size, ty))| {
+        let type_name = if let Some(sig) = sig {
+            if i < sig.params.len() {
+                sig.params[i].ty.c_str()
+            } else {
+                inferred_type_to_c(*ty, *size)
+            }
+        } else {
+            inferred_type_to_c(*ty, *size)
         };
         format!("{} {}", type_name, name)
     }).collect();
@@ -4369,6 +4361,23 @@ fn generate_function_signature(out: &mut String, ssa: &SsaCfg, func_name: &str) 
     };
 
     out.push_str(&format!("{} {}({}) {{\n", return_type, func_name, params_str));
+}
+
+/// Map InferredType + size to a C type string.
+fn inferred_type_to_c(ty: crate::ir::InferredType, size: u32) -> &'static str {
+    use crate::ir::InferredType;
+    match (ty, size) {
+        (InferredType::Float, 4) => "float",
+        (InferredType::Float, 8) => "double",
+        (InferredType::Signed, 1) => "char",
+        (InferredType::Signed, 4) => "int",
+        (InferredType::Signed, 8) => "long",
+        (InferredType::Pointer, _) | (_, 8) => "long",
+        (InferredType::Bool, _) => "bool",
+        (_, 1) => "uint8_t",
+        (_, 4) => "int",
+        _ => "int",
+    }
 }
 
 fn filter_boilerplate(stmts: &[StructuredStmt], ssa: &SsaCfg) -> Vec<StructuredStmt> {
@@ -4810,10 +4819,28 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
         }
         StructuredStmt::Call { target, args, out: call_out } => {
             let target_name = format_call_target(target, ssa, ctx);
-            let args_str: Vec<String> = args.iter()
-                .map(|a| {
+            // Look up signature for parameter name annotations
+            let call_sig = crate::signatures::lookup(&target_name);
+            let args_str: Vec<String> = args.iter().enumerate()
+                .map(|(i, a)| {
                     let vdef = ssa.var(*a);
-                    format_expr_tracked(&vdef.expr, ssa, ctx, tracker)
+                    let expr_str = format_expr_tracked(&vdef.expr, ssa, ctx, tracker);
+                    // Add /* param_name */ comment when signature is available and
+                    // the argument expression isn't already obviously named
+                    if let Some(sig) = call_sig {
+                        if let Some(param) = sig.params.get(i) {
+                            // Only annotate complex expressions (not simple constants, strings, or
+                            // already-named vars that match the param name)
+                            let is_simple = expr_str.starts_with('"')
+                                || expr_str.starts_with("L\"")
+                                || expr_str == "0"
+                                || expr_str == param.name;
+                            if !is_simple && args.len() > 1 {
+                                return format!("/*{}*/ {}", param.name, expr_str);
+                            }
+                        }
+                    }
+                    expr_str
                 })
                 .collect();
             let call_expr = format!("{}({})", target_name, args_str.join(", "));
