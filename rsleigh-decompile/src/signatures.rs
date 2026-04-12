@@ -223,4 +223,47 @@ mod tests {
         let sig = lookup("VirtualAlloc").expect("VirtualAlloc should exist");
         assert_eq!(sig.name, "VirtualAlloc");
     }
+
+    #[test]
+    fn libc_coverage() {
+        for name in ["printf", "fprintf", "sprintf", "snprintf", "puts", "fputs",
+                      "fgets", "fread", "fwrite", "fopen", "fclose", "fseek",
+                      "ftell", "feof", "ferror", "fflush", "fputc", "fgetc",
+                      "putchar", "getchar",
+                      "malloc", "calloc", "realloc", "free", "atoi", "atol",
+                      "strtol", "strtoul", "exit", "abort", "abs", "qsort",
+                      "strlen", "strcpy", "strncpy", "strcmp", "strncmp",
+                      "strcat", "strncat", "strchr", "strrchr", "strstr",
+                      "memcpy", "memset", "memmove", "memcmp", "strerror",
+                      "read", "write", "open", "close", "fork", "execve",
+                      "getpid", "sleep", "dup2", "pipe",
+                      "socket", "bind", "listen", "accept", "connect",
+                      "send", "recv", "sendto", "recvfrom",
+                      "setsockopt", "getsockopt", "shutdown"] {
+            assert!(lookup(name).is_some(), "missing libc sig: {}", name);
+        }
+    }
+
+    #[test]
+    fn win32_coverage() {
+        for name in ["VirtualAlloc", "VirtualFree", "VirtualProtect",
+                      "CreateFileA", "CreateFileW", "ReadFile", "WriteFile",
+                      "CloseHandle", "GetProcAddress", "LoadLibraryA", "LoadLibraryW",
+                      "GetModuleHandleA", "GetModuleHandleW",
+                      "CreateProcessA", "CreateProcessW",
+                      "CreateRemoteThread", "WriteProcessMemory",
+                      "GetLastError", "SetLastError",
+                      "HeapAlloc", "HeapFree",
+                      "RegOpenKeyExA", "RegSetValueExA"] {
+            assert!(lookup(name).is_some(), "missing win32 sig: {}", name);
+        }
+    }
+
+    #[test]
+    fn param_names_are_meaningful() {
+        let sig = lookup("memcpy").unwrap();
+        assert_eq!(sig.params[0].name, "dest");
+        assert_eq!(sig.params[1].name, "src");
+        assert_eq!(sig.params[2].name, "n");
+    }
 }
