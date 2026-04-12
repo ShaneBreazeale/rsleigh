@@ -71,11 +71,12 @@ rsleigh/
 │       ├── ir.rs               ← decompiler IR types (VarDef with display_type)
 │       ├── pdb_info.rs         ← PDB debug info parsing for PE binaries
 │       ├── printer.rs          ← C printer with RegTracker for copy elision
+│       ├── eqsat.rs            ← equality saturation MBA deobfuscation (egg crate)
 │       ├── signatures.rs       ← signature DB: lookup, runtime JSON, embedded TSV
 │       ├── signatures_libc.rs  ← 176 hand-tuned libc/POSIX signatures
 │       ├── signatures_win32.rs ← 128 hand-tuned Win32 signatures (HKEY, HWND, etc.)
 │       ├── ssa.rs              ← SSA construction with Phi insertion
-│       └── structure.rs        ← if/else, while loop recovery from dominators
+│       └── structure.rs        ← if/else, while/do-while loop recovery from dominators
 ├── rsleigh-cli/                ← CLI: decompile any binary to C pseudocode
 ├── scripts/
 │   └── extract-ghidra-sigs.py  ← extract signatures from Ghidra .gdt archives
@@ -100,6 +101,19 @@ cargo test -p test-harness          # compile + run all tests
 ```
 
 **Requirements:** Rust 2021 edition (stable), `make` for the recommended workflow.
+
+### CLI (`rsleigh-cli`)
+
+```bash
+rsleigh <binary>                       # list functions
+rsleigh <binary> <func> [func2..]      # decompile functions (name or 0xAddr)
+rsleigh <binary> --all                 # decompile all (two-pass type propagation)
+rsleigh <binary> --disasm <func>       # disassemble with P-code
+rsleigh <binary> --sigs extra.json     # load additional signatures
+rsleigh <binary> --json                # JSON output
+```
+
+Function discovery: symbol tables → CALL descent → `.pdata` exception dirs (PE64) → prologue scanning (`push ebp; mov ebp, esp` / `sub rsp, imm`).
 
 ---
 
@@ -159,6 +173,17 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - **Interprocedural types (two-pass):** first pass learns internal function types from
   API call arguments, second pass applies them (HKEY, REGSAM, DWORD propagate across calls)
 - **Backward Load propagation:** `Load(param)` with typed result → param gets the type
+- **MBA deobfuscation** (3-phase, architecture-independent):
+  - Phase 1: Pattern-based — cancellation (`a-(a-b)→b`), absorption, double negation
+  - Phase 2: SiMBA linear algebra — Möbius inversion recovers coefficients over
+    boolean basis {1,a,b,a&b,...} from 2^N evaluations (1-4 variables);
+    bottom-up tree walking enables cascade simplification of deep expressions
+  - Phase 3: Equality saturation via `egg` crate — 40+ rewrite rules explore all
+    equivalent MBA forms, extract cheapest (50ms/10K nodes per expression)
+- **Return type recovery:** multi-hop EAX/RAX search (3 hops), call_return tracking,
+  call-site inference (if callers use result → not void), two-pass propagation
+- **x86-32 stack param modeling:** `Load(EBP+8)` = param value read (not pointer deref);
+  `format_vardef_expr` suppresses `*(param_N)` for stack parameters
 
 **Printer (printer.rs):**
 - Ghidra-style output: typed signatures, local var declarations, auto-named registers
@@ -180,7 +205,11 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - Ghidra-style local declarations: `WCHAR local_8[262]; int local_c;` with array sizing from offset gaps
 - PE import thunk resolution: `JMP [IAT_addr]` stubs → import names
 - MSVC CRT wrapper recognition: `__acrt_iob_func + __stdio_common_vfprintf` → `printf`
-- Control flow recovery: for-loops, switch/case (jump tables), else-if chain collapse
+- **ObjC bracket syntax:** `objc_msgSend$setText:` → `[self setText:arg]` with receiver tracking
+- **Global data naming:** `*(0x4326f4)` → `DAT_004326f4` (auto-detected from address range)
+- **ARM64 prologue/epilogue elision:** callee-saved saves, FP/LR setup, ObjC ARC noise removal
+- **Architecture-aware register auto-naming:** x86-32 ESI/EDI → iVar, ARM64 x19-x28 → lVar
+- Control flow recovery: for-loops, **do-while** (back-edge post-test), switch/case, else-if
 - Simplifications: dead stores, unreachable returns, phi artifact cleanup, increment shorthand,
   constant folding, ESP/RSP stack noise elimination, pointer deref simplification
 - MSVC RTTI: vtable → COL → TypeDescriptor → class name resolution
@@ -204,9 +233,12 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - **ExprNew / ExprCPool** returns 0 (JVM/WASM only)
 - **Expression completeness** — some register values not traced back to their defining
   expression (e.g., `iVar1 * factorial(n-1)` instead of `n * factorial(n-1)`)
-- **Type inference** — basic signed/float/pointer/bool + Win32 typedef propagation;
-  no constraint-based inference, no full struct recovery
-- **Stack frame reconstruction** — buffer sizes inferred from offset gaps; no field-level typing
+- **Type inference** — basic signed/float/pointer/bool + Win32 typedef propagation +
+  interprocedural two-pass; no constraint-based inference, no full struct recovery
+- **Stack frame reconstruction** — buffer sizes inferred from offset gaps; array sizing works;
+  no field-level struct typing
+- **MBA deobfuscation** — SiMBA handles 1-4 variable linear MBA; non-linear and 5+ variable
+  expressions need synthesis-based approaches (equality saturation catches some)
 - **Loop conditions** — `while (OF == SF)` not always recovered to source comparison
 - **x86-32 control flow** — sequential TEST/JNZ patterns sometimes nest incorrectly
 - **Register-indirect calls** — `CALL EDI` where EDI was loaded from IAT earlier
