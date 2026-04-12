@@ -172,17 +172,41 @@ macro_rules! define_signatures {
 
 static SIGNATURE_MAP: LazyLock<HashMap<&'static str, &'static FuncSig>> = LazyLock::new(|| {
     let mut map = HashMap::new();
+    // Load compiled-in macro signatures
     for sig in crate::signatures_libc::LIBC_SIGNATURES {
         map.insert(sig.name, sig);
     }
     for sig in crate::signatures_win32::WIN32_SIGNATURES {
         map.insert(sig.name, sig);
     }
+    // Load embedded JSON signature database (our own Apache 2.0 data)
+    let json_str = include_str!("../data/signatures.json");
+    if let Ok(entries) = serde_json::from_str::<Vec<JsonSigEntry>>(json_str) {
+        for entry in &entries {
+            if map.contains_key(entry.name.as_str()) {
+                continue; // macro sigs take priority (hand-tuned types)
+            }
+            let params: Vec<SigParam> = entry.params.iter().map(|p| {
+                SigParam {
+                    name: leak_str(&clean_param_name(&p.name)),
+                    ty: ghidra_type_to_sigtype(&p.ty),
+                }
+            }).collect();
+            let sig = FuncSig {
+                name: leak_str(&entry.name),
+                ret: ghidra_type_to_sigtype(&entry.ret),
+                params: Box::leak(params.into_boxed_slice()),
+                variadic: entry.variadic,
+            };
+            let sig_ref: &'static FuncSig = Box::leak(Box::new(sig));
+            map.insert(sig_ref.name, sig_ref);
+        }
+    }
     map
 });
 
 /// Look up a function signature by exact name.
-/// Checks runtime-loaded signatures first, then compiled-in ones.
+/// Checks runtime-loaded signatures first (--sigs), then the built-in database.
 pub fn lookup(name: &str) -> Option<&'static FuncSig> {
     // Check runtime-loaded sigs first (they may override builtins)
     if let Some(rt) = RUNTIME_SIGS.get() {
@@ -405,5 +429,23 @@ mod tests {
         assert_eq!(sig.params[0].name, "dest");
         assert_eq!(sig.params[1].name, "src");
         assert_eq!(sig.params[2].name, "n");
+    }
+
+    #[test]
+    fn embedded_json_loads() {
+        // These are only in the JSON database, not the macro files
+        for name in ["mmap", "pthread_create", "dlopen", "epoll_create",
+                      "CreateToolhelp32Snapshot", "Process32First",
+                      "WSAStartup", "InternetOpenA", "IsDebuggerPresent",
+                      "NtQueryInformationProcess", "TlsAlloc"] {
+            assert!(lookup(name).is_some(), "missing from embedded JSON: {}", name);
+        }
+    }
+
+    #[test]
+    fn total_signature_count() {
+        // Should have 500+ signatures from macro + JSON combined
+        let count = SIGNATURE_MAP.len();
+        assert!(count >= 500, "expected 500+ signatures, got {}", count);
     }
 }

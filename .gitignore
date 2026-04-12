@@ -6,4 +6,4 @@ test_include
 test_modules
 generated/*/out/
 hs_err_pid*.log
-rsleigh-decompile/data/
+rsleigh-decompile/data/ghidra_*.json

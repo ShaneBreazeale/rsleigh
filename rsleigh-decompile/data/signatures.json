@@ -1,0 +1,7858 @@
+[
+  {
+    "name": "printf",
+    "ret": "int",
+    "params": [
+      {
+        "name": "format",
+        "type": "char *"
+      }
+    ],
+    "variadic": true
+  },
+  {
+    "name": "fprintf",
+    "ret": "int",
+    "params": [
+      {
+        "name": "stream",
+        "type": "FILE *"
+      },
+      {
+        "name": "format",
+        "type": "char *"
+      }
+    ],
+    "variadic": true
+  },
+  {
+    "name": "sprintf",
+    "ret": "int",
+    "params": [
+      {
+        "name": "buf",
+        "type": "char *"
+      },
+      {
+        "name": "format",
+        "type": "char *"
+      }
+    ],
+    "variadic": true
+  },
+  {
+    "name": "snprintf",
+    "ret": "int",
+    "params": [
+      {
+        "name": "buf",
+        "type": "char *"
+      },
+      {
+        "name": "size",
+        "type": "size_t"
+      },
+      {
+        "name": "format",
+        "type": "char *"
+      }
+    ],
+    "variadic": true
+  },
+  {
+    "name": "scanf",
+    "ret": "int",
+    "params": [
+      {
+        "name": "format",
+        "type": "char *"
+      }
+    ],
+    "variadic": true
+  },
+  {
+    "name": "fscanf",
+    "ret": "int",
+    "params": [
+      {
+        "name": "stream",
+        "type": "FILE *"
+      },
+      {
+        "name": "format",
+        "type": "char *"
+      }
+    ],
+    "variadic": true
+  },
+  {
+    "name": "sscanf",
+    "ret": "int",
+    "params": [
+      {
+        "name": "s",
+        "type": "char *"
+      },
+      {
+        "name": "format",
+        "type": "char *"
+      }
+    ],
+    "variadic": true
+  },
+  {
+    "name": "vprintf",
+    "ret": "int",
+    "params": [
+      {
+        "name": "format",
+        "type": "char *"
+      },
+      {
+        "name": "ap",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "vfprintf",
+    "ret": "int",
+    "params": [
+      {
+        "name": "stream",
+        "type": "FILE *"
+      },
+      {
+        "name": "format",
+        "type": "char *"
+      },
+      {
+        "name": "ap",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "vsprintf",
+    "ret": "int",
+    "params": [
+      {
+        "name": "buf",
+        "type": "char *"
+      },
+      {
+        "name": "format",
+        "type": "char *"
+      },
+      {
+        "name": "ap",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "vsnprintf",
+    "ret": "int",
+    "params": [
+      {
+        "name": "buf",
+        "type": "char *"
+      },
+      {
+        "name": "size",
+        "type": "size_t"
+      },
+      {
+        "name": "format",
+        "type": "char *"
+      },
+      {
+        "name": "ap",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "puts",
+    "ret": "int",
+    "params": [
+      {
+        "name": "s",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fputs",
+    "ret": "int",
+    "params": [
+      {
+        "name": "s",
+        "type": "char *"
+      },
+      {
+        "name": "stream",
+        "type": "FILE *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fgets",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "s",
+        "type": "char *"
+      },
+      {
+        "name": "size",
+        "type": "int"
+      },
+      {
+        "name": "stream",
+        "type": "FILE *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "gets",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "s",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "putchar",
+    "ret": "int",
+    "params": [
+      {
+        "name": "c",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getchar",
+    "ret": "int",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "putc",
+    "ret": "int",
+    "params": [
+      {
+        "name": "c",
+        "type": "int"
+      },
+      {
+        "name": "stream",
+        "type": "FILE *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getc",
+    "ret": "int",
+    "params": [
+      {
+        "name": "stream",
+        "type": "FILE *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fputc",
+    "ret": "int",
+    "params": [
+      {
+        "name": "c",
+        "type": "int"
+      },
+      {
+        "name": "stream",
+        "type": "FILE *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fgetc",
+    "ret": "int",
+    "params": [
+      {
+        "name": "stream",
+        "type": "FILE *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ungetc",
+    "ret": "int",
+    "params": [
+      {
+        "name": "c",
+        "type": "int"
+      },
+      {
+        "name": "stream",
+        "type": "FILE *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fread",
+    "ret": "size_t",
+    "params": [
+      {
+        "name": "ptr",
+        "type": "void *"
+      },
+      {
+        "name": "size",
+        "type": "size_t"
+      },
+      {
+        "name": "nmemb",
+        "type": "size_t"
+      },
+      {
+        "name": "stream",
+        "type": "FILE *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fwrite",
+    "ret": "size_t",
+    "params": [
+      {
+        "name": "ptr",
+        "type": "void *"
+      },
+      {
+        "name": "size",
+        "type": "size_t"
+      },
+      {
+        "name": "nmemb",
+        "type": "size_t"
+      },
+      {
+        "name": "stream",
+        "type": "FILE *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fopen",
+    "ret": "FILE *",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      },
+      {
+        "name": "mode",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "freopen",
+    "ret": "FILE *",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      },
+      {
+        "name": "mode",
+        "type": "char *"
+      },
+      {
+        "name": "stream",
+        "type": "FILE *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fclose",
+    "ret": "int",
+    "params": [
+      {
+        "name": "stream",
+        "type": "FILE *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fseek",
+    "ret": "int",
+    "params": [
+      {
+        "name": "stream",
+        "type": "FILE *"
+      },
+      {
+        "name": "offset",
+        "type": "long"
+      },
+      {
+        "name": "whence",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ftell",
+    "ret": "long",
+    "params": [
+      {
+        "name": "stream",
+        "type": "FILE *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "rewind",
+    "ret": "void",
+    "params": [
+      {
+        "name": "stream",
+        "type": "FILE *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fgetpos",
+    "ret": "int",
+    "params": [
+      {
+        "name": "stream",
+        "type": "FILE *"
+      },
+      {
+        "name": "pos",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fsetpos",
+    "ret": "int",
+    "params": [
+      {
+        "name": "stream",
+        "type": "FILE *"
+      },
+      {
+        "name": "pos",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "feof",
+    "ret": "int",
+    "params": [
+      {
+        "name": "stream",
+        "type": "FILE *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ferror",
+    "ret": "int",
+    "params": [
+      {
+        "name": "stream",
+        "type": "FILE *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "clearerr",
+    "ret": "void",
+    "params": [
+      {
+        "name": "stream",
+        "type": "FILE *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fflush",
+    "ret": "int",
+    "params": [
+      {
+        "name": "stream",
+        "type": "FILE *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "setvbuf",
+    "ret": "int",
+    "params": [
+      {
+        "name": "stream",
+        "type": "FILE *"
+      },
+      {
+        "name": "buf",
+        "type": "char *"
+      },
+      {
+        "name": "mode",
+        "type": "int"
+      },
+      {
+        "name": "size",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "setbuf",
+    "ret": "void",
+    "params": [
+      {
+        "name": "stream",
+        "type": "FILE *"
+      },
+      {
+        "name": "buf",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "perror",
+    "ret": "void",
+    "params": [
+      {
+        "name": "s",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "remove",
+    "ret": "int",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "rename",
+    "ret": "int",
+    "params": [
+      {
+        "name": "old",
+        "type": "char *"
+      },
+      {
+        "name": "new_",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "tmpfile",
+    "ret": "FILE *",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "tmpnam",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "s",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fprintf_stderr",
+    "ret": "int",
+    "params": [
+      {
+        "name": "format",
+        "type": "char *"
+      }
+    ],
+    "variadic": true
+  },
+  {
+    "name": "wprintf",
+    "ret": "int",
+    "params": [
+      {
+        "name": "format",
+        "type": "wchar_t *"
+      }
+    ],
+    "variadic": true
+  },
+  {
+    "name": "fwprintf",
+    "ret": "int",
+    "params": [
+      {
+        "name": "stream",
+        "type": "FILE *"
+      },
+      {
+        "name": "format",
+        "type": "wchar_t *"
+      }
+    ],
+    "variadic": true
+  },
+  {
+    "name": "fwprintf_stderr",
+    "ret": "int",
+    "params": [
+      {
+        "name": "format",
+        "type": "wchar_t *"
+      }
+    ],
+    "variadic": true
+  },
+  {
+    "name": "swprintf",
+    "ret": "int",
+    "params": [
+      {
+        "name": "buf",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "size",
+        "type": "size_t"
+      },
+      {
+        "name": "format",
+        "type": "wchar_t *"
+      }
+    ],
+    "variadic": true
+  },
+  {
+    "name": "malloc",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "size",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "calloc",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "nmemb",
+        "type": "size_t"
+      },
+      {
+        "name": "size",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "realloc",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "ptr",
+        "type": "void *"
+      },
+      {
+        "name": "size",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "free",
+    "ret": "void",
+    "params": [
+      {
+        "name": "ptr",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "aligned_alloc",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "alignment",
+        "type": "size_t"
+      },
+      {
+        "name": "size",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "atoi",
+    "ret": "int",
+    "params": [
+      {
+        "name": "s",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "atol",
+    "ret": "long",
+    "params": [
+      {
+        "name": "s",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "atof",
+    "ret": "int",
+    "params": [
+      {
+        "name": "s",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strtol",
+    "ret": "long",
+    "params": [
+      {
+        "name": "nptr",
+        "type": "char *"
+      },
+      {
+        "name": "endptr",
+        "type": "void *"
+      },
+      {
+        "name": "base",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strtoul",
+    "ret": "ulong",
+    "params": [
+      {
+        "name": "nptr",
+        "type": "char *"
+      },
+      {
+        "name": "endptr",
+        "type": "void *"
+      },
+      {
+        "name": "base",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strtoll",
+    "ret": "long",
+    "params": [
+      {
+        "name": "nptr",
+        "type": "char *"
+      },
+      {
+        "name": "endptr",
+        "type": "void *"
+      },
+      {
+        "name": "base",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strtoull",
+    "ret": "ulong",
+    "params": [
+      {
+        "name": "nptr",
+        "type": "char *"
+      },
+      {
+        "name": "endptr",
+        "type": "void *"
+      },
+      {
+        "name": "base",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strtod",
+    "ret": "int",
+    "params": [
+      {
+        "name": "nptr",
+        "type": "char *"
+      },
+      {
+        "name": "endptr",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strtof",
+    "ret": "int",
+    "params": [
+      {
+        "name": "nptr",
+        "type": "char *"
+      },
+      {
+        "name": "endptr",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "exit",
+    "ret": "void",
+    "params": [
+      {
+        "name": "status",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "_exit",
+    "ret": "void",
+    "params": [
+      {
+        "name": "status",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "_Exit",
+    "ret": "void",
+    "params": [
+      {
+        "name": "status",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "abort",
+    "ret": "void",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "atexit",
+    "ret": "int",
+    "params": [
+      {
+        "name": "func",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "at_quick_exit",
+    "ret": "int",
+    "params": [
+      {
+        "name": "func",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "quick_exit",
+    "ret": "void",
+    "params": [
+      {
+        "name": "status",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "system",
+    "ret": "int",
+    "params": [
+      {
+        "name": "command",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getenv",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "name",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "abs",
+    "ret": "int",
+    "params": [
+      {
+        "name": "j",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "labs",
+    "ret": "long",
+    "params": [
+      {
+        "name": "j",
+        "type": "long"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "llabs",
+    "ret": "long",
+    "params": [
+      {
+        "name": "j",
+        "type": "long"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "div",
+    "ret": "int",
+    "params": [
+      {
+        "name": "numer",
+        "type": "int"
+      },
+      {
+        "name": "denom",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "qsort",
+    "ret": "void",
+    "params": [
+      {
+        "name": "base",
+        "type": "void *"
+      },
+      {
+        "name": "nmemb",
+        "type": "size_t"
+      },
+      {
+        "name": "size",
+        "type": "size_t"
+      },
+      {
+        "name": "compar",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "bsearch",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "key",
+        "type": "void *"
+      },
+      {
+        "name": "base",
+        "type": "void *"
+      },
+      {
+        "name": "nmemb",
+        "type": "size_t"
+      },
+      {
+        "name": "size",
+        "type": "size_t"
+      },
+      {
+        "name": "compar",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "rand",
+    "ret": "int",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "srand",
+    "ret": "void",
+    "params": [
+      {
+        "name": "seed",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "rand_r",
+    "ret": "int",
+    "params": [
+      {
+        "name": "seed",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strlen",
+    "ret": "size_t",
+    "params": [
+      {
+        "name": "s",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strnlen",
+    "ret": "size_t",
+    "params": [
+      {
+        "name": "s",
+        "type": "char *"
+      },
+      {
+        "name": "maxlen",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strcpy",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "dest",
+        "type": "char *"
+      },
+      {
+        "name": "src",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strncpy",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "dest",
+        "type": "char *"
+      },
+      {
+        "name": "src",
+        "type": "char *"
+      },
+      {
+        "name": "n",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strcat",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "dest",
+        "type": "char *"
+      },
+      {
+        "name": "src",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strncat",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "dest",
+        "type": "char *"
+      },
+      {
+        "name": "src",
+        "type": "char *"
+      },
+      {
+        "name": "n",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strcmp",
+    "ret": "int",
+    "params": [
+      {
+        "name": "s1",
+        "type": "char *"
+      },
+      {
+        "name": "s2",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strncmp",
+    "ret": "int",
+    "params": [
+      {
+        "name": "s1",
+        "type": "char *"
+      },
+      {
+        "name": "s2",
+        "type": "char *"
+      },
+      {
+        "name": "n",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strchr",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "s",
+        "type": "char *"
+      },
+      {
+        "name": "c",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strrchr",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "s",
+        "type": "char *"
+      },
+      {
+        "name": "c",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strstr",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "haystack",
+        "type": "char *"
+      },
+      {
+        "name": "needle",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strtok",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "s",
+        "type": "char *"
+      },
+      {
+        "name": "delim",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strtok_r",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "s",
+        "type": "char *"
+      },
+      {
+        "name": "delim",
+        "type": "char *"
+      },
+      {
+        "name": "save",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strdup",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "s",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strndup",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "s",
+        "type": "char *"
+      },
+      {
+        "name": "n",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strerror",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "errnum",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strerror_r",
+    "ret": "int",
+    "params": [
+      {
+        "name": "errnum",
+        "type": "int"
+      },
+      {
+        "name": "buf",
+        "type": "char *"
+      },
+      {
+        "name": "buflen",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strcoll",
+    "ret": "int",
+    "params": [
+      {
+        "name": "s1",
+        "type": "char *"
+      },
+      {
+        "name": "s2",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strxfrm",
+    "ret": "size_t",
+    "params": [
+      {
+        "name": "dest",
+        "type": "char *"
+      },
+      {
+        "name": "src",
+        "type": "char *"
+      },
+      {
+        "name": "n",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strpbrk",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "s",
+        "type": "char *"
+      },
+      {
+        "name": "accept",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strspn",
+    "ret": "size_t",
+    "params": [
+      {
+        "name": "s",
+        "type": "char *"
+      },
+      {
+        "name": "accept",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strcspn",
+    "ret": "size_t",
+    "params": [
+      {
+        "name": "s",
+        "type": "char *"
+      },
+      {
+        "name": "reject",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "memcpy",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "dest",
+        "type": "void *"
+      },
+      {
+        "name": "src",
+        "type": "void *"
+      },
+      {
+        "name": "n",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "memmove",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "dest",
+        "type": "void *"
+      },
+      {
+        "name": "src",
+        "type": "void *"
+      },
+      {
+        "name": "n",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "memset",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "s",
+        "type": "void *"
+      },
+      {
+        "name": "c",
+        "type": "int"
+      },
+      {
+        "name": "n",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "memcmp",
+    "ret": "int",
+    "params": [
+      {
+        "name": "s1",
+        "type": "void *"
+      },
+      {
+        "name": "s2",
+        "type": "void *"
+      },
+      {
+        "name": "n",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "memchr",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "s",
+        "type": "void *"
+      },
+      {
+        "name": "c",
+        "type": "int"
+      },
+      {
+        "name": "n",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "memmem",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "haystack",
+        "type": "void *"
+      },
+      {
+        "name": "hlen",
+        "type": "size_t"
+      },
+      {
+        "name": "needle",
+        "type": "void *"
+      },
+      {
+        "name": "nlen",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "bzero",
+    "ret": "void",
+    "params": [
+      {
+        "name": "s",
+        "type": "void *"
+      },
+      {
+        "name": "n",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "bcopy",
+    "ret": "void",
+    "params": [
+      {
+        "name": "src",
+        "type": "void *"
+      },
+      {
+        "name": "dest",
+        "type": "void *"
+      },
+      {
+        "name": "n",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "isalpha",
+    "ret": "int",
+    "params": [
+      {
+        "name": "c",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "isdigit",
+    "ret": "int",
+    "params": [
+      {
+        "name": "c",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "isalnum",
+    "ret": "int",
+    "params": [
+      {
+        "name": "c",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "isspace",
+    "ret": "int",
+    "params": [
+      {
+        "name": "c",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "isupper",
+    "ret": "int",
+    "params": [
+      {
+        "name": "c",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "islower",
+    "ret": "int",
+    "params": [
+      {
+        "name": "c",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "isxdigit",
+    "ret": "int",
+    "params": [
+      {
+        "name": "c",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "iscntrl",
+    "ret": "int",
+    "params": [
+      {
+        "name": "c",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "isgraph",
+    "ret": "int",
+    "params": [
+      {
+        "name": "c",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "isprint",
+    "ret": "int",
+    "params": [
+      {
+        "name": "c",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ispunct",
+    "ret": "int",
+    "params": [
+      {
+        "name": "c",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "isblank",
+    "ret": "int",
+    "params": [
+      {
+        "name": "c",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "toupper",
+    "ret": "int",
+    "params": [
+      {
+        "name": "c",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "tolower",
+    "ret": "int",
+    "params": [
+      {
+        "name": "c",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sin",
+    "ret": "int",
+    "params": [
+      {
+        "name": "x",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "cos",
+    "ret": "int",
+    "params": [
+      {
+        "name": "x",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "tan",
+    "ret": "int",
+    "params": [
+      {
+        "name": "x",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "asin",
+    "ret": "int",
+    "params": [
+      {
+        "name": "x",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "acos",
+    "ret": "int",
+    "params": [
+      {
+        "name": "x",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "atan",
+    "ret": "int",
+    "params": [
+      {
+        "name": "x",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "exp",
+    "ret": "int",
+    "params": [
+      {
+        "name": "x",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "log",
+    "ret": "int",
+    "params": [
+      {
+        "name": "x",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "log10",
+    "ret": "int",
+    "params": [
+      {
+        "name": "x",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sqrt",
+    "ret": "int",
+    "params": [
+      {
+        "name": "x",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ceil",
+    "ret": "int",
+    "params": [
+      {
+        "name": "x",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "floor",
+    "ret": "int",
+    "params": [
+      {
+        "name": "x",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fabs",
+    "ret": "int",
+    "params": [
+      {
+        "name": "x",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "round",
+    "ret": "int",
+    "params": [
+      {
+        "name": "x",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "trunc",
+    "ret": "int",
+    "params": [
+      {
+        "name": "x",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "atan2",
+    "ret": "int",
+    "params": [
+      {
+        "name": "y",
+        "type": "int"
+      },
+      {
+        "name": "x",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pow",
+    "ret": "int",
+    "params": [
+      {
+        "name": "base",
+        "type": "int"
+      },
+      {
+        "name": "exp_",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fmod",
+    "ret": "int",
+    "params": [
+      {
+        "name": "x",
+        "type": "int"
+      },
+      {
+        "name": "y",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ldexp",
+    "ret": "int",
+    "params": [
+      {
+        "name": "x",
+        "type": "int"
+      },
+      {
+        "name": "exp_",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "frexp",
+    "ret": "int",
+    "params": [
+      {
+        "name": "x",
+        "type": "int"
+      },
+      {
+        "name": "exp_",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "modf",
+    "ret": "int",
+    "params": [
+      {
+        "name": "x",
+        "type": "int"
+      },
+      {
+        "name": "iptr",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "time",
+    "ret": "long",
+    "params": [
+      {
+        "name": "timer",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "clock",
+    "ret": "long",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "difftime",
+    "ret": "int",
+    "params": [
+      {
+        "name": "time1",
+        "type": "long"
+      },
+      {
+        "name": "time0",
+        "type": "long"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "mktime",
+    "ret": "long",
+    "params": [
+      {
+        "name": "tp",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "localtime",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "timer",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "localtime_r",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "timer",
+        "type": "void *"
+      },
+      {
+        "name": "result",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "gmtime",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "timer",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "gmtime_r",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "timer",
+        "type": "void *"
+      },
+      {
+        "name": "result",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "strftime",
+    "ret": "size_t",
+    "params": [
+      {
+        "name": "s",
+        "type": "char *"
+      },
+      {
+        "name": "max",
+        "type": "size_t"
+      },
+      {
+        "name": "format",
+        "type": "char *"
+      },
+      {
+        "name": "tp",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "asctime",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "tp",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ctime",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "timer",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "gettimeofday",
+    "ret": "int",
+    "params": [
+      {
+        "name": "tv",
+        "type": "void *"
+      },
+      {
+        "name": "tz",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "clock_gettime",
+    "ret": "int",
+    "params": [
+      {
+        "name": "clk_id",
+        "type": "int"
+      },
+      {
+        "name": "tp",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "nanosleep",
+    "ret": "int",
+    "params": [
+      {
+        "name": "req",
+        "type": "void *"
+      },
+      {
+        "name": "rem",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "setjmp",
+    "ret": "int",
+    "params": [
+      {
+        "name": "env",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "longjmp",
+    "ret": "void",
+    "params": [
+      {
+        "name": "env",
+        "type": "void *"
+      },
+      {
+        "name": "val",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sigsetjmp",
+    "ret": "int",
+    "params": [
+      {
+        "name": "env",
+        "type": "void *"
+      },
+      {
+        "name": "savemask",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "siglongjmp",
+    "ret": "void",
+    "params": [
+      {
+        "name": "env",
+        "type": "void *"
+      },
+      {
+        "name": "val",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "signal",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "sig",
+        "type": "int"
+      },
+      {
+        "name": "handler",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "raise",
+    "ret": "int",
+    "params": [
+      {
+        "name": "sig",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "kill",
+    "ret": "int",
+    "params": [
+      {
+        "name": "pid",
+        "type": "int"
+      },
+      {
+        "name": "sig",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sigaction",
+    "ret": "int",
+    "params": [
+      {
+        "name": "sig",
+        "type": "int"
+      },
+      {
+        "name": "act",
+        "type": "void *"
+      },
+      {
+        "name": "oact",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sigprocmask",
+    "ret": "int",
+    "params": [
+      {
+        "name": "how",
+        "type": "int"
+      },
+      {
+        "name": "set",
+        "type": "void *"
+      },
+      {
+        "name": "oset",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sigemptyset",
+    "ret": "int",
+    "params": [
+      {
+        "name": "set",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sigfillset",
+    "ret": "int",
+    "params": [
+      {
+        "name": "set",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sigaddset",
+    "ret": "int",
+    "params": [
+      {
+        "name": "set",
+        "type": "void *"
+      },
+      {
+        "name": "sig",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sigdelset",
+    "ret": "int",
+    "params": [
+      {
+        "name": "set",
+        "type": "void *"
+      },
+      {
+        "name": "sig",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sigismember",
+    "ret": "int",
+    "params": [
+      {
+        "name": "set",
+        "type": "void *"
+      },
+      {
+        "name": "sig",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "alarm",
+    "ret": "uint",
+    "params": [
+      {
+        "name": "seconds",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "__errno_location",
+    "ret": "void *",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "__error",
+    "ret": "void *",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "_errno",
+    "ret": "void *",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "read",
+    "ret": "long",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "buf",
+        "type": "void *"
+      },
+      {
+        "name": "count",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "write",
+    "ret": "long",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "buf",
+        "type": "void *"
+      },
+      {
+        "name": "count",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "open",
+    "ret": "int",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": true
+  },
+  {
+    "name": "close",
+    "ret": "int",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "lseek",
+    "ret": "long",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "offset",
+        "type": "long"
+      },
+      {
+        "name": "whence",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "dup",
+    "ret": "int",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "dup2",
+    "ret": "int",
+    "params": [
+      {
+        "name": "oldfd",
+        "type": "int"
+      },
+      {
+        "name": "newfd",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pipe",
+    "ret": "int",
+    "params": [
+      {
+        "name": "pipefd",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pipe2",
+    "ret": "int",
+    "params": [
+      {
+        "name": "pipefd",
+        "type": "void *"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fork",
+    "ret": "int",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "vfork",
+    "ret": "int",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "execve",
+    "ret": "int",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      },
+      {
+        "name": "argv",
+        "type": "void *"
+      },
+      {
+        "name": "envp",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "execvp",
+    "ret": "int",
+    "params": [
+      {
+        "name": "file",
+        "type": "char *"
+      },
+      {
+        "name": "argv",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "execl",
+    "ret": "int",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      },
+      {
+        "name": "arg",
+        "type": "char *"
+      }
+    ],
+    "variadic": true
+  },
+  {
+    "name": "execlp",
+    "ret": "int",
+    "params": [
+      {
+        "name": "file",
+        "type": "char *"
+      },
+      {
+        "name": "arg",
+        "type": "char *"
+      }
+    ],
+    "variadic": true
+  },
+  {
+    "name": "execv",
+    "ret": "int",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      },
+      {
+        "name": "argv",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "wait",
+    "ret": "int",
+    "params": [
+      {
+        "name": "status",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "waitpid",
+    "ret": "int",
+    "params": [
+      {
+        "name": "pid",
+        "type": "int"
+      },
+      {
+        "name": "status",
+        "type": "void *"
+      },
+      {
+        "name": "options",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getpid",
+    "ret": "int",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "getppid",
+    "ret": "int",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "getuid",
+    "ret": "uint",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "geteuid",
+    "ret": "uint",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "getgid",
+    "ret": "uint",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "getegid",
+    "ret": "uint",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "setuid",
+    "ret": "int",
+    "params": [
+      {
+        "name": "uid",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "setgid",
+    "ret": "int",
+    "params": [
+      {
+        "name": "gid",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "setsid",
+    "ret": "int",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "chdir",
+    "ret": "int",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fchdir",
+    "ret": "int",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getcwd",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "buf",
+        "type": "char *"
+      },
+      {
+        "name": "size",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "access",
+    "ret": "int",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      },
+      {
+        "name": "mode",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "unlink",
+    "ret": "int",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "rmdir",
+    "ret": "int",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "link",
+    "ret": "int",
+    "params": [
+      {
+        "name": "oldpath",
+        "type": "char *"
+      },
+      {
+        "name": "newpath",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "symlink",
+    "ret": "int",
+    "params": [
+      {
+        "name": "target",
+        "type": "char *"
+      },
+      {
+        "name": "linkpath",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "readlink",
+    "ret": "long",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      },
+      {
+        "name": "buf",
+        "type": "char *"
+      },
+      {
+        "name": "bufsiz",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "chmod",
+    "ret": "int",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      },
+      {
+        "name": "mode",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fchmod",
+    "ret": "int",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "mode",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "chown",
+    "ret": "int",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      },
+      {
+        "name": "owner",
+        "type": "uint"
+      },
+      {
+        "name": "group",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fchown",
+    "ret": "int",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "owner",
+        "type": "uint"
+      },
+      {
+        "name": "group",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "truncate",
+    "ret": "int",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      },
+      {
+        "name": "length",
+        "type": "long"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ftruncate",
+    "ret": "int",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "length",
+        "type": "long"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fsync",
+    "ret": "int",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sleep",
+    "ret": "uint",
+    "params": [
+      {
+        "name": "seconds",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "usleep",
+    "ret": "int",
+    "params": [
+      {
+        "name": "usec",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "isatty",
+    "ret": "int",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ttyname",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sysconf",
+    "ret": "long",
+    "params": [
+      {
+        "name": "name",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pathconf",
+    "ret": "long",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      },
+      {
+        "name": "name",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "confstr",
+    "ret": "size_t",
+    "params": [
+      {
+        "name": "name",
+        "type": "int"
+      },
+      {
+        "name": "buf",
+        "type": "char *"
+      },
+      {
+        "name": "len",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fcntl",
+    "ret": "int",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "cmd",
+        "type": "int"
+      }
+    ],
+    "variadic": true
+  },
+  {
+    "name": "creat",
+    "ret": "int",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      },
+      {
+        "name": "mode",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "stat",
+    "ret": "int",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      },
+      {
+        "name": "buf",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fstat",
+    "ret": "int",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "buf",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "lstat",
+    "ret": "int",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      },
+      {
+        "name": "buf",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "mkdir",
+    "ret": "int",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      },
+      {
+        "name": "mode",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "mkfifo",
+    "ret": "int",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      },
+      {
+        "name": "mode",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "umask",
+    "ret": "uint",
+    "params": [
+      {
+        "name": "mask",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "mmap",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "addr",
+        "type": "void *"
+      },
+      {
+        "name": "length",
+        "type": "size_t"
+      },
+      {
+        "name": "prot",
+        "type": "int"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      },
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "offset",
+        "type": "long"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "munmap",
+    "ret": "int",
+    "params": [
+      {
+        "name": "addr",
+        "type": "void *"
+      },
+      {
+        "name": "length",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "mprotect",
+    "ret": "int",
+    "params": [
+      {
+        "name": "addr",
+        "type": "void *"
+      },
+      {
+        "name": "length",
+        "type": "size_t"
+      },
+      {
+        "name": "prot",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "msync",
+    "ret": "int",
+    "params": [
+      {
+        "name": "addr",
+        "type": "void *"
+      },
+      {
+        "name": "length",
+        "type": "size_t"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "mlock",
+    "ret": "int",
+    "params": [
+      {
+        "name": "addr",
+        "type": "void *"
+      },
+      {
+        "name": "length",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "munlock",
+    "ret": "int",
+    "params": [
+      {
+        "name": "addr",
+        "type": "void *"
+      },
+      {
+        "name": "length",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "opendir",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "name",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "readdir",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "dirp",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "closedir",
+    "ret": "int",
+    "params": [
+      {
+        "name": "dirp",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "seekdir",
+    "ret": "void",
+    "params": [
+      {
+        "name": "dirp",
+        "type": "void *"
+      },
+      {
+        "name": "loc",
+        "type": "long"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "telldir",
+    "ret": "long",
+    "params": [
+      {
+        "name": "dirp",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "rewinddir",
+    "ret": "void",
+    "params": [
+      {
+        "name": "dirp",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "scandir",
+    "ret": "int",
+    "params": [
+      {
+        "name": "dir",
+        "type": "char *"
+      },
+      {
+        "name": "namelist",
+        "type": "void *"
+      },
+      {
+        "name": "filter",
+        "type": "void *"
+      },
+      {
+        "name": "compar",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "socket",
+    "ret": "int",
+    "params": [
+      {
+        "name": "domain",
+        "type": "int"
+      },
+      {
+        "name": "type_",
+        "type": "int"
+      },
+      {
+        "name": "protocol",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "bind",
+    "ret": "int",
+    "params": [
+      {
+        "name": "sockfd",
+        "type": "int"
+      },
+      {
+        "name": "addr",
+        "type": "void *"
+      },
+      {
+        "name": "addrlen",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "listen",
+    "ret": "int",
+    "params": [
+      {
+        "name": "sockfd",
+        "type": "int"
+      },
+      {
+        "name": "backlog",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "accept",
+    "ret": "int",
+    "params": [
+      {
+        "name": "sockfd",
+        "type": "int"
+      },
+      {
+        "name": "addr",
+        "type": "void *"
+      },
+      {
+        "name": "addrlen",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "accept4",
+    "ret": "int",
+    "params": [
+      {
+        "name": "sockfd",
+        "type": "int"
+      },
+      {
+        "name": "addr",
+        "type": "void *"
+      },
+      {
+        "name": "addrlen",
+        "type": "void *"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "connect",
+    "ret": "int",
+    "params": [
+      {
+        "name": "sockfd",
+        "type": "int"
+      },
+      {
+        "name": "addr",
+        "type": "void *"
+      },
+      {
+        "name": "addrlen",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "send",
+    "ret": "long",
+    "params": [
+      {
+        "name": "sockfd",
+        "type": "int"
+      },
+      {
+        "name": "buf",
+        "type": "void *"
+      },
+      {
+        "name": "len",
+        "type": "size_t"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "recv",
+    "ret": "long",
+    "params": [
+      {
+        "name": "sockfd",
+        "type": "int"
+      },
+      {
+        "name": "buf",
+        "type": "void *"
+      },
+      {
+        "name": "len",
+        "type": "size_t"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sendto",
+    "ret": "long",
+    "params": [
+      {
+        "name": "sockfd",
+        "type": "int"
+      },
+      {
+        "name": "buf",
+        "type": "void *"
+      },
+      {
+        "name": "len",
+        "type": "size_t"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      },
+      {
+        "name": "dest_addr",
+        "type": "void *"
+      },
+      {
+        "name": "addrlen",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "recvfrom",
+    "ret": "long",
+    "params": [
+      {
+        "name": "sockfd",
+        "type": "int"
+      },
+      {
+        "name": "buf",
+        "type": "void *"
+      },
+      {
+        "name": "len",
+        "type": "size_t"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      },
+      {
+        "name": "src_addr",
+        "type": "void *"
+      },
+      {
+        "name": "addrlen",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sendmsg",
+    "ret": "long",
+    "params": [
+      {
+        "name": "sockfd",
+        "type": "int"
+      },
+      {
+        "name": "msg",
+        "type": "void *"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "recvmsg",
+    "ret": "long",
+    "params": [
+      {
+        "name": "sockfd",
+        "type": "int"
+      },
+      {
+        "name": "msg",
+        "type": "void *"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "shutdown",
+    "ret": "int",
+    "params": [
+      {
+        "name": "sockfd",
+        "type": "int"
+      },
+      {
+        "name": "how",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "setsockopt",
+    "ret": "int",
+    "params": [
+      {
+        "name": "sockfd",
+        "type": "int"
+      },
+      {
+        "name": "level",
+        "type": "int"
+      },
+      {
+        "name": "optname",
+        "type": "int"
+      },
+      {
+        "name": "optval",
+        "type": "void *"
+      },
+      {
+        "name": "optlen",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getsockopt",
+    "ret": "int",
+    "params": [
+      {
+        "name": "sockfd",
+        "type": "int"
+      },
+      {
+        "name": "level",
+        "type": "int"
+      },
+      {
+        "name": "optname",
+        "type": "int"
+      },
+      {
+        "name": "optval",
+        "type": "void *"
+      },
+      {
+        "name": "optlen",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getsockname",
+    "ret": "int",
+    "params": [
+      {
+        "name": "sockfd",
+        "type": "int"
+      },
+      {
+        "name": "addr",
+        "type": "void *"
+      },
+      {
+        "name": "addrlen",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getpeername",
+    "ret": "int",
+    "params": [
+      {
+        "name": "sockfd",
+        "type": "int"
+      },
+      {
+        "name": "addr",
+        "type": "void *"
+      },
+      {
+        "name": "addrlen",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "socketpair",
+    "ret": "int",
+    "params": [
+      {
+        "name": "domain",
+        "type": "int"
+      },
+      {
+        "name": "type_",
+        "type": "int"
+      },
+      {
+        "name": "protocol",
+        "type": "int"
+      },
+      {
+        "name": "sv",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getaddrinfo",
+    "ret": "int",
+    "params": [
+      {
+        "name": "node",
+        "type": "char *"
+      },
+      {
+        "name": "service",
+        "type": "char *"
+      },
+      {
+        "name": "hints",
+        "type": "void *"
+      },
+      {
+        "name": "res",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "freeaddrinfo",
+    "ret": "void",
+    "params": [
+      {
+        "name": "res",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "gai_strerror",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "errcode",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getnameinfo",
+    "ret": "int",
+    "params": [
+      {
+        "name": "sa",
+        "type": "void *"
+      },
+      {
+        "name": "salen",
+        "type": "uint"
+      },
+      {
+        "name": "host",
+        "type": "char *"
+      },
+      {
+        "name": "hostlen",
+        "type": "uint"
+      },
+      {
+        "name": "serv",
+        "type": "char *"
+      },
+      {
+        "name": "servlen",
+        "type": "uint"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "inet_pton",
+    "ret": "int",
+    "params": [
+      {
+        "name": "af",
+        "type": "int"
+      },
+      {
+        "name": "src",
+        "type": "char *"
+      },
+      {
+        "name": "dst",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "inet_ntop",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "af",
+        "type": "int"
+      },
+      {
+        "name": "src",
+        "type": "void *"
+      },
+      {
+        "name": "dst",
+        "type": "char *"
+      },
+      {
+        "name": "size",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "inet_addr",
+    "ret": "uint",
+    "params": [
+      {
+        "name": "cp",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "inet_ntoa",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "in_",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "htons",
+    "ret": "uint",
+    "params": [
+      {
+        "name": "hostshort",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "htonl",
+    "ret": "uint",
+    "params": [
+      {
+        "name": "hostlong",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ntohs",
+    "ret": "uint",
+    "params": [
+      {
+        "name": "netshort",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ntohl",
+    "ret": "uint",
+    "params": [
+      {
+        "name": "netlong",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "gethostname",
+    "ret": "int",
+    "params": [
+      {
+        "name": "name",
+        "type": "char *"
+      },
+      {
+        "name": "len",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "gethostbyname",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "name",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "gethostbyaddr",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "addr",
+        "type": "void *"
+      },
+      {
+        "name": "len",
+        "type": "int"
+      },
+      {
+        "name": "type_",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "select",
+    "ret": "int",
+    "params": [
+      {
+        "name": "nfds",
+        "type": "int"
+      },
+      {
+        "name": "readfds",
+        "type": "void *"
+      },
+      {
+        "name": "writefds",
+        "type": "void *"
+      },
+      {
+        "name": "exceptfds",
+        "type": "void *"
+      },
+      {
+        "name": "timeout",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pselect",
+    "ret": "int",
+    "params": [
+      {
+        "name": "nfds",
+        "type": "int"
+      },
+      {
+        "name": "readfds",
+        "type": "void *"
+      },
+      {
+        "name": "writefds",
+        "type": "void *"
+      },
+      {
+        "name": "exceptfds",
+        "type": "void *"
+      },
+      {
+        "name": "timeout",
+        "type": "void *"
+      },
+      {
+        "name": "sigmask",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "poll",
+    "ret": "int",
+    "params": [
+      {
+        "name": "fds",
+        "type": "void *"
+      },
+      {
+        "name": "nfds",
+        "type": "ulong"
+      },
+      {
+        "name": "timeout",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "epoll_create",
+    "ret": "int",
+    "params": [
+      {
+        "name": "size",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "epoll_create1",
+    "ret": "int",
+    "params": [
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "epoll_ctl",
+    "ret": "int",
+    "params": [
+      {
+        "name": "epfd",
+        "type": "int"
+      },
+      {
+        "name": "op",
+        "type": "int"
+      },
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "event",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "epoll_wait",
+    "ret": "int",
+    "params": [
+      {
+        "name": "epfd",
+        "type": "int"
+      },
+      {
+        "name": "events",
+        "type": "void *"
+      },
+      {
+        "name": "maxevents",
+        "type": "int"
+      },
+      {
+        "name": "timeout",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ioctl",
+    "ret": "int",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "request",
+        "type": "ulong"
+      }
+    ],
+    "variadic": true
+  },
+  {
+    "name": "pthread_create",
+    "ret": "int",
+    "params": [
+      {
+        "name": "thread",
+        "type": "void *"
+      },
+      {
+        "name": "attr",
+        "type": "void *"
+      },
+      {
+        "name": "start_routine",
+        "type": "void *"
+      },
+      {
+        "name": "arg",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pthread_join",
+    "ret": "int",
+    "params": [
+      {
+        "name": "thread",
+        "type": "ulong"
+      },
+      {
+        "name": "retval",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pthread_exit",
+    "ret": "void",
+    "params": [
+      {
+        "name": "retval",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pthread_detach",
+    "ret": "int",
+    "params": [
+      {
+        "name": "thread",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pthread_self",
+    "ret": "ulong",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "pthread_equal",
+    "ret": "int",
+    "params": [
+      {
+        "name": "t1",
+        "type": "ulong"
+      },
+      {
+        "name": "t2",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pthread_cancel",
+    "ret": "int",
+    "params": [
+      {
+        "name": "thread",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pthread_mutex_init",
+    "ret": "int",
+    "params": [
+      {
+        "name": "mutex",
+        "type": "void *"
+      },
+      {
+        "name": "attr",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pthread_mutex_destroy",
+    "ret": "int",
+    "params": [
+      {
+        "name": "mutex",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pthread_mutex_lock",
+    "ret": "int",
+    "params": [
+      {
+        "name": "mutex",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pthread_mutex_trylock",
+    "ret": "int",
+    "params": [
+      {
+        "name": "mutex",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pthread_mutex_unlock",
+    "ret": "int",
+    "params": [
+      {
+        "name": "mutex",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pthread_rwlock_init",
+    "ret": "int",
+    "params": [
+      {
+        "name": "rwlock",
+        "type": "void *"
+      },
+      {
+        "name": "attr",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pthread_rwlock_destroy",
+    "ret": "int",
+    "params": [
+      {
+        "name": "rwlock",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pthread_rwlock_rdlock",
+    "ret": "int",
+    "params": [
+      {
+        "name": "rwlock",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pthread_rwlock_wrlock",
+    "ret": "int",
+    "params": [
+      {
+        "name": "rwlock",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pthread_rwlock_unlock",
+    "ret": "int",
+    "params": [
+      {
+        "name": "rwlock",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pthread_cond_init",
+    "ret": "int",
+    "params": [
+      {
+        "name": "cond",
+        "type": "void *"
+      },
+      {
+        "name": "attr",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pthread_cond_destroy",
+    "ret": "int",
+    "params": [
+      {
+        "name": "cond",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pthread_cond_wait",
+    "ret": "int",
+    "params": [
+      {
+        "name": "cond",
+        "type": "void *"
+      },
+      {
+        "name": "mutex",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pthread_cond_signal",
+    "ret": "int",
+    "params": [
+      {
+        "name": "cond",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pthread_cond_broadcast",
+    "ret": "int",
+    "params": [
+      {
+        "name": "cond",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pthread_key_create",
+    "ret": "int",
+    "params": [
+      {
+        "name": "key",
+        "type": "void *"
+      },
+      {
+        "name": "destructor",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pthread_setspecific",
+    "ret": "int",
+    "params": [
+      {
+        "name": "key",
+        "type": "uint"
+      },
+      {
+        "name": "value",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pthread_getspecific",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "key",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "dlopen",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "filename",
+        "type": "char *"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "dlsym",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "handle",
+        "type": "void *"
+      },
+      {
+        "name": "symbol",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "dlclose",
+    "ret": "int",
+    "params": [
+      {
+        "name": "handle",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "dlerror",
+    "ret": "char *",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "wait3",
+    "ret": "int",
+    "params": [
+      {
+        "name": "status",
+        "type": "void *"
+      },
+      {
+        "name": "options",
+        "type": "int"
+      },
+      {
+        "name": "rusage",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "wait4",
+    "ret": "int",
+    "params": [
+      {
+        "name": "pid",
+        "type": "int"
+      },
+      {
+        "name": "status",
+        "type": "void *"
+      },
+      {
+        "name": "options",
+        "type": "int"
+      },
+      {
+        "name": "rusage",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "setenv",
+    "ret": "int",
+    "params": [
+      {
+        "name": "name",
+        "type": "char *"
+      },
+      {
+        "name": "value",
+        "type": "char *"
+      },
+      {
+        "name": "overwrite",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "unsetenv",
+    "ret": "int",
+    "params": [
+      {
+        "name": "name",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "putenv",
+    "ret": "int",
+    "params": [
+      {
+        "name": "string",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "random",
+    "ret": "long",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "srandom",
+    "ret": "void",
+    "params": [
+      {
+        "name": "seed",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "VirtualAlloc",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "lpAddress",
+        "type": "void *"
+      },
+      {
+        "name": "dwSize",
+        "type": "size_t"
+      },
+      {
+        "name": "flAllocationType",
+        "type": "ulong"
+      },
+      {
+        "name": "flProtect",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "VirtualFree",
+    "ret": "int",
+    "params": [
+      {
+        "name": "lpAddress",
+        "type": "void *"
+      },
+      {
+        "name": "dwSize",
+        "type": "size_t"
+      },
+      {
+        "name": "dwFreeType",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "VirtualProtect",
+    "ret": "int",
+    "params": [
+      {
+        "name": "lpAddress",
+        "type": "void *"
+      },
+      {
+        "name": "dwSize",
+        "type": "size_t"
+      },
+      {
+        "name": "flNewProtect",
+        "type": "ulong"
+      },
+      {
+        "name": "lpflOldProtect",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "VirtualQuery",
+    "ret": "size_t",
+    "params": [
+      {
+        "name": "lpAddress",
+        "type": "void *"
+      },
+      {
+        "name": "lpBuffer",
+        "type": "void *"
+      },
+      {
+        "name": "dwLength",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "VirtualAllocEx",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "hProcess",
+        "type": "void *"
+      },
+      {
+        "name": "lpAddress",
+        "type": "void *"
+      },
+      {
+        "name": "dwSize",
+        "type": "size_t"
+      },
+      {
+        "name": "flAllocationType",
+        "type": "ulong"
+      },
+      {
+        "name": "flProtect",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "HeapAlloc",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "hHeap",
+        "type": "void *"
+      },
+      {
+        "name": "dwFlags",
+        "type": "ulong"
+      },
+      {
+        "name": "dwBytes",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "HeapFree",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hHeap",
+        "type": "void *"
+      },
+      {
+        "name": "dwFlags",
+        "type": "ulong"
+      },
+      {
+        "name": "lpMem",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "HeapCreate",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "flOptions",
+        "type": "ulong"
+      },
+      {
+        "name": "dwInitialSize",
+        "type": "size_t"
+      },
+      {
+        "name": "dwMaximumSize",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "HeapDestroy",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hHeap",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "HeapReAlloc",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "hHeap",
+        "type": "void *"
+      },
+      {
+        "name": "dwFlags",
+        "type": "ulong"
+      },
+      {
+        "name": "lpMem",
+        "type": "void *"
+      },
+      {
+        "name": "dwBytes",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "HeapSize",
+    "ret": "size_t",
+    "params": [
+      {
+        "name": "hHeap",
+        "type": "void *"
+      },
+      {
+        "name": "dwFlags",
+        "type": "ulong"
+      },
+      {
+        "name": "lpMem",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetProcessHeap",
+    "ret": "void *",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "GlobalAlloc",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "uFlags",
+        "type": "uint"
+      },
+      {
+        "name": "dwBytes",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GlobalFree",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "hMem",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GlobalLock",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "hMem",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GlobalUnlock",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hMem",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "LocalAlloc",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "uFlags",
+        "type": "uint"
+      },
+      {
+        "name": "uBytes",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "LocalFree",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "hMem",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CreateFileA",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "lpFileName",
+        "type": "char *"
+      },
+      {
+        "name": "dwDesiredAccess",
+        "type": "ulong"
+      },
+      {
+        "name": "dwShareMode",
+        "type": "ulong"
+      },
+      {
+        "name": "lpSecurityAttributes",
+        "type": "void *"
+      },
+      {
+        "name": "dwCreationDisposition",
+        "type": "ulong"
+      },
+      {
+        "name": "dwFlagsAndAttributes",
+        "type": "ulong"
+      },
+      {
+        "name": "hTemplateFile",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CreateFileW",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "lpFileName",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "dwDesiredAccess",
+        "type": "ulong"
+      },
+      {
+        "name": "dwShareMode",
+        "type": "ulong"
+      },
+      {
+        "name": "lpSecurityAttributes",
+        "type": "void *"
+      },
+      {
+        "name": "dwCreationDisposition",
+        "type": "ulong"
+      },
+      {
+        "name": "dwFlagsAndAttributes",
+        "type": "ulong"
+      },
+      {
+        "name": "hTemplateFile",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ReadFile",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hFile",
+        "type": "void *"
+      },
+      {
+        "name": "lpBuffer",
+        "type": "void *"
+      },
+      {
+        "name": "nNumberOfBytesToRead",
+        "type": "ulong"
+      },
+      {
+        "name": "lpNumberOfBytesRead",
+        "type": "void *"
+      },
+      {
+        "name": "lpOverlapped",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "WriteFile",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hFile",
+        "type": "void *"
+      },
+      {
+        "name": "lpBuffer",
+        "type": "void *"
+      },
+      {
+        "name": "nNumberOfBytesToWrite",
+        "type": "ulong"
+      },
+      {
+        "name": "lpNumberOfBytesWritten",
+        "type": "void *"
+      },
+      {
+        "name": "lpOverlapped",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CloseHandle",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hObject",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetFileSize",
+    "ret": "ulong",
+    "params": [
+      {
+        "name": "hFile",
+        "type": "void *"
+      },
+      {
+        "name": "lpFileSizeHigh",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "SetFilePointer",
+    "ret": "ulong",
+    "params": [
+      {
+        "name": "hFile",
+        "type": "void *"
+      },
+      {
+        "name": "lDistanceToMove",
+        "type": "long"
+      },
+      {
+        "name": "lpDistanceToMoveHigh",
+        "type": "void *"
+      },
+      {
+        "name": "dwMoveMethod",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "SetFilePointerEx",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hFile",
+        "type": "void *"
+      },
+      {
+        "name": "liDistanceToMove",
+        "type": "long"
+      },
+      {
+        "name": "lpNewFilePointer",
+        "type": "void *"
+      },
+      {
+        "name": "dwMoveMethod",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "FlushFileBuffers",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hFile",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "DeleteFileA",
+    "ret": "int",
+    "params": [
+      {
+        "name": "lpFileName",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "DeleteFileW",
+    "ret": "int",
+    "params": [
+      {
+        "name": "lpFileName",
+        "type": "wchar_t *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CopyFileA",
+    "ret": "int",
+    "params": [
+      {
+        "name": "lpExistingFileName",
+        "type": "char *"
+      },
+      {
+        "name": "lpNewFileName",
+        "type": "char *"
+      },
+      {
+        "name": "bFailIfExists",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CopyFileW",
+    "ret": "int",
+    "params": [
+      {
+        "name": "lpExistingFileName",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "lpNewFileName",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "bFailIfExists",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "MoveFileA",
+    "ret": "int",
+    "params": [
+      {
+        "name": "lpExistingFileName",
+        "type": "char *"
+      },
+      {
+        "name": "lpNewFileName",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "MoveFileW",
+    "ret": "int",
+    "params": [
+      {
+        "name": "lpExistingFileName",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "lpNewFileName",
+        "type": "wchar_t *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetTempPathA",
+    "ret": "ulong",
+    "params": [
+      {
+        "name": "nBufferLength",
+        "type": "ulong"
+      },
+      {
+        "name": "lpBuffer",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetTempFileNameA",
+    "ret": "uint",
+    "params": [
+      {
+        "name": "lpPathName",
+        "type": "char *"
+      },
+      {
+        "name": "lpPrefixString",
+        "type": "char *"
+      },
+      {
+        "name": "uUnique",
+        "type": "uint"
+      },
+      {
+        "name": "lpTempFileName",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "FindFirstFileA",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "lpFileName",
+        "type": "char *"
+      },
+      {
+        "name": "lpFindFileData",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "FindFirstFileW",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "lpFileName",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "lpFindFileData",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "FindNextFileA",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hFindFile",
+        "type": "void *"
+      },
+      {
+        "name": "lpFindFileData",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "FindNextFileW",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hFindFile",
+        "type": "void *"
+      },
+      {
+        "name": "lpFindFileData",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "FindClose",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hFindFile",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetFileAttributesA",
+    "ret": "ulong",
+    "params": [
+      {
+        "name": "lpFileName",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetFileAttributesW",
+    "ret": "ulong",
+    "params": [
+      {
+        "name": "lpFileName",
+        "type": "wchar_t *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CreateDirectoryA",
+    "ret": "int",
+    "params": [
+      {
+        "name": "lpPathName",
+        "type": "char *"
+      },
+      {
+        "name": "lpSecurityAttributes",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CreateDirectoryW",
+    "ret": "int",
+    "params": [
+      {
+        "name": "lpPathName",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "lpSecurityAttributes",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "RemoveDirectoryA",
+    "ret": "int",
+    "params": [
+      {
+        "name": "lpPathName",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetProcAddress",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "hModule",
+        "type": "void *"
+      },
+      {
+        "name": "lpProcName",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "LoadLibraryA",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "lpLibFileName",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "LoadLibraryW",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "lpLibFileName",
+        "type": "wchar_t *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "LoadLibraryExA",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "lpLibFileName",
+        "type": "char *"
+      },
+      {
+        "name": "hFile",
+        "type": "void *"
+      },
+      {
+        "name": "dwFlags",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "LoadLibraryExW",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "lpLibFileName",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "hFile",
+        "type": "void *"
+      },
+      {
+        "name": "dwFlags",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "FreeLibrary",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hLibModule",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetModuleHandleA",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "lpModuleName",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetModuleHandleW",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "lpModuleName",
+        "type": "wchar_t *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetModuleFileNameA",
+    "ret": "ulong",
+    "params": [
+      {
+        "name": "hModule",
+        "type": "void *"
+      },
+      {
+        "name": "lpFilename",
+        "type": "char *"
+      },
+      {
+        "name": "nSize",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetModuleFileNameW",
+    "ret": "ulong",
+    "params": [
+      {
+        "name": "hModule",
+        "type": "void *"
+      },
+      {
+        "name": "lpFilename",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "nSize",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CreateProcessA",
+    "ret": "int",
+    "params": [
+      {
+        "name": "lpApplicationName",
+        "type": "char *"
+      },
+      {
+        "name": "lpCommandLine",
+        "type": "char *"
+      },
+      {
+        "name": "lpProcessAttributes",
+        "type": "void *"
+      },
+      {
+        "name": "lpThreadAttributes",
+        "type": "void *"
+      },
+      {
+        "name": "bInheritHandles",
+        "type": "int"
+      },
+      {
+        "name": "dwCreationFlags",
+        "type": "ulong"
+      },
+      {
+        "name": "lpEnvironment",
+        "type": "void *"
+      },
+      {
+        "name": "lpCurrentDirectory",
+        "type": "char *"
+      },
+      {
+        "name": "lpStartupInfo",
+        "type": "void *"
+      },
+      {
+        "name": "lpProcessInformation",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CreateProcessW",
+    "ret": "int",
+    "params": [
+      {
+        "name": "lpApplicationName",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "lpCommandLine",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "lpProcessAttributes",
+        "type": "void *"
+      },
+      {
+        "name": "lpThreadAttributes",
+        "type": "void *"
+      },
+      {
+        "name": "bInheritHandles",
+        "type": "int"
+      },
+      {
+        "name": "dwCreationFlags",
+        "type": "ulong"
+      },
+      {
+        "name": "lpEnvironment",
+        "type": "void *"
+      },
+      {
+        "name": "lpCurrentDirectory",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "lpStartupInfo",
+        "type": "void *"
+      },
+      {
+        "name": "lpProcessInformation",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "OpenProcess",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "dwDesiredAccess",
+        "type": "ulong"
+      },
+      {
+        "name": "bInheritHandle",
+        "type": "int"
+      },
+      {
+        "name": "dwProcessId",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "TerminateProcess",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hProcess",
+        "type": "void *"
+      },
+      {
+        "name": "uExitCode",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ExitProcess",
+    "ret": "void",
+    "params": [
+      {
+        "name": "uExitCode",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetCurrentProcess",
+    "ret": "void *",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "GetCurrentProcessId",
+    "ret": "ulong",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "CreateThread",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "lpThreadAttributes",
+        "type": "void *"
+      },
+      {
+        "name": "dwStackSize",
+        "type": "size_t"
+      },
+      {
+        "name": "lpStartAddress",
+        "type": "void *"
+      },
+      {
+        "name": "lpParameter",
+        "type": "void *"
+      },
+      {
+        "name": "dwCreationFlags",
+        "type": "ulong"
+      },
+      {
+        "name": "lpThreadId",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CreateRemoteThread",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "hProcess",
+        "type": "void *"
+      },
+      {
+        "name": "lpThreadAttributes",
+        "type": "void *"
+      },
+      {
+        "name": "dwStackSize",
+        "type": "size_t"
+      },
+      {
+        "name": "lpStartAddress",
+        "type": "void *"
+      },
+      {
+        "name": "lpParameter",
+        "type": "void *"
+      },
+      {
+        "name": "dwCreationFlags",
+        "type": "ulong"
+      },
+      {
+        "name": "lpThreadId",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ExitThread",
+    "ret": "void",
+    "params": [
+      {
+        "name": "dwExitCode",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetExitCodeThread",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hThread",
+        "type": "void *"
+      },
+      {
+        "name": "lpExitCode",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetCurrentThread",
+    "ret": "void *",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "GetCurrentThreadId",
+    "ret": "ulong",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "SuspendThread",
+    "ret": "ulong",
+    "params": [
+      {
+        "name": "hThread",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ResumeThread",
+    "ret": "ulong",
+    "params": [
+      {
+        "name": "hThread",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetThreadContext",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hThread",
+        "type": "void *"
+      },
+      {
+        "name": "lpContext",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "SetThreadContext",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hThread",
+        "type": "void *"
+      },
+      {
+        "name": "lpContext",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "WriteProcessMemory",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hProcess",
+        "type": "void *"
+      },
+      {
+        "name": "lpBaseAddress",
+        "type": "void *"
+      },
+      {
+        "name": "lpBuffer",
+        "type": "void *"
+      },
+      {
+        "name": "nSize",
+        "type": "size_t"
+      },
+      {
+        "name": "lpNumberOfBytesWritten",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ReadProcessMemory",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hProcess",
+        "type": "void *"
+      },
+      {
+        "name": "lpBaseAddress",
+        "type": "void *"
+      },
+      {
+        "name": "lpBuffer",
+        "type": "void *"
+      },
+      {
+        "name": "nSize",
+        "type": "size_t"
+      },
+      {
+        "name": "lpNumberOfBytesRead",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "WaitForSingleObject",
+    "ret": "ulong",
+    "params": [
+      {
+        "name": "hHandle",
+        "type": "void *"
+      },
+      {
+        "name": "dwMilliseconds",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "WaitForMultipleObjects",
+    "ret": "ulong",
+    "params": [
+      {
+        "name": "nCount",
+        "type": "ulong"
+      },
+      {
+        "name": "lpHandles",
+        "type": "void *"
+      },
+      {
+        "name": "bWaitAll",
+        "type": "int"
+      },
+      {
+        "name": "dwMilliseconds",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "Sleep",
+    "ret": "void",
+    "params": [
+      {
+        "name": "dwMilliseconds",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "SleepEx",
+    "ret": "ulong",
+    "params": [
+      {
+        "name": "dwMilliseconds",
+        "type": "ulong"
+      },
+      {
+        "name": "bAlertable",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CreateMutexA",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "lpMutexAttributes",
+        "type": "void *"
+      },
+      {
+        "name": "bInitialOwner",
+        "type": "int"
+      },
+      {
+        "name": "lpName",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CreateMutexW",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "lpMutexAttributes",
+        "type": "void *"
+      },
+      {
+        "name": "bInitialOwner",
+        "type": "int"
+      },
+      {
+        "name": "lpName",
+        "type": "wchar_t *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ReleaseMutex",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hMutex",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CreateEventA",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "lpEventAttributes",
+        "type": "void *"
+      },
+      {
+        "name": "bManualReset",
+        "type": "int"
+      },
+      {
+        "name": "bInitialState",
+        "type": "int"
+      },
+      {
+        "name": "lpName",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CreateEventW",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "lpEventAttributes",
+        "type": "void *"
+      },
+      {
+        "name": "bManualReset",
+        "type": "int"
+      },
+      {
+        "name": "bInitialState",
+        "type": "int"
+      },
+      {
+        "name": "lpName",
+        "type": "wchar_t *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "SetEvent",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hEvent",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ResetEvent",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hEvent",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CreateSemaphoreA",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "lpSemaphoreAttributes",
+        "type": "void *"
+      },
+      {
+        "name": "lInitialCount",
+        "type": "long"
+      },
+      {
+        "name": "lMaximumCount",
+        "type": "long"
+      },
+      {
+        "name": "lpName",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ReleaseSemaphore",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hSemaphore",
+        "type": "void *"
+      },
+      {
+        "name": "lReleaseCount",
+        "type": "long"
+      },
+      {
+        "name": "lpPreviousCount",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "InitializeCriticalSection",
+    "ret": "void",
+    "params": [
+      {
+        "name": "lpCriticalSection",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "EnterCriticalSection",
+    "ret": "void",
+    "params": [
+      {
+        "name": "lpCriticalSection",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "LeaveCriticalSection",
+    "ret": "void",
+    "params": [
+      {
+        "name": "lpCriticalSection",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "DeleteCriticalSection",
+    "ret": "void",
+    "params": [
+      {
+        "name": "lpCriticalSection",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "TryEnterCriticalSection",
+    "ret": "int",
+    "params": [
+      {
+        "name": "lpCriticalSection",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "InitializeSRWLock",
+    "ret": "void",
+    "params": [
+      {
+        "name": "SRWLock",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "AcquireSRWLockExclusive",
+    "ret": "void",
+    "params": [
+      {
+        "name": "SRWLock",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ReleaseSRWLockExclusive",
+    "ret": "void",
+    "params": [
+      {
+        "name": "SRWLock",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "AcquireSRWLockShared",
+    "ret": "void",
+    "params": [
+      {
+        "name": "SRWLock",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ReleaseSRWLockShared",
+    "ret": "void",
+    "params": [
+      {
+        "name": "SRWLock",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetLastError",
+    "ret": "ulong",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "SetLastError",
+    "ret": "void",
+    "params": [
+      {
+        "name": "dwErrCode",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "FormatMessageA",
+    "ret": "ulong",
+    "params": [
+      {
+        "name": "dwFlags",
+        "type": "ulong"
+      },
+      {
+        "name": "lpSource",
+        "type": "void *"
+      },
+      {
+        "name": "dwMessageId",
+        "type": "ulong"
+      },
+      {
+        "name": "dwLanguageId",
+        "type": "ulong"
+      },
+      {
+        "name": "lpBuffer",
+        "type": "char *"
+      },
+      {
+        "name": "nSize",
+        "type": "ulong"
+      },
+      {
+        "name": "Arguments",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "FormatMessageW",
+    "ret": "ulong",
+    "params": [
+      {
+        "name": "dwFlags",
+        "type": "ulong"
+      },
+      {
+        "name": "lpSource",
+        "type": "void *"
+      },
+      {
+        "name": "dwMessageId",
+        "type": "ulong"
+      },
+      {
+        "name": "dwLanguageId",
+        "type": "ulong"
+      },
+      {
+        "name": "lpBuffer",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "nSize",
+        "type": "ulong"
+      },
+      {
+        "name": "Arguments",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "RaiseException",
+    "ret": "void",
+    "params": [
+      {
+        "name": "dwExceptionCode",
+        "type": "ulong"
+      },
+      {
+        "name": "dwExceptionFlags",
+        "type": "ulong"
+      },
+      {
+        "name": "nNumberOfArguments",
+        "type": "ulong"
+      },
+      {
+        "name": "lpArguments",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "SetUnhandledExceptionFilter",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "lpTopLevelExceptionFilter",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "RegOpenKeyExA",
+    "ret": "long",
+    "params": [
+      {
+        "name": "hKey",
+        "type": "void *"
+      },
+      {
+        "name": "lpSubKey",
+        "type": "char *"
+      },
+      {
+        "name": "ulOptions",
+        "type": "ulong"
+      },
+      {
+        "name": "samDesired",
+        "type": "ulong"
+      },
+      {
+        "name": "phkResult",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "RegOpenKeyExW",
+    "ret": "long",
+    "params": [
+      {
+        "name": "hKey",
+        "type": "void *"
+      },
+      {
+        "name": "lpSubKey",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "ulOptions",
+        "type": "ulong"
+      },
+      {
+        "name": "samDesired",
+        "type": "ulong"
+      },
+      {
+        "name": "phkResult",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "RegCreateKeyExA",
+    "ret": "long",
+    "params": [
+      {
+        "name": "hKey",
+        "type": "void *"
+      },
+      {
+        "name": "lpSubKey",
+        "type": "char *"
+      },
+      {
+        "name": "Reserved",
+        "type": "ulong"
+      },
+      {
+        "name": "lpClass",
+        "type": "char *"
+      },
+      {
+        "name": "dwOptions",
+        "type": "ulong"
+      },
+      {
+        "name": "samDesired",
+        "type": "ulong"
+      },
+      {
+        "name": "lpSecurityAttributes",
+        "type": "void *"
+      },
+      {
+        "name": "phkResult",
+        "type": "void *"
+      },
+      {
+        "name": "lpdwDisposition",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "RegSetValueExA",
+    "ret": "long",
+    "params": [
+      {
+        "name": "hKey",
+        "type": "void *"
+      },
+      {
+        "name": "lpValueName",
+        "type": "char *"
+      },
+      {
+        "name": "Reserved",
+        "type": "ulong"
+      },
+      {
+        "name": "dwType",
+        "type": "ulong"
+      },
+      {
+        "name": "lpData",
+        "type": "void *"
+      },
+      {
+        "name": "cbData",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "RegSetValueExW",
+    "ret": "long",
+    "params": [
+      {
+        "name": "hKey",
+        "type": "void *"
+      },
+      {
+        "name": "lpValueName",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "Reserved",
+        "type": "ulong"
+      },
+      {
+        "name": "dwType",
+        "type": "ulong"
+      },
+      {
+        "name": "lpData",
+        "type": "void *"
+      },
+      {
+        "name": "cbData",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "RegQueryValueExA",
+    "ret": "long",
+    "params": [
+      {
+        "name": "hKey",
+        "type": "void *"
+      },
+      {
+        "name": "lpValueName",
+        "type": "char *"
+      },
+      {
+        "name": "lpReserved",
+        "type": "void *"
+      },
+      {
+        "name": "lpType",
+        "type": "void *"
+      },
+      {
+        "name": "lpData",
+        "type": "void *"
+      },
+      {
+        "name": "lpcbData",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "RegQueryValueExW",
+    "ret": "long",
+    "params": [
+      {
+        "name": "hKey",
+        "type": "void *"
+      },
+      {
+        "name": "lpValueName",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "lpReserved",
+        "type": "void *"
+      },
+      {
+        "name": "lpType",
+        "type": "void *"
+      },
+      {
+        "name": "lpData",
+        "type": "void *"
+      },
+      {
+        "name": "lpcbData",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "RegCloseKey",
+    "ret": "long",
+    "params": [
+      {
+        "name": "hKey",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "RegDeleteKeyA",
+    "ret": "long",
+    "params": [
+      {
+        "name": "hKey",
+        "type": "void *"
+      },
+      {
+        "name": "lpSubKey",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "RegDeleteValueA",
+    "ret": "long",
+    "params": [
+      {
+        "name": "hKey",
+        "type": "void *"
+      },
+      {
+        "name": "lpValueName",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "MultiByteToWideChar",
+    "ret": "int",
+    "params": [
+      {
+        "name": "CodePage",
+        "type": "uint"
+      },
+      {
+        "name": "dwFlags",
+        "type": "ulong"
+      },
+      {
+        "name": "lpMultiByteStr",
+        "type": "char *"
+      },
+      {
+        "name": "cbMultiByte",
+        "type": "int"
+      },
+      {
+        "name": "lpWideCharStr",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "cchWideChar",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "WideCharToMultiByte",
+    "ret": "int",
+    "params": [
+      {
+        "name": "CodePage",
+        "type": "uint"
+      },
+      {
+        "name": "dwFlags",
+        "type": "ulong"
+      },
+      {
+        "name": "lpWideCharStr",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "cchWideChar",
+        "type": "int"
+      },
+      {
+        "name": "lpMultiByteStr",
+        "type": "char *"
+      },
+      {
+        "name": "cbMultiByte",
+        "type": "int"
+      },
+      {
+        "name": "lpDefaultChar",
+        "type": "char *"
+      },
+      {
+        "name": "lpUsedDefaultChar",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetSystemInfo",
+    "ret": "void",
+    "params": [
+      {
+        "name": "lpSystemInfo",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetVersionExA",
+    "ret": "int",
+    "params": [
+      {
+        "name": "lpVersionInformation",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetComputerNameA",
+    "ret": "int",
+    "params": [
+      {
+        "name": "lpBuffer",
+        "type": "char *"
+      },
+      {
+        "name": "nSize",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetUserNameA",
+    "ret": "int",
+    "params": [
+      {
+        "name": "lpBuffer",
+        "type": "char *"
+      },
+      {
+        "name": "pcbBuffer",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetEnvironmentVariableA",
+    "ret": "ulong",
+    "params": [
+      {
+        "name": "lpName",
+        "type": "char *"
+      },
+      {
+        "name": "lpBuffer",
+        "type": "char *"
+      },
+      {
+        "name": "nSize",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetEnvironmentVariableW",
+    "ret": "ulong",
+    "params": [
+      {
+        "name": "lpName",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "lpBuffer",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "nSize",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "SetEnvironmentVariableA",
+    "ret": "int",
+    "params": [
+      {
+        "name": "lpName",
+        "type": "char *"
+      },
+      {
+        "name": "lpValue",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetCommandLineA",
+    "ret": "char *",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "GetCommandLineW",
+    "ret": "wchar_t *",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "GetTickCount",
+    "ret": "ulong",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "GetTickCount64",
+    "ret": "ulong",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "QueryPerformanceCounter",
+    "ret": "int",
+    "params": [
+      {
+        "name": "lpPerformanceCount",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "QueryPerformanceFrequency",
+    "ret": "int",
+    "params": [
+      {
+        "name": "lpFrequency",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "IsDebuggerPresent",
+    "ret": "int",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "OutputDebugStringA",
+    "ret": "void",
+    "params": [
+      {
+        "name": "lpOutputString",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "OutputDebugStringW",
+    "ret": "void",
+    "params": [
+      {
+        "name": "lpOutputString",
+        "type": "wchar_t *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "DebugBreak",
+    "ret": "void",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "CheckRemoteDebuggerPresent",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hProcess",
+        "type": "void *"
+      },
+      {
+        "name": "pbDebuggerPresent",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "MessageBoxA",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hWnd",
+        "type": "void *"
+      },
+      {
+        "name": "lpText",
+        "type": "char *"
+      },
+      {
+        "name": "lpCaption",
+        "type": "char *"
+      },
+      {
+        "name": "uType",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "MessageBoxW",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hWnd",
+        "type": "void *"
+      },
+      {
+        "name": "lpText",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "lpCaption",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "uType",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetWindowTextA",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hWnd",
+        "type": "void *"
+      },
+      {
+        "name": "lpString",
+        "type": "char *"
+      },
+      {
+        "name": "nMaxCount",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "GetWindowTextW",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hWnd",
+        "type": "void *"
+      },
+      {
+        "name": "lpString",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "nMaxCount",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "FindWindowA",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "lpClassName",
+        "type": "char *"
+      },
+      {
+        "name": "lpWindowName",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "FindWindowW",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "lpClassName",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "lpWindowName",
+        "type": "wchar_t *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "SendMessageA",
+    "ret": "long",
+    "params": [
+      {
+        "name": "hWnd",
+        "type": "void *"
+      },
+      {
+        "name": "Msg",
+        "type": "uint"
+      },
+      {
+        "name": "wParam",
+        "type": "ulong"
+      },
+      {
+        "name": "lParam",
+        "type": "long"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "SendMessageW",
+    "ret": "long",
+    "params": [
+      {
+        "name": "hWnd",
+        "type": "void *"
+      },
+      {
+        "name": "Msg",
+        "type": "uint"
+      },
+      {
+        "name": "wParam",
+        "type": "ulong"
+      },
+      {
+        "name": "lParam",
+        "type": "long"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "PostMessageA",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hWnd",
+        "type": "void *"
+      },
+      {
+        "name": "Msg",
+        "type": "uint"
+      },
+      {
+        "name": "wParam",
+        "type": "ulong"
+      },
+      {
+        "name": "lParam",
+        "type": "long"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "PostMessageW",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hWnd",
+        "type": "void *"
+      },
+      {
+        "name": "Msg",
+        "type": "uint"
+      },
+      {
+        "name": "wParam",
+        "type": "ulong"
+      },
+      {
+        "name": "lParam",
+        "type": "long"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ShellExecuteA",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "hwnd",
+        "type": "void *"
+      },
+      {
+        "name": "lpOperation",
+        "type": "char *"
+      },
+      {
+        "name": "lpFile",
+        "type": "char *"
+      },
+      {
+        "name": "lpParameters",
+        "type": "char *"
+      },
+      {
+        "name": "lpDirectory",
+        "type": "char *"
+      },
+      {
+        "name": "nShowCmd",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ShellExecuteW",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "hwnd",
+        "type": "void *"
+      },
+      {
+        "name": "lpOperation",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "lpFile",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "lpParameters",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "lpDirectory",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "nShowCmd",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CommandLineToArgvW",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "lpCmdLine",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "pNumArgs",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "WSAStartup",
+    "ret": "int",
+    "params": [
+      {
+        "name": "wVersionRequested",
+        "type": "uint"
+      },
+      {
+        "name": "lpWSAData",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "WSACleanup",
+    "ret": "int",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "WSAGetLastError",
+    "ret": "int",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "InternetOpenA",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "lpszAgent",
+        "type": "char *"
+      },
+      {
+        "name": "dwAccessType",
+        "type": "ulong"
+      },
+      {
+        "name": "lpszProxy",
+        "type": "char *"
+      },
+      {
+        "name": "lpszProxyBypass",
+        "type": "char *"
+      },
+      {
+        "name": "dwFlags",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "InternetOpenUrlA",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "hInternet",
+        "type": "void *"
+      },
+      {
+        "name": "lpszUrl",
+        "type": "char *"
+      },
+      {
+        "name": "lpszHeaders",
+        "type": "char *"
+      },
+      {
+        "name": "dwHeadersLength",
+        "type": "ulong"
+      },
+      {
+        "name": "dwFlags",
+        "type": "ulong"
+      },
+      {
+        "name": "dwContext",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "InternetReadFile",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hFile",
+        "type": "void *"
+      },
+      {
+        "name": "lpBuffer",
+        "type": "void *"
+      },
+      {
+        "name": "dwNumberOfBytesToRead",
+        "type": "ulong"
+      },
+      {
+        "name": "lpdwNumberOfBytesRead",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "InternetCloseHandle",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hInternet",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "URLDownloadToFileA",
+    "ret": "long",
+    "params": [
+      {
+        "name": "pCaller",
+        "type": "void *"
+      },
+      {
+        "name": "szURL",
+        "type": "char *"
+      },
+      {
+        "name": "szFileName",
+        "type": "char *"
+      },
+      {
+        "name": "Reserved",
+        "type": "ulong"
+      },
+      {
+        "name": "lpfnCB",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "URLDownloadToFileW",
+    "ret": "long",
+    "params": [
+      {
+        "name": "pCaller",
+        "type": "void *"
+      },
+      {
+        "name": "szURL",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "szFileName",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "Reserved",
+        "type": "ulong"
+      },
+      {
+        "name": "lpfnCB",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CryptAcquireContextA",
+    "ret": "int",
+    "params": [
+      {
+        "name": "phProv",
+        "type": "void *"
+      },
+      {
+        "name": "szContainer",
+        "type": "char *"
+      },
+      {
+        "name": "szProvider",
+        "type": "char *"
+      },
+      {
+        "name": "dwProvType",
+        "type": "ulong"
+      },
+      {
+        "name": "dwFlags",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CryptGenRandom",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hProv",
+        "type": "void *"
+      },
+      {
+        "name": "dwLen",
+        "type": "ulong"
+      },
+      {
+        "name": "pbBuffer",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CryptReleaseContext",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hProv",
+        "type": "void *"
+      },
+      {
+        "name": "dwFlags",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "OpenSCManagerA",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "lpMachineName",
+        "type": "char *"
+      },
+      {
+        "name": "lpDatabaseName",
+        "type": "char *"
+      },
+      {
+        "name": "dwDesiredAccess",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "OpenSCManagerW",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "lpMachineName",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "lpDatabaseName",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "dwDesiredAccess",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CreateServiceA",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "hSCManager",
+        "type": "void *"
+      },
+      {
+        "name": "lpServiceName",
+        "type": "char *"
+      },
+      {
+        "name": "lpDisplayName",
+        "type": "char *"
+      },
+      {
+        "name": "dwDesiredAccess",
+        "type": "ulong"
+      },
+      {
+        "name": "dwServiceType",
+        "type": "ulong"
+      },
+      {
+        "name": "dwStartType",
+        "type": "ulong"
+      },
+      {
+        "name": "dwErrorControl",
+        "type": "ulong"
+      },
+      {
+        "name": "lpBinaryPathName",
+        "type": "char *"
+      },
+      {
+        "name": "lpLoadOrderGroup",
+        "type": "char *"
+      },
+      {
+        "name": "lpdwTagId",
+        "type": "void *"
+      },
+      {
+        "name": "lpDependencies",
+        "type": "char *"
+      },
+      {
+        "name": "lpServiceStartName",
+        "type": "char *"
+      },
+      {
+        "name": "lpPassword",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CreateServiceW",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "hSCManager",
+        "type": "void *"
+      },
+      {
+        "name": "lpServiceName",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "lpDisplayName",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "dwDesiredAccess",
+        "type": "ulong"
+      },
+      {
+        "name": "dwServiceType",
+        "type": "ulong"
+      },
+      {
+        "name": "dwStartType",
+        "type": "ulong"
+      },
+      {
+        "name": "dwErrorControl",
+        "type": "ulong"
+      },
+      {
+        "name": "lpBinaryPathName",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "lpLoadOrderGroup",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "lpdwTagId",
+        "type": "void *"
+      },
+      {
+        "name": "lpDependencies",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "lpServiceStartName",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "lpPassword",
+        "type": "wchar_t *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "OpenServiceA",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "hSCManager",
+        "type": "void *"
+      },
+      {
+        "name": "lpServiceName",
+        "type": "char *"
+      },
+      {
+        "name": "dwDesiredAccess",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "OpenServiceW",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "hSCManager",
+        "type": "void *"
+      },
+      {
+        "name": "lpServiceName",
+        "type": "wchar_t *"
+      },
+      {
+        "name": "dwDesiredAccess",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "StartServiceA",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hService",
+        "type": "void *"
+      },
+      {
+        "name": "dwNumServiceArgs",
+        "type": "ulong"
+      },
+      {
+        "name": "lpServiceArgVectors",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ControlService",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hService",
+        "type": "void *"
+      },
+      {
+        "name": "dwControl",
+        "type": "ulong"
+      },
+      {
+        "name": "lpServiceStatus",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "DeleteService",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hService",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "NtQueryInformationProcess",
+    "ret": "long",
+    "params": [
+      {
+        "name": "ProcessHandle",
+        "type": "void *"
+      },
+      {
+        "name": "ProcessInformationClass",
+        "type": "int"
+      },
+      {
+        "name": "ProcessInformation",
+        "type": "void *"
+      },
+      {
+        "name": "ProcessInformationLength",
+        "type": "uint"
+      },
+      {
+        "name": "ReturnLength",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "NtQuerySystemInformation",
+    "ret": "long",
+    "params": [
+      {
+        "name": "SystemInformationClass",
+        "type": "int"
+      },
+      {
+        "name": "SystemInformation",
+        "type": "void *"
+      },
+      {
+        "name": "SystemInformationLength",
+        "type": "uint"
+      },
+      {
+        "name": "ReturnLength",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CreateToolhelp32Snapshot",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "dwFlags",
+        "type": "ulong"
+      },
+      {
+        "name": "th32ProcessID",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "Process32First",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hSnapshot",
+        "type": "void *"
+      },
+      {
+        "name": "lppe",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "Process32Next",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hSnapshot",
+        "type": "void *"
+      },
+      {
+        "name": "lppe",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "Thread32First",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hSnapshot",
+        "type": "void *"
+      },
+      {
+        "name": "lpte",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "Thread32Next",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hSnapshot",
+        "type": "void *"
+      },
+      {
+        "name": "lpte",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "Module32First",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hSnapshot",
+        "type": "void *"
+      },
+      {
+        "name": "lpme",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "Module32Next",
+    "ret": "int",
+    "params": [
+      {
+        "name": "hSnapshot",
+        "type": "void *"
+      },
+      {
+        "name": "lpme",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "TlsAlloc",
+    "ret": "ulong",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "TlsFree",
+    "ret": "int",
+    "params": [
+      {
+        "name": "dwTlsIndex",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "TlsGetValue",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "dwTlsIndex",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "TlsSetValue",
+    "ret": "int",
+    "params": [
+      {
+        "name": "dwTlsIndex",
+        "type": "ulong"
+      },
+      {
+        "name": "lpTlsValue",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  }
+]
