@@ -5123,31 +5123,41 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
         }
         StructuredStmt::Call { target, args, out: call_out } => {
             let target_name = format_call_target(target, ssa, ctx);
-            // Look up signature for parameter name annotations
-            let call_sig = crate::signatures::lookup(&target_name);
-            let args_str: Vec<String> = args.iter().enumerate()
-                .map(|(i, a)| {
-                    let vdef = ssa.var(*a);
-                    let expr_str = format_vardef_expr(vdef, ssa, ctx, tracker);
-                    // Add /* param_name */ comment when signature is available and
-                    // the argument expression isn't already obviously named
-                    if let Some(sig) = call_sig {
-                        if let Some(param) = sig.params.get(i) {
-                            // Only annotate complex expressions (not simple constants, strings, or
-                            // already-named vars that match the param name)
-                            let is_simple = expr_str.starts_with('"')
-                                || expr_str.starts_with("L\"")
-                                || expr_str == "0"
-                                || expr_str == param.name;
-                            if !is_simple && args.len() > 1 {
-                                return format!("/*{}*/ {}", param.name, expr_str);
+
+            // ObjC message send: format as [receiver selector:arg1 param:arg2]
+            let call_expr = if let Some(selector) = target_name.strip_prefix("objc_msgSend$") {
+                format_objc_call(selector, args, ssa, ctx, tracker)
+            } else if target_name == "objc_msgSendSuper2" {
+                // super call: [super selector:args]
+                if !args.is_empty() {
+                    let receiver = format_vardef_expr(ssa.var(args[0]), ssa, ctx, tracker);
+                    format!("[super /* {} */]", receiver)
+                } else {
+                    "[super message]".to_string()
+                }
+            } else {
+                // Normal C function call
+                let call_sig = crate::signatures::lookup(&target_name);
+                let args_str: Vec<String> = args.iter().enumerate()
+                    .map(|(i, a)| {
+                        let vdef = ssa.var(*a);
+                        let expr_str = format_vardef_expr(vdef, ssa, ctx, tracker);
+                        if let Some(sig) = call_sig {
+                            if let Some(param) = sig.params.get(i) {
+                                let is_simple = expr_str.starts_with('"')
+                                    || expr_str.starts_with("L\"")
+                                    || expr_str == "0"
+                                    || expr_str == param.name;
+                                if !is_simple && args.len() > 1 {
+                                    return format!("/*{}*/ {}", param.name, expr_str);
+                                }
                             }
                         }
-                    }
-                    expr_str
-                })
-                .collect();
-            let call_expr = format!("{}({})", target_name, args_str.join(", "));
+                        expr_str
+                    })
+                    .collect();
+                format!("{}({})", target_name, args_str.join(", "))
+            };
 
             // Calls clobber all registers
             tracker.invalidate_all();
@@ -5485,6 +5495,93 @@ fn resolve_stack_alias(name: &str, tracker: &RegTracker) -> String {
         }
     }
     current
+}
+
+/// Format an Objective-C message send as bracket syntax: [receiver selector:arg1 param:arg2]
+fn format_objc_call(selector: &str, args: &[VarId], ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> String {
+    // First argument is the receiver (self or class).
+    // In AArch64 ObjC ABI, x0 holds self/class before the call.
+    // Try: explicit arg first, then tracker for x0 register.
+    let receiver = if !args.is_empty() {
+        let vdef = ssa.var(args[0]);
+        let r = format_vardef_expr(vdef, ssa, ctx, tracker);
+        // Clean up common receiver patterns
+        // ObjC ARC calls in x0 are not the actual receiver — the previous message result is
+        let r = if r.starts_with("objc_retain") || r.starts_with("objc_release")
+            || r.starts_with("[super") || r.starts_with("[[")
+        {
+            "self".to_string()
+        } else { r };
+        if r.starts_with("param_") || r.starts_with("self") || r.starts_with("lVar") || r.starts_with("iVar") {
+            r
+        } else if r.contains("OBJC_CLASS") || r.starts_with("*(") {
+            // Class method: extract class name if possible
+            if let Some(cls) = r.strip_prefix("*(") {
+                if let Some(cls) = cls.strip_suffix(")") {
+                    if cls.contains("OBJC_CLASS") {
+                        // *(PTR__OBJC_CLASS___UIColor...) → UIColor
+                        cls.rsplit("___").next()
+                            .and_then(|s| s.split('_').next())
+                            .unwrap_or(cls).to_string()
+                    } else { r }
+                } else { r }
+            } else { r }
+        } else {
+            r
+        }
+    } else {
+        // No explicit arg — try to get x0 from the register tracker
+        // AArch64 x0 is register offset 0, size 8
+        if let Some(x0_expr) = tracker.get_expr_str(0, 8) {
+            let r = x0_expr.to_string();
+            // Clean up ARC noise in tracker result
+            if r.contains("objc_retain") || r.contains("objc_release") || r.starts_with("[") {
+                "self".to_string()
+            } else {
+                r
+            }
+        } else {
+            "self".to_string()
+        }
+    };
+
+    // The remaining arguments (after receiver, skipping selector which is implicit in the name)
+    // In AArch64 ObjC ABI: x0=self, x1=_cmd (selector), x2..=actual args
+    // Our call args may or may not include x1 depending on how they were collected
+    let extra_args: Vec<String> = args.iter().skip(1).map(|a| {
+        let vdef = ssa.var(*a);
+        format_vardef_expr(vdef, ssa, ctx, tracker)
+    }).collect();
+
+    // Parse selector parts (split by ':')
+    let parts: Vec<&str> = selector.split(':').collect();
+    let num_params = selector.matches(':').count();
+
+    if num_params == 0 {
+        // No-argument message: [receiver selector]
+        format!("[{} {}]", receiver, selector)
+    } else if extra_args.len() >= num_params {
+        // Interleave selector parts with arguments
+        let mut result = format!("[{}", receiver);
+        for (i, part) in parts.iter().enumerate() {
+            if part.is_empty() { continue; }
+            if i < extra_args.len() {
+                result.push_str(&format!(" {}:{}", part, extra_args[i]));
+            } else {
+                result.push_str(&format!(" {}", part));
+            }
+        }
+        result.push(']');
+        result
+    } else {
+        // Not enough args — fall back to simpler format
+        let args_str = extra_args.join(", ");
+        if args_str.is_empty() {
+            format!("[{} {}]", receiver, selector.trim_end_matches(':'))
+        } else {
+            format!("[{} {} {}]", receiver, selector.trim_end_matches(':'), args_str)
+        }
+    }
 }
 
 /// Format a VarDef's expression, respecting param_name for stack parameters.
