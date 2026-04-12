@@ -9,6 +9,7 @@ pub mod imports;
 pub mod dwarf;
 pub mod pdb_info;
 pub mod signatures;
+pub mod eqsat;
 mod signatures_libc;
 mod signatures_win32;
 

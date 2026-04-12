@@ -114,6 +114,21 @@ fn fold_once(ssa: &mut SsaCfg) {
     // MBA deobfuscation: deep algebraic simplification through expression trees.
     mba_simplify(ssa);
 
+    // Equality saturation: explore all equivalent MBA forms, extract cheapest.
+    // Only run on expressions deep enough to benefit (depth ≥ 5).
+    // Wrapped in catch_unwind because egg can panic on pathological inputs.
+    for v in 0..ssa.vars.len() {
+        let depth = expr_depth(&ssa.vars[v].expr, &ssa.vars, 0);
+        if depth >= 5 {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::eqsat::simplify_expr(v, &mut ssa.vars)
+            }));
+            if let Ok(Some(simplified)) = result {
+                ssa.vars[v].expr = simplified;
+            }
+        }
+    }
+
     // Pass 3: Inline single-use Unique vars and all constants
     let inline_candidates: Vec<(VarId, Expr)> = (0..ssa.vars.len())
         .filter_map(|v| {
