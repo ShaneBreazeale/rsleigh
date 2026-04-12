@@ -295,10 +295,109 @@ pub fn extract_learned_types(
         }
     }
 
+    // Also detect non-void return even without display_type:
+    // If any Return terminator has Some(var), the function returns a value.
+    let has_return_val = ssa.blocks.iter().any(|b|
+        matches!(&b.terminator, ir::SsaTerminator::Return(Some(_))));
+    if has_return_val && return_type.is_none() {
+        // We know it returns something, just don't know the display type.
+        // Mark as "int" (conservative — better than void).
+        return_type = Some("int");
+    }
+
     // Only return if we learned something useful
     if param_types.iter().any(|t| t.is_some()) || return_type.is_some() {
         Some(LearnedFuncType { addr: func_addr, param_types, return_type })
     } else {
         None
     }
+}
+
+/// Analyze call sites in a function's SSA to infer which callees return non-void.
+/// Returns a list of (callee_addr, inferred_return_type) pairs.
+///
+/// A callee is non-void if the caller:
+/// - Reads the call return register (EAX/RAX) after the call
+/// - Uses the result in a comparison, store, or as an argument to another call
+pub fn infer_returns_from_callsites(
+    arch: Architecture,
+    instructions: &[(u64, Instruction)],
+    binary: Option<&[u8]>,
+) -> Vec<(u64, &'static str)> {
+    if instructions.is_empty() { return Vec::new(); }
+
+    let mut expanded = Vec::new();
+    for (addr, inst) in instructions {
+        expanded.push((*addr, inst.clone()));
+    }
+    let cfg_result = cfg::build_cfg(&expanded);
+    if cfg_result.blocks.is_empty() { return Vec::new(); }
+
+    let import_map = binary.map(|b| imports::resolve_imports(b)).unwrap_or_default();
+    let mut ssa = ssa::build_ssa(&cfg_result);
+
+    let cc = if let Some(binary) = binary {
+        if let Ok(obj) = goblin::Object::parse(binary) {
+            match &obj {
+                goblin::Object::PE(pe) => if pe.is_64 {
+                    fold::CallingConv::Win64
+                } else {
+                    fold::CallingConv::Cdecl32
+                },
+                _ => match arch {
+                    Architecture::X86_32 | Architecture::ARM32 | Architecture::MIPS32
+                        => fold::CallingConv::Cdecl32,
+                    _ => fold::CallingConv::SysV,
+                }
+            }
+        } else { fold::CallingConv::SysV }
+    } else { fold::CallingConv::SysV };
+
+    fold::fold_with_cc(&mut ssa, cc);
+
+    let mut results = Vec::new();
+
+    // Check Call terminators: if the fallthrough block reads EAX, the call returns a value
+    for bi in 0..ssa.blocks.len() {
+        let (target_addr, ft) = match &ssa.blocks[bi].terminator {
+            ir::SsaTerminator::Call { target: ir::CallTarget::Direct(addr), fallthrough, .. } => {
+                (*addr, fallthrough.0)
+            }
+            _ => continue,
+        };
+
+        // Skip known imports (they already have signatures)
+        if import_map.contains_key(&target_addr) { continue; }
+
+        // Check if the fallthrough block reads the call return register
+        if ft < ssa.blocks.len() {
+            for stmt in &ssa.blocks[ft].stmts {
+                if let ir::Stmt::Assign(var_id) = stmt {
+                    let vdef = &ssa.vars[var_id.0 as usize];
+                    if vdef.call_return && vdef.use_count > 0 {
+                        // The return value is used — callee is not void
+                        results.push((target_addr, "int"));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check Stmt::Call with out variable that has use_count > 0
+    for block in &ssa.blocks {
+        for stmt in &block.stmts {
+            if let ir::Stmt::Call { target: ir::CallTarget::Direct(addr), out: Some(out_var), .. } = stmt {
+                if import_map.contains_key(addr) { continue; }
+                let vdef = &ssa.vars[out_var.0 as usize];
+                if vdef.use_count > 0 {
+                    results.push((*addr, "int"));
+                }
+            }
+        }
+    }
+
+    results.sort_by_key(|(addr, _)| *addr);
+    results.dedup_by_key(|(addr, _)| *addr);
+    results
 }

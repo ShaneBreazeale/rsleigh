@@ -938,31 +938,30 @@ fn is_comparison(kind: BinOpKind) -> bool {
 // ---- Return Values ----
 
 fn detect_return_values(ssa: &mut SsaCfg) {
-    // Also check x86-32 EAX (offset 0, size 4) and ARM64 x0/w0 (offset 0)
-    let ret_reg_offset = RAX_OFFSET;
+    let ret_reg_offset = RAX_OFFSET; // EAX/RAX = offset 0
 
     for bi in 0..ssa.blocks.len() {
         if let SsaTerminator::Return(ref ret_val) = ssa.blocks[bi].terminator {
             if ret_val.is_some() { continue; }
         } else { continue; }
 
-        // Look backwards in this block for RAX/EAX assignment
-        let mut found = None;
-        for stmt in ssa.blocks[bi].stmts.iter().rev() {
-            if let Stmt::Assign(var_id) = stmt {
-                let vdef = &ssa.vars[var_id.0 as usize];
-                if vdef.varnode.space == AddressSpaceId::Register
-                    && vdef.varnode.offset == ret_reg_offset
-                    && vdef.varnode.size >= 4
-                {
-                    found = Some(*var_id);
-                    break;
+        // Strategy 1: Look backwards in this block for RAX/EAX assignment
+        let mut found = find_ret_reg_in_block(&ssa.blocks[bi].stmts, &ssa.vars, ret_reg_offset);
+
+        // Strategy 2: Check for call_return var (EAX set by a preceding CALL)
+        if found.is_none() {
+            for stmt in ssa.blocks[bi].stmts.iter().rev() {
+                if let Stmt::Assign(var_id) = stmt {
+                    let vdef = &ssa.vars[var_id.0 as usize];
+                    if vdef.call_return {
+                        found = Some(*var_id);
+                        break;
+                    }
                 }
             }
         }
 
-        // If not found in this block, check predecessors (handles CMOV patterns
-        // where the return register was set in a preceding conditional block)
+        // Strategy 3: Check predecessors (CMOV patterns, conditional returns)
         if found.is_none() {
             for pred_bi in 0..ssa.blocks.len() {
                 if pred_bi == bi { continue; }
@@ -974,19 +973,68 @@ fn detect_return_values(ssa: &mut SsaCfg) {
                 };
                 if !flows_to_bi { continue; }
 
-                for stmt in ssa.blocks[pred_bi].stmts.iter().rev() {
-                    if let Stmt::Assign(var_id) = stmt {
-                        let vdef = &ssa.vars[var_id.0 as usize];
-                        if vdef.varnode.space == AddressSpaceId::Register
-                            && vdef.varnode.offset == ret_reg_offset
-                            && vdef.varnode.size >= 4
-                        {
-                            found = Some(*var_id);
-                            break;
+                let pred_found = find_ret_reg_in_block(&ssa.blocks[pred_bi].stmts, &ssa.vars, ret_reg_offset);
+                if pred_found.is_some() {
+                    found = pred_found;
+                    break;
+                }
+                // Also check if predecessor ends with a Call (return value in EAX flows through)
+                if matches!(&ssa.blocks[pred_bi].terminator, SsaTerminator::Call { .. }) {
+                    // The call's return value (in EAX) flows to the return block
+                    for stmt in ssa.blocks[pred_bi].stmts.iter().rev() {
+                        if let Stmt::Assign(var_id) = stmt {
+                            if ssa.vars[var_id.0 as usize].call_return {
+                                found = Some(*var_id);
+                                break;
+                            }
                         }
                     }
                 }
                 if found.is_some() { break; }
+            }
+        }
+
+        // Strategy 4: Broader search — check ALL blocks that flow to this return block
+        // through any path (up to 3 hops). This catches cases where EAX is set several
+        // blocks before the actual return (common in x86-32 with epilogue blocks).
+        if found.is_none() {
+            let mut visited = std::collections::HashSet::new();
+            let mut frontier = vec![bi];
+            visited.insert(bi);
+            for _hop in 0..3 {
+                let mut next_frontier = Vec::new();
+                for &target_bi in &frontier {
+                    for pred_bi in 0..ssa.blocks.len() {
+                        if visited.contains(&pred_bi) { continue; }
+                        let flows = match &ssa.blocks[pred_bi].terminator {
+                            SsaTerminator::Fallthrough(b) | SsaTerminator::Branch(b) => b.0 == target_bi,
+                            SsaTerminator::CBranch { taken, fallthrough, .. } => taken.0 == target_bi || fallthrough.0 == target_bi,
+                            SsaTerminator::Call { fallthrough, .. } => fallthrough.0 == target_bi,
+                            _ => false,
+                        };
+                        if !flows { continue; }
+                        visited.insert(pred_bi);
+                        next_frontier.push(pred_bi);
+
+                        if let Some(var_id) = find_ret_reg_in_block(&ssa.blocks[pred_bi].stmts, &ssa.vars, ret_reg_offset) {
+                            found = Some(var_id);
+                            break;
+                        }
+                        // Check call_return in predecessor
+                        for stmt in ssa.blocks[pred_bi].stmts.iter().rev() {
+                            if let Stmt::Assign(var_id) = stmt {
+                                if ssa.vars[var_id.0 as usize].call_return {
+                                    found = Some(*var_id);
+                                    break;
+                                }
+                            }
+                        }
+                        if found.is_some() { break; }
+                    }
+                    if found.is_some() { break; }
+                }
+                if found.is_some() { break; }
+                frontier = next_frontier;
             }
         }
 
@@ -996,6 +1044,22 @@ fn detect_return_values(ssa: &mut SsaCfg) {
             }
         }
     }
+}
+
+/// Search a block's statements backwards for an assignment to the return register.
+fn find_ret_reg_in_block(stmts: &[Stmt], vars: &[VarDef], ret_reg_offset: u64) -> Option<VarId> {
+    for stmt in stmts.iter().rev() {
+        if let Stmt::Assign(var_id) = stmt {
+            let vdef = &vars[var_id.0 as usize];
+            if vdef.varnode.space == AddressSpaceId::Register
+                && vdef.varnode.offset == ret_reg_offset
+                && vdef.varnode.size >= 4
+            {
+                return Some(*var_id);
+            }
+        }
+    }
+    None
 }
 
 // ---- Call Arguments ----

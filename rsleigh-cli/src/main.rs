@@ -184,6 +184,8 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
     // Pass 1: quick decompile all targets to learn parameter/return types
     if all_mode && targets.len() > 1 {
         let mut learned: Vec<rsleigh_decompile::LearnedFuncType> = Vec::new();
+        let mut callsite_returns: Vec<(u64, &'static str)> = Vec::new();
+
         for name in &targets {
             let func_addr = if let Some(hex) = name.strip_prefix("0x").or_else(|| name.strip_prefix("0X")) {
                 u64::from_str_radix(hex, 16).ok()
@@ -193,12 +195,31 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
             if let Some(func_addr) = func_addr {
                 let insts = decode_func(func_addr, &symbols, &segs, &data, &mut dec);
                 if !insts.is_empty() {
+                    // Extract learned types from this function
                     if let Some(lt) = rsleigh_decompile::extract_learned_types(arch, &insts, Some(&data)) {
                         learned.push(lt);
                     }
+                    // Infer callee return types from how this function uses call results
+                    let returns = rsleigh_decompile::infer_returns_from_callsites(arch, &insts, Some(&data));
+                    callsite_returns.extend(returns);
                 }
             }
         }
+
+        // Merge call-site inferred returns into learned types
+        callsite_returns.sort_by_key(|(a, _)| *a);
+        callsite_returns.dedup_by_key(|(a, _)| *a);
+        for (addr, ret_type) in &callsite_returns {
+            // Only add if we don't already have a return type for this function
+            if !learned.iter().any(|lt| lt.addr == *addr && lt.return_type.is_some()) {
+                learned.push(rsleigh_decompile::LearnedFuncType {
+                    addr: *addr,
+                    param_types: Vec::new(),
+                    return_type: Some(ret_type),
+                });
+            }
+        }
+
         if !learned.is_empty() {
             rsleigh_decompile::signatures::register_learned_types(&learned);
         }

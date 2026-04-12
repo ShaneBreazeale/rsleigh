@@ -4509,6 +4509,10 @@ fn generate_function_signature(out: &mut String, ssa: &SsaCfg, func_name: &str) 
 
     // If this function has a known signature, use it for return type
     let sig = crate::signatures::lookup(func_name);
+    // Also check learned types by address (from two-pass interprocedural analysis)
+    let learned_sig = func_name.strip_prefix("func_")
+        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+        .and_then(crate::signatures::lookup_addr);
 
     // Detect return type from Return terminators
     let mut return_type = "void";
@@ -4529,10 +4533,16 @@ fn generate_function_signature(out: &mut String, ssa: &SsaCfg, func_name: &str) 
                 break;
             }
         }
-        // If no return terminator has a value, it's void
+        // If no return terminator has a value, check learned types from call-site analysis
         let has_return_val = ssa.blocks.iter().any(|b|
             matches!(&b.terminator, SsaTerminator::Return(Some(_))));
-        if !has_return_val { return_type = "void"; }
+        if !has_return_val {
+            if let Some(lsig) = learned_sig {
+                return_type = lsig.ret.c_str();
+            } else {
+                return_type = "void";
+            }
+        }
     }
 
     // Collect parameters — variables with param_name set
