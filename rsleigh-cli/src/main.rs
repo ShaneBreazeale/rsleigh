@@ -423,10 +423,27 @@ fn discover_pe_functions(
             let va = seg_va + off as u64;
             if !found.contains(&va) {
                 let is_prologue =
-                    // push ebp; mov ebp, esp (55 8B EC)
-                    (bytes[off] == 0x55 && off + 3 <= sz && bytes[off+1] == 0x8B && bytes[off+2] == 0xEC)
-                    // push ebp; mov ebp, esp (55 89 E5) — GCC
-                    || (bytes[off] == 0x55 && off + 3 <= sz && bytes[off+1] == 0x89 && bytes[off+2] == 0xE5);
+                    // push ebp; mov ebp, esp (55 8B EC / 55 89 E5)
+                    (bytes[off] == 0x55 && off + 3 <= sz
+                        && ((bytes[off+1] == 0x8B && bytes[off+2] == 0xEC)
+                            || (bytes[off+1] == 0x89 && bytes[off+2] == 0xE5)))
+                    // push esi; ... or push edi; ... at function boundary (56/57)
+                    || (off + 2 <= sz && (bytes[off] == 0x56 || bytes[off] == 0x57)
+                        && off > 0 && matches!(bytes[off - 1], 0xC3 | 0xCC | 0x90))
+                    // mov reg, [esp+4] at boundary — leaf function loading first arg (8B 44 24 04 / 8B 4C 24 04)
+                    || (off + 4 <= sz && bytes[off] == 0x8B
+                        && (bytes[off+1] == 0x44 || bytes[off+1] == 0x4C)
+                        && bytes[off+2] == 0x24 && bytes[off+3] == 0x04
+                        && off > 0 && matches!(bytes[off - 1], 0xC3 | 0xCC | 0x90))
+                    // sub esp / cmp [esp] at boundary — frameless function
+                    || (off + 2 <= sz && bytes[off] == 0x83
+                        && (bytes[off+1] == 0xEC || bytes[off+1] == 0x7C)
+                        && off > 0 && matches!(bytes[off - 1], 0xC3 | 0xCC | 0x90))
+                    // push imm + forwarding stub at boundary (68 xx / 6A xx / FF 74)
+                    || (off + 2 <= sz
+                        && (bytes[off] == 0x68 || bytes[off] == 0x6A
+                            || (bytes[off] == 0xFF && bytes[off+1] == 0x74))
+                        && off > 0 && matches!(bytes[off - 1], 0xC3 | 0xCC | 0x90));
 
                 if is_prologue {
                     // Verify: the byte before should be a RET (C3), INT3 (CC), NOP (90), or start of section

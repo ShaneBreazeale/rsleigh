@@ -4190,9 +4190,44 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             }
         }
 
-        if !var_names.is_empty() {
-            // Build declaration lines
+        // Also collect stack variable references (var_XX) for local declarations
+        let mut stack_vars: BTreeSet<String> = BTreeSet::new();
+        {
+            let mut search_from = 0;
+            while let Some(pos) = all_text[search_from..].find("var_") {
+                let abs_pos = search_from + pos;
+                let before_ok = abs_pos == 0 || {
+                    let b = all_text.as_bytes()[abs_pos - 1];
+                    !b.is_ascii_alphanumeric() && b != b'_'
+                };
+                if before_ok {
+                    let hex_start = abs_pos + 4; // after "var_"
+                    let mut hex_end = hex_start;
+                    while hex_end < all_text.len() && all_text.as_bytes()[hex_end].is_ascii_hexdigit() {
+                        hex_end += 1;
+                    }
+                    if hex_end > hex_start {
+                        let after_ok = hex_end >= all_text.len() || {
+                            let b = all_text.as_bytes()[hex_end];
+                            !b.is_ascii_alphanumeric() && b != b'_'
+                        };
+                        if after_ok {
+                            let vname = all_text[abs_pos..hex_end].to_string();
+                            // Don't re-declare vars that were aliased by DWARF
+                            if !aliases.contains_key(&vname) {
+                                stack_vars.insert(vname);
+                            }
+                        }
+                    }
+                }
+                search_from = search_from + pos + 4;
+            }
+        }
+
+        if !var_names.is_empty() || !stack_vars.is_empty() {
             let mut decl_lines: Vec<String> = Vec::new();
+
+            // Auto-named register variables
             for name in &var_names {
                 let type_str = if name.starts_with("lVar") {
                     "long"
@@ -4214,6 +4249,18 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 decl_lines.push(format!("    {} {};", type_str, name));
             }
 
+            // Stack local variables — infer type from usage context
+            for vname in &stack_vars {
+                // Parse hex offset from var_XX to guess size
+                let offset_str = vname.strip_prefix("var_").unwrap_or("0");
+                let offset = u64::from_str_radix(offset_str, 16).unwrap_or(0);
+                // Heuristic: large offsets (> 0x100) are likely buffers
+                let type_str = if offset > 0x100 { "char" }
+                    else { "int" };
+                // Ghidra-style: var_XX → local_XX
+                decl_lines.push(format!("    {} local_{};", type_str, offset_str));
+            }
+
             // Find the first line ending with '{' and insert after it
             let mut insert_idx = None;
             for (idx, line) in lines.iter().enumerate() {
@@ -4223,10 +4270,20 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 }
             }
             if let Some(idx) = insert_idx {
-                // Insert an empty line after declarations for visual separation
                 decl_lines.push(String::new());
                 for (j, decl) in decl_lines.into_iter().enumerate() {
                     lines.insert(idx + j, decl);
+                }
+            }
+
+            // Rename var_XX → local_XX throughout the output
+            for vname in &stack_vars {
+                let offset_str = vname.strip_prefix("var_").unwrap_or("0");
+                let local_name = format!("local_{}", offset_str);
+                for line in &mut lines {
+                    if line.contains(vname.as_str()) {
+                        *line = line.replace(vname.as_str(), &local_name);
+                    }
                 }
             }
         }

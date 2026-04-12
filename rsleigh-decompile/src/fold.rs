@@ -2131,4 +2131,27 @@ pub fn propagate_signature_return_types(ssa: &mut SsaCfg, import_map: &std::coll
     for (var_id, ty) in type_updates {
         ssa.vars[var_id.0 as usize].inferred_type = ty;
     }
+
+    // Forward-propagate return types through Var/Copy chains.
+    // If var_A = CreateFile() has type Pointer, and var_B = Var(var_A),
+    // then var_B should also be Pointer.
+    for _round in 0..3 {
+        let mut propagated = false;
+        for v in 0..ssa.vars.len() {
+            let var_ty = ssa.vars[v].inferred_type;
+            if var_ty != InferredType::Unknown { continue; }
+            let new_ty = match &ssa.vars[v].expr {
+                Expr::Var(src) => {
+                    let src_ty = ssa.vars[src.0 as usize].inferred_type;
+                    if src_ty != InferredType::Unknown { Some(src_ty) } else { None }
+                }
+                _ => None,
+            };
+            if let Some(ty) = new_ty {
+                ssa.vars[v].inferred_type = ty;
+                propagated = true;
+            }
+        }
+        if !propagated { break; }
+    }
 }
