@@ -21,6 +21,7 @@ fn main() {
         eprintln!("  rsleigh <binary> --json             List functions as JSON");
         eprintln!("  rsleigh <binary> <func> --json     Decompile as JSON");
         eprintln!("  rsleigh <binary> --disasm <func>   Disassemble with P-code");
+        eprintln!("  rsleigh <binary> --sigs <file.json> Load extra signatures");
         std::process::exit(1);
     }
 
@@ -28,6 +29,16 @@ fn main() {
     let json_mode = args.iter().any(|a| a == "--json");
     let all_mode = args.iter().any(|a| a == "--all");
     let disasm_mode = args.iter().any(|a| a == "--disasm");
+
+    // Load external signature database if --sigs provided
+    if let Some(pos) = args.iter().position(|a| a == "--sigs") {
+        if let Some(sigs_path) = args.get(pos + 1) {
+            match rsleigh_decompile::signatures::load_json_file(std::path::Path::new(sigs_path)) {
+                Ok(n) => eprintln!("Loaded {} signatures from {}", n, sigs_path),
+                Err(e) => eprintln!("Warning: {}", e),
+            }
+        }
+    }
 
     let t = std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
@@ -65,15 +76,33 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
         Err(e) => { eprintln!("Error: cannot parse binary: {}", e); std::process::exit(1); }
     };
 
-    let (arch, segs, symbols) = match parse_binary(&obj, &data) {
+    let (arch, segs, mut symbols) = match parse_binary(&obj, &data) {
         Some(r) => r,
         None => { eprintln!("Error: unsupported binary format"); std::process::exit(1); }
     };
 
+    // For stripped PE binaries: discover functions from entry point + CALL targets
+    if symbols.is_empty() {
+        if let goblin::Object::PE(pe) = &obj {
+            let base = pe.image_base as u64;
+            let entry = base + pe.header.optional_header.unwrap().standard_fields.address_of_entry_point as u64;
+            symbols = discover_pe_functions(entry, &segs, &data, arch);
+        }
+    }
+
     // Determine which functions to process
-    let func_args: Vec<&str> = args[2..].iter()
-        .filter(|a| !a.starts_with("--"))
-        .map(|a| a.as_str())
+    // Skip --flag arguments and their values (e.g., --sigs path.json)
+    let sigs_arg_idx = args.iter().position(|a| a == "--sigs");
+    let func_args: Vec<&str> = args[2..].iter().enumerate()
+        .filter(|(i, a)| {
+            if a.starts_with("--") { return false; }
+            // Skip the value after --sigs
+            if let Some(si) = sigs_arg_idx {
+                if *i + 2 == si + 1 { return false; }
+            }
+            true
+        })
+        .map(|(_, a)| a.as_str())
         .collect();
 
     if func_args.is_empty() && !all_mode && !disasm_mode {
@@ -119,8 +148,12 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
     if disasm_mode {
         // Disassembly mode
         for name in &targets {
-            if let Some((addr, _)) = symbols.iter().find(|(_, n)| n == name) {
-                let func_addr = *addr;
+            let func_addr = if let Some(hex) = name.strip_prefix("0x").or_else(|| name.strip_prefix("0X")) {
+                u64::from_str_radix(hex, 16).ok()
+            } else {
+                symbols.iter().find(|(_, n)| n == name).map(|(a, _)| *a)
+            };
+            if let Some(func_addr) = func_addr {
                 let insts = decode_func(func_addr, &symbols, &segs, &data, &mut dec);
                 if json_mode {
                     let entries: Vec<serde_json::Value> = insts.iter()
@@ -151,8 +184,13 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
     let mut results: Vec<serde_json::Value> = Vec::new();
 
     for name in &targets {
-        if let Some((addr, _)) = symbols.iter().find(|(_, n)| n == name) {
-            let func_addr = *addr;
+        // Support hex addresses like 0x1400013f0
+        let func_addr = if let Some(hex) = name.strip_prefix("0x").or_else(|| name.strip_prefix("0X")) {
+            u64::from_str_radix(hex, 16).ok()
+        } else {
+            symbols.iter().find(|(_, n)| n == name).map(|(a, _)| *a)
+        };
+        if let Some(func_addr) = func_addr {
             let output = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 decompile_func(func_addr, &symbols, &segs, &data, &mut dec, arch, path)
             })) {
@@ -303,4 +341,69 @@ fn parse_binary(obj: &goblin::Object, _data: &[u8]) -> Option<(rsleigh_api::Arch
         }
         _ => None,
     }
+}
+
+/// Discover functions in a stripped PE by recursive descent from entry point.
+/// Follows direct CALL targets to find function boundaries.
+fn discover_pe_functions(
+    entry: u64, segs: &[(u64, u64, u64)], data: &[u8], arch: rsleigh_api::Architecture,
+) -> Vec<(u64, String)> {
+    use std::collections::{BTreeSet, VecDeque};
+
+    let mut found = BTreeSet::new();
+    let mut queue = VecDeque::new();
+    found.insert(entry);
+    queue.push_back(entry);
+
+    let mut dec = rsleigh_api::Decoder::new(arch);
+
+    while let Some(func_addr) = queue.pop_front() {
+        // Translate VA to file offset
+        let off = segs.iter().find_map(|(va, sz, fo)| {
+            if func_addr >= *va && func_addr < va + sz { Some(fo + (func_addr - va)) } else { None }
+        });
+        let Some(off) = off else { continue };
+        let max = 4096.min(data.len().saturating_sub(off as usize));
+        if max == 0 { continue; }
+        let bytes = &data[off as usize..off as usize + max];
+
+        let mut io = 0usize;
+        while io < max {
+            let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                dec.decode(&bytes[io..], func_addr + io as u64)
+            }));
+            match ok {
+                Ok(Ok(inst)) => {
+                    let l = inst.len as usize;
+                    if l == 0 { io += 1; continue; }
+                    // Look for CALL with direct target
+                    for op in &inst.ops {
+                        if let pcode_ir::PcodeOp::Call { dest, .. } = op {
+                            if dest.space == pcode_ir::AddressSpaceId::Ram {
+                                let call_target = dest.offset;
+                                // Only follow targets in executable segments
+                                let in_seg = segs.iter().any(|(va, sz, _)| call_target >= *va && call_target < va + sz);
+                                if in_seg && !found.contains(&call_target) {
+                                    found.insert(call_target);
+                                    queue.push_back(call_target);
+                                }
+                            }
+                        }
+                    }
+                    // Stop at RET
+                    if inst.ops.iter().any(|op| matches!(op, pcode_ir::PcodeOp::Return { .. })) {
+                        break;
+                    }
+                    io += l;
+                }
+                Ok(Err(_)) => break,
+                Err(_) => { io += 1; }
+            }
+        }
+    }
+
+    let sorted: Vec<u64> = found.into_iter().collect();
+    sorted.iter().enumerate().map(|(i, addr)| {
+        (*addr, format!("FUN_{:08x}", addr))
+    }).collect()
 }

@@ -182,8 +182,148 @@ static SIGNATURE_MAP: LazyLock<HashMap<&'static str, &'static FuncSig>> = LazyLo
 });
 
 /// Look up a function signature by exact name.
+/// Checks runtime-loaded signatures first, then compiled-in ones.
 pub fn lookup(name: &str) -> Option<&'static FuncSig> {
+    // Check runtime-loaded sigs first (they may override builtins)
+    if let Some(rt) = RUNTIME_SIGS.get() {
+        if let Some(sig) = rt.get(name) {
+            return Some(sig);
+        }
+    }
     SIGNATURE_MAP.get(name).copied()
+}
+
+// ---------------------------------------------------------------------------
+// Runtime-loaded signatures (from JSON files)
+// ---------------------------------------------------------------------------
+
+/// Owned version of FuncSig for runtime-loaded signatures.
+/// Stored in a leaked Box so we can return &'static references.
+struct RuntimeSigStore {
+    map: HashMap<String, &'static FuncSig>,
+    // Keep the backing storage alive (leaked Vecs/Strings)
+    _storage: Vec<Box<dyn std::any::Any + Send + Sync>>,
+}
+
+impl RuntimeSigStore {
+    fn get(&self, name: &str) -> Option<&'static FuncSig> {
+        self.map.get(name).copied()
+    }
+}
+
+static RUNTIME_SIGS: std::sync::OnceLock<RuntimeSigStore> = std::sync::OnceLock::new();
+
+/// Load additional signatures from a Ghidra-exported JSON file.
+///
+/// The JSON format is an array of objects:
+/// ```json
+/// [{"name": "printf", "ret": "int", "params": [{"name": "format", "type": "char *"}], "variadic": true}, ...]
+/// ```
+///
+/// Call this once at startup before decompilation begins. Subsequent calls are ignored.
+/// Returns the number of signatures loaded.
+pub fn load_json(json_str: &str) -> Result<usize, String> {
+    let entries: Vec<JsonSigEntry> = serde_json::from_str(json_str)
+        .map_err(|e| format!("failed to parse signature JSON: {}", e))?;
+
+    let mut map = HashMap::new();
+    let mut storage: Vec<Box<dyn std::any::Any + Send + Sync>> = Vec::new();
+
+    for entry in &entries {
+        let params: Vec<SigParam> = entry.params.iter().map(|p| {
+            SigParam {
+                name: leak_str(&clean_param_name(&p.name)),
+                ty: ghidra_type_to_sigtype(&p.ty),
+            }
+        }).collect();
+        let params_ref: &'static [SigParam] = Box::leak(params.into_boxed_slice());
+
+        let sig = FuncSig {
+            name: leak_str(&entry.name),
+            ret: ghidra_type_to_sigtype(&entry.ret),
+            params: params_ref,
+            variadic: entry.variadic,
+        };
+        let sig_ref: &'static FuncSig = Box::leak(Box::new(sig));
+        map.insert(entry.name.clone(), sig_ref);
+    }
+
+    let count = map.len();
+    storage.push(Box::new(())); // placeholder to keep _storage non-empty
+
+    let _ = RUNTIME_SIGS.set(RuntimeSigStore { map, _storage: storage });
+    Ok(count)
+}
+
+/// Load signatures from a JSON file path.
+pub fn load_json_file(path: &std::path::Path) -> Result<usize, String> {
+    let data = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {}", path.display(), e))?;
+    load_json(&data)
+}
+
+fn leak_str(s: &str) -> &'static str {
+    Box::leak(s.to_string().into_boxed_str())
+}
+
+fn clean_param_name(name: &str) -> String {
+    let n = name.trim_start_matches('_');
+    if n.is_empty() { return "arg".to_string(); }
+    // Rust keywords
+    match n {
+        "type" | "fn" | "mod" | "self" | "super" | "use" | "in" | "ref" | "mut"
+        | "loop" | "match" | "if" | "else" | "return" | "struct" | "enum"
+        | "trait" | "impl" | "as" | "where" | "break" | "continue" | "for"
+        | "while" | "pub" | "const" | "static" | "let" | "move" | "unsafe" => {
+            format!("{}_", n)
+        }
+        _ => n.to_string(),
+    }
+}
+
+/// Map Ghidra type strings to SigType.
+fn ghidra_type_to_sigtype(ty: &str) -> SigType {
+    let t = ty.trim();
+    match t {
+        "void" => SigType::Void,
+        "int" => SigType::Int,
+        "uint" | "unsigned int" => SigType::UInt,
+        "long" => SigType::Long,
+        "ulong" | "unsigned long" => SigType::ULong,
+        "longlong" => SigType::Long,
+        "ulonglong" => SigType::ULong,
+        "short" | "ushort" | "char" | "uchar" | "unsigned char" | "byte" => SigType::Int,
+        "size_t" => SigType::SizeT,
+        "ssize_t" => SigType::Long,
+        "bool" | "BOOL" => SigType::Bool,
+        "HANDLE" => SigType::Handle,
+        "DWORD" => SigType::DWord,
+        "LPVOID" => SigType::LpVoid,
+        "FILE *" => SigType::FilePtr,
+        _ if t.ends_with(" *") || t.ends_with(" * *") => {
+            if t.contains("char") && !t.contains("* *") {
+                if t.contains("wchar") { SigType::WCharPtr } else { SigType::CharPtr }
+            } else {
+                SigType::VoidPtr
+            }
+        }
+        _ => SigType::Int,
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct JsonSigEntry {
+    name: String,
+    ret: String,
+    params: Vec<JsonParam>,
+    variadic: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct JsonParam {
+    name: String,
+    #[serde(rename = "type")]
+    ty: String,
 }
 
 // ---------------------------------------------------------------------------
