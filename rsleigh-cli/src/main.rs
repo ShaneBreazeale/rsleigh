@@ -451,7 +451,42 @@ fn discover_pe_functions(
         }
     }
 
-    // Phase 2: Prologue scanning — find functions not reached by direct CALL.
+    // Phase 2a: Parse .pdata exception directory for PE64 (gives exact function boundaries)
+    if let Ok(obj) = goblin::Object::parse(data) {
+        if let goblin::Object::PE(pe) = &obj {
+            if pe.is_64 {
+                let base = pe.image_base as u64;
+                for sec in &pe.sections {
+                    let name = std::str::from_utf8(&sec.name).unwrap_or("").trim_end_matches('\0');
+                    if name == ".pdata" {
+                        let fo = sec.pointer_to_raw_data as usize;
+                        let sz = sec.virtual_size.min(sec.size_of_raw_data) as usize;
+                        if fo + sz <= data.len() {
+                            // Each RUNTIME_FUNCTION is 12 bytes: BeginAddress(4), EndAddress(4), UnwindData(4)
+                            let mut off = 0;
+                            while off + 12 <= sz {
+                                let begin_rva = u32::from_le_bytes([
+                                    data[fo+off], data[fo+off+1], data[fo+off+2], data[fo+off+3]
+                                ]) as u64;
+                                if begin_rva == 0 { break; }
+                                let func_va = base + begin_rva;
+                                if !found.contains(&func_va) {
+                                    // Verify the address is in an executable segment
+                                    let in_seg = segs.iter().any(|(va, sz, _)| func_va >= *va && func_va < va + sz);
+                                    if in_seg {
+                                        found.insert(func_va);
+                                    }
+                                }
+                                off += 12;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Phase 2b: Prologue scanning — find functions not reached by direct CALL.
     // Scan executable sections for common function prologues:
     //   55 8B EC       push ebp; mov ebp, esp  (x86-32 standard)
     //   55 89 E5       push ebp; mov esp, ebp  (GCC variant)
@@ -467,28 +502,57 @@ fn discover_pe_functions(
         while off + 3 <= sz {
             let va = seg_va + off as u64;
             if !found.contains(&va) {
+                let boundary = off == 0 || matches!(bytes[off - 1], 0xC3 | 0xCC | 0x90 | 0x00);
                 let is_prologue =
+                    // === x86-32 patterns ===
                     // push ebp; mov ebp, esp (55 8B EC / 55 89 E5)
                     (bytes[off] == 0x55 && off + 3 <= sz
                         && ((bytes[off+1] == 0x8B && bytes[off+2] == 0xEC)
                             || (bytes[off+1] == 0x89 && bytes[off+2] == 0xE5)))
-                    // push esi; ... or push edi; ... at function boundary (56/57)
+                    // push esi/edi at boundary
                     || (off + 2 <= sz && (bytes[off] == 0x56 || bytes[off] == 0x57)
-                        && off > 0 && matches!(bytes[off - 1], 0xC3 | 0xCC | 0x90))
-                    // mov reg, [esp+4] at boundary — leaf function loading first arg (8B 44 24 04 / 8B 4C 24 04)
+                        && boundary && off > 0)
+                    // mov reg, [esp+4] at boundary
                     || (off + 4 <= sz && bytes[off] == 0x8B
                         && (bytes[off+1] == 0x44 || bytes[off+1] == 0x4C)
                         && bytes[off+2] == 0x24 && bytes[off+3] == 0x04
-                        && off > 0 && matches!(bytes[off - 1], 0xC3 | 0xCC | 0x90))
-                    // sub esp / cmp [esp] at boundary — frameless function
+                        && boundary && off > 0)
+                    // sub esp at boundary
                     || (off + 2 <= sz && bytes[off] == 0x83
                         && (bytes[off+1] == 0xEC || bytes[off+1] == 0x7C)
-                        && off > 0 && matches!(bytes[off - 1], 0xC3 | 0xCC | 0x90))
-                    // push imm + forwarding stub at boundary (68 xx / 6A xx / FF 74)
+                        && boundary && off > 0)
+                    // push imm + forwarding stub at boundary
                     || (off + 2 <= sz
                         && (bytes[off] == 0x68 || bytes[off] == 0x6A
                             || (bytes[off] == 0xFF && bytes[off+1] == 0x74))
-                        && off > 0 && matches!(bytes[off - 1], 0xC3 | 0xCC | 0x90));
+                        && boundary && off > 0)
+                    // === x86-64 patterns ===
+                    // sub rsp, imm8 (48 83 EC xx) — standard x86-64 prologue
+                    || (off + 4 <= sz && bytes[off] == 0x48
+                        && bytes[off+1] == 0x83 && bytes[off+2] == 0xEC
+                        && boundary)
+                    // sub rsp, imm32 (48 81 EC xx xx xx xx) — large frame
+                    || (off + 7 <= sz && bytes[off] == 0x48
+                        && bytes[off+1] == 0x81 && bytes[off+2] == 0xEC
+                        && boundary)
+                    // push rbp (55) at boundary in 64-bit context
+                    || (bytes[off] == 0x55 && off + 2 <= sz
+                        && bytes[off+1] == 0x48  // followed by REX prefix (mov rbp, rsp)
+                        && boundary)
+                    // mov [rsp+N], rbx (48 89 5C 24 xx) — Windows x64 ABI
+                    || (off + 5 <= sz && bytes[off] == 0x48
+                        && bytes[off+1] == 0x89 && bytes[off+2] == 0x5C
+                        && bytes[off+3] == 0x24
+                        && boundary)
+                    // mov [rsp+N], rdi (48 89 7C 24 xx) — save first param
+                    || (off + 5 <= sz && bytes[off] == 0x48
+                        && bytes[off+1] == 0x89 && bytes[off+2] == 0x7C
+                        && bytes[off+3] == 0x24
+                        && boundary)
+                    // push rbx (53) or push rdi (57) at boundary with REX or sub rsp following
+                    || (off + 2 <= sz && (bytes[off] == 0x53 || bytes[off] == 0x41)
+                        && boundary && off > 0
+                        && (bytes[off+1] == 0x48 || bytes[off+1] == 0x56 || bytes[off+1] == 0x57));
 
                 if is_prologue {
                     // Verify: the byte before should be a RET (C3), INT3 (CC), NOP (90), or start of section
