@@ -325,7 +325,11 @@ fn parse_binary(obj: &goblin::Object, _data: &[u8]) -> Option<(rsleigh_api::Arch
             Some((arch, segs, syms))
         }
         goblin::Object::PE(pe) => {
-            if !pe.is_64 { return None; }
+            let arch = if pe.is_64 {
+                rsleigh_api::Architecture::X86_64
+            } else {
+                rsleigh_api::Architecture::X86_32
+            };
             let base = pe.image_base as u64;
             let segs = pe.sections.iter()
                 .filter(|s| s.characteristics & 0x20000000 != 0)
@@ -337,7 +341,7 @@ fn parse_binary(obj: &goblin::Object, _data: &[u8]) -> Option<(rsleigh_api::Arch
                     if exp.rva != 0 { syms.push((base + exp.rva as u64, name.to_string())); }
                 }
             }
-            Some((rsleigh_api::Architecture::X86_64, segs, syms))
+            Some((arch, segs, syms))
         }
         _ => None,
     }
@@ -402,8 +406,42 @@ fn discover_pe_functions(
         }
     }
 
+    // Phase 2: Prologue scanning — find functions not reached by direct CALL.
+    // Scan executable sections for common function prologues:
+    //   55 8B EC       push ebp; mov ebp, esp  (x86-32 standard)
+    //   55 89 E5       push ebp; mov esp, ebp  (GCC variant)
+    //   48 89 5C 24    mov [rsp+...], rbx      (x86-64 MS ABI)
+    //   48 83 EC       sub rsp, imm8           (x86-64 leaf)
+    for (seg_va, seg_sz, seg_fo) in segs {
+        let fo = *seg_fo as usize;
+        let sz = (*seg_sz as usize).min(data.len().saturating_sub(fo));
+        if fo + sz > data.len() { continue; }
+        let bytes = &data[fo..fo + sz];
+
+        let mut off = 0usize;
+        while off + 3 <= sz {
+            let va = seg_va + off as u64;
+            if !found.contains(&va) {
+                let is_prologue =
+                    // push ebp; mov ebp, esp (55 8B EC)
+                    (bytes[off] == 0x55 && off + 3 <= sz && bytes[off+1] == 0x8B && bytes[off+2] == 0xEC)
+                    // push ebp; mov ebp, esp (55 89 E5) — GCC
+                    || (bytes[off] == 0x55 && off + 3 <= sz && bytes[off+1] == 0x89 && bytes[off+2] == 0xE5);
+
+                if is_prologue {
+                    // Verify: the byte before should be a RET (C3), INT3 (CC), NOP (90), or start of section
+                    let valid_boundary = off == 0 || matches!(bytes[off - 1], 0xC3 | 0xCC | 0x90 | 0x00);
+                    if valid_boundary {
+                        found.insert(va);
+                    }
+                }
+            }
+            off += 1;
+        }
+    }
+
     let sorted: Vec<u64> = found.into_iter().collect();
-    sorted.iter().enumerate().map(|(i, addr)| {
+    sorted.iter().enumerate().map(|(_i, addr)| {
         (*addr, format!("FUN_{:08x}", addr))
     }).collect()
 }
