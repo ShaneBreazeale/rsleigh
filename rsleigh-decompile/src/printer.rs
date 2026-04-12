@@ -1080,6 +1080,20 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         true
     });
 
+    // Remove x86-64 RSP boilerplate: stack frame setup/teardown noise
+    lines.retain(|line| {
+        let t = line.trim();
+        // RSP = RSP - N / RSP = RSP + N (frame allocation/deallocation)
+        if t.starts_with("RSP = RSP ") && t.ends_with(';') { return false; }
+        // *(uint64_t*)(RBP) = -2; (stack cookie sentinel)
+        if t == "*(uint64_t*)(RBP) = -2;" { return false; }
+        // *(uint64_t*)(RSP) = RBP; (push rbp)
+        if t == "*(uint64_t*)(RSP) = RBP;" { return false; }
+        // RBP = RSP; or RBP = RSP + N; (frame pointer setup)
+        if t.starts_with("RBP = RSP") && t.ends_with(';') && !t.contains("func_") { return false; }
+        true
+    });
+
     // Remove ARM64 prologue/epilogue boilerplate:
     // - sp[N] = x19/x20/.../x29/x30  (callee-saved register saves)
     // - x29 = sp + N  (frame pointer setup)
@@ -4128,9 +4142,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             &["RSP", "ESP", "RBP", "EBP", "RIP", "EIP",
               "XMM0", "XMM1", "XMM2", "XMM3", "XMM4", "XMM5"]
         } else {
-            &["RDI", "EDI", "RSI", "ESI", "RDX", "EDX",
-              "RCX", "ECX", "R8", "R8D", "R9", "R9D",
-              "RSP", "ESP", "RBP", "EBP", "RIP", "EIP",
+            // x86-64: only skip stack/frame/instruction pointers and XMM.
+            // Param registers (RDI,RSI,RDX,RCX,R8,R9) are NOT skipped —
+            // they appear raw in the body when used as intermediates or
+            // when setting up arguments for other calls. The function's own
+            // params already have param_name and won't appear as bare regs.
+            &["RSP", "ESP", "RBP", "EBP", "RIP", "EIP",
               "XMM0", "XMM1", "XMM2", "XMM3", "XMM4", "XMM5"]
         };
 
@@ -4154,8 +4171,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             &[
                 ("RAX", "l"), ("RBX", "l"), ("R12", "l"), ("R13", "l"),
                 ("R14", "l"), ("R15", "l"), ("R10", "l"), ("R11", "l"),
+                // Param registers — renamed when used as intermediates in the body
+                ("RDI", "l"), ("RSI", "l"), ("RDX", "l"), ("RCX", "l"),
+                ("R8", "l"), ("R9", "l"),
                 ("EAX", "i"), ("EBX", "i"), ("ECX", "i"), ("EDX", "i"),
-                ("ESI", "i"), ("EDI", "i"),
+                ("ESI", "i"), ("EDI", "i"), ("R8D", "i"), ("R9D", "i"),
                 ("R12D", "i"), ("R13D", "i"),
                 ("R14D", "i"), ("R15D", "i"), ("R10D", "i"), ("R11D", "i"),
                 ("AL", "b"), ("BL", "b"), ("AH", "b"), ("BH", "b"),
