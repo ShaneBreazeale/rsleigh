@@ -203,7 +203,7 @@ fn try_simba_at(v: usize, vars: &mut Vec<VarDef>) -> bool {
     bases.sort_by_key(|id| id.0);
     bases.dedup_by_key(|id| id.0);
 
-    if bases.is_empty() || bases.len() > 3 { return false; }
+    if bases.is_empty() || bases.len() > 4 { return false; }
 
     let sz = vars[v].size;
     let mask = if sz >= 8 { u64::MAX } else { (1u64 << (sz * 8)).wrapping_sub(1) };
@@ -212,6 +212,7 @@ fn try_simba_at(v: usize, vars: &mut Vec<VarDef>) -> bool {
         1 => simba_simplify_1var(v, vars, bases[0], mask, sz),
         2 => simba_simplify_2var(v, vars, &bases, mask, sz),
         3 => simba_simplify_3var(v, vars, &bases, mask, sz),
+        4 => simba_simplify_4var(v, vars, &bases, mask, sz),
         _ => None,
     };
 
@@ -655,6 +656,153 @@ fn simba_simplify_3var(
         && c7 == 4
     {
         return None; // Can't express as single op
+    }
+
+    None
+}
+
+/// SiMBA coefficient recovery for 4-variable MBA expressions.
+/// Boolean basis: {1, a, b, c, d, a&b, a&c, a&d, b&c, b&d, c&d,
+///                 a&b&c, a&b&d, a&c&d, b&c&d, a&b&c&d}
+/// 16 coefficients from 16 evaluations via Möbius inversion.
+fn simba_simplify_4var(
+    var_idx: usize, vars: &[VarDef], bases: &[VarId], mask: u64, sz: u32,
+) -> Option<Expr> {
+    if bases.len() != 4 { return None; }
+    let ids = [bases[0], bases[1], bases[2], bases[3]];
+
+    // Evaluate f on all 16 combinations of (0,1) for (a,b,c,d)
+    let mut env = std::collections::HashMap::new();
+    let mut f = [[[[0u64; 1]; 2]; 2]; 2]; // f[a][b][c] with d=0..1 flattened
+    let mut vals = std::collections::HashMap::new();
+    for a in 0u64..=1 {
+        for b in 0u64..=1 {
+            for c in 0u64..=1 {
+                for d in 0u64..=1 {
+                    env.clear();
+                    env.insert(ids[0].0, a); env.insert(ids[1].0, b);
+                    env.insert(ids[2].0, c); env.insert(ids[3].0, d);
+                    let v = eval_expr(&vars[var_idx].expr, vars, &env, mask, 0)?;
+                    vals.insert((a,b,c,d), v);
+                }
+            }
+        }
+    }
+
+    let v = |a:u64,b:u64,c:u64,d:u64| -> u64 { *vals.get(&(a,b,c,d)).unwrap() };
+
+    // Möbius inversion: recover 16 coefficients
+    let c_1    = v(0,0,0,0);
+    let c_a    = v(1,0,0,0).wrapping_sub(v(0,0,0,0)) & mask;
+    let c_b    = v(0,1,0,0).wrapping_sub(v(0,0,0,0)) & mask;
+    let c_c    = v(0,0,1,0).wrapping_sub(v(0,0,0,0)) & mask;
+    let c_d    = v(0,0,0,1).wrapping_sub(v(0,0,0,0)) & mask;
+    let c_ab   = v(1,1,0,0).wrapping_sub(v(1,0,0,0)).wrapping_sub(v(0,1,0,0)).wrapping_add(v(0,0,0,0)) & mask;
+    let c_ac   = v(1,0,1,0).wrapping_sub(v(1,0,0,0)).wrapping_sub(v(0,0,1,0)).wrapping_add(v(0,0,0,0)) & mask;
+    let c_ad   = v(1,0,0,1).wrapping_sub(v(1,0,0,0)).wrapping_sub(v(0,0,0,1)).wrapping_add(v(0,0,0,0)) & mask;
+    let c_bc   = v(0,1,1,0).wrapping_sub(v(0,1,0,0)).wrapping_sub(v(0,0,1,0)).wrapping_add(v(0,0,0,0)) & mask;
+    let c_bd   = v(0,1,0,1).wrapping_sub(v(0,1,0,0)).wrapping_sub(v(0,0,0,1)).wrapping_add(v(0,0,0,0)) & mask;
+    let c_cd   = v(0,0,1,1).wrapping_sub(v(0,0,1,0)).wrapping_sub(v(0,0,0,1)).wrapping_add(v(0,0,0,0)) & mask;
+    // Skip triple and quad coefficients for matching (we only output 2-op expressions)
+    let c_abc  = v(1,1,1,0).wrapping_sub(v(1,1,0,0)).wrapping_sub(v(1,0,1,0)).wrapping_sub(v(0,1,1,0))
+        .wrapping_add(v(1,0,0,0)).wrapping_add(v(0,1,0,0)).wrapping_add(v(0,0,1,0)).wrapping_sub(v(0,0,0,0)) & mask;
+    let c_abd  = v(1,1,0,1).wrapping_sub(v(1,1,0,0)).wrapping_sub(v(1,0,0,1)).wrapping_sub(v(0,1,0,1))
+        .wrapping_add(v(1,0,0,0)).wrapping_add(v(0,1,0,0)).wrapping_add(v(0,0,0,1)).wrapping_sub(v(0,0,0,0)) & mask;
+    let c_acd  = v(1,0,1,1).wrapping_sub(v(1,0,1,0)).wrapping_sub(v(1,0,0,1)).wrapping_sub(v(0,0,1,1))
+        .wrapping_add(v(1,0,0,0)).wrapping_add(v(0,0,1,0)).wrapping_add(v(0,0,0,1)).wrapping_sub(v(0,0,0,0)) & mask;
+    let c_bcd  = v(0,1,1,1).wrapping_sub(v(0,1,1,0)).wrapping_sub(v(0,1,0,1)).wrapping_sub(v(0,0,1,1))
+        .wrapping_add(v(0,1,0,0)).wrapping_add(v(0,0,1,0)).wrapping_add(v(0,0,0,1)).wrapping_sub(v(0,0,0,0)) & mask;
+    let c_abcd = v(1,1,1,1).wrapping_sub(v(1,1,1,0)).wrapping_sub(v(1,1,0,1)).wrapping_sub(v(1,0,1,1)).wrapping_sub(v(0,1,1,1))
+        .wrapping_add(v(1,1,0,0)).wrapping_add(v(1,0,1,0)).wrapping_add(v(1,0,0,1)).wrapping_add(v(0,1,1,0)).wrapping_add(v(0,1,0,1)).wrapping_add(v(0,0,1,1))
+        .wrapping_sub(v(1,0,0,0)).wrapping_sub(v(0,1,0,0)).wrapping_sub(v(0,0,1,0)).wrapping_sub(v(0,0,0,1))
+        .wrapping_add(v(0,0,0,0)) & mask;
+
+    // Verify with a test point
+    env.clear();
+    env.insert(ids[0].0, 0xAA); env.insert(ids[1].0, 0x55);
+    env.insert(ids[2].0, 0x42); env.insert(ids[3].0, 0xDE);
+    let f_test = eval_expr(&vars[var_idx].expr, vars, &env, mask, 0)?;
+    let (ta, tb, tc, td) = (0xAAu64, 0x55u64, 0x42u64, 0xDEu64);
+    let expected = c_1
+        .wrapping_add(c_a.wrapping_mul(ta)).wrapping_add(c_b.wrapping_mul(tb))
+        .wrapping_add(c_c.wrapping_mul(tc)).wrapping_add(c_d.wrapping_mul(td))
+        .wrapping_add(c_ab.wrapping_mul(ta & tb)).wrapping_add(c_ac.wrapping_mul(ta & tc))
+        .wrapping_add(c_ad.wrapping_mul(ta & td)).wrapping_add(c_bc.wrapping_mul(tb & tc))
+        .wrapping_add(c_bd.wrapping_mul(tb & td)).wrapping_add(c_cd.wrapping_mul(tc & td))
+        .wrapping_add(c_abc.wrapping_mul(ta & tb & tc)).wrapping_add(c_abd.wrapping_mul(ta & tb & td))
+        .wrapping_add(c_acd.wrapping_mul(ta & tc & td)).wrapping_add(c_bcd.wrapping_mul(tb & tc & td))
+        .wrapping_add(c_abcd.wrapping_mul(ta & tb & tc & td)) & mask;
+    if f_test != expected { return None; } // Not a linear MBA
+
+    // Only match patterns where the result is a simple 1-2 op expression on a subset of variables.
+    // Skip if constant term is non-zero (complex to represent).
+    if c_1 != 0 { return None; }
+
+    // Collect non-zero coefficients
+    let all_coeffs = [
+        (c_a, "a"), (c_b, "b"), (c_c, "c"), (c_d, "d"),
+        (c_ab, "ab"), (c_ac, "ac"), (c_ad, "ad"), (c_bc, "bc"), (c_bd, "bd"), (c_cd, "cd"),
+        (c_abc, "abc"), (c_abd, "abd"), (c_acd, "acd"), (c_bcd, "bcd"), (c_abcd, "abcd"),
+    ];
+    let nonzero: Vec<_> = all_coeffs.iter().filter(|(c, _)| *c != 0).collect();
+
+    let neg1 = mask;
+    let neg2 = mask.wrapping_sub(1);
+
+    // Single non-zero coefficient → single variable or single AND
+    if nonzero.len() == 1 {
+        let (coeff, name) = nonzero[0];
+        if *coeff == 1 {
+            return match *name {
+                "a" => Some(Expr::Var(ids[0])),
+                "b" => Some(Expr::Var(ids[1])),
+                "c" => Some(Expr::Var(ids[2])),
+                "d" => Some(Expr::Var(ids[3])),
+                "ab" => Some(Expr::BinOp(BinOpKind::And, ids[0], ids[1])),
+                "ac" => Some(Expr::BinOp(BinOpKind::And, ids[0], ids[2])),
+                "ad" => Some(Expr::BinOp(BinOpKind::And, ids[0], ids[3])),
+                "bc" => Some(Expr::BinOp(BinOpKind::And, ids[1], ids[2])),
+                "bd" => Some(Expr::BinOp(BinOpKind::And, ids[1], ids[3])),
+                "cd" => Some(Expr::BinOp(BinOpKind::And, ids[2], ids[3])),
+                _ => None,
+            };
+        }
+        if *coeff == neg1 {
+            return match *name {
+                "a" => Some(Expr::UnaryOp(UnaryOpKind::Neg, ids[0])),
+                "b" => Some(Expr::UnaryOp(UnaryOpKind::Neg, ids[1])),
+                "c" => Some(Expr::UnaryOp(UnaryOpKind::Neg, ids[2])),
+                "d" => Some(Expr::UnaryOp(UnaryOpKind::Neg, ids[3])),
+                _ => None,
+            };
+        }
+    }
+
+    // Two-variable patterns (other vars cancel): detect which pair is active
+    // by checking which singleton+pair coefficients are non-zero.
+    // Pattern: c_x=1, c_y=1, c_xy=-2 → x ^ y
+    // Pattern: c_x=1, c_y=1, c_xy=-1 → x | y
+    // Pattern: c_x=1, c_y=1, c_xy=0 → x + y
+    // Pattern: c_x=1, c_y=-1, c_xy=0 → x - y
+    let pairs: &[(usize, usize, &str)] = &[
+        (0,1,"ab"), (0,2,"ac"), (0,3,"ad"), (1,2,"bc"), (1,3,"bd"), (2,3,"cd"),
+    ];
+    for &(i, j, pair_name) in pairs {
+        let ci = all_coeffs[i].0;   // singleton i
+        let cj = all_coeffs[j].0;   // singleton j
+        let cpair = all_coeffs.iter().find(|(_, n)| *n == pair_name).map(|(c, _)| *c).unwrap_or(0);
+
+        // Check that all OTHER coefficients are zero
+        let others_zero = all_coeffs.iter().all(|(c, name)| {
+            *c == 0 || *name == all_coeffs[i].1 || *name == all_coeffs[j].1 || *name == pair_name
+        });
+        if !others_zero { continue; }
+
+        if ci == 1 && cj == 1 && cpair == neg2 { return Some(Expr::BinOp(BinOpKind::Xor, ids[i], ids[j])); }
+        if ci == 1 && cj == 1 && cpair == neg1 { return Some(Expr::BinOp(BinOpKind::Or, ids[i], ids[j])); }
+        if ci == 1 && cj == 1 && cpair == 0    { return Some(Expr::BinOp(BinOpKind::Add, ids[i], ids[j])); }
+        if ci == 1 && cj == neg1 && cpair == 0  { return Some(Expr::BinOp(BinOpKind::Sub, ids[i], ids[j])); }
+        if ci == neg1 && cj == 1 && cpair == 0  { return Some(Expr::BinOp(BinOpKind::Sub, ids[j], ids[i])); }
     }
 
     None
