@@ -4937,7 +4937,7 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
 
             // Format RHS BEFORE any invalidation of this register
             let name = var_name(&vdef.varnode, ctx);
-            let rhs = format_expr_tracked(&vdef.expr, ssa, ctx, tracker);
+            let rhs = format_vardef_expr(vdef, ssa, ctx, tracker);
 
             // NOW invalidate if this was a computed expression (not a copy/load)
             if vdef.varnode.space == AddressSpaceId::Register {
@@ -5049,7 +5049,7 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
             let args_str: Vec<String> = args.iter().enumerate()
                 .map(|(i, a)| {
                     let vdef = ssa.var(*a);
-                    let expr_str = format_expr_tracked(&vdef.expr, ssa, ctx, tracker);
+                    let expr_str = format_vardef_expr(vdef, ssa, ctx, tracker);
                     // Add /* param_name */ comment when signature is available and
                     // the argument expression isn't already obviously named
                     if let Some(sig) = call_sig {
@@ -5233,6 +5233,14 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
 /// Format a VarId with register tracking — resolves register copies to their source.
 fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> String {
     let vdef = ssa.var(id);
+
+    // If this variable has a parameter name (from stack param detection or ABI naming),
+    // use it directly. This prevents x86-32 stack params from showing as *(param_0)
+    // when the Load from [EBP+8] is just reading the parameter value, not dereferencing it.
+    if let Some(ref name) = vdef.param_name {
+        return name.clone();
+    }
+
     // For Unique-space: normally use standard formatting.
     // BUT: if this Unique wraps a UnaryOp(Sext/Zext) of a register that has
     // a call return expression, inline it.
@@ -5398,6 +5406,19 @@ fn resolve_stack_alias(name: &str, tracker: &RegTracker) -> String {
         }
     }
     current
+}
+
+/// Format a VarDef's expression, respecting param_name for stack parameters.
+/// Use this instead of format_expr_tracked when you have the VarDef available.
+fn format_vardef_expr(vdef: &VarDef, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> String {
+    // If this variable is a named parameter (e.g., x86-32 stack param from [EBP+8]),
+    // return the param name directly — don't render the Load as a pointer deref.
+    if let Some(ref name) = vdef.param_name {
+        if matches!(&vdef.expr, Expr::Load(_)) {
+            return name.clone();
+        }
+    }
+    format_expr_tracked(&vdef.expr, ssa, ctx, tracker)
 }
 
 fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> String {

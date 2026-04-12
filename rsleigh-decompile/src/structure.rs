@@ -104,8 +104,20 @@ fn emit_region(
 
                     if let Some(back_src) = back_source {
                         if back_src.0 < ssa.blocks.len() {
+                            // The back-edge source might be the CBranch block itself,
+                            // or it might be a block that falls through to the CBranch.
+                            // Check both the direct back-edge source and its successors.
                             let back_block = &ssa.blocks[back_src.0];
-                            if let SsaTerminator::CBranch { cond, taken, fallthrough } = &back_block.terminator {
+                            let latch_block = if matches!(&back_block.terminator, SsaTerminator::CBranch { .. }) {
+                                Some(back_src)
+                            } else if let SsaTerminator::Fallthrough(next) | SsaTerminator::Branch(next) = &back_block.terminator {
+                                if matches!(&ssa.blocks[next.0].terminator, SsaTerminator::CBranch { .. }) {
+                                    Some(*next)
+                                } else { None }
+                            } else { None };
+
+                            if let Some(latch) = latch_block {
+                            if let SsaTerminator::CBranch { cond, taken, fallthrough } = &ssa.blocks[latch.0].terminator {
                                 // The back-edge goes to `current` (header).
                                 // One branch goes to header (loop continues), the other exits.
                                 let (exit, negate) = if *taken == current {
@@ -149,6 +161,7 @@ fn emit_region(
                                     current = exit;
                                     continue;
                                 }
+                            }
                             }
                         }
                     }
@@ -249,13 +262,65 @@ fn emit_region(
                 current = merge;
             }
             SsaTerminator::Call { target, args, fallthrough } => {
-                out.push(StructuredStmt::Call {
-                    target: target.clone(),
-                    args: args.clone(),
-                    out: None,
-                });
-                // Check if this call block is a loop header (call-in-loop-condition pattern)
+                // Check if this call block is a loop header — try do-while first
                 if is_loop_header {
+                    let back_source = back_edges.iter()
+                        .find(|(_, header)| *header == current)
+                        .map(|(src, _)| *src);
+
+                    // Do-while: back-edge source has CBranch (post-tested loop)
+                    if let Some(back_src) = back_source {
+                        if back_src.0 < ssa.blocks.len() {
+                            let back_block = &ssa.blocks[back_src.0];
+                            if let SsaTerminator::CBranch { cond, taken, fallthrough: back_fall } = &back_block.terminator {
+                                let (exit, negate) = if *taken == current {
+                                    (*back_fall, false)
+                                } else if *back_fall == current {
+                                    (*taken, true)
+                                } else {
+                                    (BlockId(0), false)
+                                };
+
+                                if (*taken == current || *back_fall == current) && exit.0 < cfg.blocks.len() {
+                                    // Emit the call as part of the loop body
+                                    let mut body = Vec::new();
+                                    body.push(StructuredStmt::Call {
+                                        target: target.clone(),
+                                        args: args.clone(),
+                                        out: None,
+                                    });
+
+                                    let exit_was_emitted = if exit.0 < emitted.len() { emitted[exit.0] } else { true };
+                                    if exit.0 < emitted.len() { emitted[exit.0] = true; }
+                                    let back_was_emitted = emitted[back_src.0];
+
+                                    emit_region(ssa, cfg, dom, pdom, back_edges, *fallthrough, emitted, &mut body, depth + 1, None);
+
+                                    if !back_was_emitted && !emitted[back_src.0] {
+                                        emitted[back_src.0] = true;
+                                        emit_block_stmts(&ssa.blocks[back_src.0], &mut body);
+                                    }
+
+                                    if exit.0 < emitted.len() { emitted[exit.0] = exit_was_emitted; }
+
+                                    out.push(StructuredStmt::DoWhile {
+                                        cond: *cond,
+                                        negate,
+                                        body,
+                                    });
+                                    current = exit;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+
+                    // Not a do-while — try while pattern
+                    out.push(StructuredStmt::Call {
+                        target: target.clone(),
+                        args: args.clone(),
+                        out: None,
+                    });
                     let next_block = &ssa.blocks[fallthrough.0];
                     if let SsaTerminator::CBranch { cond, taken, fallthrough: fall } = &next_block.terminator {
                         if !emitted[fallthrough.0] {
@@ -278,6 +343,12 @@ fn emit_region(
                             continue;
                         }
                     }
+                } else {
+                    out.push(StructuredStmt::Call {
+                        target: target.clone(),
+                        args: args.clone(),
+                        out: None,
+                    });
                 }
                 current = *fallthrough;
             }

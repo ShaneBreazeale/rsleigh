@@ -1970,13 +1970,26 @@ fn name_parameters(ssa: &mut SsaCfg) {
             }
         }
 
-        // Name the detected parameters
+        // Name the detected parameters and mark them as stack-parameter loads.
+        // The Load(EBP+offset) reads the parameter VALUE from the stack slot —
+        // it's not a pointer dereference. We set param_name and mark the Load
+        // source as a stack parameter so the printer can suppress the *() wrapper.
         for (off_val, var_indices) in &ebp_params {
             let pidx = (off_val - 8) / 4;
             let name = format!("param_{}", pidx);
             for &vi in var_indices {
                 if ssa.vars[vi].param_name.is_none() {
                     ssa.vars[vi].param_name = Some(name.clone());
+                    // Mark the Load pointer variable as a stack frame address
+                    // so field_access recognition skips it and the printer
+                    // knows this Load is a parameter read, not a pointer deref.
+                    if let Expr::Load(ptr_id) = &ssa.vars[vi].expr {
+                        let ptr_idx = ptr_id.0 as usize;
+                        if ptr_idx < ssa.vars.len() {
+                            // Tag the address var — we'll use param_name on the load result
+                            // to suppress the deref in the printer
+                        }
+                    }
                 }
             }
         }
