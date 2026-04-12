@@ -2028,19 +2028,14 @@ pub fn apply_signature_names(ssa: &mut SsaCfg, import_map: &std::collections::Ha
             for (i, arg_id) in args.iter().enumerate() {
                 if let Some(param) = sig.params.get(i) {
                     let var = &ssa.vars[arg_id.0 as usize];
-                    // Only rename if current name is generic or absent
-                    let dominated_name = match &var.param_name {
-                        None => true,
-                        Some(n) => n.starts_with("param_"),
-                    };
-                    if dominated_name && var.use_count <= 1 {
-                        renames.push((*arg_id, param.name.to_string(), param.ty.to_inferred()));
-                    } else {
-                        // Still propagate type even if we don't rename
-                        let ty = param.ty.to_inferred();
-                        if ty != InferredType::Unknown && var.inferred_type == InferredType::Unknown {
-                            renames.push((*arg_id, String::new(), ty));
-                        }
+                    // Only propagate type from signature — don't rename.
+                    // Renaming via param_name would corrupt the function signature
+                    // (the printer collects all vars with param_name for the sig line).
+                    // Instead, the printer uses signatures::lookup() directly for
+                    // call-site argument comments/naming.
+                    let ty = param.ty.to_inferred();
+                    if ty != InferredType::Unknown && var.inferred_type == InferredType::Unknown {
+                        renames.push((*arg_id, String::new(), ty));
                     }
                 }
             }

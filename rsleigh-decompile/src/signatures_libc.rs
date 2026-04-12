@@ -24,6 +24,12 @@ pub static LIBC_SIGNATURES: &[FuncSig] = crate::define_signatures! {
     fn fgetc(stream: FilePtr) -> Int;
     fn putchar(c: Int) -> Int;
     fn getchar() -> Int;
+    fn fprintf_stderr(format: ConstCharPtr, ...) -> Int;
+    fn wprintf(format: ConstWCharPtr, ...) -> Int;
+    fn fwprintf(stream: FilePtr, format: ConstWCharPtr, ...) -> Int;
+    fn fwprintf_stderr(format: ConstWCharPtr, ...) -> Int;
+    fn scanf(format: ConstCharPtr, ...) -> Int;
+    fn fscanf(stream: FilePtr, format: ConstCharPtr, ...) -> Int;
 
     // stdlib
     fn malloc(size: SizeT) -> VoidPtr;
