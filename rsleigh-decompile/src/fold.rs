@@ -196,6 +196,7 @@ fn mba_oracle_simplify(ssa: &mut SsaCfg) {
             let simplified = match bases.len() {
                 1 => simba_simplify_1var(v, &ssa.vars, bases[0], mask, sz),
                 2 => simba_simplify_2var(v, &ssa.vars, &bases, mask, sz),
+                3 => simba_simplify_3var(v, &ssa.vars, &bases, mask, sz),
                 _ => None,
             };
 
@@ -540,6 +541,135 @@ fn simba_simplify_2var(
 }
 
 /// SiMBA coefficient recovery for 1-variable MBA expressions.
+/// SiMBA coefficient recovery for 3-variable MBA expressions.
+/// Boolean basis: {1, a, b, c, a&b, a&c, b&c, a&b&c} — 8 coefficients from 8 evaluations.
+fn simba_simplify_3var(
+    var_idx: usize, vars: &[VarDef], bases: &[VarId], mask: u64, sz: u32,
+) -> Option<Expr> {
+    if bases.len() != 3 { return None; }
+    let (a_id, b_id, c_id) = (bases[0], bases[1], bases[2]);
+
+    // Evaluate f on all 8 combinations of (0,1) for (a,b,c)
+    let mut env = std::collections::HashMap::new();
+    let mut f = [0u64; 8];
+    let combos: [(u64,u64,u64); 8] = [
+        (0,0,0), (1,0,0), (0,1,0), (0,0,1), (1,1,0), (1,0,1), (0,1,1), (1,1,1)
+    ];
+    for (i, (a,b,c)) in combos.iter().enumerate() {
+        env.clear();
+        env.insert(a_id.0, *a); env.insert(b_id.0, *b); env.insert(c_id.0, *c);
+        f[i] = eval_expr(&vars[var_idx].expr, vars, &env, mask, 0)?;
+    }
+
+    // Recover coefficients
+    let c0 = f[0];
+    let c1 = f[1].wrapping_sub(f[0]) & mask;
+    let c2 = f[2].wrapping_sub(f[0]) & mask;
+    let c3 = f[3].wrapping_sub(f[0]) & mask;
+    let c4 = f[4].wrapping_sub(f[1]).wrapping_sub(f[2]).wrapping_add(f[0]) & mask;
+    let c5 = f[5].wrapping_sub(f[1]).wrapping_sub(f[3]).wrapping_add(f[0]) & mask;
+    let c6 = f[6].wrapping_sub(f[2]).wrapping_sub(f[3]).wrapping_add(f[0]) & mask;
+    let c7 = f[7].wrapping_sub(f[4]).wrapping_sub(f[5]).wrapping_sub(f[6])
+        .wrapping_add(f[1]).wrapping_add(f[2]).wrapping_add(f[3]).wrapping_sub(f[0]) & mask;
+
+    // Verify with a non-trivial test point
+    env.clear();
+    env.insert(a_id.0, 0xAA); env.insert(b_id.0, 0x55); env.insert(c_id.0, 0x42);
+    let f_test = eval_expr(&vars[var_idx].expr, vars, &env, mask, 0)?;
+    let (ta, tb, tc) = (0xAAu64, 0x55u64, 0x42u64);
+    let expected = c0.wrapping_add(c1.wrapping_mul(ta))
+        .wrapping_add(c2.wrapping_mul(tb))
+        .wrapping_add(c3.wrapping_mul(tc))
+        .wrapping_add(c4.wrapping_mul(ta & tb))
+        .wrapping_add(c5.wrapping_mul(ta & tc))
+        .wrapping_add(c6.wrapping_mul(tb & tc))
+        .wrapping_add(c7.wrapping_mul(ta & tb & tc)) & mask;
+    if f_test != expected { return None; }
+
+    let neg1 = mask;
+    let neg2 = mask.wrapping_sub(1);
+
+    // Map coefficient vector to simplest expression
+    // Only handle patterns where c0 == 0 (no constant offset)
+    if c0 != 0 { return None; } // with constant → too complex to simplify cleanly
+
+    // Count non-zero coefficients
+    let coeffs = [c1, c2, c3, c4, c5, c6, c7];
+    let nonzero = coeffs.iter().filter(|&&c| c != 0).count();
+
+    // Single non-zero → single variable or single op
+    if nonzero == 1 {
+        if c1 == 1 { return Some(Expr::Var(a_id)); }
+        if c2 == 1 { return Some(Expr::Var(b_id)); }
+        if c3 == 1 { return Some(Expr::Var(c_id)); }
+        if c4 == 1 { return Some(Expr::BinOp(BinOpKind::And, a_id, b_id)); }
+        if c5 == 1 { return Some(Expr::BinOp(BinOpKind::And, a_id, c_id)); }
+        if c6 == 1 { return Some(Expr::BinOp(BinOpKind::And, b_id, c_id)); }
+        // c7 == 1 → a&b&c — can't express as single BinOp
+        if c1 == neg1 { return Some(Expr::UnaryOp(UnaryOpKind::Neg, a_id)); }
+        if c2 == neg1 { return Some(Expr::UnaryOp(UnaryOpKind::Neg, b_id)); }
+        if c3 == neg1 { return Some(Expr::UnaryOp(UnaryOpKind::Neg, c_id)); }
+    }
+
+    // Two-variable patterns (third variable cancels out)
+    // a + b: c1=1, c2=1, rest 0
+    if c1 == 1 && c2 == 1 && c3 == 0 && c4 == 0 && c5 == 0 && c6 == 0 && c7 == 0 {
+        return Some(Expr::BinOp(BinOpKind::Add, a_id, b_id));
+    }
+    if c1 == 1 && c3 == 1 && c2 == 0 && c4 == 0 && c5 == 0 && c6 == 0 && c7 == 0 {
+        return Some(Expr::BinOp(BinOpKind::Add, a_id, c_id));
+    }
+    if c2 == 1 && c3 == 1 && c1 == 0 && c4 == 0 && c5 == 0 && c6 == 0 && c7 == 0 {
+        return Some(Expr::BinOp(BinOpKind::Add, b_id, c_id));
+    }
+
+    // a ^ b: c1=1, c2=1, c4=-2
+    if c1 == 1 && c2 == 1 && c4 == neg2 && c3 == 0 && c5 == 0 && c6 == 0 && c7 == 0 {
+        return Some(Expr::BinOp(BinOpKind::Xor, a_id, b_id));
+    }
+    if c1 == 1 && c3 == 1 && c5 == neg2 && c2 == 0 && c4 == 0 && c6 == 0 && c7 == 0 {
+        return Some(Expr::BinOp(BinOpKind::Xor, a_id, c_id));
+    }
+    if c2 == 1 && c3 == 1 && c6 == neg2 && c1 == 0 && c4 == 0 && c5 == 0 && c7 == 0 {
+        return Some(Expr::BinOp(BinOpKind::Xor, b_id, c_id));
+    }
+
+    // a | b: c1=1, c2=1, c4=-1
+    if c1 == 1 && c2 == 1 && c4 == neg1 && c3 == 0 && c5 == 0 && c6 == 0 && c7 == 0 {
+        return Some(Expr::BinOp(BinOpKind::Or, a_id, b_id));
+    }
+    if c1 == 1 && c3 == 1 && c5 == neg1 && c2 == 0 && c4 == 0 && c6 == 0 && c7 == 0 {
+        return Some(Expr::BinOp(BinOpKind::Or, a_id, c_id));
+    }
+    if c2 == 1 && c3 == 1 && c6 == neg1 && c1 == 0 && c4 == 0 && c5 == 0 && c7 == 0 {
+        return Some(Expr::BinOp(BinOpKind::Or, b_id, c_id));
+    }
+
+    // a - b: c1=1, c2=-1
+    if c1 == 1 && c2 == neg1 && c3 == 0 && c4 == 0 && c5 == 0 && c6 == 0 && c7 == 0 {
+        return Some(Expr::BinOp(BinOpKind::Sub, a_id, b_id));
+    }
+    if c1 == 1 && c3 == neg1 && c2 == 0 && c4 == 0 && c5 == 0 && c6 == 0 && c7 == 0 {
+        return Some(Expr::BinOp(BinOpKind::Sub, a_id, c_id));
+    }
+
+    // Three-variable patterns
+    // a + b + c: c1=c2=c3=1, rest 0
+    if c1 == 1 && c2 == 1 && c3 == 1 && c4 == 0 && c5 == 0 && c6 == 0 && c7 == 0 {
+        // Can't express as single BinOp but it's still simpler than deep MBA
+        return None; // leave for now
+    }
+
+    // a ^ b ^ c: c1=c2=c3=1, c4=c5=c6=-2, c7=4
+    if c1 == 1 && c2 == 1 && c3 == 1 && c4 == neg2 && c5 == neg2 && c6 == neg2
+        && c7 == 4
+    {
+        return None; // Can't express as single op
+    }
+
+    None
+}
+
 /// Compute base variable outputs for brute-force matching (3-variable fallback).
 fn compute_base_outputs(base_idx: usize, n_bases: usize, samples: &[u64], mask: u64) -> Vec<u64> {
     let mut outputs = Vec::new();
