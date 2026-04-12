@@ -8,6 +8,9 @@ pub mod printer;
 pub mod imports;
 pub mod dwarf;
 pub mod pdb_info;
+pub mod signatures;
+mod signatures_libc;
+mod signatures_win32;
 
 use std::path::Path;
 use pcode_ir::Instruction;
