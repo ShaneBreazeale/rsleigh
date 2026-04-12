@@ -2015,8 +2015,8 @@ fn recognize_field_access(ssa: &mut SsaCfg) {
 /// rename argument variables from generic "param_N" names to the signature's parameter names
 /// and propagate parameter types when not already inferred.
 pub fn apply_signature_names(ssa: &mut SsaCfg, import_map: &std::collections::HashMap<u64, String>) {
-    // Collect (VarId, new_name, new_type) triples to apply after iteration.
-    let mut renames: Vec<(VarId, String, InferredType)> = Vec::new();
+    // Collect (VarId, new_name, new_type, display_type) to apply after iteration.
+    let mut renames: Vec<(VarId, String, InferredType, Option<&'static str>)> = Vec::new();
 
     for block in &ssa.blocks {
         // Helper closure: given a call target and args, collect renames
@@ -2043,7 +2043,7 @@ pub fn apply_signature_names(ssa: &mut SsaCfg, import_map: &std::collections::Ha
                     // call-site argument comments/naming.
                     let ty = param.ty.to_inferred();
                     if ty != InferredType::Unknown && var.inferred_type == InferredType::Unknown {
-                        renames.push((*arg_id, String::new(), ty));
+                        renames.push((*arg_id, String::new(), ty, Some(param.ty.c_str())));
                     }
                 }
             }
@@ -2059,16 +2059,14 @@ pub fn apply_signature_names(ssa: &mut SsaCfg, import_map: &std::collections::Ha
         }
     }
 
-    // Apply collected renames
-    for (var_id, new_name, new_type) in renames {
+    // Apply collected type updates
+    for (var_id, _new_name, new_type, disp_type) in renames {
         let var = &mut ssa.vars[var_id.0 as usize];
-        if !new_name.is_empty() {
-            var.param_name = Some(new_name);
-            if var.inferred_type == InferredType::Unknown && new_type != InferredType::Unknown {
-                var.inferred_type = new_type;
-            }
-        } else if new_type != InferredType::Unknown && var.inferred_type == InferredType::Unknown {
+        if new_type != InferredType::Unknown && var.inferred_type == InferredType::Unknown {
             var.inferred_type = new_type;
+        }
+        if var.display_type.is_none() {
+            var.display_type = disp_type;
         }
     }
 }
@@ -2078,7 +2076,7 @@ pub fn apply_signature_names(ssa: &mut SsaCfg, import_map: &std::collections::Ha
 /// For each call whose target resolves to a known function, set the return variable's
 /// inferred type from the signature when not already inferred.
 pub fn propagate_signature_return_types(ssa: &mut SsaCfg, import_map: &std::collections::HashMap<u64, String>) {
-    let mut type_updates: Vec<(VarId, InferredType)> = Vec::new();
+    let mut type_updates: Vec<(VarId, InferredType, Option<&'static str>)> = Vec::new();
 
     for block in &ssa.blocks {
         // Stmt::Call with out variable
@@ -2088,10 +2086,11 @@ pub fn propagate_signature_return_types(ssa: &mut SsaCfg, import_map: &std::coll
                     if let Some(name) = import_map.get(addr) {
                         if let Some(sig) = crate::signatures::lookup(name) {
                             let ret_ty = sig.ret.to_inferred();
+                            let disp = sig.ret.c_str();
                             if ret_ty != InferredType::Unknown {
                                 let var = &ssa.vars[out_id.0 as usize];
                                 if var.inferred_type == InferredType::Unknown {
-                                    type_updates.push((*out_id, ret_ty));
+                                    type_updates.push((*out_id, ret_ty, Some(disp)));
                                 }
                             }
                         }
@@ -2106,6 +2105,7 @@ pub fn propagate_signature_return_types(ssa: &mut SsaCfg, import_map: &std::coll
                 if let Some(name) = import_map.get(addr) {
                     if let Some(sig) = crate::signatures::lookup(name) {
                         let ret_ty = sig.ret.to_inferred();
+                        let disp = sig.ret.c_str();
                         if ret_ty != InferredType::Unknown {
                             // Find the first call_return var in the fallthrough block
                             let ft_idx = fallthrough.0;
@@ -2115,7 +2115,7 @@ pub fn propagate_signature_return_types(ssa: &mut SsaCfg, import_map: &std::coll
                                     if let Stmt::Assign(var_id) = stmt {
                                         let var = &ssa.vars[var_id.0 as usize];
                                         if var.call_return && var.inferred_type == InferredType::Unknown {
-                                            type_updates.push((*var_id, ret_ty));
+                                            type_updates.push((*var_id, ret_ty, Some(disp)));
                                             break;
                                         }
                                     }
@@ -2128,28 +2128,37 @@ pub fn propagate_signature_return_types(ssa: &mut SsaCfg, import_map: &std::coll
         }
     }
 
-    for (var_id, ty) in type_updates {
-        ssa.vars[var_id.0 as usize].inferred_type = ty;
+    for (var_id, ty, disp) in type_updates {
+        let var = &mut ssa.vars[var_id.0 as usize];
+        var.inferred_type = ty;
+        if var.display_type.is_none() {
+            var.display_type = disp;
+        }
     }
 
-    // Forward-propagate return types through Var/Copy chains.
+    // Forward-propagate return types AND display types through Var/Copy chains.
     // If var_A = CreateFile() has type Pointer, and var_B = Var(var_A),
     // then var_B should also be Pointer.
     for _round in 0..3 {
         let mut propagated = false;
         for v in 0..ssa.vars.len() {
-            let var_ty = ssa.vars[v].inferred_type;
-            if var_ty != InferredType::Unknown { continue; }
-            let new_ty = match &ssa.vars[v].expr {
-                Expr::Var(src) => {
-                    let src_ty = ssa.vars[src.0 as usize].inferred_type;
-                    if src_ty != InferredType::Unknown { Some(src_ty) } else { None }
+            if let Expr::Var(src) = &ssa.vars[v].expr {
+                let src_idx = src.0 as usize;
+                // Propagate InferredType
+                if ssa.vars[v].inferred_type == InferredType::Unknown {
+                    let src_ty = ssa.vars[src_idx].inferred_type;
+                    if src_ty != InferredType::Unknown {
+                        ssa.vars[v].inferred_type = src_ty;
+                        propagated = true;
+                    }
                 }
-                _ => None,
-            };
-            if let Some(ty) = new_ty {
-                ssa.vars[v].inferred_type = ty;
-                propagated = true;
+                // Propagate display_type
+                if ssa.vars[v].display_type.is_none() {
+                    if let Some(disp) = ssa.vars[src_idx].display_type {
+                        ssa.vars[v].display_type = Some(disp);
+                        propagated = true;
+                    }
+                }
             }
         }
         if !propagated { break; }

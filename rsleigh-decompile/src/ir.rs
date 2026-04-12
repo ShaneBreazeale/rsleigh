@@ -115,6 +115,10 @@ pub struct VarDef {
     pub call_return: bool,
     /// Inferred type from dataflow analysis
     pub inferred_type: InferredType,
+    /// Display type name from signature database (e.g. "HANDLE", "DWORD", "LPCWSTR").
+    /// When set, the printer uses this instead of mapping InferredType to a generic C type.
+    /// Propagates through Var/Copy chains alongside InferredType.
+    pub display_type: Option<&'static str>,
 }
 
 #[derive(Debug, Clone)]
@@ -205,6 +209,7 @@ static SENTINEL_VARDEF: std::sync::LazyLock<VarDef> = std::sync::LazyLock::new(|
     param_name: None,
     call_return: false,
     inferred_type: InferredType::Unknown,
+    display_type: None,
 });
 
 impl SsaCfg {
@@ -230,6 +235,7 @@ impl SsaCfg {
                     param_name: None,
                     call_return: false,
                     inferred_type: InferredType::Unknown,
+                    display_type: None,
                 });
             }
         }
@@ -247,6 +253,7 @@ impl SsaCfg {
             param_name: None,
             call_return: false,
             inferred_type: InferredType::Unknown,
+            display_type: None,
         });
         id
     }

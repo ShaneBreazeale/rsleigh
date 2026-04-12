@@ -4368,7 +4368,12 @@ fn generate_function_signature(out: &mut String, ssa: &SsaCfg, func_name: &str) 
             if let SsaTerminator::Return(Some(v)) = &block.terminator {
                 let vdef = ssa.var(*v);
                 _return_size = vdef.size;
-                return_type = inferred_type_to_c(vdef.inferred_type, vdef.size);
+                // Prefer display_type from signature propagation
+                return_type = if let Some(d) = vdef.display_type {
+                    d
+                } else {
+                    inferred_type_to_c(vdef.inferred_type, vdef.size)
+                };
                 break;
             }
         }
@@ -4379,12 +4384,10 @@ fn generate_function_signature(out: &mut String, ssa: &SsaCfg, func_name: &str) 
     }
 
     // Collect parameters — variables with param_name set
-    let mut params: Vec<(String, u32, InferredType)> = Vec::new();
+    let mut params: Vec<(String, u32, InferredType, Option<&str>)> = Vec::new();
     for v in &ssa.vars {
         if let Some(ref name) = v.param_name {
-            let ty = v.inferred_type;
-            let sz = v.size;
-            params.push((name.clone(), sz, ty));
+            params.push((name.clone(), v.size, v.inferred_type, v.display_type));
         }
     }
     // Deduplicate by name (SSA may have multiple defs of the same param)
@@ -4397,9 +4400,12 @@ fn generate_function_signature(out: &mut String, ssa: &SsaCfg, func_name: &str) 
         idx_a.cmp(&idx_b).then(a.0.cmp(&b.0))
     });
 
-    // Format parameter list — use signature types when available
-    let param_strs: Vec<String> = params.iter().enumerate().map(|(i, (name, size, ty))| {
-        let type_name = if let Some(sig) = sig {
+    // Format parameter list — use display_type > signature > InferredType
+    let param_strs: Vec<String> = params.iter().enumerate().map(|(i, (name, size, ty, disp))| {
+        let type_name = if let Some(d) = disp {
+            // display_type set by signature propagation (e.g., "HANDLE", "DWORD")
+            *d
+        } else if let Some(sig) = sig {
             if i < sig.params.len() {
                 sig.params[i].ty.c_str()
             } else {
