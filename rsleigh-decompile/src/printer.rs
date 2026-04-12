@@ -1080,6 +1080,62 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         true
     });
 
+    // Remove ARM64 prologue/epilogue boilerplate:
+    // - sp[N] = x19/x20/.../x29/x30  (callee-saved register saves)
+    // - x29 = sp + N  (frame pointer setup)
+    // - sp = sp + N / sp = sp - N  (stack frame allocation)
+    // - *(uint64_t*)(sp) = x28  (alternative save syntax)
+    // Also remove ObjC ARC noise: objc_retain, objc_release,
+    // objc_retainAutoreleasedReturnValue, objc_autoreleasePoolPush/Pop
+    lines.retain(|line| {
+        let t = line.trim();
+        // ARM64 callee-saved register saves / stack frame setup:
+        // sp[N] = lVarM; sp[N] = x29; sp[N] = x30; sp[N] = 0; sp[N+M] = xNN;
+        if t.starts_with("sp[") && t.ends_with(';') && t.contains(" = ") {
+            let rhs = t.split(" = ").last().unwrap_or("").trim_end_matches(';').trim();
+            if rhs.starts_with("lVar") || rhs.starts_with("iVar")
+                || rhs == "x29" || rhs == "x30" || rhs == "0"
+                || rhs.starts_with("x1") || rhs.starts_with("x2")
+            { return false; }
+        }
+        // sp[N + M] = xNN patterns (compound offset callee-saved saves)
+        if t.starts_with("sp[") && t.ends_with(';') && t.contains(" + ") && t.contains("] = ") {
+            let rhs = t.split("] = ").last().unwrap_or("").trim_end_matches(';').trim();
+            if rhs == "x30" || rhs == "x29" || rhs.starts_with("lVar")
+                || rhs.starts_with("x1") || rhs.starts_with("x2") || rhs == "0"
+            { return false; }
+        }
+        if t.starts_with("*(uint64_t*)(sp)") && t.ends_with(';')
+            && (t.contains("= x") || t.contains("= lVar") || t.contains("= 0"))
+        { return false; }
+        // Frame pointer setup: x29 = sp + N;
+        if t.starts_with("x29 = sp") && t.ends_with(';') { return false; }
+        // Stack allocation: sp = sp + N; sp = sp - N; sp = param_-N;
+        if t.starts_with("sp = sp ") && t.ends_with(';') { return false; }
+        if t.starts_with("sp = param_") && t.ends_with(';') { return false; }
+        // Return via link register: return sp[N]->field_8; (epilogue pattern)
+        if t.starts_with("return sp") && t.contains("->field_8") { return false; }
+        // ObjC ARC noise
+        if t == "objc_retain();" || t.starts_with("objc_retain(") && t.ends_with(");") && !t.contains("=") {
+            return false;
+        }
+        if t == "objc_release();" || t.starts_with("objc_release(") && t.ends_with(");") {
+            return false;
+        }
+        if t.starts_with("objc_retainAutoreleasedReturnValue(") { return false; }
+        if t.starts_with("objc_autoreleasePoolPush(") { return false; }
+        if t.starts_with("objc_autoreleasePoolPop(") { return false; }
+        if t.starts_with("objc_autoreleaseReturnValue(") { return false; }
+        // x30 = address (link register setup for calls — noise)
+        if t.starts_with("x30 = 0x") && t.ends_with(';') { return false; }
+        if t.starts_with("x30 = ") && t.contains(" + ") && t.ends_with(';') && !t.contains("func_") { return false; }
+        // x29 stores (frame pointer spills)
+        if t.starts_with("*(uint64_t*)(x29") && t.ends_with(';') && !t.contains("func_") && !t.contains("param_") { return false; }
+        // sp + N -> field_8 patterns (return address from stack)
+        if t.starts_with("return sp") && t.ends_with(';') && !t.contains("func_") { return false; }
+        true
+    });
+
     // Fix orphaned blocks: when statements are indented inside a block whose
     // opening "if/else" was removed, reduce their indent and remove the orphaned "}".
     // Pattern: line at indent N, then 1+ lines at indent N+4, then "}" at indent N.
@@ -4059,34 +4115,57 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // In x86-32, EDI/ESI/EDX/ECX are NOT parameter registers (all args on stack),
         // so they should be auto-named. Only skip them in x86-64 SysV mode.
         let all_text_check = lines.join("");
-        let is_32bit = !all_text_check.contains("RSP") && !all_text_check.contains("RBP");
-        let skip_regs: &[&str] = if is_32bit {
-            // x86-32 cdecl: only skip stack/frame pointers
+        let is_arm64 = all_text_check.contains("x19") || all_text_check.contains("x29");
+        let is_32bit = !is_arm64 && !all_text_check.contains("RSP") && !all_text_check.contains("RBP");
+
+        let skip_regs: &[&str] = if is_arm64 {
+            // AArch64: skip param regs (x0-x7), frame pointer (x29), link reg (x30), sp
+            &["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7",
+              "w0", "w1", "w2", "w3", "w4", "w5", "w6", "w7",
+              "x29", "x30", "sp",
+              "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7"]
+        } else if is_32bit {
             &["RSP", "ESP", "RBP", "EBP", "RIP", "EIP",
               "XMM0", "XMM1", "XMM2", "XMM3", "XMM4", "XMM5"]
         } else {
-            // x86-64: skip parameter registers + stack/frame
             &["RDI", "EDI", "RSI", "ESI", "RDX", "EDX",
               "RCX", "ECX", "R8", "R8D", "R9", "R9D",
               "RSP", "ESP", "RBP", "EBP", "RIP", "EIP",
               "XMM0", "XMM1", "XMM2", "XMM3", "XMM4", "XMM5"]
         };
+
         // Candidate registers for renaming
-        let reg_candidates: &[(&str, &str)] = &[
-            // (register_name, type_prefix) — 64-bit → l, 32-bit → i, 8-bit → b
-            ("RAX", "l"), ("RBX", "l"), ("R12", "l"), ("R13", "l"),
-            ("R14", "l"), ("R15", "l"), ("R10", "l"), ("R11", "l"),
-            ("EAX", "i"), ("EBX", "i"), ("ECX", "i"), ("EDX", "i"),
-            ("ESI", "i"), ("EDI", "i"),
-            ("R12D", "i"), ("R13D", "i"),
-            ("R14D", "i"), ("R15D", "i"), ("R10D", "i"), ("R11D", "i"),
-            ("AL", "b"), ("BL", "b"), ("AH", "b"), ("BH", "b"),
-            ("DIL", "b"), ("SIL", "b"), ("DL", "b"), ("CL", "b"),
-            ("CH", "b"), ("DH", "b"),
-            ("R8B", "b"), ("R9B", "b"), ("R10B", "b"), ("R11B", "b"),
-            ("R12B", "b"), ("R13B", "b"), ("R14B", "b"), ("R15B", "b"),
-            ("AX", "w"), ("BX", "w"), ("CX", "w"), ("DX", "w"), ("SI", "w"), ("DI", "w"),
-        ];
+        let reg_candidates: &[(&str, &str)] = if is_arm64 {
+            &[
+                // AArch64: 64-bit → l, 32-bit → i
+                ("x8", "l"), ("x9", "l"), ("x10", "l"), ("x11", "l"),
+                ("x12", "l"), ("x13", "l"), ("x14", "l"), ("x15", "l"),
+                ("x16", "l"), ("x17", "l"), ("x18", "l"),
+                ("x19", "l"), ("x20", "l"), ("x21", "l"), ("x22", "l"),
+                ("x23", "l"), ("x24", "l"), ("x25", "l"), ("x26", "l"),
+                ("x27", "l"), ("x28", "l"),
+                ("w8", "i"), ("w9", "i"), ("w10", "i"), ("w11", "i"),
+                ("w12", "i"), ("w13", "i"), ("w14", "i"), ("w15", "i"),
+                ("w16", "i"), ("w17", "i"), ("w18", "i"),
+                ("w19", "i"), ("w20", "i"), ("w21", "i"), ("w22", "i"),
+                ("w23", "i"), ("w24", "i"), ("w25", "i"),
+            ]
+        } else {
+            &[
+                ("RAX", "l"), ("RBX", "l"), ("R12", "l"), ("R13", "l"),
+                ("R14", "l"), ("R15", "l"), ("R10", "l"), ("R11", "l"),
+                ("EAX", "i"), ("EBX", "i"), ("ECX", "i"), ("EDX", "i"),
+                ("ESI", "i"), ("EDI", "i"),
+                ("R12D", "i"), ("R13D", "i"),
+                ("R14D", "i"), ("R15D", "i"), ("R10D", "i"), ("R11D", "i"),
+                ("AL", "b"), ("BL", "b"), ("AH", "b"), ("BH", "b"),
+                ("DIL", "b"), ("SIL", "b"), ("DL", "b"), ("CL", "b"),
+                ("CH", "b"), ("DH", "b"),
+                ("R8B", "b"), ("R9B", "b"), ("R10B", "b"), ("R11B", "b"),
+                ("R12B", "b"), ("R13B", "b"), ("R14B", "b"), ("R15B", "b"),
+                ("AX", "w"), ("BX", "w"), ("CX", "w"), ("DX", "w"), ("SI", "w"), ("DI", "w"),
+            ]
+        };
 
         // Scan all lines for register appearances
         let all_text = lines.join("\n");
