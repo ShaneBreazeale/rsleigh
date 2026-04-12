@@ -1977,6 +1977,14 @@ fn recognize_field_access(ssa: &mut SsaCfg) {
                     // 3. Base looks like a pointer (parameter, load, or known pointer)
                     if *offset_val > 0 && *offset_val < 4096 {
                         let base_def = safe_var(&ssa.vars, *base);
+
+                        // Skip stack frame accesses: EBP+offset in x86-32 is a parameter
+                        // or local variable, not a struct field. EBP offset = 20, ESP offset = 28.
+                        let is_stack_frame = base_def.varnode.space == AddressSpaceId::Register
+                            && (base_def.varnode.offset == 20 || base_def.varnode.offset == 28)
+                            && base_def.varnode.size == 4;
+                        if is_stack_frame { continue; }
+
                         let base_is_pointer = pointer_vars.contains(base)
                             || base_def.param_name.is_some()
                             || matches!(&base_def.expr, Expr::Load(_) | Expr::FieldAccess(_, _))
