@@ -168,69 +168,59 @@ fn mba_simplify(ssa: &mut SsaCfg) {
 /// For each complex expression (depth ≥ 3), find its base variables,
 /// evaluate on sample inputs, and check if the output matches a simpler form.
 fn mba_oracle_simplify(ssa: &mut SsaCfg) {
-    // Sample values for truth table evaluation (8-bit for speed, catches most MBA patterns)
-    const SAMPLES: &[u64] = &[0, 1, 2, 0x55, 0xAA, 0xFF, 0x0F, 0xF0,
-                               0x7F, 0x80, 0xDE, 0xAD, 0x42, 0x13, 0x37, 0xBE];
-
-    for _pass in 0..3 {
+    // Phase A: Bottom-up tree walking — simplify subtrees first to reduce
+    // 4+ variable expressions to tractable 2-3 variable forms.
+    // Process variables in dependency order (lower IDs = earlier definitions = leaves).
+    for _pass in 0..6 {
         let mut changed = false;
 
+        // Forward pass (leaves → root)
         for v in 0..ssa.vars.len() {
-            // Skip simple expressions (depth < 3)
-            let depth = expr_depth(&ssa.vars[v].expr, &ssa.vars, 0);
-            if depth < 3 { continue; }
-
-            // Find base variables (leaves that aren't constants)
-            let mut bases: Vec<VarId> = Vec::new();
-            collect_base_vars(&ssa.vars[v].expr, &ssa.vars, &mut bases, 0);
-            bases.sort_by_key(|id| id.0);
-            bases.dedup_by_key(|id| id.0);
-
-            // Only handle 1-3 base variables (tractable)
-            if bases.is_empty() || bases.len() > 3 { continue; }
-
-            let sz = ssa.vars[v].size;
-            let mask = if sz >= 8 { u64::MAX } else { (1u64 << (sz * 8)).wrapping_sub(1) };
-
-            // SiMBA: linear algebra coefficient recovery (exact, fast)
-            let simplified = match bases.len() {
-                1 => simba_simplify_1var(v, &ssa.vars, bases[0], mask, sz),
-                2 => simba_simplify_2var(v, &ssa.vars, &bases, mask, sz),
-                3 => simba_simplify_3var(v, &ssa.vars, &bases, mask, sz),
-                _ => None,
-            };
-
-            if let Some(simple) = simplified {
-                ssa.vars[v].expr = simple;
-                changed = true;
-                continue;
-            }
-
-            // Fallback: brute-force sample-based matching for 3-variable expressions
-            if bases.len() == 3 {
-                let outputs = evaluate_expr_samples(&ssa.vars[v].expr, &ssa.vars, &bases, SAMPLES, mask);
-                if let Some(outputs) = outputs {
-                    // Check if it's a constant
-                    if outputs.iter().all(|&o| o == outputs[0]) {
-                        ssa.vars[v].expr = Expr::Const(outputs[0], sz);
-                        changed = true;
-                        continue;
-                    }
-                    // Check if it matches a single variable
-                    for (bi, base) in bases.iter().enumerate() {
-                        let base_outs = compute_base_outputs(bi, 3, SAMPLES, mask);
-                        if base_outs == outputs {
-                            ssa.vars[v].expr = Expr::Var(*base);
-                            changed = true;
-                            break;
-                        }
-                    }
-                }
-            }
+            if try_simba_at(v, &mut ssa.vars) { changed = true; }
+        }
+        // Reverse pass (root → leaves) — catch top-down opportunities
+        for v in (0..ssa.vars.len()).rev() {
+            if try_simba_at(v, &mut ssa.vars) { changed = true; }
         }
 
         if !changed { break; }
     }
+}
+
+/// Try SiMBA simplification on a single variable. Returns true if simplified.
+fn try_simba_at(v: usize, vars: &mut Vec<VarDef>) -> bool {
+    let depth = expr_depth(&vars[v].expr, vars, 0);
+    if depth < 2 { return false; }
+
+    // Constant folding first
+    if let Some((val, sz)) = const_fold_expr(&vars[v].expr, vars) {
+        vars[v].expr = Expr::Const(val, sz);
+        return true;
+    }
+
+    let mut bases: Vec<VarId> = Vec::new();
+    collect_base_vars(&vars[v].expr, vars, &mut bases, 0);
+    bases.sort_by_key(|id| id.0);
+    bases.dedup_by_key(|id| id.0);
+
+    if bases.is_empty() || bases.len() > 3 { return false; }
+
+    let sz = vars[v].size;
+    let mask = if sz >= 8 { u64::MAX } else { (1u64 << (sz * 8)).wrapping_sub(1) };
+
+    let simplified = match bases.len() {
+        1 => simba_simplify_1var(v, vars, bases[0], mask, sz),
+        2 => simba_simplify_2var(v, vars, &bases, mask, sz),
+        3 => simba_simplify_3var(v, vars, &bases, mask, sz),
+        _ => None,
+    };
+
+    if let Some(simple) = simplified {
+        vars[v].expr = simple;
+        return true;
+    }
+
+    false
 }
 
 /// Compute expression depth (for filtering).
