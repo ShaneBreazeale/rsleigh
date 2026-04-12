@@ -120,6 +120,10 @@ pub fn decompile_with_binary(
 
     fold::fold_with_cc(&mut ssa, cc);
 
+    // Apply function signature parameter names and return types
+    fold::apply_signature_names(&mut ssa, &import_map);
+    fold::propagate_signature_return_types(&mut ssa, &import_map);
+
     // Apply DWARF debug info if available: replace param_N with actual names
     let debug_info = if let Some(path) = binary_path {
         let info = dwarf::parse_dwarf_from_path(path);

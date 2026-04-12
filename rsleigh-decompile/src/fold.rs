@@ -2000,3 +2000,132 @@ fn recognize_field_access(ssa: &mut SsaCfg) {
         ssa.vars[var_idx].expr = Expr::FieldAccess(base, offset);
     }
 }
+
+/// Apply parameter names and types from the function signature database to call arguments.
+///
+/// For each call whose target resolves to a known function name (via `import_map`),
+/// rename argument variables from generic "param_N" names to the signature's parameter names
+/// and propagate parameter types when not already inferred.
+pub fn apply_signature_names(ssa: &mut SsaCfg, import_map: &std::collections::HashMap<u64, String>) {
+    // Collect (VarId, new_name, new_type) triples to apply after iteration.
+    let mut renames: Vec<(VarId, String, InferredType)> = Vec::new();
+
+    for block in &ssa.blocks {
+        // Helper closure: given a call target and args, collect renames
+        let mut process_call = |target: &CallTarget, args: &[VarId]| {
+            let addr = match target {
+                CallTarget::Direct(a) => *a,
+                CallTarget::Indirect(_) => return,
+            };
+            let name = match import_map.get(&addr) {
+                Some(n) => n.as_str(),
+                None => return,
+            };
+            let sig = match crate::signatures::lookup(name) {
+                Some(s) => s,
+                None => return,
+            };
+            for (i, arg_id) in args.iter().enumerate() {
+                if let Some(param) = sig.params.get(i) {
+                    let var = &ssa.vars[arg_id.0 as usize];
+                    // Only rename if current name is generic or absent
+                    let dominated_name = match &var.param_name {
+                        None => true,
+                        Some(n) => n.starts_with("param_"),
+                    };
+                    if dominated_name && var.use_count <= 1 {
+                        renames.push((*arg_id, param.name.to_string(), param.ty.to_inferred()));
+                    } else {
+                        // Still propagate type even if we don't rename
+                        let ty = param.ty.to_inferred();
+                        if ty != InferredType::Unknown && var.inferred_type == InferredType::Unknown {
+                            renames.push((*arg_id, String::new(), ty));
+                        }
+                    }
+                }
+            }
+        };
+
+        for stmt in &block.stmts {
+            if let Stmt::Call { target, args, .. } = stmt {
+                process_call(target, args);
+            }
+        }
+        if let SsaTerminator::Call { target, args, .. } = &block.terminator {
+            process_call(target, args);
+        }
+    }
+
+    // Apply collected renames
+    for (var_id, new_name, new_type) in renames {
+        let var = &mut ssa.vars[var_id.0 as usize];
+        if !new_name.is_empty() {
+            var.param_name = Some(new_name);
+            if var.inferred_type == InferredType::Unknown && new_type != InferredType::Unknown {
+                var.inferred_type = new_type;
+            }
+        } else if new_type != InferredType::Unknown && var.inferred_type == InferredType::Unknown {
+            var.inferred_type = new_type;
+        }
+    }
+}
+
+/// Propagate return types from the function signature database to call output variables.
+///
+/// For each call whose target resolves to a known function, set the return variable's
+/// inferred type from the signature when not already inferred.
+pub fn propagate_signature_return_types(ssa: &mut SsaCfg, import_map: &std::collections::HashMap<u64, String>) {
+    let mut type_updates: Vec<(VarId, InferredType)> = Vec::new();
+
+    for block in &ssa.blocks {
+        // Stmt::Call with out variable
+        for stmt in &block.stmts {
+            if let Stmt::Call { target, out: Some(out_id), .. } = stmt {
+                if let CallTarget::Direct(addr) = target {
+                    if let Some(name) = import_map.get(addr) {
+                        if let Some(sig) = crate::signatures::lookup(name) {
+                            let ret_ty = sig.ret.to_inferred();
+                            if ret_ty != InferredType::Unknown {
+                                let var = &ssa.vars[out_id.0 as usize];
+                                if var.inferred_type == InferredType::Unknown {
+                                    type_updates.push((*out_id, ret_ty));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // SsaTerminator::Call — find call_return var in fallthrough block
+        if let SsaTerminator::Call { target, fallthrough, .. } = &block.terminator {
+            if let CallTarget::Direct(addr) = target {
+                if let Some(name) = import_map.get(addr) {
+                    if let Some(sig) = crate::signatures::lookup(name) {
+                        let ret_ty = sig.ret.to_inferred();
+                        if ret_ty != InferredType::Unknown {
+                            // Find the first call_return var in the fallthrough block
+                            let ft_idx = fallthrough.0;
+                            if ft_idx < ssa.blocks.len() {
+                                let ft_block = &ssa.blocks[ft_idx];
+                                for stmt in &ft_block.stmts {
+                                    if let Stmt::Assign(var_id) = stmt {
+                                        let var = &ssa.vars[var_id.0 as usize];
+                                        if var.call_return && var.inferred_type == InferredType::Unknown {
+                                            type_updates.push((*var_id, ret_ty));
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (var_id, ty) in type_updates {
+        ssa.vars[var_id.0 as usize].inferred_type = ty;
+    }
+}
