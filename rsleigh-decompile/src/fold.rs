@@ -98,10 +98,19 @@ fn fold_once(ssa: &mut SsaCfg) {
         }
     }
 
-    // Pass 2: Algebraic simplification
+    // Pass 2: Algebraic simplification + constant folding
     for v in 0..ssa.vars.len() {
         let expr = ssa.vars[v].expr.clone();
         ssa.vars[v].expr = simplify_expr(expr, &ssa.vars);
+    }
+    // Constant folding: evaluate BinOp(Const, Const) chains to single constants.
+    // This resolves obfuscated arithmetic like (0 ^ x) and chains of ops on constants.
+    for v in 0..ssa.vars.len() {
+        if matches!(&ssa.vars[v].expr, Expr::BinOp(_, _, _) | Expr::UnaryOp(_, _)) {
+            if let Some((val, sz)) = const_fold_expr(&ssa.vars[v].expr, &ssa.vars) {
+                ssa.vars[v].expr = Expr::Const(val, sz);
+            }
+        }
     }
 
     // Pass 3: Inline single-use Unique vars and all constants
@@ -129,36 +138,64 @@ fn fold_once(ssa: &mut SsaCfg) {
 
 fn simplify_expr(expr: Expr, vars: &[VarDef]) -> Expr {
     match &expr {
-        // x & x → x (TEST instruction), x & 0 → 0, const & mask noop
+        // === Identity / Annihilation rules ===
+
+        // x & x → x, x & 0 → 0, x & -1 → x, const & mask noop
         Expr::BinOp(BinOpKind::And, left, right) => {
             if left == right || same_varnode(*left, *right, vars) {
                 Expr::Var(*left)
-            } else if is_const_zero(*right, vars) {
+            } else if is_const_zero(*right, vars) || is_const_zero(*left, vars) {
                 Expr::Const(0, vars[left.0 as usize].size)
-            } else if is_const_zero(*left, vars) {
-                Expr::Const(0, vars[right.0 as usize].size)
+            } else if is_const_all_ones(*right, vars) {
+                Expr::Var(*left)
+            } else if is_const_all_ones(*left, vars) {
+                Expr::Var(*right)
             } else if is_const_mask_noop(*left, *right, vars) {
                 Expr::Var(*left)
             } else {
                 expr
             }
         }
-        // x ^ x → 0
-        Expr::BinOp(BinOpKind::Xor, left, right) if left == right || same_varnode(*left, *right, vars) => {
-            Expr::Const(0, vars[left.0 as usize].size)
+        // x ^ x → 0, x ^ 0 → x, 0 ^ x → x
+        Expr::BinOp(BinOpKind::Xor, left, right) => {
+            if left == right || same_varnode(*left, *right, vars) {
+                Expr::Const(0, vars[left.0 as usize].size)
+            } else if is_const_zero(*right, vars) {
+                Expr::Var(*left)
+            } else if is_const_zero(*left, vars) {
+                Expr::Var(*right)
+            } else {
+                expr
+            }
         }
-        // x + 0 → x, 0 + x → x, x | 0 → x
-        Expr::BinOp(BinOpKind::Or | BinOpKind::Add, left, right) => {
-            if is_const_zero(*right, vars) { Expr::Var(*left) }
+        // x | x → x, x + 0 → x, 0 + x → x, x | 0 → x, x | -1 → -1
+        Expr::BinOp(BinOpKind::Or, left, right) => {
+            if left == right || same_varnode(*left, *right, vars) {
+                Expr::Var(*left)
+            } else if is_const_zero(*right, vars) { Expr::Var(*left) }
             else if is_const_zero(*left, vars) { Expr::Var(*right) }
-            // x | -1 → -1 (all bits set)
             else if is_const_all_ones(*right, vars) { Expr::Var(*right) }
             else if is_const_all_ones(*left, vars) { Expr::Var(*left) }
             else { expr }
         }
-        // x - 0 → x
-        Expr::BinOp(BinOpKind::Sub, left, right) if is_const_zero(*right, vars) => {
-            Expr::Var(*left)
+        Expr::BinOp(BinOpKind::Add, left, right) => {
+            if is_const_zero(*right, vars) { Expr::Var(*left) }
+            else if is_const_zero(*left, vars) { Expr::Var(*right) }
+            // x + x → x * 2 → x << 1 (useful for MBA reduction)
+            else if left == right || same_varnode(*left, *right, vars) {
+                Expr::BinOp(BinOpKind::Lsl, *left, *right) // approximate as shift
+            }
+            else { expr }
+        }
+        // x - 0 → x, x - x → 0
+        Expr::BinOp(BinOpKind::Sub, left, right) => {
+            if is_const_zero(*right, vars) {
+                Expr::Var(*left)
+            } else if left == right || same_varnode(*left, *right, vars) {
+                Expr::Const(0, vars[left.0 as usize].size)
+            } else {
+                expr
+            }
         }
         // x * 1 → x, x * 0 → 0
         Expr::BinOp(BinOpKind::Mult, left, right) => {
@@ -168,7 +205,51 @@ fn simplify_expr(expr: Expr, vars: &[VarDef]) -> Expr {
             else if is_const_zero(*left, vars) { Expr::Const(0, vars[right.0 as usize].size) }
             else { expr }
         }
+        // x >> 0 → x, x << 0 → x
+        Expr::BinOp(BinOpKind::Lsr | BinOpKind::Lsl | BinOpKind::Asr, left, right) => {
+            if is_const_zero(*right, vars) { Expr::Var(*left) }
+            else { expr }
+        }
+
         _ => expr,
+    }
+}
+
+/// Constant folding: evaluate BinOp(Const, Const) → Const.
+/// This handles chains of arithmetic that resolve to constants at compile time.
+fn const_fold_expr(expr: &Expr, vars: &[VarDef]) -> Option<(u64, u32)> {
+    match expr {
+        Expr::Const(val, sz) => Some((*val, *sz)),
+        Expr::Var(id) => const_fold_expr(&vars[id.0 as usize].expr, vars),
+        Expr::BinOp(kind, left, right) => {
+            let (lv, lsz) = const_fold_expr(&vars[left.0 as usize].expr, vars)?;
+            let (rv, _) = const_fold_expr(&vars[right.0 as usize].expr, vars)?;
+            let mask = if lsz >= 8 { u64::MAX } else { (1u64 << (lsz * 8)) - 1 };
+            let result = match kind {
+                BinOpKind::Add => lv.wrapping_add(rv) & mask,
+                BinOpKind::Sub => lv.wrapping_sub(rv) & mask,
+                BinOpKind::Mult => lv.wrapping_mul(rv) & mask,
+                BinOpKind::And => lv & rv,
+                BinOpKind::Or => lv | rv,
+                BinOpKind::Xor => lv ^ rv,
+                BinOpKind::Lsl => (lv << (rv & 63)) & mask,
+                BinOpKind::Lsr => lv >> (rv & 63),
+                BinOpKind::Asr => ((lv as i64) >> (rv & 63)) as u64 & mask,
+                _ => return None,
+            };
+            Some((result, lsz))
+        }
+        Expr::UnaryOp(kind, inner) => {
+            let (v, sz) = const_fold_expr(&vars[inner.0 as usize].expr, vars)?;
+            let mask = if sz >= 8 { u64::MAX } else { (1u64 << (sz * 8)) - 1 };
+            let result = match kind {
+                UnaryOpKind::Neg => (-(v as i64) as u64) & mask,
+                UnaryOpKind::Not => (!v) & mask,
+                _ => return None,
+            };
+            Some((result, sz))
+        }
+        _ => None,
     }
 }
 
