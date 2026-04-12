@@ -10540,5 +10540,3720 @@
       }
     ],
     "variadic": false
+  },
+  {
+    "name": "openat",
+    "ret": "int",
+    "params": [
+      {
+        "name": "dirfd",
+        "type": "int"
+      },
+      {
+        "name": "pathname",
+        "type": "char *"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": true
+  },
+  {
+    "name": "openat2",
+    "ret": "long",
+    "params": [
+      {
+        "name": "dirfd",
+        "type": "int"
+      },
+      {
+        "name": "pathname",
+        "type": "char *"
+      },
+      {
+        "name": "how",
+        "type": "void *"
+      },
+      {
+        "name": "size",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "readv",
+    "ret": "long",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "iov",
+        "type": "void *"
+      },
+      {
+        "name": "iovcnt",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "writev",
+    "ret": "long",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "iov",
+        "type": "void *"
+      },
+      {
+        "name": "iovcnt",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pread",
+    "ret": "long",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "buf",
+        "type": "void *"
+      },
+      {
+        "name": "count",
+        "type": "size_t"
+      },
+      {
+        "name": "offset",
+        "type": "long"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pread64",
+    "ret": "long",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "buf",
+        "type": "void *"
+      },
+      {
+        "name": "count",
+        "type": "size_t"
+      },
+      {
+        "name": "offset",
+        "type": "long"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pwrite",
+    "ret": "long",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "buf",
+        "type": "void *"
+      },
+      {
+        "name": "count",
+        "type": "size_t"
+      },
+      {
+        "name": "offset",
+        "type": "long"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pwrite64",
+    "ret": "long",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "buf",
+        "type": "void *"
+      },
+      {
+        "name": "count",
+        "type": "size_t"
+      },
+      {
+        "name": "offset",
+        "type": "long"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "preadv",
+    "ret": "long",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "iov",
+        "type": "void *"
+      },
+      {
+        "name": "iovcnt",
+        "type": "int"
+      },
+      {
+        "name": "offset",
+        "type": "long"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pwritev",
+    "ret": "long",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "iov",
+        "type": "void *"
+      },
+      {
+        "name": "iovcnt",
+        "type": "int"
+      },
+      {
+        "name": "offset",
+        "type": "long"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fallocate",
+    "ret": "int",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "mode",
+        "type": "int"
+      },
+      {
+        "name": "offset",
+        "type": "long"
+      },
+      {
+        "name": "len",
+        "type": "long"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fadvise64",
+    "ret": "int",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "offset",
+        "type": "long"
+      },
+      {
+        "name": "len",
+        "type": "long"
+      },
+      {
+        "name": "advice",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "readahead",
+    "ret": "long",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "offset",
+        "type": "long"
+      },
+      {
+        "name": "count",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "copy_file_range",
+    "ret": "long",
+    "params": [
+      {
+        "name": "fd_in",
+        "type": "int"
+      },
+      {
+        "name": "off_in",
+        "type": "void *"
+      },
+      {
+        "name": "fd_out",
+        "type": "int"
+      },
+      {
+        "name": "off_out",
+        "type": "void *"
+      },
+      {
+        "name": "len",
+        "type": "size_t"
+      },
+      {
+        "name": "flags",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "flock",
+    "ret": "int",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "operation",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "dup3",
+    "ret": "int",
+    "params": [
+      {
+        "name": "oldfd",
+        "type": "int"
+      },
+      {
+        "name": "newfd",
+        "type": "int"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sync",
+    "ret": "void",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "syncfs",
+    "ret": "int",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fdatasync",
+    "ret": "int",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "mkdirat",
+    "ret": "int",
+    "params": [
+      {
+        "name": "dirfd",
+        "type": "int"
+      },
+      {
+        "name": "pathname",
+        "type": "char *"
+      },
+      {
+        "name": "mode",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "mknodat",
+    "ret": "int",
+    "params": [
+      {
+        "name": "dirfd",
+        "type": "int"
+      },
+      {
+        "name": "pathname",
+        "type": "char *"
+      },
+      {
+        "name": "mode",
+        "type": "uint"
+      },
+      {
+        "name": "dev",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fstatat",
+    "ret": "int",
+    "params": [
+      {
+        "name": "dirfd",
+        "type": "int"
+      },
+      {
+        "name": "pathname",
+        "type": "char *"
+      },
+      {
+        "name": "statbuf",
+        "type": "void *"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "unlinkat",
+    "ret": "int",
+    "params": [
+      {
+        "name": "dirfd",
+        "type": "int"
+      },
+      {
+        "name": "pathname",
+        "type": "char *"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "renameat",
+    "ret": "int",
+    "params": [
+      {
+        "name": "olddirfd",
+        "type": "int"
+      },
+      {
+        "name": "oldpath",
+        "type": "char *"
+      },
+      {
+        "name": "newdirfd",
+        "type": "int"
+      },
+      {
+        "name": "newpath",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "renameat2",
+    "ret": "int",
+    "params": [
+      {
+        "name": "olddirfd",
+        "type": "int"
+      },
+      {
+        "name": "oldpath",
+        "type": "char *"
+      },
+      {
+        "name": "newdirfd",
+        "type": "int"
+      },
+      {
+        "name": "newpath",
+        "type": "char *"
+      },
+      {
+        "name": "flags",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "linkat",
+    "ret": "int",
+    "params": [
+      {
+        "name": "olddirfd",
+        "type": "int"
+      },
+      {
+        "name": "oldpath",
+        "type": "char *"
+      },
+      {
+        "name": "newdirfd",
+        "type": "int"
+      },
+      {
+        "name": "newpath",
+        "type": "char *"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "symlinkat",
+    "ret": "int",
+    "params": [
+      {
+        "name": "target",
+        "type": "char *"
+      },
+      {
+        "name": "newdirfd",
+        "type": "int"
+      },
+      {
+        "name": "linkpath",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "readlinkat",
+    "ret": "long",
+    "params": [
+      {
+        "name": "dirfd",
+        "type": "int"
+      },
+      {
+        "name": "pathname",
+        "type": "char *"
+      },
+      {
+        "name": "buf",
+        "type": "char *"
+      },
+      {
+        "name": "bufsiz",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fchmodat",
+    "ret": "int",
+    "params": [
+      {
+        "name": "dirfd",
+        "type": "int"
+      },
+      {
+        "name": "pathname",
+        "type": "char *"
+      },
+      {
+        "name": "mode",
+        "type": "uint"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fchownat",
+    "ret": "int",
+    "params": [
+      {
+        "name": "dirfd",
+        "type": "int"
+      },
+      {
+        "name": "pathname",
+        "type": "char *"
+      },
+      {
+        "name": "owner",
+        "type": "uint"
+      },
+      {
+        "name": "group",
+        "type": "uint"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "faccessat",
+    "ret": "int",
+    "params": [
+      {
+        "name": "dirfd",
+        "type": "int"
+      },
+      {
+        "name": "pathname",
+        "type": "char *"
+      },
+      {
+        "name": "mode",
+        "type": "int"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "statx",
+    "ret": "int",
+    "params": [
+      {
+        "name": "dirfd",
+        "type": "int"
+      },
+      {
+        "name": "pathname",
+        "type": "char *"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      },
+      {
+        "name": "mask",
+        "type": "uint"
+      },
+      {
+        "name": "statxbuf",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getdents64",
+    "ret": "long",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "dirp",
+        "type": "void *"
+      },
+      {
+        "name": "count",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "realpath",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      },
+      {
+        "name": "resolved_path",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "canonicalize_file_name",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "name",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "nftw",
+    "ret": "int",
+    "params": [
+      {
+        "name": "dirpath",
+        "type": "char *"
+      },
+      {
+        "name": "fn",
+        "type": "void *"
+      },
+      {
+        "name": "nopenfd",
+        "type": "int"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ftw",
+    "ret": "int",
+    "params": [
+      {
+        "name": "dirpath",
+        "type": "char *"
+      },
+      {
+        "name": "fn",
+        "type": "void *"
+      },
+      {
+        "name": "nopenfd",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "glob",
+    "ret": "int",
+    "params": [
+      {
+        "name": "pattern",
+        "type": "char *"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      },
+      {
+        "name": "errfunc",
+        "type": "void *"
+      },
+      {
+        "name": "pglob",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "globfree",
+    "ret": "void",
+    "params": [
+      {
+        "name": "pglob",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "execvpe",
+    "ret": "int",
+    "params": [
+      {
+        "name": "file",
+        "type": "char *"
+      },
+      {
+        "name": "argv",
+        "type": "void *"
+      },
+      {
+        "name": "envp",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "posix_spawn",
+    "ret": "int",
+    "params": [
+      {
+        "name": "pid",
+        "type": "void *"
+      },
+      {
+        "name": "path",
+        "type": "char *"
+      },
+      {
+        "name": "file_actions",
+        "type": "void *"
+      },
+      {
+        "name": "attrp",
+        "type": "void *"
+      },
+      {
+        "name": "argv",
+        "type": "void *"
+      },
+      {
+        "name": "envp",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "posix_spawnp",
+    "ret": "int",
+    "params": [
+      {
+        "name": "pid",
+        "type": "void *"
+      },
+      {
+        "name": "file",
+        "type": "char *"
+      },
+      {
+        "name": "file_actions",
+        "type": "void *"
+      },
+      {
+        "name": "attrp",
+        "type": "void *"
+      },
+      {
+        "name": "argv",
+        "type": "void *"
+      },
+      {
+        "name": "envp",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "daemon",
+    "ret": "int",
+    "params": [
+      {
+        "name": "nochdir",
+        "type": "int"
+      },
+      {
+        "name": "noclose",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getsid",
+    "ret": "int",
+    "params": [
+      {
+        "name": "pid",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "setpgid",
+    "ret": "int",
+    "params": [
+      {
+        "name": "pid",
+        "type": "int"
+      },
+      {
+        "name": "pgid",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getpgid",
+    "ret": "int",
+    "params": [
+      {
+        "name": "pid",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getpgrp",
+    "ret": "int",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "setreuid",
+    "ret": "int",
+    "params": [
+      {
+        "name": "ruid",
+        "type": "uint"
+      },
+      {
+        "name": "euid",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "setregid",
+    "ret": "int",
+    "params": [
+      {
+        "name": "rgid",
+        "type": "uint"
+      },
+      {
+        "name": "egid",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "setresuid",
+    "ret": "int",
+    "params": [
+      {
+        "name": "ruid",
+        "type": "uint"
+      },
+      {
+        "name": "euid",
+        "type": "uint"
+      },
+      {
+        "name": "suid",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "setresgid",
+    "ret": "int",
+    "params": [
+      {
+        "name": "rgid",
+        "type": "uint"
+      },
+      {
+        "name": "egid",
+        "type": "uint"
+      },
+      {
+        "name": "sgid",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getresuid",
+    "ret": "int",
+    "params": [
+      {
+        "name": "ruid",
+        "type": "void *"
+      },
+      {
+        "name": "euid",
+        "type": "void *"
+      },
+      {
+        "name": "suid",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getresgid",
+    "ret": "int",
+    "params": [
+      {
+        "name": "rgid",
+        "type": "void *"
+      },
+      {
+        "name": "egid",
+        "type": "void *"
+      },
+      {
+        "name": "sgid",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "setgroups",
+    "ret": "int",
+    "params": [
+      {
+        "name": "size",
+        "type": "size_t"
+      },
+      {
+        "name": "list",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getgroups",
+    "ret": "int",
+    "params": [
+      {
+        "name": "size",
+        "type": "int"
+      },
+      {
+        "name": "list",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "initgroups",
+    "ret": "int",
+    "params": [
+      {
+        "name": "user",
+        "type": "char *"
+      },
+      {
+        "name": "group",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "nice",
+    "ret": "int",
+    "params": [
+      {
+        "name": "inc",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sched_setscheduler",
+    "ret": "int",
+    "params": [
+      {
+        "name": "pid",
+        "type": "int"
+      },
+      {
+        "name": "policy",
+        "type": "int"
+      },
+      {
+        "name": "param",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sched_getscheduler",
+    "ret": "int",
+    "params": [
+      {
+        "name": "pid",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sched_setparam",
+    "ret": "int",
+    "params": [
+      {
+        "name": "pid",
+        "type": "int"
+      },
+      {
+        "name": "param",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sched_getparam",
+    "ret": "int",
+    "params": [
+      {
+        "name": "pid",
+        "type": "int"
+      },
+      {
+        "name": "param",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sched_get_priority_max",
+    "ret": "int",
+    "params": [
+      {
+        "name": "policy",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sched_get_priority_min",
+    "ret": "int",
+    "params": [
+      {
+        "name": "policy",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "cpu_set",
+    "ret": "void",
+    "params": [
+      {
+        "name": "cpu",
+        "type": "int"
+      },
+      {
+        "name": "set",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "waitid",
+    "ret": "int",
+    "params": [
+      {
+        "name": "idtype",
+        "type": "int"
+      },
+      {
+        "name": "id",
+        "type": "uint"
+      },
+      {
+        "name": "infop",
+        "type": "void *"
+      },
+      {
+        "name": "options",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "prlimit64",
+    "ret": "int",
+    "params": [
+      {
+        "name": "pid",
+        "type": "int"
+      },
+      {
+        "name": "resource",
+        "type": "int"
+      },
+      {
+        "name": "new_limit",
+        "type": "void *"
+      },
+      {
+        "name": "old_limit",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "epoll_pwait",
+    "ret": "int",
+    "params": [
+      {
+        "name": "epfd",
+        "type": "int"
+      },
+      {
+        "name": "events",
+        "type": "void *"
+      },
+      {
+        "name": "maxevents",
+        "type": "int"
+      },
+      {
+        "name": "timeout",
+        "type": "int"
+      },
+      {
+        "name": "sigmask",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "ppoll",
+    "ret": "int",
+    "params": [
+      {
+        "name": "fds",
+        "type": "void *"
+      },
+      {
+        "name": "nfds",
+        "type": "ulong"
+      },
+      {
+        "name": "tmo_p",
+        "type": "void *"
+      },
+      {
+        "name": "sigmask",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "recvmmsg",
+    "ret": "int",
+    "params": [
+      {
+        "name": "sockfd",
+        "type": "int"
+      },
+      {
+        "name": "msgvec",
+        "type": "void *"
+      },
+      {
+        "name": "vlen",
+        "type": "uint"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      },
+      {
+        "name": "timeout",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sendmmsg",
+    "ret": "int",
+    "params": [
+      {
+        "name": "sockfd",
+        "type": "int"
+      },
+      {
+        "name": "msgvec",
+        "type": "void *"
+      },
+      {
+        "name": "vlen",
+        "type": "uint"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "if_nametoindex",
+    "ret": "uint",
+    "params": [
+      {
+        "name": "ifname",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "if_indextoname",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "ifindex",
+        "type": "uint"
+      },
+      {
+        "name": "ifname",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getifaddrs",
+    "ret": "int",
+    "params": [
+      {
+        "name": "ifap",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "freeifaddrs",
+    "ret": "void",
+    "params": [
+      {
+        "name": "ifa",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sigwait",
+    "ret": "int",
+    "params": [
+      {
+        "name": "set",
+        "type": "void *"
+      },
+      {
+        "name": "sig",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sigwaitinfo",
+    "ret": "int",
+    "params": [
+      {
+        "name": "set",
+        "type": "void *"
+      },
+      {
+        "name": "info",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sigtimedwait",
+    "ret": "int",
+    "params": [
+      {
+        "name": "set",
+        "type": "void *"
+      },
+      {
+        "name": "info",
+        "type": "void *"
+      },
+      {
+        "name": "timeout",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sigaltstack",
+    "ret": "int",
+    "params": [
+      {
+        "name": "ss",
+        "type": "void *"
+      },
+      {
+        "name": "old_ss",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "signalfd4",
+    "ret": "int",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "mask",
+        "type": "void *"
+      },
+      {
+        "name": "sizemask",
+        "type": "size_t"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "rt_sigaction",
+    "ret": "int",
+    "params": [
+      {
+        "name": "signum",
+        "type": "int"
+      },
+      {
+        "name": "act",
+        "type": "void *"
+      },
+      {
+        "name": "oldact",
+        "type": "void *"
+      },
+      {
+        "name": "sigsetsize",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "rt_sigprocmask",
+    "ret": "int",
+    "params": [
+      {
+        "name": "how",
+        "type": "int"
+      },
+      {
+        "name": "set",
+        "type": "void *"
+      },
+      {
+        "name": "oldset",
+        "type": "void *"
+      },
+      {
+        "name": "sigsetsize",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "clock_nanosleep",
+    "ret": "int",
+    "params": [
+      {
+        "name": "clockid",
+        "type": "int"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      },
+      {
+        "name": "request",
+        "type": "void *"
+      },
+      {
+        "name": "remain",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "clock_settime",
+    "ret": "int",
+    "params": [
+      {
+        "name": "clockid",
+        "type": "int"
+      },
+      {
+        "name": "tp",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "clock_getres",
+    "ret": "int",
+    "params": [
+      {
+        "name": "clockid",
+        "type": "int"
+      },
+      {
+        "name": "res",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "timer_create",
+    "ret": "int",
+    "params": [
+      {
+        "name": "clockid",
+        "type": "int"
+      },
+      {
+        "name": "sevp",
+        "type": "void *"
+      },
+      {
+        "name": "timerid",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "timer_settime",
+    "ret": "int",
+    "params": [
+      {
+        "name": "timerid",
+        "type": "int"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      },
+      {
+        "name": "new_value",
+        "type": "void *"
+      },
+      {
+        "name": "old_value",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "timer_gettime",
+    "ret": "int",
+    "params": [
+      {
+        "name": "timerid",
+        "type": "int"
+      },
+      {
+        "name": "curr_value",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "timer_delete",
+    "ret": "int",
+    "params": [
+      {
+        "name": "timerid",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "settimeofday",
+    "ret": "int",
+    "params": [
+      {
+        "name": "tv",
+        "type": "void *"
+      },
+      {
+        "name": "tz",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "adjtimex",
+    "ret": "int",
+    "params": [
+      {
+        "name": "buf",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getpwnam",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "name",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getpwuid",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "uid",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getpwnam_r",
+    "ret": "int",
+    "params": [
+      {
+        "name": "name",
+        "type": "char *"
+      },
+      {
+        "name": "pwd",
+        "type": "void *"
+      },
+      {
+        "name": "buf",
+        "type": "char *"
+      },
+      {
+        "name": "buflen",
+        "type": "size_t"
+      },
+      {
+        "name": "result",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getpwuid_r",
+    "ret": "int",
+    "params": [
+      {
+        "name": "uid",
+        "type": "uint"
+      },
+      {
+        "name": "pwd",
+        "type": "void *"
+      },
+      {
+        "name": "buf",
+        "type": "char *"
+      },
+      {
+        "name": "buflen",
+        "type": "size_t"
+      },
+      {
+        "name": "result",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getgrnam",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "name",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getgrgid",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "gid",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "endpwent",
+    "ret": "void",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "setpwent",
+    "ret": "void",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "getpwent",
+    "ret": "void *",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "crypt",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "key",
+        "type": "char *"
+      },
+      {
+        "name": "salt",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getlogin",
+    "ret": "char *",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "getlogin_r",
+    "ret": "int",
+    "params": [
+      {
+        "name": "buf",
+        "type": "char *"
+      },
+      {
+        "name": "bufsize",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "cuserid",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "string",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "uname",
+    "ret": "int",
+    "params": [
+      {
+        "name": "buf",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sysinfo",
+    "ret": "int",
+    "params": [
+      {
+        "name": "info",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "syslog",
+    "ret": "void",
+    "params": [
+      {
+        "name": "priority",
+        "type": "int"
+      },
+      {
+        "name": "format",
+        "type": "char *"
+      }
+    ],
+    "variadic": true
+  },
+  {
+    "name": "openlog",
+    "ret": "void",
+    "params": [
+      {
+        "name": "ident",
+        "type": "char *"
+      },
+      {
+        "name": "option",
+        "type": "int"
+      },
+      {
+        "name": "facility",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "closelog",
+    "ret": "void",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "brk",
+    "ret": "int",
+    "params": [
+      {
+        "name": "addr",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "sbrk",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "increment",
+        "type": "long"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "mlockall",
+    "ret": "int",
+    "params": [
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "munlockall",
+    "ret": "int",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "posix_memalign",
+    "ret": "int",
+    "params": [
+      {
+        "name": "memptr",
+        "type": "void *"
+      },
+      {
+        "name": "alignment",
+        "type": "size_t"
+      },
+      {
+        "name": "size",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "memalign",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "alignment",
+        "type": "size_t"
+      },
+      {
+        "name": "size",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "valloc",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "size",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pvalloc",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "size",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "malloc_usable_size",
+    "ret": "size_t",
+    "params": [
+      {
+        "name": "ptr",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "setxattr",
+    "ret": "int",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      },
+      {
+        "name": "name",
+        "type": "char *"
+      },
+      {
+        "name": "value",
+        "type": "void *"
+      },
+      {
+        "name": "size",
+        "type": "size_t"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getxattr",
+    "ret": "long",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      },
+      {
+        "name": "name",
+        "type": "char *"
+      },
+      {
+        "name": "value",
+        "type": "void *"
+      },
+      {
+        "name": "size",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "listxattr",
+    "ret": "long",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      },
+      {
+        "name": "list",
+        "type": "char *"
+      },
+      {
+        "name": "size",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "removexattr",
+    "ret": "int",
+    "params": [
+      {
+        "name": "path",
+        "type": "char *"
+      },
+      {
+        "name": "name",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fsetxattr",
+    "ret": "int",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "name",
+        "type": "char *"
+      },
+      {
+        "name": "value",
+        "type": "void *"
+      },
+      {
+        "name": "size",
+        "type": "size_t"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fgetxattr",
+    "ret": "long",
+    "params": [
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "name",
+        "type": "char *"
+      },
+      {
+        "name": "value",
+        "type": "void *"
+      },
+      {
+        "name": "size",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "io_uring_queue_init",
+    "ret": "int",
+    "params": [
+      {
+        "name": "entries",
+        "type": "uint"
+      },
+      {
+        "name": "ring",
+        "type": "void *"
+      },
+      {
+        "name": "flags",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "io_uring_queue_exit",
+    "ret": "void",
+    "params": [
+      {
+        "name": "ring",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "io_uring_get_sqe",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "ring",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "io_uring_submit",
+    "ret": "int",
+    "params": [
+      {
+        "name": "ring",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "io_uring_wait_cqe",
+    "ret": "int",
+    "params": [
+      {
+        "name": "ring",
+        "type": "void *"
+      },
+      {
+        "name": "cqe_ptr",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "io_uring_cqe_seen",
+    "ret": "void",
+    "params": [
+      {
+        "name": "ring",
+        "type": "void *"
+      },
+      {
+        "name": "cqe",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "io_uring_prep_read",
+    "ret": "void",
+    "params": [
+      {
+        "name": "sqe",
+        "type": "void *"
+      },
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "buf",
+        "type": "void *"
+      },
+      {
+        "name": "nbytes",
+        "type": "uint"
+      },
+      {
+        "name": "offset",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "io_uring_prep_write",
+    "ret": "void",
+    "params": [
+      {
+        "name": "sqe",
+        "type": "void *"
+      },
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "buf",
+        "type": "void *"
+      },
+      {
+        "name": "nbytes",
+        "type": "uint"
+      },
+      {
+        "name": "offset",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "io_uring_prep_accept",
+    "ret": "void",
+    "params": [
+      {
+        "name": "sqe",
+        "type": "void *"
+      },
+      {
+        "name": "fd",
+        "type": "int"
+      },
+      {
+        "name": "addr",
+        "type": "void *"
+      },
+      {
+        "name": "addrlen",
+        "type": "void *"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "SecItemAdd",
+    "ret": "int",
+    "params": [
+      {
+        "name": "attributes",
+        "type": "void *"
+      },
+      {
+        "name": "result",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "SecItemCopyMatching",
+    "ret": "int",
+    "params": [
+      {
+        "name": "query",
+        "type": "void *"
+      },
+      {
+        "name": "result",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "SecItemUpdate",
+    "ret": "int",
+    "params": [
+      {
+        "name": "query",
+        "type": "void *"
+      },
+      {
+        "name": "attributesToUpdate",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "SecItemDelete",
+    "ret": "int",
+    "params": [
+      {
+        "name": "query",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "SecKeyCreateRandomKey",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "parameters",
+        "type": "void *"
+      },
+      {
+        "name": "error",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "SecKeyCreateSignature",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "key",
+        "type": "void *"
+      },
+      {
+        "name": "algorithm",
+        "type": "void *"
+      },
+      {
+        "name": "dataToSign",
+        "type": "void *"
+      },
+      {
+        "name": "error",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "SecCertificateCreateWithData",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "allocator",
+        "type": "void *"
+      },
+      {
+        "name": "data",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "SecTrustCreateWithCertificates",
+    "ret": "int",
+    "params": [
+      {
+        "name": "certificates",
+        "type": "void *"
+      },
+      {
+        "name": "policies",
+        "type": "void *"
+      },
+      {
+        "name": "trust",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "SecTrustEvaluateWithError",
+    "ret": "int",
+    "params": [
+      {
+        "name": "trust",
+        "type": "void *"
+      },
+      {
+        "name": "error",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "mach_task_self",
+    "ret": "uint",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "mach_host_self",
+    "ret": "uint",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "mach_thread_self",
+    "ret": "uint",
+    "params": [],
+    "variadic": false
+  },
+  {
+    "name": "task_info",
+    "ret": "int",
+    "params": [
+      {
+        "name": "target_task",
+        "type": "uint"
+      },
+      {
+        "name": "flavor",
+        "type": "int"
+      },
+      {
+        "name": "task_info_out",
+        "type": "void *"
+      },
+      {
+        "name": "task_info_outCnt",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "host_info",
+    "ret": "int",
+    "params": [
+      {
+        "name": "host",
+        "type": "uint"
+      },
+      {
+        "name": "flavor",
+        "type": "int"
+      },
+      {
+        "name": "host_info_out",
+        "type": "void *"
+      },
+      {
+        "name": "host_info_outCnt",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "vm_allocate",
+    "ret": "int",
+    "params": [
+      {
+        "name": "target_task",
+        "type": "uint"
+      },
+      {
+        "name": "address",
+        "type": "void *"
+      },
+      {
+        "name": "size",
+        "type": "ulong"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "vm_deallocate",
+    "ret": "int",
+    "params": [
+      {
+        "name": "target_task",
+        "type": "uint"
+      },
+      {
+        "name": "address",
+        "type": "ulong"
+      },
+      {
+        "name": "size",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "vm_protect",
+    "ret": "int",
+    "params": [
+      {
+        "name": "target_task",
+        "type": "uint"
+      },
+      {
+        "name": "address",
+        "type": "ulong"
+      },
+      {
+        "name": "size",
+        "type": "ulong"
+      },
+      {
+        "name": "set_maximum",
+        "type": "int"
+      },
+      {
+        "name": "new_protection",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "vm_read",
+    "ret": "int",
+    "params": [
+      {
+        "name": "target_task",
+        "type": "uint"
+      },
+      {
+        "name": "address",
+        "type": "ulong"
+      },
+      {
+        "name": "size",
+        "type": "ulong"
+      },
+      {
+        "name": "data",
+        "type": "void *"
+      },
+      {
+        "name": "dataCnt",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "vm_write",
+    "ret": "int",
+    "params": [
+      {
+        "name": "target_task",
+        "type": "uint"
+      },
+      {
+        "name": "address",
+        "type": "ulong"
+      },
+      {
+        "name": "data",
+        "type": "void *"
+      },
+      {
+        "name": "dataCnt",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "mach_port_allocate",
+    "ret": "int",
+    "params": [
+      {
+        "name": "task",
+        "type": "uint"
+      },
+      {
+        "name": "right",
+        "type": "int"
+      },
+      {
+        "name": "name",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "mach_port_deallocate",
+    "ret": "int",
+    "params": [
+      {
+        "name": "task",
+        "type": "uint"
+      },
+      {
+        "name": "name",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "mach_msg",
+    "ret": "int",
+    "params": [
+      {
+        "name": "msg",
+        "type": "void *"
+      },
+      {
+        "name": "option",
+        "type": "int"
+      },
+      {
+        "name": "send_size",
+        "type": "uint"
+      },
+      {
+        "name": "rcv_size",
+        "type": "uint"
+      },
+      {
+        "name": "rcv_name",
+        "type": "uint"
+      },
+      {
+        "name": "timeout",
+        "type": "uint"
+      },
+      {
+        "name": "notify",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "thread_create_running",
+    "ret": "int",
+    "params": [
+      {
+        "name": "parent_task",
+        "type": "uint"
+      },
+      {
+        "name": "flavor",
+        "type": "int"
+      },
+      {
+        "name": "new_state",
+        "type": "void *"
+      },
+      {
+        "name": "new_stateCnt",
+        "type": "uint"
+      },
+      {
+        "name": "child_act",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "task_for_pid",
+    "ret": "int",
+    "params": [
+      {
+        "name": "target_tport",
+        "type": "uint"
+      },
+      {
+        "name": "pid",
+        "type": "int"
+      },
+      {
+        "name": "t",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "pid_for_task",
+    "ret": "int",
+    "params": [
+      {
+        "name": "t",
+        "type": "uint"
+      },
+      {
+        "name": "pid",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "notify_post",
+    "ret": "uint",
+    "params": [
+      {
+        "name": "name",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "notify_register_dispatch",
+    "ret": "uint",
+    "params": [
+      {
+        "name": "name",
+        "type": "char *"
+      },
+      {
+        "name": "out_token",
+        "type": "void *"
+      },
+      {
+        "name": "queue",
+        "type": "void *"
+      },
+      {
+        "name": "handler",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "notify_cancel",
+    "ret": "uint",
+    "params": [
+      {
+        "name": "token",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "xpc_connection_create_mach_service",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "name",
+        "type": "char *"
+      },
+      {
+        "name": "targetq",
+        "type": "void *"
+      },
+      {
+        "name": "flags",
+        "type": "ulong"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "xpc_connection_set_event_handler",
+    "ret": "void",
+    "params": [
+      {
+        "name": "connection",
+        "type": "void *"
+      },
+      {
+        "name": "handler",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "xpc_connection_resume",
+    "ret": "void",
+    "params": [
+      {
+        "name": "connection",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "xpc_connection_send_message",
+    "ret": "void",
+    "params": [
+      {
+        "name": "connection",
+        "type": "void *"
+      },
+      {
+        "name": "message",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "xpc_dictionary_create",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "keys",
+        "type": "void *"
+      },
+      {
+        "name": "values",
+        "type": "void *"
+      },
+      {
+        "name": "count",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "xpc_dictionary_set_string",
+    "ret": "void",
+    "params": [
+      {
+        "name": "xdict",
+        "type": "void *"
+      },
+      {
+        "name": "key",
+        "type": "char *"
+      },
+      {
+        "name": "string",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "xpc_dictionary_get_string",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "xdict",
+        "type": "void *"
+      },
+      {
+        "name": "key",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "SCDynamicStoreCreate",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "allocator",
+        "type": "void *"
+      },
+      {
+        "name": "name",
+        "type": "void *"
+      },
+      {
+        "name": "callout",
+        "type": "void *"
+      },
+      {
+        "name": "context",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "SCDynamicStoreCopyValue",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "store",
+        "type": "void *"
+      },
+      {
+        "name": "key",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "SCNetworkReachabilityCreateWithName",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "allocator",
+        "type": "void *"
+      },
+      {
+        "name": "nodename",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "SCNetworkReachabilityGetFlags",
+    "ret": "int",
+    "params": [
+      {
+        "name": "target",
+        "type": "void *"
+      },
+      {
+        "name": "flags",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "LSOpenCFURLRef",
+    "ret": "int",
+    "params": [
+      {
+        "name": "inURL",
+        "type": "void *"
+      },
+      {
+        "name": "outLaunchedURL",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "NSApplicationMain",
+    "ret": "int",
+    "params": [
+      {
+        "name": "argc",
+        "type": "int"
+      },
+      {
+        "name": "argv",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "NSSearchPathForDirectoriesInDomains",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "directory",
+        "type": "ulong"
+      },
+      {
+        "name": "domainMask",
+        "type": "ulong"
+      },
+      {
+        "name": "expandTilde",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CC_MD5",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "data",
+        "type": "void *"
+      },
+      {
+        "name": "len",
+        "type": "uint"
+      },
+      {
+        "name": "md",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CC_SHA1",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "data",
+        "type": "void *"
+      },
+      {
+        "name": "len",
+        "type": "uint"
+      },
+      {
+        "name": "md",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CC_SHA256",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "data",
+        "type": "void *"
+      },
+      {
+        "name": "len",
+        "type": "uint"
+      },
+      {
+        "name": "md",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CC_SHA256_Init",
+    "ret": "int",
+    "params": [
+      {
+        "name": "c",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CC_SHA256_Update",
+    "ret": "int",
+    "params": [
+      {
+        "name": "c",
+        "type": "void *"
+      },
+      {
+        "name": "data",
+        "type": "void *"
+      },
+      {
+        "name": "len",
+        "type": "uint"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CC_SHA256_Final",
+    "ret": "int",
+    "params": [
+      {
+        "name": "md",
+        "type": "void *"
+      },
+      {
+        "name": "c",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CCCrypt",
+    "ret": "int",
+    "params": [
+      {
+        "name": "op",
+        "type": "uint"
+      },
+      {
+        "name": "alg",
+        "type": "uint"
+      },
+      {
+        "name": "options",
+        "type": "uint"
+      },
+      {
+        "name": "key",
+        "type": "void *"
+      },
+      {
+        "name": "keyLength",
+        "type": "size_t"
+      },
+      {
+        "name": "iv",
+        "type": "void *"
+      },
+      {
+        "name": "dataIn",
+        "type": "void *"
+      },
+      {
+        "name": "dataInLength",
+        "type": "size_t"
+      },
+      {
+        "name": "dataOut",
+        "type": "void *"
+      },
+      {
+        "name": "dataOutAvailable",
+        "type": "size_t"
+      },
+      {
+        "name": "dataOutMoved",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CCHmac",
+    "ret": "void",
+    "params": [
+      {
+        "name": "algorithm",
+        "type": "uint"
+      },
+      {
+        "name": "key",
+        "type": "void *"
+      },
+      {
+        "name": "keyLength",
+        "type": "size_t"
+      },
+      {
+        "name": "data",
+        "type": "void *"
+      },
+      {
+        "name": "dataLength",
+        "type": "size_t"
+      },
+      {
+        "name": "macOut",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "CCKeyDerivationPBKDF",
+    "ret": "int",
+    "params": [
+      {
+        "name": "algorithm",
+        "type": "uint"
+      },
+      {
+        "name": "password",
+        "type": "char *"
+      },
+      {
+        "name": "passwordLen",
+        "type": "size_t"
+      },
+      {
+        "name": "salt",
+        "type": "void *"
+      },
+      {
+        "name": "saltLen",
+        "type": "size_t"
+      },
+      {
+        "name": "prf",
+        "type": "uint"
+      },
+      {
+        "name": "rounds",
+        "type": "uint"
+      },
+      {
+        "name": "derivedKey",
+        "type": "void *"
+      },
+      {
+        "name": "derivedKeyLen",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "SecRandomCopyBytes",
+    "ret": "int",
+    "params": [
+      {
+        "name": "rnd",
+        "type": "void *"
+      },
+      {
+        "name": "count",
+        "type": "size_t"
+      },
+      {
+        "name": "bytes",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getopt",
+    "ret": "int",
+    "params": [
+      {
+        "name": "argc",
+        "type": "int"
+      },
+      {
+        "name": "argv",
+        "type": "void *"
+      },
+      {
+        "name": "optstring",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "getopt_long",
+    "ret": "int",
+    "params": [
+      {
+        "name": "argc",
+        "type": "int"
+      },
+      {
+        "name": "argv",
+        "type": "void *"
+      },
+      {
+        "name": "optstring",
+        "type": "char *"
+      },
+      {
+        "name": "longopts",
+        "type": "void *"
+      },
+      {
+        "name": "longindex",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "regcomp",
+    "ret": "int",
+    "params": [
+      {
+        "name": "preg",
+        "type": "void *"
+      },
+      {
+        "name": "regex",
+        "type": "char *"
+      },
+      {
+        "name": "cflags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "regexec",
+    "ret": "int",
+    "params": [
+      {
+        "name": "preg",
+        "type": "void *"
+      },
+      {
+        "name": "string",
+        "type": "char *"
+      },
+      {
+        "name": "nmatch",
+        "type": "size_t"
+      },
+      {
+        "name": "pmatch",
+        "type": "void *"
+      },
+      {
+        "name": "eflags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "regfree",
+    "ret": "void",
+    "params": [
+      {
+        "name": "preg",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fnmatch",
+    "ret": "int",
+    "params": [
+      {
+        "name": "pattern",
+        "type": "char *"
+      },
+      {
+        "name": "string",
+        "type": "char *"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "wordexp",
+    "ret": "int",
+    "params": [
+      {
+        "name": "words",
+        "type": "char *"
+      },
+      {
+        "name": "pwordexp",
+        "type": "void *"
+      },
+      {
+        "name": "flags",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "wordfree",
+    "ret": "void",
+    "params": [
+      {
+        "name": "pwordexp",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "iconv_open",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "tocode",
+        "type": "char *"
+      },
+      {
+        "name": "fromcode",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "iconv",
+    "ret": "size_t",
+    "params": [
+      {
+        "name": "cd",
+        "type": "void *"
+      },
+      {
+        "name": "inbuf",
+        "type": "void *"
+      },
+      {
+        "name": "inbytesleft",
+        "type": "void *"
+      },
+      {
+        "name": "outbuf",
+        "type": "void *"
+      },
+      {
+        "name": "outbytesleft",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "iconv_close",
+    "ret": "int",
+    "params": [
+      {
+        "name": "cd",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "nl_langinfo",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "item",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "setlocale",
+    "ret": "char *",
+    "params": [
+      {
+        "name": "category",
+        "type": "int"
+      },
+      {
+        "name": "locale",
+        "type": "char *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "mbstowcs",
+    "ret": "size_t",
+    "params": [
+      {
+        "name": "dest",
+        "type": "void *"
+      },
+      {
+        "name": "src",
+        "type": "char *"
+      },
+      {
+        "name": "n",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "wcstombs",
+    "ret": "size_t",
+    "params": [
+      {
+        "name": "dest",
+        "type": "char *"
+      },
+      {
+        "name": "src",
+        "type": "void *"
+      },
+      {
+        "name": "n",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "mbtowc",
+    "ret": "int",
+    "params": [
+      {
+        "name": "pwc",
+        "type": "void *"
+      },
+      {
+        "name": "s",
+        "type": "char *"
+      },
+      {
+        "name": "n",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "wctomb",
+    "ret": "int",
+    "params": [
+      {
+        "name": "s",
+        "type": "char *"
+      },
+      {
+        "name": "wchar",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "mblen",
+    "ret": "int",
+    "params": [
+      {
+        "name": "s",
+        "type": "char *"
+      },
+      {
+        "name": "n",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "wcscpy",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "dest",
+        "type": "void *"
+      },
+      {
+        "name": "src",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "wcslen",
+    "ret": "size_t",
+    "params": [
+      {
+        "name": "s",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "wcscmp",
+    "ret": "int",
+    "params": [
+      {
+        "name": "s1",
+        "type": "void *"
+      },
+      {
+        "name": "s2",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "wcsncpy",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "dest",
+        "type": "void *"
+      },
+      {
+        "name": "src",
+        "type": "void *"
+      },
+      {
+        "name": "n",
+        "type": "size_t"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "wcscat",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "dest",
+        "type": "void *"
+      },
+      {
+        "name": "src",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "wcschr",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "wcs",
+        "type": "void *"
+      },
+      {
+        "name": "wc",
+        "type": "int"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "wcsstr",
+    "ret": "void *",
+    "params": [
+      {
+        "name": "haystack",
+        "type": "void *"
+      },
+      {
+        "name": "needle",
+        "type": "void *"
+      }
+    ],
+    "variadic": false
+  },
+  {
+    "name": "fwide",
+    "ret": "int",
+    "params": [
+      {
+        "name": "stream",
+        "type": "FILE *"
+      },
+      {
+        "name": "mode",
+        "type": "int"
+      }
+    ],
+    "variadic": false
   }
 ]
