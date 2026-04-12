@@ -4056,24 +4056,36 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     {
         use std::collections::BTreeMap;
         // Registers that should NOT be auto-named (parameters, stack/frame, instruction pointer)
-        let skip_regs: &[&str] = &[
-            "RDI", "EDI", "RSI", "ESI", "RDX", "EDX",
-            "RCX", "ECX", "R8", "R8D", "R9", "R9D",
-            "RSP", "ESP", "RBP", "EBP", "RIP", "EIP",
-            "XMM0", "XMM1", "XMM2", "XMM3", "XMM4", "XMM5",
-        ];
+        // In x86-32, EDI/ESI/EDX/ECX are NOT parameter registers (all args on stack),
+        // so they should be auto-named. Only skip them in x86-64 SysV mode.
+        let all_text_check = lines.join("");
+        let is_32bit = !all_text_check.contains("RSP") && !all_text_check.contains("RBP");
+        let skip_regs: &[&str] = if is_32bit {
+            // x86-32 cdecl: only skip stack/frame pointers
+            &["RSP", "ESP", "RBP", "EBP", "RIP", "EIP",
+              "XMM0", "XMM1", "XMM2", "XMM3", "XMM4", "XMM5"]
+        } else {
+            // x86-64: skip parameter registers + stack/frame
+            &["RDI", "EDI", "RSI", "ESI", "RDX", "EDX",
+              "RCX", "ECX", "R8", "R8D", "R9", "R9D",
+              "RSP", "ESP", "RBP", "EBP", "RIP", "EIP",
+              "XMM0", "XMM1", "XMM2", "XMM3", "XMM4", "XMM5"]
+        };
         // Candidate registers for renaming
         let reg_candidates: &[(&str, &str)] = &[
             // (register_name, type_prefix) — 64-bit → l, 32-bit → i, 8-bit → b
             ("RAX", "l"), ("RBX", "l"), ("R12", "l"), ("R13", "l"),
             ("R14", "l"), ("R15", "l"), ("R10", "l"), ("R11", "l"),
-            ("EAX", "i"), ("EBX", "i"), ("R12D", "i"), ("R13D", "i"),
+            ("EAX", "i"), ("EBX", "i"), ("ECX", "i"), ("EDX", "i"),
+            ("ESI", "i"), ("EDI", "i"),
+            ("R12D", "i"), ("R13D", "i"),
             ("R14D", "i"), ("R15D", "i"), ("R10D", "i"), ("R11D", "i"),
             ("AL", "b"), ("BL", "b"), ("AH", "b"), ("BH", "b"),
             ("DIL", "b"), ("SIL", "b"), ("DL", "b"), ("CL", "b"),
+            ("CH", "b"), ("DH", "b"),
             ("R8B", "b"), ("R9B", "b"), ("R10B", "b"), ("R11B", "b"),
             ("R12B", "b"), ("R13B", "b"), ("R14B", "b"), ("R15B", "b"),
-            ("AX", "w"), ("BX", "w"), ("CX", "w"),
+            ("AX", "w"), ("BX", "w"), ("CX", "w"), ("DX", "w"), ("SI", "w"), ("DI", "w"),
         ];
 
         // Scan all lines for register appearances
@@ -4371,6 +4383,107 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             pos += 1;
         }
         *line = result_line;
+    }
+
+    // #GLOBALS: Replace raw hex addresses with DAT_XXXXXXXX global names.
+    // Patterns: *(0x4xxxxx), *(uint32_t*)(0x4xxxxx), *(int*)(0x4xxxxx)
+    // Only for addresses in .data/.bss range (not code or string addresses).
+    {
+        use std::collections::BTreeSet;
+        let mut global_addrs: BTreeSet<u64> = BTreeSet::new();
+        let all_text = lines.join("\n");
+
+        // Find all hex addresses used as memory dereferences
+        let mut pos = 0;
+        let bytes = all_text.as_bytes();
+        while pos + 4 < bytes.len() {
+            // Look for "(0x" pattern
+            if bytes[pos] == b'(' && pos + 3 < bytes.len()
+                && bytes[pos+1] == b'0' && bytes[pos+2] == b'x'
+            {
+                let hex_start = pos + 3;
+                let mut hex_end = hex_start;
+                while hex_end < bytes.len() && bytes[hex_end].is_ascii_hexdigit() {
+                    hex_end += 1;
+                }
+                if hex_end > hex_start && hex_end < bytes.len() && bytes[hex_end] == b')' {
+                    if let Ok(addr) = u64::from_str_radix(&all_text[hex_start..hex_end], 16) {
+                        // Only name addresses that look like data section (not code or small constants)
+                        if addr > 0x10000 && (addr & 0xFFF00000 != 0) {
+                            global_addrs.insert(addr);
+                        }
+                    }
+                }
+            }
+            pos += 1;
+        }
+
+        // Replace hex addresses with global names
+        for addr in &global_addrs {
+            let hex_str = format!("0x{:x}", addr);
+            let global_name = format!("DAT_{:08x}", addr);
+            for line in &mut lines {
+                if line.contains(&hex_str) {
+                    *line = line.replace(&hex_str, &global_name);
+                }
+            }
+        }
+    }
+
+    // #NUMERIC_BASE: Fix numeric struct bases (1[4], 10[5]) — replace with pointer deref.
+    // These occur when a constant was mistakenly used as a struct base. Replace N[M] with
+    // *(N + M) or just the field access for readability.
+    for line in &mut lines {
+        // Pattern: standalone digit(s) followed by [ — e.g., "1[4]", "10[5]"
+        // But NOT "param_0[4]" or "local_8[2]" (those are real array accesses)
+        let bytes = line.as_bytes();
+        let mut result = String::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            // Check for digit(s) followed by '['
+            if bytes[i].is_ascii_digit() {
+                let digit_start = i;
+                while i < bytes.len() && bytes[i].is_ascii_digit() { i += 1; }
+                if i < bytes.len() && bytes[i] == b'[' {
+                    // Check word boundary before — must not be preceded by alnum or _
+                    let before_ok = digit_start == 0 || {
+                        let b = bytes[digit_start - 1];
+                        !b.is_ascii_alphanumeric() && b != b'_'
+                    };
+                    if before_ok {
+                        let num_str = &line[digit_start..i];
+                        // Find matching ]
+                        let bracket_start = i;
+                        let mut depth = 1;
+                        i += 1;
+                        while i < bytes.len() && depth > 0 {
+                            if bytes[i] == b'[' { depth += 1; }
+                            if bytes[i] == b']' { depth -= 1; }
+                            i += 1;
+                        }
+                        let inner = &line[bracket_start + 1..i - 1];
+                        // Replace "N[M]" with "*(N + M)" — but for small N, likely a param deref
+                        if let Ok(base) = num_str.parse::<u64>() {
+                            if base < 256 {
+                                // Small constant base — likely a lost parameter reference
+                                result.push_str(&format!("param_{}[{}]", base, inner));
+                            } else {
+                                result.push_str(&format!("DAT_{:08x}[{}]", base, inner));
+                            }
+                        } else {
+                            result.push_str(num_str);
+                            result.push_str(&line[bracket_start..i]);
+                        }
+                        continue;
+                    }
+                }
+                result.push_str(&line[digit_start..i]);
+                continue;
+            }
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+        *line = result;
     }
 
     for line in &lines {
