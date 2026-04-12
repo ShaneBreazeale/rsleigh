@@ -7,6 +7,7 @@ pub mod structure;
 pub mod printer;
 pub mod imports;
 pub mod dwarf;
+pub mod pdb_info;
 
 use std::path::Path;
 use pcode_ir::Instruction;
@@ -127,9 +128,29 @@ pub fn decompile_with_binary(
         None
     };
 
-    // Build local variable name map from DWARF: var_N → actual_name
+    // Try PDB debug info for PE binaries when DWARF is absent
+    let (pdb_debug_info, pdb_struct_fields) = if debug_info.is_none() {
+        if let Some(path) = binary_path {
+            pdb_info::parse_pdb_from_path(path)
+        } else {
+            (std::collections::HashMap::new(), std::collections::HashMap::new())
+        }
+    } else {
+        (std::collections::HashMap::new(), std::collections::HashMap::new())
+    };
+
+    // Merge: prefer DWARF, fall back to PDB
+    let effective_debug_info = if debug_info.is_some() {
+        debug_info.clone()
+    } else if !pdb_debug_info.is_empty() {
+        Some(pdb_debug_info)
+    } else {
+        None
+    };
+
+    // Build local variable name map from debug info: var_N → actual_name
     let mut local_var_names = std::collections::HashMap::new();
-    if let Some(ref debug_info) = debug_info {
+    if let Some(ref debug_info) = effective_debug_info {
         let func_addr = instructions[0].0;
         if let Some(info) = debug_info.get(&func_addr) {
             // Apply parameter names
@@ -142,34 +163,38 @@ pub fn decompile_with_binary(
                     }
                 }
             }
-            // Build local variable name map: DWARF fbreg offset → var_N name
+            // Build local variable name map: fbreg/stack offset → var_N name
             // Try both the direct mapping and an 8-byte adjusted mapping
             // (some toolchains have a consistent 8-byte offset between DWARF and actual layout)
-            for (dwarf_offset, name) in &info.local_names {
-                if *dwarf_offset < 0 {
-                    let positive = (-dwarf_offset) as u64;
+            for (offset, name) in &info.local_names {
+                if *offset < 0 {
+                    let positive = (-offset) as u64;
                     let var_name = format!("var_{:x}", positive);
                     local_var_names.insert(var_name, name.clone());
                     // Also try with 8-byte adjustment (CFA vs RBP frame base mismatch)
                     let adjusted = positive + 8;
                     let adj_name = format!("var_{:x}", adjusted);
                     local_var_names.entry(adj_name).or_insert_with(|| name.clone());
-                } else if *dwarf_offset > 0 {
-                    let var_name = format!("var_{:x}", *dwarf_offset as u64);
+                } else if *offset > 0 {
+                    let var_name = format!("var_{:x}", *offset as u64);
                     local_var_names.insert(var_name, name.clone());
                 }
             }
         }
     }
 
-    // Parse struct field names from DWARF
-    let struct_fields = if let Some(path) = binary_path {
+    // Parse struct field names from DWARF, then PDB
+    let mut struct_fields = if let Some(path) = binary_path {
         dwarf::parse_struct_fields_from_path(path)
     } else if let Some(binary) = binary {
         dwarf::parse_struct_fields(binary)
     } else {
         std::collections::HashMap::new()
     };
+    // Merge PDB struct fields (don't overwrite DWARF fields)
+    for (offset, name) in pdb_struct_fields {
+        struct_fields.entry(offset).or_insert(name);
+    }
 
     // Resolve function name from import map or DWARF
     let func_addr = instructions[0].0;
