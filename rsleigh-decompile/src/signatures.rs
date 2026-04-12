@@ -179,29 +179,10 @@ static SIGNATURE_MAP: LazyLock<HashMap<&'static str, &'static FuncSig>> = LazyLo
     for sig in crate::signatures_win32::WIN32_SIGNATURES {
         map.insert(sig.name, sig);
     }
-    // Load embedded JSON signature database (our own Apache 2.0 data)
-    let json_str = include_str!("../data/signatures.json");
-    if let Ok(entries) = serde_json::from_str::<Vec<JsonSigEntry>>(json_str) {
-        for entry in &entries {
-            if map.contains_key(entry.name.as_str()) {
-                continue; // macro sigs take priority (hand-tuned types)
-            }
-            let params: Vec<SigParam> = entry.params.iter().map(|p| {
-                SigParam {
-                    name: leak_str(&clean_param_name(&p.name)),
-                    ty: ghidra_type_to_sigtype(&p.ty),
-                }
-            }).collect();
-            let sig = FuncSig {
-                name: leak_str(&entry.name),
-                ret: ghidra_type_to_sigtype(&entry.ret),
-                params: Box::leak(params.into_boxed_slice()),
-                variadic: entry.variadic,
-            };
-            let sig_ref: &'static FuncSig = Box::leak(Box::new(sig));
-            map.insert(sig_ref.name, sig_ref);
-        }
-    }
+    // Load embedded compressed signature database (36K+ sigs, ~320KB gzipped)
+    load_embedded_tsv(&mut map);
+    // Load curated JSON signatures (overrides TSV where present — hand-tuned types)
+    load_embedded_json(&mut map);
     map
 });
 
@@ -215,6 +196,98 @@ pub fn lookup(name: &str) -> Option<&'static FuncSig> {
         }
     }
     SIGNATURE_MAP.get(name).copied()
+}
+
+// ---------------------------------------------------------------------------
+// Embedded compressed signature database (TSV + gzip)
+// ---------------------------------------------------------------------------
+
+/// Decompress and parse the embedded signature database.
+/// Format: gzipped TSV with columns: name, ret_type_code, params (name:type,...), variadic (0/1)
+/// Type codes: v=void, i=int, u=uint, l=long, U=ulong, z=size_t, b=bool,
+///             s=char*, W=wchar_t*, p=void*, F=FILE*
+fn load_embedded_tsv(map: &mut HashMap<&'static str, &'static FuncSig>) {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+
+    let compressed = include_bytes!("../data/signatures.tsv.gz");
+    let mut decoder = GzDecoder::new(&compressed[..]);
+    let mut text = String::new();
+    if decoder.read_to_string(&mut text).is_err() {
+        return;
+    }
+
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 4 { continue; }
+
+        let name = parts[0];
+        if map.contains_key(name) { continue; } // macro sigs take priority
+
+        let ret = tsv_type_code(parts[1]);
+
+        let params: Vec<SigParam> = if parts[2].is_empty() {
+            Vec::new()
+        } else {
+            parts[2].split(',').map(|p| {
+                let mut it = p.splitn(2, ':');
+                let pname = it.next().unwrap_or("arg");
+                let ptype = tsv_type_code(it.next().unwrap_or("i"));
+                SigParam { name: leak_str(pname), ty: ptype }
+            }).collect()
+        };
+
+        let variadic = parts[3] == "1";
+
+        let sig = FuncSig {
+            name: leak_str(name),
+            ret,
+            params: Box::leak(params.into_boxed_slice()),
+            variadic,
+        };
+        let sig_ref: &'static FuncSig = Box::leak(Box::new(sig));
+        map.insert(sig_ref.name, sig_ref);
+    }
+}
+
+/// Load curated JSON signatures (supplements TSV with hand-written entries).
+fn load_embedded_json(map: &mut HashMap<&'static str, &'static FuncSig>) {
+    let json_str = include_str!("../data/signatures.json");
+    let Ok(entries) = serde_json::from_str::<Vec<JsonSigEntry>>(json_str) else { return };
+    for entry in &entries {
+        if map.contains_key(entry.name.as_str()) { continue; }
+        let params: Vec<SigParam> = entry.params.iter().map(|p| {
+            SigParam {
+                name: leak_str(&clean_param_name(&p.name)),
+                ty: ghidra_type_to_sigtype(&p.ty),
+            }
+        }).collect();
+        let sig = FuncSig {
+            name: leak_str(&entry.name),
+            ret: ghidra_type_to_sigtype(&entry.ret),
+            params: Box::leak(params.into_boxed_slice()),
+            variadic: entry.variadic,
+        };
+        let sig_ref: &'static FuncSig = Box::leak(Box::new(sig));
+        map.insert(sig_ref.name, sig_ref);
+    }
+}
+
+fn tsv_type_code(code: &str) -> SigType {
+    match code {
+        "v" => SigType::Void,
+        "i" => SigType::Int,
+        "u" => SigType::UInt,
+        "l" => SigType::Long,
+        "U" => SigType::ULong,
+        "z" => SigType::SizeT,
+        "b" => SigType::Bool,
+        "s" => SigType::CharPtr,
+        "W" => SigType::WCharPtr,
+        "p" => SigType::VoidPtr,
+        "F" => SigType::FilePtr,
+        _ => SigType::Int,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -444,8 +517,8 @@ mod tests {
 
     #[test]
     fn total_signature_count() {
-        // Should have 500+ signatures from macro + JSON combined
+        // Should have 30K+ from macro + embedded TSV
         let count = SIGNATURE_MAP.len();
-        assert!(count >= 500, "expected 500+ signatures, got {}", count);
+        assert!(count >= 30000, "expected 30000+ signatures, got {}", count);
     }
 }
