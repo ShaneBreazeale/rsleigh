@@ -18,9 +18,10 @@ cargo install --path rsleigh-cli
 rsleigh ./binary                       # list functions
 rsleigh ./binary main                  # decompile a function
 rsleigh ./binary main vuln init        # decompile multiple functions
-rsleigh ./binary --all                 # decompile everything
+rsleigh ./binary --all                 # decompile everything (two-pass type propagation)
 rsleigh ./binary main --json           # JSON output for tool integration
 rsleigh ./binary --disasm main         # disassembly with P-code
+rsleigh ./binary --sigs extra.json     # load additional signatures from JSON
 ```
 
 ```
@@ -143,7 +144,9 @@ Tested against 30+ CTF binaries from CSAW, HSCTF, DiceCTF, Google CTF, hkcert, C
 | MIPS32 | 900+ | FPU, DSP, MIPS16, microMIPS |
 | RISC-V 64 | 500+ | RV64GC + F/D/B/K/P/Q/V/C |
 
-**Binary formats:** ELF (32/64), Mach-O (x86-64, AArch64), PE (32/64) — auto-detected from headers. Function discovery from symbols, exports, and CALL-target scanning for stripped binaries. Fallback manual PE parser handles malformed binaries with anti-analysis tricks (Stuxnet, packed malware).
+**Binary formats:** ELF (32/64), Mach-O (x86-64, AArch64), PE (32/64) — auto-detected from headers. Function discovery from symbols, exports, CALL-target scanning, and prologue pattern matching for stripped binaries. Fallback manual PE parser handles malformed binaries with anti-analysis tricks (Stuxnet, packed malware).
+
+**38K+ function signatures** auto-loaded — C stdlib, POSIX, Linux (syscall, ptrace, epoll, io_uring), macOS (GCD, ObjC runtime, CoreFoundation, IOKit, Mach, Security, CommonCrypto), Android, Win32/64 (with fine-grained typedefs: HKEY, HWND, REGSAM, LSTATUS), OpenSSL, zlib. Signatures propagate parameter names (`/* param_name */` at call sites) and Win32 typedef types through interprocedural two-pass analysis.
 
 ## How it works
 
@@ -159,9 +162,9 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 
 1. **CFG** — P-code to basic blocks, branch resolution, IAT call target resolution, x86-32 CALL/RET boilerplate stripping
 2. **SSA** — Iterative dataflow with phi insertion (multi-pass convergence for loop-carried variables)
-3. **Fold** — Expression folding, dead code elimination, condition recovery, type inference (signed/float/pointer/bool), calling convention detection (SysV/Win64/cdecl), division-by-constant recognition, modulo pattern matching
+3. **Fold** — Expression folding, dead code elimination, condition recovery, type inference (signed/float/pointer/bool), calling convention detection (SysV/Win64/cdecl), division-by-constant, modulo, signature-based type propagation (38K+ sigs), interprocedural typedef propagation (two-pass), backward Load propagation
 4. **Structure** — If/else, while/for loop recovery, switch/case from jump tables, depth-limited recursion (max 256)
-5. **Printer** — Function signatures with typed params, local variable declarations, Ghidra-style auto-naming (iVar/lVar), C++ demangling, import resolution (PLT/GOT/IAT), errno recognition, string literal detection, ELF32 PIE GOT-relative resolution, stack noise elimination
+5. **Printer** — Function signatures with typed params and Win32 typedefs (HKEY, HWND, DWORD), `/* param_name */` annotations at call sites, Ghidra-style local declarations with array sizing (`WCHAR local_8[262]`), auto-naming (iVar/lVar), C++ demangling, import resolution (PLT/GOT/IAT + thunk + CRT wrapper), string literal detection, ELF32 PIE, stack noise elimination
 
 ## Rust API
 
@@ -197,8 +200,9 @@ rsleigh/
   src/                    SLEIGH parser + Rust codegen library
   pcode-ir/               PcodeOp/Varnode types + peephole optimizer (no_std)
   rsleigh-api/            Decoder API — bytes to instructions + P-code
-  rsleigh-decompile/      Decompiler — P-code to C pseudocode
-  rsleigh-cli/            CLI binary
+  rsleigh-decompile/      Decompiler — P-code to C pseudocode + 38K signature DB
+  rsleigh-cli/            CLI binary (two-pass interprocedural decompilation)
+  scripts/                Ghidra signature extraction script
   rsleigh-generate/       Slaspec parser, generates Rust crate source
   generated/              Output crates (regenerated from slaspecs)
   test-harness/           Golden tests, corpus, fuzz, decompiler validation
@@ -235,9 +239,8 @@ The decompiler is hardened for untrusted input:
 - Loop conditions not always recovered to source-level comparisons
 - x86-32 sequential TEST/JNZ patterns sometimes nest incorrectly
 - Register-indirect calls (`CALL EDI` loaded from IAT) not resolved to import names
-- Stack frame reconstruction — buffer sizes not inferred from access patterns
 - Packed malware — only stub functions visible (Emotet); need unpacking first
-- Windows API type annotations — `HANDLE`, `HMODULE` not shown (uses `long`/`int`)
+- Struct field typing — field offsets shown but not typed as struct members
 
 ## License
 

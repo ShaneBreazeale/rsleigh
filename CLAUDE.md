@@ -56,14 +56,29 @@ rsleigh/
 │   └── semantic/               ← SLEIGH semantic analysis (forked sleigh-rs)
 ├── pcode-ir/                   ← P-code types + peephole optimizer (no_std, zero deps)
 ├── rsleigh-api/                ← High-level Decoder API + register name resolution
+│   ├── lib.rs                  ← public API (re-exported)
+│   └── src/
 ├── rsleigh-decompile/          ← 5-pass decompiler (CFG → SSA → fold → structure → print)
-│   ├── cfg.rs                  ← P-code to basic blocks + control flow graph
-│   ├── ssa.rs                  ← SSA construction with Phi insertion
-│   ├── fold.rs                 ← expression folding, dead code, condition recovery
-│   ├── structure.rs            ← if/else, while loop recovery from dominators
-│   ├── printer.rs              ← C printer with RegTracker for copy elision
-│   ├── imports.rs              ← PLT/GOT/stub → import name resolution
-│   └── dwarf.rs               ← DWARF debug info parsing (gimli) + macOS dSYM
+│   ├── data/
+│   │   ├── signatures.json     ← 889 curated function signatures (Apache 2.0)
+│   │   └── signatures.tsv.gz   ← 36K+ bulk signatures (gzipped, auto-loaded)
+│   └── src/
+│       ├── cfg.rs              ← P-code to basic blocks + control flow graph
+│       ├── dominators.rs       ← dominator tree computation
+│       ├── dwarf.rs            ← DWARF debug info parsing (gimli) + macOS dSYM
+│       ├── fold.rs             ← expression folding, dead code, condition recovery
+│       ├── imports.rs          ← PLT/GOT/stub → import name resolution
+│       ├── ir.rs               ← decompiler IR types (VarDef with display_type)
+│       ├── pdb_info.rs         ← PDB debug info parsing for PE binaries
+│       ├── printer.rs          ← C printer with RegTracker for copy elision
+│       ├── signatures.rs       ← signature DB: lookup, runtime JSON, embedded TSV
+│       ├── signatures_libc.rs  ← 176 hand-tuned libc/POSIX signatures
+│       ├── signatures_win32.rs ← 128 hand-tuned Win32 signatures (HKEY, HWND, etc.)
+│       ├── ssa.rs              ← SSA construction with Phi insertion
+│       └── structure.rs        ← if/else, while loop recovery from dominators
+├── rsleigh-cli/                ← CLI: decompile any binary to C pseudocode
+├── scripts/
+│   └── extract-ghidra-sigs.py  ← extract signatures from Ghidra .gdt archives
 ├── rsleigh-generate/           ← CLI: parse slaspecs, write generated crate source
 ├── generated/                  ← Output crates (gitignored /out/ dirs)
 │   ├── x86-{shared,subtables,instr-00..07,root}/       (64-bit)
@@ -83,6 +98,8 @@ make test                           # generate + build + test (recommended)
 cargo run -p rsleigh-generate       # parse slaspecs (~30s)
 cargo test -p test-harness          # compile + run all tests
 ```
+
+**Requirements:** Rust 2021 edition (stable), `make` for the recommended workflow.
 
 ---
 
@@ -129,73 +146,46 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - x86-32 RET boilerplate stripping: removes stack pop from P-code ops
 
 **Fold passes (fold.rs):**
-- Algebraic simplification (x & x → x, x ^ x → 0)
-- Single-use temp inlining
-- Multi-level register copy propagation
-- Dead flag elimination (x86 CF/ZF/SF/OF, ARM64 NG/ZR/CY/OV)
-- Condition recovery: compound Jcc patterns → comparisons
-  (BoolAnd(BoolNot(ZF), IntEq(OF,SF)) → JG → `a > b`)
-- Call return value propagation
-- Parameter naming from ABI registers (SysV or Windows x64, auto-detected)
+- Standard optimizations: algebraic simplification, single-use temp inlining, copy propagation, dead flag elimination (x86 CF/ZF/SF/OF, ARM64 NG/ZR/CY/OV)
+- Condition recovery: compound Jcc flag patterns → comparisons
+  (e.g., BoolAnd(BoolNot(ZF), IntEq(OF,SF)) → `a > b`)
 - Call argument collection (runs BEFORE fold to prevent DCE of arg registers):
-  - x86-64 SysV: RDI/RSI/RDX/RCX/R8/R9
-  - Windows x64: RCX/RDX/R8/R9 (auto-detected from PE format)
-  - x86-32 cdecl/thiscall: stack-pushed arguments
-  - Result: `GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlInitUnicodeString")`
-- Division-by-constant recognition (multiply+shift → `x / 7`, SAR+ADD → `x / 7`)
-- Modulo pattern matching (`x - (x/D)*D` → `x % D`)
-- Loop body preservation (register writes in back-edge blocks protected from DCE)
-- **Type inference** (3-phase: seed → forward → backward propagation):
-  - Float: FloatAdd/FloatMult/Int2Float → `float`/`double`
-  - Signed: SDiv/SLess/Sext/Neg → `int`/`int64_t`
-  - Unsigned: Div/Less/Zext → `uint32_t`/`uint64_t`
-  - Pointer: Load/Store addresses → pointer type
-  - Bool: comparisons, flag registers → boolean context
+  x86-64 SysV, Windows x64 (auto-detected from PE), x86-32 cdecl/thiscall (stack-pushed)
+- Division-by-constant (multiply+shift → `x / 7`) and modulo (`x - (x/D)*D` → `x % D`)
+- Loop body preservation: register writes in back-edge blocks protected from DCE
+- **Type inference** (3-phase: seed → forward → backward): float, signed, unsigned, pointer, bool propagation from P-code op semantics
+- **Signature-based type propagation:** 38K+ function signatures auto-loaded; param types
+  and return types propagate through call chains with `display_type` typedef system
+- **Interprocedural types (two-pass):** first pass learns internal function types from
+  API call arguments, second pass applies them (HKEY, REGSAM, DWORD propagate across calls)
+- **Backward Load propagation:** `Load(param)` with typed result → param gets the type
 
 **Printer (printer.rs):**
-- Function signatures: `int func_name(long param_0, int param_1)` with typed return
-- Local variable declarations: `long lVar1; int iVar2;` Ghidra-style block
-- Auto-named registers: `R14` → `lVar1`, `R12D` → `iVar2`, `DIL` → `bVar1`
-- Array indexing: `->field10` → `[2]` for aligned offsets
-- C++ demangling: `_ZN5phttp10InitializeEv` → `phttp::Initialize` (ELF + Mach-O)
-- Errno recognition: `__error(); *(uint32_t*)(RAX) = 22` → `errno = 22 /* EINVAL */`
-- POSIX errno annotations: `== 4 /* EINTR */`, `!= 35 /* EAGAIN */`
-- RegTracker: per-block register value tracking at print time
+- Ghidra-style output: typed signatures, local var declarations, auto-named registers
+- RegTracker: per-block register value tracking enables copy elision at print time
 - Call return inlining: `printf("...", add(3, 4))` not `add(); printf("...", add())`
-- Stack alias resolution: var_c → var_8 → param_0 chain
-- Save/restore elision: register spills across calls hidden
-- Import name resolution: ELF PLT/GOT (CET bnd jmp), Mach-O indirect, PE IAT (UPX-unpacked)
-- Manual PE import fallback: handles malformed binaries with corrupted import directories (Stuxnet)
-- x86-32 cdecl argument tracking: stack-pushed args resolved from ESP-relative stores
-- ELF32 PIE: GOT-relative string resolution, __x86.get_pc_thunk hiding
-- DWARF debug info: parameter names from `.debug_info` (DWARF4/5, macOS dSYM auto-discovery)
-- String literal detection from read-only binary sections (filters .data, magic constants)
-- For-loop recovery: `while` + increment → `for (; cond; i++)`
-- Switch/case: jump table → `switch (d) { case 0: return "Sunday"; }`
-- Division-by-constant display: `x * 0x55555556 >> 32` → `x / 3`
-- Modulo display: `x/D * D; x - result` → `x % D`
-- Consecutive printf/puts merging into single call
-- Dead store before return removal
-- Unreachable return after complete if/else removal
-- Constant-vs-constant comparison folding
-- x86-32 ESP / x86-64 RSP stack noise elimination
-- Duplicate ESP/RSP store dedup (cdecl arg push noise)
-- MSVC RTTI vtable resolution: vtable → COL → TypeDescriptor → class name
-- Wide string support (UTF-16LE): `L"ntdll.dll"`, `L"Software\\Sysinternals"`
-- Global variable naming: repeated addresses → `DAT_14008b128`
-- Phi artifact cleanup: `return phi(0, 0)` → `return 0`
-- Increment shorthand: `len = len + 1` → `len++`
-- Else-if chain collapse: nested `} else { if (` → flat `} else if (`
-- Void return removal: trailing `return;` in void functions
-- Putchar ASCII: `putchar(10)` → `putchar('\n')`
-- Pointer deref simplification: `*(uint64_t*)(param_0)` → `*param_0`
-- **Malware analysis annotations:**
-  - Win32 constants: STILL_ACTIVE, PAGE_EXECUTE_READWRITE, MEM_COMMIT, HKEY_LOCAL_MACHINE, etc.
-  - Suspicious API flagging (24 APIs): VirtualAlloc, WriteProcessMemory, CreateRemoteThread,
-    GetProcAddress, IsDebuggerPresent, RegSetValue, URLDownloadToFile, etc.
-  - Stack cookie detection: `lVar ^ RSP` → `// stack cookie`
-  - Dynamic resolve pattern: GetProcAddress + indirect call → `// call resolved API`
-- Duplicate ESP/RSP store dedup (cdecl arg push noise)
+- Stack alias resolution: var_c → var_8 → param_0 chain; save/restore elision hides spills
+- Import resolution: ELF PLT/GOT (CET bnd jmp), Mach-O indirect, PE IAT (UPX-unpacked)
+- Manual PE import fallback: handles malformed binaries with corrupted import dirs (Stuxnet)
+- ELF32 PIE: GOT-relative string resolution, `__x86.get_pc_thunk` hiding
+- String literals: read-only section detection (filters .data, magic constants),
+  wide strings (UTF-16LE: `L"ntdll.dll"`), C++ demangling (ELF + Mach-O)
+- DWARF debug info: param names from `.debug_info` (DWARF4/5, macOS dSYM auto-discovery)
+- PDB debug info: function names and types from PE `.pdb` files
+- **Function signature database** (38K+ signatures, auto-loaded):
+  - `/* param_name */` annotations at call sites: `fread(/*ptr*/ buf, /*size*/ 1, /*nmemb*/ 64, /*stream*/ file)`
+  - Win32 typedef display: HANDLE, HKEY, HWND, DWORD, REGSAM, LSTATUS, LRESULT, WPARAM, LPARAM
+  - 889 curated JSON + 304 macro + 36K embedded TSV — covers libc, POSIX, Linux, macOS, Win32, Android, OpenSSL
+  - Interprocedural propagation: internal function params typed from API call context
+- Ghidra-style local declarations: `WCHAR local_8[262]; int local_c;` with array sizing from offset gaps
+- PE import thunk resolution: `JMP [IAT_addr]` stubs → import names
+- MSVC CRT wrapper recognition: `__acrt_iob_func + __stdio_common_vfprintf` → `printf`
+- Control flow recovery: for-loops, switch/case (jump tables), else-if chain collapse
+- Simplifications: dead stores, unreachable returns, phi artifact cleanup, increment shorthand,
+  constant folding, ESP/RSP stack noise elimination, pointer deref simplification
+- MSVC RTTI: vtable → COL → TypeDescriptor → class name resolution
+- **Malware analysis:** Win32 constant annotation, suspicious API flagging (24 APIs),
+  stack cookie detection, dynamic resolve pattern recognition
 
 ### Peephole Optimizer (`pcode-ir/src/lib.rs`)
 
@@ -214,9 +204,9 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - **ExprNew / ExprCPool** returns 0 (JVM/WASM only)
 - **Expression completeness** — some register values not traced back to their defining
   expression (e.g., `iVar1 * factorial(n-1)` instead of `n * factorial(n-1)`)
-- **Type inference** — basic signed/float/pointer/bool propagation; no constraint-based
-  inference, no struct/array recovery, no interprocedural types
-- **Stack frame reconstruction** — buffer sizes not inferred from access patterns
+- **Type inference** — basic signed/float/pointer/bool + Win32 typedef propagation;
+  no constraint-based inference, no full struct recovery
+- **Stack frame reconstruction** — buffer sizes inferred from offset gaps; no field-level typing
 - **Loop conditions** — `while (OF == SF)` not always recovered to source comparison
 - **x86-32 control flow** — sequential TEST/JNZ patterns sometimes nest incorrectly
 - **Register-indirect calls** — `CALL EDI` where EDI was loaded from IAT earlier
@@ -228,7 +218,7 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 
 Wired into Spectra via `rsleigh-api` + `rsleigh-decompile`:
 - Settings > Analysis: toggle between "Native (rsleigh)" and "Ghidra"
-- Function discovery: symbol tables + recursive descent from CALL targets
+- Function discovery: symbol tables + recursive descent from CALL targets + prologue scanning
 - ASM view: native disassembly via `get_disasm`
 - P-code view: structured ops via `get_pcode`
 - Code view: decompiled pseudocode with syntax highlighting
