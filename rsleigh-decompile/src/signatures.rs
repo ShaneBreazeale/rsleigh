@@ -35,6 +35,35 @@ pub enum SigType {
     Handle,
     DWord,
     LpVoid,
+    // Fine-grained Win32 handle/typedef types
+    HKey,       // HKEY — registry key handle
+    HModule,    // HMODULE — module handle
+    Hwnd,       // HWND — window handle
+    HIcon,      // HICON — icon handle
+    HBrush,     // HBRUSH — brush handle
+    HDc,        // HDC — device context handle
+    HBitmap,    // HBITMAP — bitmap handle
+    HFont,      // HFONT — font handle
+    HMenu,      // HMENU — menu handle
+    HInstance,  // HINSTANCE — instance handle (= HMODULE)
+    LResult,    // LRESULT — long return value
+    WParam,     // WPARAM — message parameter (uint_ptr)
+    LParam,     // LPARAM — message parameter (long_ptr)
+    Atom,       // ATOM — atom handle (ushort)
+    LpCStr,     // LPCSTR = const char * (Win32 alias)
+    LpCWStr,    // LPCWSTR = const wchar_t * (Win32 alias)
+    LpStr,      // LPSTR = char * (Win32 alias)
+    LpWStr,     // LPWSTR = wchar_t * (Win32 alias)
+    LpByte,     // LPBYTE = unsigned char * (Win32 alias)
+    LpDWord,    // LPDWORD = unsigned long * (Win32 alias)
+    PhKey,      // PHKEY = HKEY * (pointer to registry key)
+    RegSam,     // REGSAM = unsigned long (registry access mask)
+    LStatus,    // LSTATUS = long (registry return status)
+    ScHandle,   // SC_HANDLE — service control handle
+    Ntstatus,   // NTSTATUS = long (NT status code)
+    HResult,    // HRESULT = long (COM return code)
+    Word,       // WORD = unsigned short
+    Byte,       // BYTE = unsigned char
 }
 
 impl SigType {
@@ -47,19 +76,42 @@ impl SigType {
             SigType::Long => "long",
             SigType::ULong => "unsigned long",
             SigType::SizeT => "size_t",
-            SigType::CharPtr => "char *",
-            SigType::ConstCharPtr => "const char *",
-            SigType::VoidPtr => "void *",
+            SigType::CharPtr | SigType::LpStr => "char *",
+            SigType::ConstCharPtr | SigType::LpCStr => "const char *",
+            SigType::VoidPtr | SigType::LpVoid => "void *",
             SigType::ConstVoidPtr => "const void *",
             SigType::FilePtr => "FILE *",
             SigType::Bool => "bool",
             SigType::Fd => "int",
             SigType::SockFd => "int",
-            SigType::WCharPtr => "wchar_t *",
-            SigType::ConstWCharPtr => "const wchar_t *",
+            SigType::WCharPtr | SigType::LpWStr => "wchar_t *",
+            SigType::ConstWCharPtr | SigType::LpCWStr => "const wchar_t *",
+            SigType::LpByte => "LPBYTE",
+            SigType::LpDWord => "LPDWORD",
             SigType::Handle => "HANDLE",
             SigType::DWord => "DWORD",
-            SigType::LpVoid => "LPVOID",
+            SigType::Word => "WORD",
+            SigType::Byte => "BYTE",
+            SigType::HKey => "HKEY",
+            SigType::HModule => "HMODULE",
+            SigType::Hwnd => "HWND",
+            SigType::HIcon => "HICON",
+            SigType::HBrush => "HBRUSH",
+            SigType::HDc => "HDC",
+            SigType::HBitmap => "HBITMAP",
+            SigType::HFont => "HFONT",
+            SigType::HMenu => "HMENU",
+            SigType::HInstance => "HINSTANCE",
+            SigType::LResult => "LRESULT",
+            SigType::WParam => "WPARAM",
+            SigType::LParam => "LPARAM",
+            SigType::Atom => "ATOM",
+            SigType::PhKey => "PHKEY",
+            SigType::RegSam => "REGSAM",
+            SigType::LStatus => "LSTATUS",
+            SigType::ScHandle => "SC_HANDLE",
+            SigType::Ntstatus => "NTSTATUS",
+            SigType::HResult => "HRESULT",
         }
     }
 
@@ -68,18 +120,25 @@ impl SigType {
         match self {
             SigType::Void => InferredType::Unknown,
             SigType::Bool => InferredType::Bool,
-            SigType::Int | SigType::Long | SigType::Fd | SigType::SockFd => InferredType::Signed,
-            SigType::UInt | SigType::ULong | SigType::SizeT | SigType::DWord | SigType::Handle => {
-                InferredType::Unsigned
-            }
-            SigType::CharPtr
-            | SigType::ConstCharPtr
-            | SigType::VoidPtr
-            | SigType::ConstVoidPtr
-            | SigType::FilePtr
-            | SigType::WCharPtr
-            | SigType::ConstWCharPtr
-            | SigType::LpVoid => InferredType::Pointer,
+            // Signed integers
+            SigType::Int | SigType::Long | SigType::Fd | SigType::SockFd
+            | SigType::LStatus | SigType::Ntstatus | SigType::HResult
+            | SigType::LResult | SigType::LParam => InferredType::Signed,
+            // Unsigned integers
+            SigType::UInt | SigType::ULong | SigType::SizeT | SigType::DWord
+            | SigType::Word | SigType::Byte | SigType::RegSam | SigType::Atom
+            | SigType::WParam => InferredType::Unsigned,
+            // Handles (pointer-sized but semantically unsigned)
+            SigType::Handle | SigType::HKey | SigType::HModule | SigType::Hwnd
+            | SigType::HIcon | SigType::HBrush | SigType::HDc | SigType::HBitmap
+            | SigType::HFont | SigType::HMenu | SigType::HInstance
+            | SigType::ScHandle => InferredType::Pointer,
+            // Pointers
+            SigType::CharPtr | SigType::ConstCharPtr | SigType::VoidPtr
+            | SigType::ConstVoidPtr | SigType::FilePtr | SigType::WCharPtr
+            | SigType::ConstWCharPtr | SigType::LpVoid | SigType::LpStr
+            | SigType::LpCStr | SigType::LpWStr | SigType::LpCWStr
+            | SigType::LpByte | SigType::LpDWord | SigType::PhKey => InferredType::Pointer,
         }
     }
 }
@@ -372,7 +431,27 @@ fn c_str_to_sigtype(s: &str) -> SigType {
         "const wchar_t *" => SigType::ConstWCharPtr,
         "HANDLE" => SigType::Handle,
         "DWORD" => SigType::DWord,
+        "WORD" => SigType::Word,
+        "BYTE" => SigType::Byte,
         "LPVOID" => SigType::LpVoid,
+        "LPBYTE" => SigType::LpByte,
+        "LPDWORD" => SigType::LpDWord,
+        "HKEY" => SigType::HKey,
+        "HMODULE" => SigType::HModule,
+        "HWND" => SigType::Hwnd,
+        "HICON" => SigType::HIcon,
+        "HDC" => SigType::HDc,
+        "HMENU" => SigType::HMenu,
+        "HINSTANCE" => SigType::HInstance,
+        "LRESULT" => SigType::LResult,
+        "WPARAM" => SigType::WParam,
+        "LPARAM" => SigType::LParam,
+        "PHKEY" => SigType::PhKey,
+        "REGSAM" => SigType::RegSam,
+        "LSTATUS" => SigType::LStatus,
+        "SC_HANDLE" => SigType::ScHandle,
+        "NTSTATUS" => SigType::Ntstatus,
+        "HRESULT" => SigType::HResult,
         _ => SigType::Int,
     }
 }
