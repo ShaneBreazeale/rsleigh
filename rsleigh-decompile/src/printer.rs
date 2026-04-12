@@ -4249,16 +4249,55 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 decl_lines.push(format!("    {} {};", type_str, name));
             }
 
-            // Stack local variables — infer type from usage context
-            for vname in &stack_vars {
-                // Parse hex offset from var_XX to guess size
-                let offset_str = vname.strip_prefix("var_").unwrap_or("0");
-                let offset = u64::from_str_radix(offset_str, 16).unwrap_or(0);
-                // Heuristic: large offsets (> 0x100) are likely buffers
-                let type_str = if offset > 0x100 { "char" }
-                    else { "int" };
-                // Ghidra-style: var_XX → local_XX
-                decl_lines.push(format!("    {} local_{};", type_str, offset_str));
+            // Stack local variables — compute sizes from offset gaps and declare arrays.
+            // Sort offsets ascending. For x86-32 EBP frames, locals are at negative
+            // offsets: local_4 = EBP-4 (highest addr), local_22c = EBP-0x22c (lowest).
+            // Size of each local = gap to next higher offset (or 4 for the topmost).
+            let mut offsets: Vec<(u64, &str)> = stack_vars.iter().filter_map(|vname| {
+                let off_str = vname.strip_prefix("var_")?;
+                let off = u64::from_str_radix(off_str, 16).ok()?;
+                Some((off, off_str))
+            }).collect();
+            offsets.sort_by_key(|(off, _)| *off);
+
+            // Detect wide string usage: check if any W-suffix Win32 call references
+            // a local buffer (heuristic for WCHAR vs char arrays)
+            let uses_wide = all_text.contains("lstrcatW") || all_text.contains("lstrlenW")
+                || all_text.contains("lstrcpyW") || all_text.contains("wsprintfW")
+                || all_text.contains("RegEnumKeyW") || all_text.contains("RegEnumValueW")
+                || all_text.contains("GetModuleFileNameW") || all_text.contains("FindFirstFileW")
+                || all_text.contains("CreateDirectoryW") || all_text.contains("GetTempPathW")
+                || all_text.contains("SearchPathW");
+
+            for i in 0..offsets.len() {
+                let (off, off_str) = offsets[i];
+                // Size = gap to next offset above, or 4 for the topmost local
+                let size = if i + 1 < offsets.len() {
+                    offsets[i + 1].0 - off
+                } else {
+                    4 // topmost local, assume 4 bytes
+                };
+
+                if size > 8 {
+                    // Buffer — declare as array
+                    // Choose element type: WCHAR (2 bytes) if wide string context, else char
+                    let (elem_type, elem_size) = if uses_wide && size % 2 == 0 && size >= 16 {
+                        ("WCHAR", 2u64)
+                    } else {
+                        ("char", 1u64)
+                    };
+                    let count = size / elem_size;
+                    decl_lines.push(format!("    {} local_{}[{}];", elem_type, off_str, count));
+                } else {
+                    // Scalar — use size to pick type
+                    let type_str = match size {
+                        1 => "byte",
+                        2 => "short",
+                        8 => "long",
+                        _ => "int", // 4 bytes default
+                    };
+                    decl_lines.push(format!("    {} local_{};", type_str, off_str));
+                }
             }
 
             // Find the first line ending with '{' and insert after it
