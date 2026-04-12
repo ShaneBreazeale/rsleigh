@@ -324,7 +324,7 @@ fn collect_expr_refs(expr: &Expr) -> Vec<VarId> {
     match expr {
         Expr::Var(id) => vec![*id],
         Expr::BinOp(_, l, r) => vec![*l, *r],
-        Expr::UnaryOp(_, i) | Expr::Load(i) => vec![*i],
+        Expr::UnaryOp(_, i) | Expr::Load(i) | Expr::FieldAccess(i, _) => vec![*i],
         Expr::Phi(inputs) => inputs.clone(),
         Expr::Const(_, _) | Expr::Unknown => vec![],
     }

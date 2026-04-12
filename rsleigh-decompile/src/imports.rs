@@ -1,5 +1,38 @@
 use std::collections::HashMap;
 
+/// Resolve a DLL ordinal import to a function name, using known ordinal tables.
+fn resolve_ordinal(dll_name: &str, ordinal: u16) -> String {
+    let dll_lower = dll_name.to_ascii_lowercase();
+    let dll_base = dll_lower.trim_end_matches(".dll");
+
+    let name = match dll_base {
+        "ws2_32" | "wsock32" => match ordinal {
+            1 => "accept", 2 => "bind", 3 => "closesocket", 4 => "connect",
+            5 => "getpeername", 6 => "getsockname", 7 => "getsockopt", 8 => "htonl",
+            9 => "htons", 10 => "ioctlsocket", 11 => "inet_addr", 12 => "inet_ntoa",
+            13 => "listen", 14 => "ntohl", 15 => "ntohs", 16 => "recv",
+            17 => "recvfrom", 18 => "select", 19 => "send", 20 => "sendto",
+            21 => "setsockopt", 22 => "shutdown", 23 => "socket",
+            51 => "gethostbyaddr", 52 => "gethostbyname", 53 => "getprotobyname",
+            54 => "getprotobynumber", 55 => "getservbyname", 56 => "getservbyport",
+            57 => "gethostname",
+            111 => "WSAGetLastError", 112 => "WSASetLastError",
+            115 => "WSAStartup", 116 => "WSACleanup",
+            151 => "WSAFDIsSet",
+            500 => "WSARecv", 501 => "WSASend",
+            _ => return format!("{}!ordinal_{}", dll_name, ordinal),
+        },
+        "oleaut32" => match ordinal {
+            2 => "SysAllocString", 4 => "SysAllocStringLen",
+            6 => "SysFreeString", 7 => "SysStringLen",
+            8 => "VariantInit", 9 => "VariantClear",
+            _ => return format!("{}!ordinal_{}", dll_name, ordinal),
+        },
+        _ => return format!("{}!ordinal_{}", dll_name, ordinal),
+    };
+    name.to_string()
+}
+
 /// Demangle a C++ symbol name if applicable, returning a simplified form.
 fn demangle_name(name: &str) -> String {
     // Strip @@ version suffix first
@@ -508,7 +541,8 @@ fn resolve_pe(pe: &goblin::pe::PE, binary: &[u8], map: &mut HashMap<u64, String>
                             map.insert(iat_addr, hint_entry.name.to_string());
                         }
                         goblin::pe::import::SyntheticImportLookupTableEntry::OrdinalNumber(ord) => {
-                            map.insert(iat_addr, format!("{}!ordinal_{}", entry.name, ord));
+                            let name = resolve_ordinal(entry.name, *ord);
+                            map.insert(iat_addr, name);
                         }
                     }
                 }
@@ -529,7 +563,8 @@ fn resolve_pe(pe: &goblin::pe::PE, binary: &[u8], map: &mut HashMap<u64, String>
 
                     let iat_addr = base + iat_rva + (i as u64) * ptr_size as u64;
                     if raw_entry & ordinal_flag != 0 {
-                        map.insert(iat_addr, format!("{}!ordinal_{}", entry.name, raw_entry & 0xffff));
+                        let name = resolve_ordinal(entry.name, (raw_entry & 0xffff) as u16);
+                        map.insert(iat_addr, name);
                     } else if let Some(name) = read_hint_name(raw_entry) {
                         map.insert(iat_addr, name);
                     }
@@ -612,6 +647,12 @@ fn resolve_pe_manual(binary: &[u8], map: &mut HashMap<u64, String>) {
         let Some(name_off) = rva_to_off(name_rva) else { continue; };
         if name_off >= binary.len() { continue; }
 
+        // Read DLL name
+        let dll_name_str = {
+            let end = binary[name_off..].iter().position(|&b| b == 0).unwrap_or(0);
+            std::str::from_utf8(&binary[name_off..name_off + end]).unwrap_or("unknown")
+        };
+
         // Read import entries from ILT or IAT
         let source_rva = if ilt_rva != 0 { ilt_rva } else { iat_rva };
         let Some(source_off) = rva_to_off(source_rva) else { continue; };
@@ -629,7 +670,8 @@ fn resolve_pe_manual(binary: &[u8], map: &mut HashMap<u64, String>) {
 
             let iat_addr = image_base + iat_rva + (j as u64) * ptr_size as u64;
             if raw_entry & ordinal_flag != 0 {
-                // Ordinal import — skip (no name)
+                let name = resolve_ordinal(dll_name_str, (raw_entry & 0xffff) as u16);
+                map.insert(iat_addr, name);
             } else if let Some(hint_off) = rva_to_off(raw_entry) {
                 if hint_off + 3 < binary.len() {
                     let name_start = hint_off + 2;

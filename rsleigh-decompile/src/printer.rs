@@ -4,7 +4,9 @@ use rsleigh_api::Architecture;
 use crate::ir::*;
 
 const RBP_OFFSET: u64 = 40;
+const EBP_OFFSET: u64 = 20;
 const RSP_OFFSET: u64 = 32;
+const ESP_OFFSET: u64 = 16;
 const RIP_OFFSET: u64 = 648;
 
 /// Print structured statements as C-like pseudocode.
@@ -1075,6 +1077,179 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // Remove standalone ESP stores of constants that are PUSH boilerplate
         // "*(uint32_t*)(ESP) = -1;" (SEH frame sentinel)
         if t == "*(uint32_t*)(ESP) = -1;" { return false; }
+        true
+    });
+
+    // Fix orphaned blocks: when statements are indented inside a block whose
+    // opening "if/else" was removed, reduce their indent and remove the orphaned "}".
+    // Pattern: line at indent N, then 1+ lines at indent N+4, then "}" at indent N.
+    // Where line at indent N doesn't end with "{".
+    {
+        let mut i = 0;
+        while i + 2 < lines.len() {
+            let cur_indent = lines[i].len() - lines[i].trim_start().len();
+            let cur_t = lines[i].trim();
+            let next_indent = lines[i + 1].len() - lines[i + 1].trim_start().len();
+            let next_t = lines[i + 1].trim();
+
+            // Skip if current line opens a block
+            if cur_t.ends_with('{') || cur_t.is_empty() || next_t.is_empty() {
+                i += 1;
+                continue;
+            }
+
+            // Check: current at indent N (no brace), next at indent N+4
+            if next_indent == cur_indent + 4 && !next_t.starts_with('}') {
+                // Find the closing brace for this orphaned block
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let jt = lines[j].trim();
+                    let ji = lines[j].len() - lines[j].trim_start().len();
+                    if jt == "}" && ji == cur_indent {
+                        // Found orphan close. De-indent all lines between i+1 and j.
+                        for k in (i + 1)..j {
+                            let kt = lines[k].trim().to_string();
+                            if kt.is_empty() { continue; }
+                            let ki = lines[k].len() - lines[k].trim_start().len();
+                            let new_indent = if ki >= 4 { ki - 4 } else { 0 };
+                            lines[k] = format!("{}{}", " ".repeat(new_indent), kt);
+                        }
+                        // Remove the orphaned "}"
+                        lines.remove(j);
+                        break;
+                    }
+                    if jt == "}" && ji < cur_indent { break; } // different scope
+                    j += 1;
+                }
+            }
+            i += 1;
+        }
+    }
+
+    // Remove empty if blocks: "if (...) {\n}" with nothing between braces.
+    {
+        let mut i = 0;
+        while i + 1 < lines.len() {
+            let t = lines[i].trim();
+            let next = lines[i + 1].trim();
+            if t.starts_with("if (") && t.ends_with('{') && next == "}" {
+                // Check if there's an else after the closing brace
+                if i + 2 < lines.len() && lines[i + 2].trim().starts_with("} else {") {
+                    // if (...) { } else { ... } → keep the else part
+                    // handled by is_body_empty + negate logic
+                }
+                lines.remove(i + 1); // remove "}"
+                lines.remove(i);     // remove "if (...) {"
+                continue;
+            }
+            i += 1;
+        }
+    }
+
+    // Remove x86 REP STOS/MOVS boilerplate: "EDI = EDI + N - 8 * DF;" patterns
+    // These are string instruction noise (REP STOSD, REP MOVSD).
+    lines.retain(|line| {
+        let t = line.trim();
+        // "EDI = EDI + N - 8 * DF;" or "EDI = EDI + N - 4 * DF;"
+        if t.starts_with("EDI = EDI + ") && t.contains(" * DF;") { return false; }
+        if t.starts_with("ESI = ESI + ") && t.contains(" * DF;") { return false; }
+        // "EDI = EDI + 4 - 8 * DF;"
+        if t.starts_with("EDI = ") && t.contains("- 8 * DF;") { return false; }
+        if t.starts_with("EDI = ") && t.contains("- 4 * DF;") { return false; }
+        if t.starts_with("EDI = ") && t.contains("- 2 * DF;") { return false; }
+        true
+    });
+
+    // Annotate common Win32 constants for reverse engineering readability
+    for line in &mut lines {
+        // CreateProcess flags
+        if line.contains("134217728") { *line = line.replace("134217728", "CREATE_NO_WINDOW /* 0x8000000 */"); }
+        // Winsock errors
+        if line.contains("0x2733") { *line = line.replace("0x2733", "WSAEWOULDBLOCK"); }
+        if line.contains("0x2746") { *line = line.replace("0x2746", "WSAECONNRESET"); }
+        if line.contains("0x274c") { *line = line.replace("0x274c", "WSAECONNREFUSED"); }
+        // Registry
+        if line.contains("0x80000001") && !line.contains("0x80000001 <") {
+            *line = line.replace("0x80000001", "HKEY_CURRENT_USER");
+        }
+        if line.contains("0x80000002") && !line.contains("0x80000002 <") {
+            *line = line.replace("0x80000002", "HKEY_LOCAL_MACHINE");
+        }
+    }
+
+    // Collapse "X = expr; return X;" into "return expr;"
+    {
+        let mut i = 0;
+        while i + 1 < lines.len() {
+            let cur = lines[i].trim().to_string();
+            let next = lines[i + 1].trim().to_string();
+            // Match: "VAR = EXPR;" followed by "return VAR;"
+            if cur.contains(" = ") && cur.ends_with(';') && next.starts_with("return ") && next.ends_with(';') {
+                if let Some(eq_pos) = cur.find(" = ") {
+                    let lhs = &cur[..eq_pos];
+                    let rhs = &cur[eq_pos + 3..cur.len() - 1]; // strip trailing ;
+                    let ret_val = &next[7..next.len() - 1]; // strip "return " and ";"
+                    if lhs == ret_val {
+                        // Replace both with "return EXPR;"
+                        let indent = lines[i].len() - lines[i].trim_start().len();
+                        let pad = " ".repeat(indent);
+                        lines[i] = format!("{}return {};", pad, rhs);
+                        lines.remove(i + 1);
+                        continue;
+                    }
+                    // Also match: "X = X | -1;" + "return X | -1;" → "return -1;"
+                    if ret_val == &cur[..cur.len() - 1] || rhs == ret_val {
+                        let indent = lines[i].len() - lines[i].trim_start().len();
+                        let pad = " ".repeat(indent);
+                        lines[i] = format!("{}return {};", pad, rhs);
+                        lines.remove(i + 1);
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
+    // Remove standalone CARRY/SCARRY/SBORROW assignments that leaked through DCE.
+    lines.retain(|line| {
+        let t = line.trim();
+        if (t.contains(" CARRY ") || t.contains(" SCARRY ") || t.contains(" SBORROW "))
+            && t.ends_with(';')
+            && !t.contains("if ")
+            && !t.contains("while ")
+            && !t.contains("return ")
+        {
+            return false;
+        }
+        // Remove all stores to address 0: SEH chain setup (fs:[0]) and similar
+        if t.starts_with("*(int*)(0) = ") && t.ends_with(';') { return false; }
+        if t.starts_with("*(uint32_t*)(0) = ") && t.ends_with(';') { return false; }
+        true
+    });
+
+    // Remove byte-extract self-shift chains from Subpiece operations.
+    // Actual format: "X = X >> 8 & 31 | 0 << 32 - 8 & 31;" or "X = X >> 8;"
+    // These are byte-by-byte extraction noise from multi-byte copies.
+    lines.retain(|line| {
+        let t = line.trim();
+        if !t.contains(" >> 8") || !t.contains(" = ") { return true; }
+        // Don't remove from conditions or returns
+        if t.starts_with("if ") || t.starts_with("while ") || t.starts_with("return ") { return true; }
+        // Split at first " = "
+        if let Some(eq_pos) = t.find(" = ") {
+            let lhs = &t[..eq_pos];
+            let rhs = &t[eq_pos + 3..].trim_end_matches(';').trim();
+            // Self-shift: "X = X >> 8 ..." (rhs starts with lhs >> 8)
+            let shift_pat = format!("{} >> 8", lhs);
+            if rhs.starts_with(&shift_pat) {
+                return false;
+            }
+            // Initial zero shift: "X = 0 >> 8 ..."
+            if rhs.starts_with("0 >> 8") {
+                return false;
+            }
+        }
         true
     });
 
@@ -4211,9 +4386,9 @@ fn filter_boilerplate(stmts: &[StructuredStmt], ssa: &SsaCfg) -> Vec<StructuredS
             StructuredStmt::Store { addr, val: _ } => {
                 let addr_def = ssa.var(*addr);
                 if addr_def.varnode.space == AddressSpaceId::Register
-                    && addr_def.varnode.offset == RSP_OFFSET
+                    && (addr_def.varnode.offset == RSP_OFFSET || addr_def.varnode.offset == ESP_OFFSET)
                 { return false; }
-                if is_rsp_expr(&addr_def.expr, ssa) { return false; }
+                if is_sp_expr(&addr_def.expr, ssa) { return false; }
                 true
             }
             _ => true,
@@ -4233,15 +4408,29 @@ fn is_stack_management(vdef: &VarDef, ssa: &SsaCfg) -> bool {
             return v.varnode.space == AddressSpaceId::Register && v.varnode.offset == RBP_OFFSET;
         }
     }
+    // x86-32: ESP = ESP ± N (stack allocation, PUSH/POP, cdecl cleanup)
+    if vdef.varnode.offset == ESP_OFFSET && vdef.varnode.size == 4 {
+        if let Expr::BinOp(BinOpKind::Add | BinOpKind::Sub, l, _) = &vdef.expr {
+            let lv = ssa.var(*l);
+            return lv.varnode.space == AddressSpaceId::Register && lv.varnode.offset == ESP_OFFSET;
+        }
+        if let Expr::Var(id) = &vdef.expr {
+            let v = ssa.var(*id);
+            return v.varnode.space == AddressSpaceId::Register
+                && (v.varnode.offset == EBP_OFFSET || v.varnode.offset == ESP_OFFSET);
+        }
+    }
     false
 }
 
 fn is_frame_pointer_op(vdef: &VarDef) -> bool {
     if vdef.varnode.space != AddressSpaceId::Register { return false; }
-    if vdef.varnode.offset == RBP_OFFSET || vdef.varnode.offset == RSP_OFFSET {
+    if vdef.varnode.offset == RBP_OFFSET || vdef.varnode.offset == RSP_OFFSET
+        || vdef.varnode.offset == EBP_OFFSET || vdef.varnode.offset == ESP_OFFSET
+    {
         match &vdef.expr {
             Expr::Var(_) => true,
-            Expr::Load(_) => vdef.varnode.offset == RBP_OFFSET,
+            Expr::Load(_) => vdef.varnode.offset == RBP_OFFSET || vdef.varnode.offset == EBP_OFFSET,
             _ => false,
         }
     } else {
@@ -4249,15 +4438,32 @@ fn is_frame_pointer_op(vdef: &VarDef) -> bool {
     }
 }
 
-fn is_rsp_expr(expr: &Expr, ssa: &SsaCfg) -> bool {
+/// Check if a VarId resolves to an ESP-derived expression (for condition cleanup).
+fn is_esp_derived_var(id: VarId, ssa: &SsaCfg) -> bool {
+    let vdef = ssa.var(id);
+    if vdef.varnode.space == AddressSpaceId::Register
+        && (vdef.varnode.offset == ESP_OFFSET || vdef.varnode.offset == RSP_OFFSET)
+    {
+        return true;
+    }
+    match &vdef.expr {
+        Expr::Var(inner) => is_esp_derived_var(*inner, ssa),
+        Expr::BinOp(BinOpKind::Add | BinOpKind::Sub, l, _) => is_esp_derived_var(*l, ssa),
+        _ => false,
+    }
+}
+
+fn is_sp_expr(expr: &Expr, ssa: &SsaCfg) -> bool {
     match expr {
         Expr::Var(id) => {
             let v = ssa.var(*id);
-            v.varnode.space == AddressSpaceId::Register && v.varnode.offset == RSP_OFFSET
+            v.varnode.space == AddressSpaceId::Register
+                && (v.varnode.offset == RSP_OFFSET || v.varnode.offset == ESP_OFFSET)
         }
         Expr::BinOp(_, l, _) => {
             let v = ssa.var(*l);
-            v.varnode.space == AddressSpaceId::Register && v.varnode.offset == RSP_OFFSET
+            v.varnode.space == AddressSpaceId::Register
+                && (v.varnode.offset == RSP_OFFSET || v.varnode.offset == ESP_OFFSET)
         }
         _ => false,
     }
@@ -4274,10 +4480,29 @@ fn is_body_empty(stmts: &[StructuredStmt], ssa: &SsaCfg) -> bool {
                 if matches!(&vdef.expr, Expr::Phi(_)) { continue; }
                 if is_zext_artifact(vdef, ssa) { continue; }
                 if is_self_assign(vdef, ssa) { continue; }
+                // Stack management (ESP/RSP arithmetic) is filtered in output
+                if is_stack_management(vdef, ssa) { continue; }
+                if is_frame_pointer_op(vdef) { continue; }
+                if vdef.varnode.space == AddressSpaceId::Register && vdef.varnode.offset == RIP_OFFSET { continue; }
+                // Call returns with use_count <= 1 are inlined at use site
+                if vdef.call_return && vdef.use_count <= 1 { continue; }
+                // Arg register assigns consumed by a call
+                if is_arg_consumed_by_call(*lhs, ssa) { continue; }
                 return false;
             }
-            StructuredStmt::Return(_) | StructuredStmt::Store { .. }
+            StructuredStmt::Store { addr, .. } => {
+                // ESP/RSP-derived stores are filtered in output
+                let addr_def = ssa.var(*addr);
+                if addr_def.varnode.space == AddressSpaceId::Register
+                    && (addr_def.varnode.offset == RSP_OFFSET || addr_def.varnode.offset == ESP_OFFSET)
+                { continue; }
+                if is_sp_expr(&addr_def.expr, ssa) { continue; }
+                return false;
+            }
+            StructuredStmt::Return(_)
             | StructuredStmt::Call { .. } | StructuredStmt::While { .. }
+            | StructuredStmt::DoWhile { .. } | StructuredStmt::Switch { .. }
+            | StructuredStmt::Break | StructuredStmt::Continue
             | StructuredStmt::Goto(_) => return false,
             StructuredStmt::IfElse { then_body, else_body, .. } => {
                 if !is_body_empty(then_body, ssa) || !is_body_empty(else_body, ssa) {
@@ -4705,6 +4930,45 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
             print_stmts(&body_filtered, ssa, ctx, indent + 1, out);
             out.push_str(&format!("{}}}\n", pad));
         }
+        StructuredStmt::DoWhile { cond, negate, body } => {
+            let body_filtered = filter_boilerplate(body, ssa);
+            out.push_str(&format!("{}do {{\n", pad));
+            print_stmts(&body_filtered, ssa, ctx, indent + 1, out);
+            let cond_expr = format_condition_tracked(*cond, ssa, ctx, tracker);
+            let display_cond = if *negate {
+                negate_condition(&cond_expr)
+            } else {
+                cond_expr
+            };
+            out.push_str(&format!("{}}} while ({});\n", pad, display_cond));
+        }
+        StructuredStmt::Switch { expr, cases, default } => {
+            let expr_str = format_var_tracked(*expr, ssa, ctx, tracker);
+            out.push_str(&format!("{}switch ({}) {{\n", pad, expr_str));
+            for (vals, body) in cases {
+                for val in vals {
+                    out.push_str(&format!("{}    case {}:\n", pad, val));
+                }
+                let body_filtered = filter_boilerplate(body, ssa);
+                print_stmts(&body_filtered, ssa, ctx, indent + 2, out);
+                // Add break if body doesn't end with return
+                if !body_filtered.iter().any(|s| matches!(s, StructuredStmt::Return(_))) {
+                    out.push_str(&format!("{}        break;\n", pad));
+                }
+            }
+            if !default.is_empty() {
+                out.push_str(&format!("{}    default:\n", pad));
+                let default_filtered = filter_boilerplate(default, ssa);
+                print_stmts(&default_filtered, ssa, ctx, indent + 2, out);
+            }
+            out.push_str(&format!("{}}}\n", pad));
+        }
+        StructuredStmt::Break => {
+            out.push_str(&format!("{}break;\n", pad));
+        }
+        StructuredStmt::Continue => {
+            out.push_str(&format!("{}continue;\n", pad));
+        }
         StructuredStmt::Goto(addr) => {
             out.push_str(&format!("{}goto label_{:x};\n", pad, addr));
         }
@@ -4919,6 +5183,10 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
             }
             format_expr(expr, ssa, ctx)
         }
+        Expr::FieldAccess(base, offset) => {
+            let base_str = format_var_tracked(*base, ssa, ctx, tracker);
+            format!("{}->field_{:x}", base_str, offset)
+        }
         _ => format_expr(expr, ssa, ctx),
     }
 }
@@ -5018,6 +5286,40 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, indent: usize
             print_stmts(&body_filtered, ssa, ctx, indent + 1, out);
             out.push_str(&format!("{}}}\n", pad));
         }
+        StructuredStmt::DoWhile { cond, negate, body } => {
+            let body_filtered = filter_boilerplate(body, ssa);
+            out.push_str(&format!("{}do {{\n", pad));
+            print_stmts(&body_filtered, ssa, ctx, indent + 1, out);
+            let cond_expr = format_condition(*cond, ssa, ctx);
+            let display_cond = if *negate { negate_condition(&cond_expr) } else { cond_expr };
+            out.push_str(&format!("{}}} while ({});\n", pad, display_cond));
+        }
+        StructuredStmt::Switch { expr, cases, default } => {
+            let expr_str = format_var(*expr, ssa, ctx);
+            out.push_str(&format!("{}switch ({}) {{\n", pad, expr_str));
+            for (vals, body) in cases {
+                for val in vals {
+                    out.push_str(&format!("{}    case {}:\n", pad, val));
+                }
+                let body_filtered = filter_boilerplate(body, ssa);
+                print_stmts(&body_filtered, ssa, ctx, indent + 2, out);
+                if !body_filtered.iter().any(|s| matches!(s, StructuredStmt::Return(_))) {
+                    out.push_str(&format!("{}        break;\n", pad));
+                }
+            }
+            if !default.is_empty() {
+                out.push_str(&format!("{}    default:\n", pad));
+                let default_filtered = filter_boilerplate(default, ssa);
+                print_stmts(&default_filtered, ssa, ctx, indent + 2, out);
+            }
+            out.push_str(&format!("{}}}\n", pad));
+        }
+        StructuredStmt::Break => {
+            out.push_str(&format!("{}break;\n", pad));
+        }
+        StructuredStmt::Continue => {
+            out.push_str(&format!("{}continue;\n", pad));
+        }
         StructuredStmt::Goto(addr) => {
             out.push_str(&format!("{}goto label_{:x};\n", pad, addr));
         }
@@ -5039,6 +5341,25 @@ fn format_condition_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &R
 
     if let Expr::BinOp(kind, left, right) = &vdef.expr {
         if is_comparison(*kind) {
+            // Check if either operand is ESP-derived — if so, simplify the condition.
+            // ESP-in-conditions is a side-effect of x86-32 frame setup comparisons
+            // that leaked through condition recovery. Replace with "result != 0".
+            let l_esp = is_esp_derived_var(*left, ssa);
+            let r_esp = is_esp_derived_var(*right, ssa);
+            if l_esp && r_esp {
+                // Both ESP-derived: frame check, render as constant true
+                return "1".to_string();
+            }
+            if l_esp {
+                // Left is ESP-derived: show just the right operand comparison
+                let r = format_cond_operand(*right, ssa, ctx, tracker);
+                return format!("{} {} 0", r, binop_str(*kind));
+            }
+            if r_esp {
+                let l = format_cond_operand(*left, ssa, ctx, tracker);
+                return format!("{} {} 0", l, binop_str(*kind));
+            }
+
             // For conditions, render operands via their SSA expression first,
             // falling back to tracker. This avoids the tracker aliasing both
             // operands to the same register name.
@@ -5112,6 +5433,10 @@ fn format_cond_operand(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTra
             if let Some(offset) = get_rbp_offset(*ptr, ssa) {
                 let name = format!("var_{:x}", offset);
                 return resolve_stack_alias(&name, tracker);
+            }
+            // x86-32: positive EBP offset → parameter
+            if let Some(param) = get_ebp_param(*ptr, ssa) {
+                return param;
             }
             let addr = format_cond_operand(*ptr, ssa, ctx, tracker);
             return format!("*({})", addr);
@@ -5231,22 +5556,52 @@ fn swap_comparison_str(kind: BinOpKind) -> Option<&'static str> {
 
 // ---- Stack variable naming ----
 
-/// Try to produce a stack variable name like "var_8" for RBP-relative accesses.
+/// Try to produce a stack variable name like "var_8" or "param_0" for frame-pointer-relative accesses.
 fn try_stack_var_name(addr_id: VarId, ssa: &SsaCfg) -> Option<String> {
-    let offset = get_rbp_offset(addr_id, ssa)?;
-    Some(format!("var_{:x}", offset))
+    if let Some(offset) = get_rbp_offset(addr_id, ssa) {
+        return Some(format!("var_{:x}", offset));
+    }
+    // x86-32: positive EBP offsets are parameters (EBP+8 = param_0, EBP+12 = param_1, ...)
+    if let Some(param_name) = get_ebp_param(addr_id, ssa) {
+        return Some(param_name);
+    }
+    None
 }
 
-/// Get the (positive) offset from RBP for a stack access, if this is RBP-relative.
+/// Detect x86-32 cdecl parameters from positive EBP offsets.
+/// EBP+8 = param_0, EBP+12 = param_1, EBP+16 = param_2, etc.
+fn get_ebp_param(id: VarId, ssa: &SsaCfg) -> Option<String> {
+    let expr = resolve_through_vars(id, ssa);
+    if let Expr::BinOp(BinOpKind::Add, base_id, off_id) = &expr {
+        let base = ssa.var(*base_id);
+        if base.varnode.space == AddressSpaceId::Register
+            && (base.varnode.offset == EBP_OFFSET || base.varnode.offset == RBP_OFFSET)
+        {
+            let off_val = get_const_val(*off_id, ssa)?;
+            // Positive offsets: EBP+8 = param_0, EBP+12 = param_1, ...
+            // Skip EBP+0 (saved EBP) and EBP+4 (return address)
+            if off_val >= 8 && off_val < 0x80 && off_val % 4 == 0 {
+                let param_idx = (off_val - 8) / 4;
+                return Some(format!("param_{}", param_idx));
+            }
+        }
+    }
+    None
+}
+
+/// Get the (positive) offset from RBP/EBP for a stack access, if this is frame-pointer-relative.
 fn get_rbp_offset(id: VarId, ssa: &SsaCfg) -> Option<u64> {
     let expr = resolve_through_vars(id, ssa);
     if let Expr::BinOp(BinOpKind::Add, base_id, off_id) = &expr {
         let base = ssa.var(*base_id);
-        if base.varnode.space == AddressSpaceId::Register && base.varnode.offset == RBP_OFFSET {
+        if base.varnode.space == AddressSpaceId::Register
+            && (base.varnode.offset == RBP_OFFSET || base.varnode.offset == EBP_OFFSET)
+        {
             let off_val = get_const_val(*off_id, ssa)?;
-            // Convert to negative offset
+            // Convert to negative offset (two's complement)
             if off_val >= 0x80 && off_val < 0x100 { return Some(0x100 - off_val); }
             if off_val >= 0x8000 && off_val < 0x10000 { return Some(0x10000 - off_val); }
+            if off_val >= 0x80000000 && off_val < 0x100000000 { return Some(0x100000000u64 - off_val); }
             if off_val > 0x7fffffffffffffff { return Some((!off_val).wrapping_add(1)); }
             return None; // Positive offset — not a local variable
         }
@@ -5272,15 +5627,21 @@ fn get_const_val_expr(expr: &Expr, ssa: &SsaCfg) -> Option<u64> {
 // ---- Address formatting ----
 
 fn format_addr(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
-    // Try stack variable first
+    // Try stack variable first (RBP or EBP relative, negative offset = local)
     if let Some(offset) = get_rbp_offset(id, ssa) {
         return format!("RBP - 0x{:x}", offset);
+    }
+    // Try x86-32 parameter (positive EBP offset)
+    if let Some(param) = get_ebp_param(id, ssa) {
+        return param;
     }
 
     let expr = resolve_through_vars(id, ssa);
     if let Expr::BinOp(BinOpKind::Add, base_id, off_id) = &expr {
         let base = ssa.var(*base_id);
-        if base.varnode.space == AddressSpaceId::Register && base.varnode.offset == RBP_OFFSET {
+        if base.varnode.space == AddressSpaceId::Register
+            && (base.varnode.offset == RBP_OFFSET || base.varnode.offset == EBP_OFFSET)
+        {
             if let Some(val) = get_const_val(*off_id, ssa) {
                 return format_rbp_offset(val);
             }
@@ -5330,9 +5691,14 @@ fn format_var(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
     // the printer at the use site should show the call expression
     // (handled by the caller checking call_return flag)
 
-    // Inline Unique-space temporaries
+    // Inline Unique-space temporaries (but not bare Unknown — show register name instead)
     if vdef.varnode.space == AddressSpaceId::Unique {
-        return format_expr(&vdef.expr, ssa, ctx);
+        if matches!(&vdef.expr, Expr::Unknown) {
+            // Don't emit "?" — try to find a meaningful name from the context
+            // (this var is likely an unresolved intermediate)
+        } else {
+            return format_expr(&vdef.expr, ssa, ctx);
+        }
     }
 
     // Inline constants
@@ -5488,6 +5854,11 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
             }
             let p = format_addr(*ptr, ssa, ctx);
             format!("*({})", p)
+        }
+        Expr::FieldAccess(base, offset) => {
+            let base_str = format_var(*base, ssa, ctx);
+            // Show as ->field_XX for pointer-based access
+            format!("{}->field_{:x}", base_str, offset)
         }
         Expr::Phi(inputs) => {
             if inputs.len() == 1 { return format_var(inputs[0], ssa, ctx); }

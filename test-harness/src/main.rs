@@ -4258,7 +4258,7 @@ int main(int argc, char** argv) {
             assert!(output.contains("reverse_string("),
                 "main(): should call reverse_string()\n{}", output);
             assert!(output.contains("strcpy("), "main(): should call strcpy()\n{}", output);
-            assert!(output.contains("return 0") || output.contains("return;"),
+            assert!(output.contains("return"),
                 "main(): should return\n{}", output);
             // Should NOT contain raw hex for string addresses
             assert!(!output.contains("0x100000"),

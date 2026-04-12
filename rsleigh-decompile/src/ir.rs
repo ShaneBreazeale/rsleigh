@@ -124,6 +124,9 @@ pub enum Expr {
     BinOp(BinOpKind, VarId, VarId),
     UnaryOp(UnaryOpKind, VarId),
     Load(VarId),
+    /// Struct field access: base pointer + byte offset.
+    /// Recognized from Load(Add(base, Const(offset))) patterns.
+    FieldAccess(VarId, u64),
     Phi(Vec<VarId>),
     Unknown,
 }
@@ -168,6 +171,20 @@ pub enum StructuredStmt {
         negate: bool,
         body: Vec<StructuredStmt>,
     },
+    /// Post-tested loop: do { body } while (cond)
+    DoWhile {
+        cond: VarId,
+        negate: bool,
+        body: Vec<StructuredStmt>,
+    },
+    /// Switch/case recovered from if-else chains or jump tables.
+    Switch {
+        expr: VarId,
+        cases: Vec<(Vec<i64>, Vec<StructuredStmt>)>,  // (case values, body)
+        default: Vec<StructuredStmt>,
+    },
+    Break,
+    Continue,
     Goto(u64),
     Label(u64),
 }

@@ -78,6 +78,8 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
     }
     // Type inference runs once after folding is stable
     infer_types(ssa);
+    // Recognize struct field access patterns after all folding is done
+    recognize_field_access(ssa);
 }
 
 fn count_live_stmts(ssa: &SsaCfg) -> usize {
@@ -127,10 +129,15 @@ fn fold_once(ssa: &mut SsaCfg) {
 
 fn simplify_expr(expr: Expr, vars: &[VarDef]) -> Expr {
     match &expr {
-        // x & x → x (TEST instruction)
+        // x & x → x (TEST instruction), x & 0 → 0, const & mask noop
         Expr::BinOp(BinOpKind::And, left, right) => {
-            // Check both VarId equality AND varnode equality (same register, different VarId)
             if left == right || same_varnode(*left, *right, vars) {
+                Expr::Var(*left)
+            } else if is_const_zero(*right, vars) {
+                Expr::Const(0, vars[left.0 as usize].size)
+            } else if is_const_zero(*left, vars) {
+                Expr::Const(0, vars[right.0 as usize].size)
+            } else if is_const_mask_noop(*left, *right, vars) {
                 Expr::Var(*left)
             } else {
                 expr
@@ -144,11 +151,22 @@ fn simplify_expr(expr: Expr, vars: &[VarDef]) -> Expr {
         Expr::BinOp(BinOpKind::Or | BinOpKind::Add, left, right) => {
             if is_const_zero(*right, vars) { Expr::Var(*left) }
             else if is_const_zero(*left, vars) { Expr::Var(*right) }
+            // x | -1 → -1 (all bits set)
+            else if is_const_all_ones(*right, vars) { Expr::Var(*right) }
+            else if is_const_all_ones(*left, vars) { Expr::Var(*left) }
             else { expr }
         }
         // x - 0 → x
         Expr::BinOp(BinOpKind::Sub, left, right) if is_const_zero(*right, vars) => {
             Expr::Var(*left)
+        }
+        // x * 1 → x, x * 0 → 0
+        Expr::BinOp(BinOpKind::Mult, left, right) => {
+            if is_const_one(*right, vars) { Expr::Var(*left) }
+            else if is_const_one(*left, vars) { Expr::Var(*right) }
+            else if is_const_zero(*right, vars) { Expr::Const(0, vars[left.0 as usize].size) }
+            else if is_const_zero(*left, vars) { Expr::Const(0, vars[right.0 as usize].size) }
+            else { expr }
         }
         _ => expr,
     }
@@ -166,6 +184,28 @@ fn same_varnode(a: VarId, b: VarId, vars: &[VarDef]) -> bool {
 
 fn is_const_zero(id: VarId, vars: &[VarDef]) -> bool {
     matches!(&vars[id.0 as usize].expr, Expr::Const(0, _))
+}
+
+fn is_const_one(id: VarId, vars: &[VarDef]) -> bool {
+    matches!(&vars[id.0 as usize].expr, Expr::Const(1, _))
+}
+
+/// Check if `val & mask` == `val` (AND is a no-op because val fits within mask).
+fn is_const_mask_noop(val_id: VarId, mask_id: VarId, vars: &[VarDef]) -> bool {
+    if let (Expr::Const(val, _), Expr::Const(mask, _)) = (&vars[val_id.0 as usize].expr, &vars[mask_id.0 as usize].expr) {
+        *val & *mask == *val && *val != 0
+    } else {
+        false
+    }
+}
+
+fn is_const_all_ones(id: VarId, vars: &[VarDef]) -> bool {
+    if let Expr::Const(val, sz) = &vars[id.0 as usize].expr {
+        let mask = if *sz >= 8 { u64::MAX } else { (1u64 << (*sz * 8)) - 1 };
+        *val == mask
+    } else {
+        false
+    }
 }
 
 /// Propagate constants from register writes to Unknown versions at the same offset.
@@ -295,6 +335,15 @@ fn eliminate_dead(ssa: &mut SsaCfg) {
                         dead_indices.push(i); continue;
                     }
 
+                    // Dead CARRY/SCARRY/SBORROW operations (multi-precision arithmetic flags)
+                    if vdef.use_count == 0 {
+                        if matches!(&vdef.expr,
+                            Expr::BinOp(BinOpKind::Carry | BinOpKind::SCarry | BinOpKind::SBorrow, _, _))
+                        {
+                            dead_indices.push(i); continue;
+                        }
+                    }
+
                     // RIP writes
                     if vdef.varnode.space == AddressSpaceId::Register && vdef.varnode.offset == RIP_OFFSET {
                         dead_indices.push(i); continue;
@@ -329,7 +378,8 @@ fn eliminate_dead(ssa: &mut SsaCfg) {
                         && vdef.varnode.space == AddressSpaceId::Register
                         && !FLAG_OFFSETS.contains(&vdef.varnode.offset)
                         && vdef.varnode.offset != RIP_OFFSET
-                        && vdef.varnode.offset != RSP_OFFSET;
+                        && vdef.varnode.offset != RSP_OFFSET
+                        && vdef.varnode.offset != ESP_OFFSET;
                     if vdef.varnode.space == AddressSpaceId::Register
                         && !read_after.contains(&key)
                         && vdef.use_count == 0
@@ -343,7 +393,9 @@ fn eliminate_dead(ssa: &mut SsaCfg) {
                 Stmt::Store { addr, val } => {
                     let val_def = &ssa.vars[val.0 as usize];
                     let addr_def = &ssa.vars[addr.0 as usize];
-                    if is_rsp_derived(&addr_def.varnode, &addr_def.expr, &ssa.vars) {
+                    if is_rsp_derived(&addr_def.varnode, &addr_def.expr, &ssa.vars)
+                        || is_esp_derived(&addr_def.varnode, &addr_def.expr, &ssa.vars)
+                    {
                         if let Expr::Const(_, _) = &val_def.expr {
                             dead_indices.push(i); continue;
                         }
@@ -403,6 +455,17 @@ fn is_rsp_derived(vn: &pcode_ir::Varnode, expr: &Expr, vars: &[VarDef]) -> bool 
         Expr::Var(id) | Expr::BinOp(_, id, _) => {
             let v = &vars[id.0 as usize];
             v.varnode.space == AddressSpaceId::Register && v.varnode.offset == RSP_OFFSET
+        }
+        _ => false,
+    }
+}
+
+fn is_esp_derived(vn: &pcode_ir::Varnode, expr: &Expr, vars: &[VarDef]) -> bool {
+    if vn.space == AddressSpaceId::Register && vn.offset == ESP_OFFSET && vn.size == 4 { return true; }
+    match expr {
+        Expr::Var(id) | Expr::BinOp(_, id, _) => {
+            let v = &vars[id.0 as usize];
+            v.varnode.space == AddressSpaceId::Register && v.varnode.offset == ESP_OFFSET && v.varnode.size == 4
         }
         _ => false,
     }
@@ -938,11 +1001,15 @@ fn detect_return_values(ssa: &mut SsaCfg) {
 // ---- Call Arguments ----
 
 /// Collect argument register writes (x86-64) or stack pushes (x86-32) before each Call.
+/// For x86-32, also removes consumed Store/ESP-decrement statements.
 fn collect_call_arguments(ssa: &mut SsaCfg) {
     // Use the calling convention set by fold_with_cc, not heuristic detection.
     let is_x86_32 = arg_reg_offsets().is_empty();
 
     for bi in 0..ssa.blocks.len() {
+        // Collect all indices to remove for this block (from multiple calls)
+        let mut all_consumed: Vec<usize> = Vec::new();
+
         // Check if block ends with a Call terminator
         let call_info = match &ssa.blocks[bi].terminator {
             SsaTerminator::Call { target, fallthrough, .. } => {
@@ -954,7 +1021,9 @@ fn collect_call_arguments(ssa: &mut SsaCfg) {
         if let Some((target, fallthrough)) = call_info {
             let n_stmts = ssa.blocks[bi].stmts.len();
             let args = if is_x86_32 {
-                collect_stack_args_from_block(&ssa.blocks[bi].stmts, &ssa.vars, n_stmts)
+                let (args, consumed) = collect_stack_args_from_block(&ssa.blocks[bi].stmts, &ssa.vars, n_stmts);
+                if !args.is_empty() { all_consumed.extend(consumed); }
+                args
             } else {
                 collect_reg_args_from_block(&ssa.blocks[bi].stmts, &ssa.vars, n_stmts)
             };
@@ -969,13 +1038,17 @@ fn collect_call_arguments(ssa: &mut SsaCfg) {
         }
 
         // Also check for Call statements within the block
-        for si in 0..ssa.blocks[bi].stmts.len() {
-            let is_call_no_args = matches!(&ssa.blocks[bi].stmts[si],
-                Stmt::Call { args, .. } if args.is_empty());
-            if !is_call_no_args { continue; }
+        // Process in reverse order so consumed indices from earlier calls don't shift
+        let call_indices: Vec<usize> = (0..ssa.blocks[bi].stmts.len())
+            .filter(|si| matches!(&ssa.blocks[bi].stmts[*si],
+                Stmt::Call { args, .. } if args.is_empty()))
+            .collect();
 
+        for &si in call_indices.iter().rev() {
             let args = if is_x86_32 {
-                collect_stack_args_from_block(&ssa.blocks[bi].stmts, &ssa.vars, si)
+                let (args, consumed) = collect_stack_args_from_block(&ssa.blocks[bi].stmts, &ssa.vars, si);
+                if !args.is_empty() { all_consumed.extend(consumed); }
+                args
             } else {
                 collect_reg_args_from_block(&ssa.blocks[bi].stmts, &ssa.vars, si)
             };
@@ -986,6 +1059,15 @@ fn collect_call_arguments(ssa: &mut SsaCfg) {
                     let out = *out;
                     ssa.blocks[bi].stmts[si] = Stmt::Call { target, args, out };
                 }
+            }
+        }
+
+        // Remove consumed arg Store + ESP-decrement statements (reverse order for stable indices)
+        all_consumed.sort_unstable();
+        all_consumed.dedup();
+        for &i in all_consumed.iter().rev() {
+            if i < ssa.blocks[bi].stmts.len() {
+                ssa.blocks[bi].stmts.remove(i);
             }
         }
     }
@@ -1019,9 +1101,10 @@ fn collect_reg_args_from_block(stmts: &[Stmt], vars: &[VarDef], up_to: usize) ->
 ///
 /// Scans backward from `up_to` for Store { addr: ESP-derived, val } patterns.
 /// Arguments are pushed right-to-left (cdecl), so first push = last arg.
-/// Returns them in correct call order.
-fn collect_stack_args_from_block(stmts: &[Stmt], vars: &[VarDef], up_to: usize) -> Vec<VarId> {
+/// Returns (args in correct call order, indices of consumed statements to remove).
+fn collect_stack_args_from_block(stmts: &[Stmt], vars: &[VarDef], up_to: usize) -> (Vec<VarId>, Vec<usize>) {
     let mut pushed_values: Vec<VarId> = Vec::new();
+    let mut consumed_indices: Vec<usize> = Vec::new();
     let mut i = up_to;
 
     while i > 0 {
@@ -1031,6 +1114,7 @@ fn collect_stack_args_from_block(stmts: &[Stmt], vars: &[VarDef], up_to: usize) 
                 let addr_def = &vars[addr.0 as usize];
                 if is_esp_var(addr_def, vars) {
                     pushed_values.push(*val);
+                    consumed_indices.push(i);
                     continue;
                 }
                 // Non-ESP store — could be a memory write between pushes, skip
@@ -1038,11 +1122,12 @@ fn collect_stack_args_from_block(stmts: &[Stmt], vars: &[VarDef], up_to: usize) 
             }
             Stmt::Assign(v) => {
                 let vdef = &vars[v.0 as usize];
-                // Skip ESP writes (IntSub ESP, 4) — they're PUSH boilerplate
+                // Skip (and mark for removal) ESP writes (IntSub ESP, 4) — PUSH boilerplate
                 if vdef.varnode.space == AddressSpaceId::Register
                     && vdef.varnode.offset == ESP_OFFSET
                     && vdef.varnode.size == 4
                 {
+                    consumed_indices.push(i);
                     continue;
                 }
                 // Skip flag writes
@@ -1051,6 +1136,7 @@ fn collect_stack_args_from_block(stmts: &[Stmt], vars: &[VarDef], up_to: usize) 
                 }
                 // Skip Unique-space temporaries (address computation, etc.)
                 if vdef.varnode.space == AddressSpaceId::Unique {
+                    consumed_indices.push(i);
                     continue;
                 }
                 // Other register writes between pushes — these could be thiscall
@@ -1064,7 +1150,7 @@ fn collect_stack_args_from_block(stmts: &[Stmt], vars: &[VarDef], up_to: usize) 
     // Arguments pushed right-to-left: first pushed = last argument
     // We collected bottom-up, so reverse for correct order
     pushed_values.reverse();
-    pushed_values
+    (pushed_values, consumed_indices)
 }
 
 /// Check if a VarDef is ESP-derived (direct ESP or computed from ESP via IntSub).
@@ -1129,9 +1215,16 @@ fn infer_types(ssa: &mut SsaCfg) {
 
     // Mark Load pointer operands as pointers (from Expr::Load(ptr_var))
     for vi in 0..n {
-        if let Expr::Load(ptr) = ssa.vars[vi].expr {
-            let cur = ssa.vars[ptr.0 as usize].inferred_type;
-            ssa.vars[ptr.0 as usize].inferred_type = cur.merge(InferredType::Pointer);
+        match ssa.vars[vi].expr {
+            Expr::Load(ptr) => {
+                let cur = ssa.vars[ptr.0 as usize].inferred_type;
+                ssa.vars[ptr.0 as usize].inferred_type = cur.merge(InferredType::Pointer);
+            }
+            Expr::FieldAccess(base, _) => {
+                let cur = ssa.vars[base.0 as usize].inferred_type;
+                ssa.vars[base.0 as usize].inferred_type = cur.merge(InferredType::Pointer);
+            }
+            _ => {}
         }
     }
 
@@ -1289,7 +1382,7 @@ pub(crate) fn recount_uses(ssa: &mut SsaCfg) {
         match &ssa.vars[v].expr {
             Expr::Var(id) => use_counts[id.0 as usize] += 1,
             Expr::BinOp(_, l, r) => { use_counts[l.0 as usize] += 1; use_counts[r.0 as usize] += 1; }
-            Expr::UnaryOp(_, i) | Expr::Load(i) => use_counts[i.0 as usize] += 1,
+            Expr::UnaryOp(_, i) | Expr::Load(i) | Expr::FieldAccess(i, _) => use_counts[i.0 as usize] += 1,
             Expr::Phi(inputs) => { for i in inputs { use_counts[i.0 as usize] += 1; } }
             Expr::Const(_, _) | Expr::Unknown => {}
         }
@@ -1780,5 +1873,130 @@ fn name_parameters(ssa: &mut SsaCfg) {
         for (v, name) in to_name {
             ssa.vars[v].param_name = Some(name);
         }
+    }
+
+    // Pass 3: x86-32 cdecl stack parameters from positive EBP offsets.
+    // In cdecl with frame pointer: EBP+8 = param_0, EBP+12 = param_1, etc.
+    // Scan all vars for Load(EBP + positive_offset) patterns.
+    if arg_reg_offsets().is_empty() && param_idx == 0 {
+        const EBP_OFFSET_32: u64 = 20;
+        const RBP_OFFSET_64: u64 = 40;
+        let mut ebp_params: std::collections::BTreeMap<u64, Vec<usize>> = std::collections::BTreeMap::new();
+
+        for v in 0..ssa.vars.len() {
+            let vdef = &ssa.vars[v];
+            if vdef.param_name.is_some() { continue; }
+            // Look for Load(ptr) where ptr is EBP/RBP + positive_const
+            if let Expr::Load(ptr_id) = &vdef.expr {
+                let ptr = &ssa.vars[ptr_id.0 as usize];
+                if let Expr::BinOp(BinOpKind::Add, base_id, off_id) = &ptr.expr {
+                    let base = &ssa.vars[base_id.0 as usize];
+                    let off = &ssa.vars[off_id.0 as usize];
+                    if base.varnode.space == AddressSpaceId::Register
+                        && (base.varnode.offset == EBP_OFFSET_32 || base.varnode.offset == RBP_OFFSET_64)
+                    {
+                        if let Expr::Const(off_val, _) = &off.expr {
+                            // EBP+8 = param_0, EBP+12 = param_1, ...
+                            if *off_val >= 8 && *off_val < 0x80 && *off_val % 4 == 0 {
+                                ebp_params.entry(*off_val).or_default().push(v);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Name the detected parameters
+        for (off_val, var_indices) in &ebp_params {
+            let pidx = (off_val - 8) / 4;
+            let name = format!("param_{}", pidx);
+            for &vi in var_indices {
+                if ssa.vars[vi].param_name.is_none() {
+                    ssa.vars[vi].param_name = Some(name.clone());
+                }
+            }
+        }
+    }
+
+    // Pass 4: x86-32 thiscall ECX detection.
+    // In MSVC thiscall, ECX holds `this`. If ECX (offset 8, size 4) has Expr::Unknown
+    // in the entry block, it's a parameter read without prior write.
+    if arg_reg_offsets().is_empty() {
+        const ECX_OFFSET: u64 = 8;
+        let has_ecx_param = ssa.vars.iter().any(|v| v.param_name.as_deref() == Some("this"));
+        if !has_ecx_param {
+            for v in 0..ssa.vars.len() {
+                let vdef = &ssa.vars[v];
+                if vdef.varnode.space == AddressSpaceId::Register
+                    && vdef.varnode.offset == ECX_OFFSET
+                    && vdef.varnode.size == 4
+                    && vdef.param_name.is_none()
+                    && matches!(&vdef.expr, Expr::Unknown)
+                    && vdef.use_count > 0
+                {
+                    ssa.vars[v].param_name = Some("this".to_string());
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Recognize struct field access patterns.
+/// Converts Load(BinOp(Add, base, Const(offset))) → FieldAccess(base, offset)
+/// when the base is a pointer (parameter, Load result, or another FieldAccess)
+/// and the offset is a small aligned value typical of struct fields.
+fn recognize_field_access(ssa: &mut SsaCfg) {
+    // Collect pointer-typed variables: parameters, Load results, and anything
+    // already typed as Pointer.
+    let mut pointer_vars: std::collections::HashSet<VarId> = std::collections::HashSet::new();
+    for v in &ssa.vars {
+        if v.param_name.is_some() {
+            pointer_vars.insert(v.id);
+        }
+        if v.inferred_type == InferredType::Pointer {
+            pointer_vars.insert(v.id);
+        }
+        if matches!(&v.expr, Expr::Load(_)) {
+            pointer_vars.insert(v.id);
+        }
+    }
+
+    // Find Load(BinOp(Add, base, Const(offset))) patterns
+    let mut replacements: Vec<(usize, VarId, u64)> = Vec::new();
+    for v in 0..ssa.vars.len() {
+        let vdef = &ssa.vars[v];
+        if let Expr::Load(ptr_id) = &vdef.expr {
+            let ptr_def = safe_var(&ssa.vars, *ptr_id);
+            if let Expr::BinOp(BinOpKind::Add, base, offset_var) = &ptr_def.expr {
+                let offset_def = safe_var(&ssa.vars, *offset_var);
+                if let Expr::Const(offset_val, _) = &offset_def.expr {
+                    // Only convert if:
+                    // 1. Offset is non-zero (offset 0 is just a plain deref)
+                    // 2. Offset is within reasonable struct size (< 4096 bytes)
+                    // 3. Base looks like a pointer (parameter, load, or known pointer)
+                    if *offset_val > 0 && *offset_val < 4096 {
+                        let base_def = safe_var(&ssa.vars, *base);
+                        let base_is_pointer = pointer_vars.contains(base)
+                            || base_def.param_name.is_some()
+                            || matches!(&base_def.expr, Expr::Load(_) | Expr::FieldAccess(_, _))
+                            || base_def.inferred_type == InferredType::Pointer;
+
+                        // Also check if base is a register that was a parameter
+                        let base_is_reg_param = base_def.varnode.space == AddressSpaceId::Register
+                            && (base_def.param_name.is_some()
+                                || matches!(&base_def.expr, Expr::Var(src) if safe_var(&ssa.vars, *src).param_name.is_some()));
+
+                        if base_is_pointer || base_is_reg_param {
+                            replacements.push((v, *base, *offset_val));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (var_idx, base, offset) in replacements {
+        ssa.vars[var_idx].expr = Expr::FieldAccess(base, offset);
     }
 }

@@ -24,7 +24,13 @@ pub fn recover_structure(ssa: &SsaCfg, cfg: &Cfg) -> Vec<StructuredStmt> {
     let mut result = Vec::new();
 
     emit_region(ssa, cfg, &dom, &pdom, &back_edges, cfg.entry,
-                &mut emitted, &mut result, 0);
+                &mut emitted, &mut result, 0, None);
+
+    // Post-pass: convert if-else chains on the same variable into switch/case
+    collapse_if_else_to_switch(&mut result, ssa);
+
+    // Post-pass: convert gotos to break/continue where possible
+    eliminate_gotos(&mut result, ssa, cfg);
 
     result
 }
@@ -32,6 +38,13 @@ pub fn recover_structure(ssa: &SsaCfg, cfg: &Cfg) -> Vec<StructuredStmt> {
 /// Maximum recursion depth for structure recovery.
 /// Prevents stack overflow on deeply nested or pathological CFGs.
 const MAX_STRUCTURE_DEPTH: usize = 256;
+
+/// Context for loop-aware goto elimination.
+/// Tracks the current loop header address and exit address.
+struct LoopCtx {
+    header_addr: u64,
+    exit_addr: u64,
+}
 
 fn emit_region(
     ssa: &SsaCfg,
@@ -43,6 +56,7 @@ fn emit_region(
     emitted: &mut Vec<bool>,
     out: &mut Vec<StructuredStmt>,
     depth: usize,
+    _loop_ctx: Option<&LoopCtx>,
 ) {
     if depth >= MAX_STRUCTURE_DEPTH {
         out.push(StructuredStmt::Goto(0)); // bail on too-deep nesting
@@ -81,10 +95,65 @@ fn emit_region(
             }
             SsaTerminator::Fallthrough(next) | SsaTerminator::Branch(next) => {
                 // Check if this fallthrough/call block is a loop header.
-                // This handles patterns like: call readdir → cbranch (result != NULL?)
-                // where the back-edge targets this block, not the CBranch block.
                 if is_loop_header {
-                    // The condition is at the next block (which should be a CBranch)
+                    // Check if this is a do-while: header has no condition,
+                    // the back-edge source has the condition (post-tested).
+                    let back_source = back_edges.iter()
+                        .find(|(_, header)| *header == current)
+                        .map(|(src, _)| *src);
+
+                    if let Some(back_src) = back_source {
+                        if back_src.0 < ssa.blocks.len() {
+                            let back_block = &ssa.blocks[back_src.0];
+                            if let SsaTerminator::CBranch { cond, taken, fallthrough } = &back_block.terminator {
+                                // The back-edge goes to `current` (header).
+                                // One branch goes to header (loop continues), the other exits.
+                                let (exit, negate) = if *taken == current {
+                                    (*fallthrough, false)
+                                } else if *fallthrough == current {
+                                    (*taken, true)
+                                } else {
+                                    // Not a clean do-while, fall through to regular handling
+                                    (BlockId(0), false)
+                                };
+
+                                if (*taken == current || *fallthrough == current) && exit.0 < cfg.blocks.len() {
+                                    // This IS a do-while pattern. Emit:
+                                    // do { body } while (cond);
+                                    let mut body = Vec::new();
+
+                                    // Mark exit block as emitted to bound the loop body
+                                    let exit_was_emitted = if exit.0 < emitted.len() { emitted[exit.0] } else { true };
+                                    if exit.0 < emitted.len() { emitted[exit.0] = true; }
+
+                                    // Mark back-edge source as emitted to prevent it
+                                    // from being emitted inside the body twice
+                                    let back_was_emitted = emitted[back_src.0];
+
+                                    emit_region(ssa, cfg, dom, pdom, back_edges, *next, emitted, &mut body, depth + 1, None);
+
+                                    // If the back-edge source wasn't emitted as part of the body,
+                                    // emit its statements now (they're part of the loop body)
+                                    if !back_was_emitted && !emitted[back_src.0] {
+                                        emitted[back_src.0] = true;
+                                        emit_block_stmts(&ssa.blocks[back_src.0], &mut body);
+                                    }
+
+                                    if exit.0 < emitted.len() { emitted[exit.0] = exit_was_emitted; }
+
+                                    out.push(StructuredStmt::DoWhile {
+                                        cond: *cond,
+                                        negate,
+                                        body,
+                                    });
+                                    current = exit;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+
+                    // Not a do-while; try the existing while-with-condition-in-next-block pattern
                     let next_block = &ssa.blocks[next.0];
                     if let SsaTerminator::CBranch { cond, taken, fallthrough } = &next_block.terminator {
                         if !emitted[next.0] {
@@ -101,12 +170,10 @@ fn emit_region(
                             };
 
                             let mut body = Vec::new();
-                            // Mark exit block as emitted to prevent loop body from
-                            // including blocks after the loop
                             let exit_was_emitted = emitted[exit.0];
                             emitted[exit.0] = true;
-                            emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body, depth + 1);
-                            emitted[exit.0] = exit_was_emitted; // restore for later processing
+                            emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body, depth + 1, None);
+                            emitted[exit.0] = exit_was_emitted;
                             out.push(StructuredStmt::While { cond: *cond, negate, body });
                             current = exit;
                             continue;
@@ -139,7 +206,7 @@ fn emit_region(
                     // Mark exit block as emitted to bound the loop body
                     let exit_was_emitted = emitted[exit.0];
                     emitted[exit.0] = true;
-                    emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body, depth + 1);
+                    emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body, depth + 1, None);
                     emitted[exit.0] = exit_was_emitted;
 
                     out.push(StructuredStmt::While {
@@ -158,10 +225,10 @@ fn emit_region(
                 let mut else_body = Vec::new();
 
                 if *taken != merge {
-                    emit_region(ssa, cfg, dom, pdom, back_edges, *taken, emitted, &mut then_body, depth + 1);
+                    emit_region(ssa, cfg, dom, pdom, back_edges, *taken, emitted, &mut then_body, depth + 1, None);
                 }
                 if *fallthrough != merge {
-                    emit_region(ssa, cfg, dom, pdom, back_edges, *fallthrough, emitted, &mut else_body, depth + 1);
+                    emit_region(ssa, cfg, dom, pdom, back_edges, *fallthrough, emitted, &mut else_body, depth + 1, None);
                 }
 
                 if else_body.is_empty() {
@@ -204,7 +271,7 @@ fn emit_region(
                             let mut body = Vec::new();
                             let exit_was_emitted = emitted[exit.0];
                             emitted[exit.0] = true;
-                            emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body, depth + 1);
+                            emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body, depth + 1, None);
                             emitted[exit.0] = exit_was_emitted;
                             out.push(StructuredStmt::While { cond: *cond, negate, body });
                             current = exit;
@@ -239,6 +306,294 @@ fn emit_block_stmts(block: &SsaBlock, out: &mut Vec<StructuredStmt>) {
                 });
             }
         }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Post-pass: collapse if-else chains on the same variable into switch
+// ──────────────────────────────────────────────────────────────────────
+
+/// Try to extract the variable and constant from a condition VarId.
+/// Returns (var_being_tested, constant_value, is_eq).
+/// Handles both `var == const` (is_eq=true) and `var != const` (is_eq=false).
+/// Traces through Var() indirection to find the original variable.
+fn extract_eq_const(cond: VarId, ssa: &SsaCfg) -> Option<(VarId, i64, bool)> {
+    let vdef = ssa.var(cond);
+    let (is_eq, left, right) = match &vdef.expr {
+        Expr::BinOp(BinOpKind::Eq, l, r) => (true, *l, *r),
+        Expr::BinOp(BinOpKind::NotEq, l, r) => (false, *l, *r),
+        _ => return None,
+    };
+    let rv = ssa.var(right);
+    if let Expr::Const(val, sz) = &rv.expr {
+        let signed = sign_extend(*val, *sz);
+        return Some((resolve_to_source(left, ssa), signed, is_eq));
+    }
+    let lv = ssa.var(left);
+    if let Expr::Const(val, sz) = &lv.expr {
+        let signed = sign_extend(*val, *sz);
+        return Some((resolve_to_source(right, ssa), signed, is_eq));
+    }
+    None
+}
+
+/// Extract (base_register_offset, constant_offset) from an address expression.
+/// Matches patterns like BinOp(Add, reg, const) which is typical for stack access.
+fn extract_base_offset(ptr: VarId, ssa: &SsaCfg) -> Option<(u64, u64)> {
+    let vdef = ssa.var(ptr);
+    if let Expr::BinOp(BinOpKind::Add | BinOpKind::Sub, base, off) = &vdef.expr {
+        let base_def = ssa.var(*base);
+        let off_def = ssa.var(*off);
+        if base_def.varnode.space == pcode_ir::AddressSpaceId::Register {
+            if let Expr::Const(c, _) = &off_def.expr {
+                return Some((base_def.varnode.offset, *c));
+            }
+        }
+        // Also handle: base is a Var(reg)
+        if let Expr::Var(inner) = &base_def.expr {
+            let inner_def = ssa.var(*inner);
+            if inner_def.varnode.space == pcode_ir::AddressSpaceId::Register {
+                if let Expr::Const(c, _) = &off_def.expr {
+                    return Some((inner_def.varnode.offset, *c));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Trace a VarId through Var() copies and Zext/Sext to find the source variable.
+/// Returns the deepest non-trivial VarId.
+fn resolve_to_source(id: VarId, ssa: &SsaCfg) -> VarId {
+    let mut cur = id;
+    for _ in 0..8 { // max depth
+        let vdef = ssa.var(cur);
+        match &vdef.expr {
+            Expr::Var(inner) => cur = *inner,
+            Expr::UnaryOp(UnaryOpKind::Zext | UnaryOpKind::Sext, inner) => cur = *inner,
+            _ => break,
+        }
+    }
+    cur
+}
+
+fn sign_extend(val: u64, size: u32) -> i64 {
+    match size {
+        1 => val as i8 as i64,
+        2 => val as i16 as i64,
+        4 => val as i32 as i64,
+        _ => val as i64,
+    }
+}
+
+/// Check if two VarIds refer to the same underlying variable.
+/// They match if they're the same id, or if they're both loads from the same
+/// stack location, or copies of the same source register.
+fn same_test_var(a: VarId, b: VarId, ssa: &SsaCfg) -> bool {
+    if a == b { return true; }
+    let va = ssa.var(a);
+    let vb = ssa.var(b);
+    // Same register
+    if va.varnode.space == pcode_ir::AddressSpaceId::Register
+        && vb.varnode.space == pcode_ir::AddressSpaceId::Register
+        && va.varnode.offset == vb.varnode.offset
+        && va.varnode.size == vb.varnode.size
+    {
+        return true;
+    }
+    // Both are Var() pointing to the same source
+    if let (Expr::Var(sa), Expr::Var(sb)) = (&va.expr, &vb.expr) {
+        if sa == sb { return true; }
+        return same_test_var(*sa, *sb, ssa);
+    }
+    // Both are loads — check if they load from the same address
+    if let (Expr::Load(pa), Expr::Load(pb)) = (&va.expr, &vb.expr) {
+        if same_test_var(*pa, *pb, ssa) { return true; }
+        // Check if both are Load(base + offset) with same base and offset
+        if let Some(off_a) = extract_base_offset(*pa, ssa) {
+            if let Some(off_b) = extract_base_offset(*pb, ssa) {
+                if off_a == off_b { return true; }
+            }
+        }
+    }
+    // Both are param_name with same name
+    if va.param_name.is_some() && va.param_name == vb.param_name {
+        return true;
+    }
+    false
+}
+
+/// Collapse if-else chains testing the same variable into switch/case.
+fn collapse_if_else_to_switch(stmts: &mut Vec<StructuredStmt>, ssa: &SsaCfg) {
+    let mut i = 0;
+    while i < stmts.len() {
+        // Try to collapse BEFORE recursing into nested bodies,
+        // so we can catch the full if-else chain before inner IfElses
+        // are independently processed.
+
+        // Try to collapse this if-else into a switch
+        if let StructuredStmt::IfElse { cond, .. } = &stmts[i] {
+            if let Some((test_var, _, _)) = extract_eq_const(*cond, ssa) {
+                // Walk the if-else chain collecting cases
+                let mut cases: Vec<(Vec<i64>, Vec<StructuredStmt>)> = Vec::new();
+                let mut default = Vec::new();
+                let collected = collect_switch_cases(&stmts[i], test_var, ssa, &mut cases, &mut default);
+
+                // Only convert if we collected at least 3 cases
+                if collected && cases.len() >= 3 {
+                    stmts[i] = StructuredStmt::Switch {
+                        expr: test_var,
+                        cases,
+                        default,
+                    };
+                }
+            }
+        }
+
+        // Recurse into nested bodies AFTER switch collapse attempt
+        match &mut stmts[i] {
+            StructuredStmt::IfElse { then_body, else_body, .. } => {
+                collapse_if_else_to_switch(then_body, ssa);
+                collapse_if_else_to_switch(else_body, ssa);
+            }
+            StructuredStmt::While { body, .. } | StructuredStmt::DoWhile { body, .. } => {
+                collapse_if_else_to_switch(body, ssa);
+            }
+            StructuredStmt::Switch { cases, default, .. } => {
+                for (_, body) in cases.iter_mut() {
+                    collapse_if_else_to_switch(body, ssa);
+                }
+                collapse_if_else_to_switch(default, ssa);
+            }
+            _ => {}
+        }
+
+        i += 1;
+    }
+}
+
+/// Recursively collect cases from a chain of if-else-if testing the same variable.
+/// Returns true if the chain was successfully collected.
+///
+/// Handles two patterns:
+/// 1. `if (x == N) { case_body } else { next_check }` — case body in then
+/// 2. `if (x != N) { next_check } else { case_body }` — case body in else (inverted)
+fn collect_switch_cases(
+    stmt: &StructuredStmt,
+    test_var: VarId,
+    ssa: &SsaCfg,
+    cases: &mut Vec<(Vec<i64>, Vec<StructuredStmt>)>,
+    default: &mut Vec<StructuredStmt>,
+) -> bool {
+    if let StructuredStmt::IfElse { cond, then_body, else_body } = stmt {
+        if let Some((var, val, is_eq)) = extract_eq_const(*cond, ssa) {
+            if same_test_var(var, test_var, ssa) {
+                // For `==`: case body is in then_body, chain continues in else_body
+                // For `!=`: case body is in else_body, chain continues in then_body
+                let (case_body, chain_body) = if is_eq {
+                    (then_body, else_body)
+                } else {
+                    (else_body, then_body)
+                };
+
+                cases.push((vec![val], case_body.clone()));
+
+                // Check if the chain body contains another if-else on the same var.
+                // Allow leading non-IfElse statements (assignments, stores) before it.
+                let next_if = chain_body.iter().enumerate().find(|(_, s)|
+                    matches!(s, StructuredStmt::IfElse { .. }));
+                if let Some((_, next_stmt)) = next_if {
+                    if let StructuredStmt::IfElse { cond: next_cond, .. } = next_stmt {
+                        if let Some((next_var, _, _)) = extract_eq_const(*next_cond, ssa) {
+                            if same_test_var(next_var, test_var, ssa) {
+                                return collect_switch_cases(next_stmt, test_var, ssa, cases, default);
+                            }
+                        }
+                    }
+                }
+
+                // Chain body is the default case
+                if !chain_body.is_empty() {
+                    *default = chain_body.clone();
+                }
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Post-pass: convert gotos to break/continue
+// ──────────────────────────────────────────────────────────────────────
+
+fn eliminate_gotos(stmts: &mut Vec<StructuredStmt>, ssa: &SsaCfg, cfg: &Cfg) {
+    eliminate_gotos_inner(stmts, ssa, cfg, None);
+}
+
+fn eliminate_gotos_inner(stmts: &mut Vec<StructuredStmt>, ssa: &SsaCfg, cfg: &Cfg, loop_ctx: Option<&LoopCtx>) {
+    // First: collect info we need from stmts without holding mutable borrows
+    let len = stmts.len();
+    let mut loop_infos: Vec<Option<LoopCtx>> = Vec::new();
+    for i in 0..len {
+        match &stmts[i] {
+            StructuredStmt::While { body, .. } | StructuredStmt::DoWhile { body, .. } => {
+                let header_addr = body.first().map(|s| stmt_addr(s, ssa)).unwrap_or(0);
+                let exit_addr = if i + 1 < len {
+                    stmt_addr(&stmts[i + 1], ssa)
+                } else {
+                    0
+                };
+                loop_infos.push(Some(LoopCtx { header_addr, exit_addr }));
+            }
+            _ => {
+                loop_infos.push(None);
+            }
+        }
+    }
+
+    // Now do the mutable pass
+    for i in 0..len {
+        match &mut stmts[i] {
+            StructuredStmt::While { body, .. } | StructuredStmt::DoWhile { body, .. } => {
+                if let Some(ref ctx) = loop_infos[i] {
+                    eliminate_gotos_inner(body, ssa, cfg, Some(ctx));
+                }
+            }
+            StructuredStmt::IfElse { then_body, else_body, .. } => {
+                eliminate_gotos_inner(then_body, ssa, cfg, loop_ctx);
+                eliminate_gotos_inner(else_body, ssa, cfg, loop_ctx);
+            }
+            StructuredStmt::Switch { cases, default, .. } => {
+                for (_, body) in cases.iter_mut() {
+                    eliminate_gotos_inner(body, ssa, cfg, loop_ctx);
+                }
+                eliminate_gotos_inner(default, ssa, cfg, loop_ctx);
+            }
+            StructuredStmt::Goto(addr) => {
+                if let Some(ctx) = loop_ctx {
+                    if *addr == ctx.header_addr && ctx.header_addr != 0 {
+                        stmts[i] = StructuredStmt::Continue;
+                    } else if *addr == ctx.exit_addr && ctx.exit_addr != 0 {
+                        stmts[i] = StructuredStmt::Break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Try to get a representative address for a statement (for goto resolution).
+fn stmt_addr(stmt: &StructuredStmt, ssa: &SsaCfg) -> u64 {
+    match stmt {
+        StructuredStmt::Assign { lhs, .. } => {
+            let vdef = ssa.var(*lhs);
+            // Use the instruction address encoded in the varnode
+            vdef.varnode.offset
+        }
+        StructuredStmt::Label(addr) | StructuredStmt::Goto(addr) => *addr,
+        _ => 0,
     }
 }
 
