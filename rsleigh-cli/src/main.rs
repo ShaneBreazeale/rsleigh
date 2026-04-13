@@ -562,6 +562,32 @@ fn discover_pe_functions(
         }
     }
 
+    // Phase 2c: Exhaustive CALL target scanning — find ALL E8 (CALL rel32) targets in .text.
+    // This catches functions that are called but not reachable by recursive descent
+    // (e.g., C++ adjustment thunks called from code we haven't analyzed yet).
+    for (seg_va, seg_sz, seg_fo) in segs {
+        let fo = *seg_fo as usize;
+        let sz = (*seg_sz as usize).min(data.len().saturating_sub(fo));
+        if fo + sz > data.len() { continue; }
+        let bytes = &data[fo..fo + sz];
+
+        let mut off = 0usize;
+        while off + 5 <= sz {
+            if bytes[off] == 0xE8 { // CALL rel32
+                let disp = i32::from_le_bytes([
+                    bytes[off+1], bytes[off+2], bytes[off+3], bytes[off+4]
+                ]);
+                let target = (seg_va + off as u64 + 5).wrapping_add(disp as i64 as u64);
+                // Only accept targets in executable segments
+                let in_seg = segs.iter().any(|(va, sz, _)| target >= *va && target < va + sz);
+                if in_seg && !found.contains(&target) {
+                    found.insert(target);
+                }
+            }
+            off += 1;
+        }
+    }
+
     // Phase 3: Thunk discovery — find JMP [rip+disp] import thunks at function boundaries.
     // Only for PE64 — PE32 thunks are already found by the prologue scanner or import resolution.
     let is_pe64 = goblin::Object::parse(data).ok()
@@ -623,9 +649,10 @@ fn discover_pe_functions(
                     let ptr_size: usize = 8; // PE64 only
 
                     // Phase 4a: Vtable detection — consecutive function pointer arrays.
-                    // A vtable is 3+ consecutive 8-byte pointers into .text.
+                    // A vtable is 2+ consecutive 8-byte pointers into .text.
                     // All pointers in a vtable are accepted without prologue check
-                    // (vtable entries include tiny thunks like "mov al, 1; ret").
+                    // (vtable entries include tiny thunks like "mov al, 1; ret" and
+                    // C++ adjustment thunks like "sub rcx, N; jmp real_method").
                     {
                         let mut consecutive = 0usize;
                         let mut vtable_ptrs: Vec<u64> = Vec::new();
@@ -637,7 +664,7 @@ fn discover_pe_functions(
                                 vtable_ptrs.push(ptr);
                                 consecutive += 1;
                             } else {
-                                if consecutive >= 3 {
+                                if consecutive >= 2 {
                                     for &vptr in &vtable_ptrs[vtable_ptrs.len()-consecutive..] {
                                         found.insert(vptr);
                                     }
@@ -646,7 +673,7 @@ fn discover_pe_functions(
                             }
                             off += ptr_size;
                         }
-                        if consecutive >= 3 {
+                        if consecutive >= 2 {
                             for &vptr in &vtable_ptrs[vtable_ptrs.len()-consecutive..] {
                                 found.insert(vptr);
                             }
