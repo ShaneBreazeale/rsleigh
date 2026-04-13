@@ -1076,6 +1076,123 @@ fn discover_elf_functions(
         let text_fo = text.sh_offset as usize;
         let text_end = text_addr + text_size;
 
+        // 4b. Architecture-specific raw CALL scanning for initial seeds.
+        if text_fo + text_size as usize <= data.len() {
+            let text_bytes = &data[text_fo..text_fo + text_size as usize];
+
+            if matches!(arch, rsleigh_api::Architecture::ARM32) {
+                // ARM32 BL (Branch with Link): condition[31:28] 1011 imm24
+                // Encoding: cccc 1011 xxxx xxxx xxxx xxxx xxxx xxxx
+                // Byte pattern: xx xx xx xB (little-endian, top nibble of byte[3] is cond, byte[3]&0x0F == 0x0B)
+                // Most common: 0xEB (AL condition = always)
+                for i in (0..text_bytes.len().saturating_sub(3)).step_by(4) {
+                    let word = u32::from_le_bytes(text_bytes[i..i+4].try_into().unwrap_or([0;4]));
+                    let is_bl = (word & 0x0F000000) == 0x0B000000; // BL opcode
+                    if is_bl {
+                        let imm24 = word & 0x00FFFFFF;
+                        // Sign-extend 24-bit immediate
+                        let offset = if imm24 & 0x800000 != 0 {
+                            ((imm24 | 0xFF000000) as i32) << 2
+                        } else {
+                            (imm24 as i32) << 2
+                        };
+                        // PC is at instruction + 8 in ARM mode
+                        let target = (text_addr as i64 + i as i64 + 8 + offset as i64) as u64;
+                        if target >= text_addr && target < text_end {
+                            found.insert(target);
+                        }
+                    }
+                }
+
+                // ARM32 PUSH {regs, lr} prologue: E92D xxxx where xxxx has bit 14 set (LR)
+                for i in (0..text_bytes.len().saturating_sub(3)).step_by(4) {
+                    let word = u32::from_le_bytes(text_bytes[i..i+4].try_into().unwrap_or([0;4]));
+                    // STMDB SP!, {regs} = E92D xxxx (PUSH)
+                    if (word & 0xFFFF0000) == 0xE92D0000 {
+                        let reglist = word & 0xFFFF;
+                        if reglist & (1 << 14) != 0 { // LR in register list
+                            // Verify: preceded by function boundary (previous word is a return)
+                            if i == 0 || {
+                                let prev = u32::from_le_bytes(text_bytes[i-4..i].try_into().unwrap_or([0;4]));
+                                // BX LR = E12FFF1E, POP {pc} = E8BD8xxx, MOV PC, LR = E1A0F00E
+                                (prev & 0x0FFFFFFF) == 0x012FFF1E // BX LR
+                                || (prev & 0xFFFF0000) == 0xE8BD0000 && (prev & 0x8000) != 0 // POP {.., PC}
+                                || prev == 0xE1A0F00E // MOV PC, LR
+                                || prev == 0x00000000 // padding
+                            } {
+                                found.insert(text_addr + i as u64);
+                            }
+                        }
+                    }
+
+                    // Thumb PUSH {regs, lr}: B5xx (16-bit)
+                    // Check both halfwords in this 4-byte window
+                    for off in [0usize, 2] {
+                        if i + off + 1 < text_bytes.len() {
+                            let hw = u16::from_le_bytes(text_bytes[i+off..i+off+2].try_into().unwrap_or([0;2]));
+                            if (hw & 0xFF00) == 0xB500 { // PUSH {.., LR}
+                                let addr = text_addr + (i + off) as u64;
+                                if !found.contains(&addr) {
+                                    // Thumb PUSH at aligned boundary
+                                    if off == 0 || {
+                                        let prev_hw = u16::from_le_bytes(text_bytes[i+off-2..i+off].try_into().unwrap_or([0;2]));
+                                        // POP {.., PC} = BDxx, BX LR = 4770
+                                        (prev_hw & 0xFF00) == 0xBD00 || prev_hw == 0x4770 || prev_hw == 0x0000
+                                    } {
+                                        found.insert(addr);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Thumb BL: F000 F800-FFFF (32-bit Thumb instruction)
+                for i in 0..text_bytes.len().saturating_sub(3) {
+                    let hw1 = u16::from_le_bytes(text_bytes[i..i+2].try_into().unwrap_or([0;2]));
+                    let hw2 = u16::from_le_bytes(text_bytes[i+2..i+4].try_into().unwrap_or([0;2]));
+                    // BL: hw1[15:11] = 11110, hw2[15:12] = 1101 (BL) or 1100 (BLX)
+                    if (hw1 & 0xF800) == 0xF000 && (hw2 & 0xD000) == 0xD000 {
+                        let s = ((hw1 >> 10) & 1) as i32;
+                        let imm10 = (hw1 & 0x3FF) as i32;
+                        let j1 = ((hw2 >> 13) & 1) as i32;
+                        let j2 = ((hw2 >> 11) & 1) as i32;
+                        let imm11 = (hw2 & 0x7FF) as i32;
+                        let i1 = !(j1 ^ s) & 1;
+                        let i2 = !(j2 ^ s) & 1;
+                        let offset = if s != 0 {
+                            (0xFF000000u32 as i32) | (s << 24) | (i1 << 23) | (i2 << 22) | (imm10 << 12) | (imm11 << 1)
+                        } else {
+                            (i1 << 23) | (i2 << 22) | (imm10 << 12) | (imm11 << 1)
+                        };
+                        let target = (text_addr as i64 + i as i64 + 4 + offset as i64) as u64;
+                        if target >= text_addr && target < text_end {
+                            found.insert(target);
+                        }
+                    }
+                }
+            }
+
+            if matches!(arch, rsleigh_api::Architecture::AArch64) {
+                // AArch64 BL: 1001 01xx xxxx xxxx xxxx xxxx xxxx xxxx = 0x94000000 mask 0xFC000000
+                for i in (0..text_bytes.len().saturating_sub(3)).step_by(4) {
+                    let word = u32::from_le_bytes(text_bytes[i..i+4].try_into().unwrap_or([0;4]));
+                    if (word & 0xFC000000) == 0x94000000 {
+                        let imm26 = word & 0x03FFFFFF;
+                        let offset = if imm26 & 0x02000000 != 0 {
+                            ((imm26 | 0xFC000000) as i32) << 2
+                        } else {
+                            (imm26 as i32) << 2
+                        };
+                        let target = (text_addr as i64 + i as i64 + offset as i64) as u64;
+                        if target >= text_addr && target < text_end {
+                            found.insert(target);
+                        }
+                    }
+                }
+            }
+        }
+
         // 5. Decoder-based CALL target discovery with indirect call resolution.
         // Decode from known function starts, track register values via LEA/MOV,
         // and resolve both direct CALL 0xNNNN and indirect CALL RAX/CALL [RIP+N].
