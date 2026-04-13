@@ -541,10 +541,14 @@ fn discover_pe_functions(
                         && bytes[off+1] == 0x89 && bytes[off+2] == 0x7C
                         && bytes[off+3] == 0x24
                         && boundary)
-                    // push rbx (53) or push rdi (57) at boundary with REX or sub rsp following
-                    || (off + 2 <= sz && (bytes[off] == 0x53 || bytes[off] == 0x41)
+                    // push rbx (53) at boundary with REX following (common Win64 prologue)
+                    || (off + 2 <= sz && bytes[off] == 0x53
                         && boundary && off > 0
-                        && (bytes[off+1] == 0x48 || bytes[off+1] == 0x56 || bytes[off+1] == 0x57));
+                        && bytes[off+1] == 0x48)
+                    // push r-prefixed (41 5x) at boundary — push r12..r15
+                    || (off + 3 <= sz && bytes[off] == 0x41
+                        && matches!(bytes[off+1], 0x54 | 0x55 | 0x56 | 0x57)
+                        && boundary && off > 0);
 
                 if is_prologue {
                     // Verify: the byte before should be a RET (C3), INT3 (CC), NOP (90), or start of section
@@ -577,11 +581,13 @@ fn discover_pe_functions(
                 let boundary = off == 0 || matches!(bytes[off - 1], 0xC3 | 0xCC | 0x90 | 0x00);
                 if boundary {
                     let is_thunk =
-                        // JMP [rip+disp32]: FF 25 xx xx xx xx (import thunks only)
-                        // These are 6-byte stubs: FF 25 [disp32] followed by NOP/INT3 padding
-                        (off + 6 <= sz && bytes[off] == 0xFF && bytes[off+1] == 0x25
-                            && (off + 6 >= sz || matches!(bytes[off + 6], 0xCC | 0x90 | 0x00
-                                | 0xFF | 0x48 | 0x55)));
+                        // JMP [rip+disp32]: FF 25 xx xx xx xx (import thunks)
+                        (off + 6 <= sz && bytes[off] == 0xFF && bytes[off+1] == 0x25)
+                        // JMP rel32: E9 xx xx xx xx (C++ virtual thunks, tail calls)
+                        // Only at function boundaries — must be preceded by RET/INT3/NOP
+                        // AND followed by another thunk or function start
+                        || (off + 5 <= sz && bytes[off] == 0xE9
+                            && off > 0 && matches!(bytes[off - 1], 0xC3 | 0xCC | 0x90));
 
                     if is_thunk {
                         found.insert(va);
