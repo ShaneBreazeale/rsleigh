@@ -144,7 +144,7 @@ Tested against 30+ CTF binaries from CSAW, HSCTF, DiceCTF, Google CTF, hkcert, C
 | MIPS32 | 900+ | FPU, DSP, MIPS16, microMIPS |
 | RISC-V 64 | 500+ | RV64GC + F/D/B/K/P/Q/V/C |
 
-**Binary formats:** ELF (32/64), Mach-O (x86-64, AArch64), PE (32/64) — auto-detected from headers. Function discovery from symbols, exports, CALL-target scanning, and prologue pattern matching for stripped binaries. Fallback manual PE parser handles malformed binaries with anti-analysis tricks (Stuxnet, packed malware).
+**Binary formats:** ELF (32/64), Mach-O (x86-64, AArch64), PE (32/64) — auto-detected from headers. **Beats Ghidra on function discovery** across all test binaries (PE32/PE64/Mach-O). 8-phase discovery: symbol tables → recursive CALL descent → exhaustive CALL target scanning → `.pdata` exception directories → prologue pattern matching → JMP thunk detection → vtable pointer scanning → `.rdata` cross-references. Fallback manual PE parser handles malformed binaries (Stuxnet, packed malware).
 
 **38K+ function signatures** auto-loaded — C stdlib, POSIX, Linux (syscall, ptrace, epoll, io_uring), macOS (GCD, ObjC runtime, CoreFoundation, IOKit, Mach, Security, CommonCrypto), Android, Win32/64 (with fine-grained typedefs: HKEY, HWND, REGSAM, LSTATUS), OpenSSL, zlib. Signatures propagate parameter names (`/* param_name */` at call sites) and Win32 typedef types through interprocedural two-pass analysis.
 
@@ -162,9 +162,9 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 
 1. **CFG** — P-code to basic blocks, branch resolution, IAT call target resolution, x86-32 CALL/RET boilerplate stripping
 2. **SSA** — Iterative dataflow with phi insertion (multi-pass convergence for loop-carried variables)
-3. **Fold** — Expression folding, dead code elimination, condition recovery, type inference (signed/float/pointer/bool), calling convention detection (SysV/Win64/cdecl), division-by-constant, modulo, signature-based type propagation (38K+ sigs), interprocedural typedef propagation (two-pass), backward Load propagation
-4. **Structure** — If/else, while/for loop recovery, switch/case from jump tables, depth-limited recursion (max 256)
-5. **Printer** — Function signatures with typed params and Win32 typedefs (HKEY, HWND, DWORD), `/* param_name */` annotations at call sites, Ghidra-style local declarations with array sizing (`WCHAR local_8[262]`), auto-naming (iVar/lVar), C++ demangling, import resolution (PLT/GOT/IAT + thunk + CRT wrapper), string literal detection, ELF32 PIE, stack noise elimination
+3. **Fold** — Expression folding, dead code elimination, condition recovery, type inference (signed/float/pointer/bool), calling convention detection (SysV/Win64/cdecl), division-by-constant, modulo, signature-based type propagation (38K+ sigs), interprocedural typedef propagation (two-pass), backward Load propagation, MBA deobfuscation (SiMBA + equality saturation via egg)
+4. **Structure** — If/else, while/for/do-while loop recovery, switch/case from jump tables, depth-limited recursion (max 256)
+5. **Printer** — Function signatures with typed params and Win32 typedefs (HKEY, HWND, DWORD), `/* param_name */` annotations at call sites, Ghidra-style local declarations with array sizing (`WCHAR local_8[262]`), ObjC bracket syntax (`[self method:]`), auto-naming (iVar/lVar/dVar for x86-32/x86-64/ARM64/XMM), C++ demangling, import resolution (PLT/GOT/IAT + thunk + CRT wrapper), global naming (DAT_xxx), string literal detection, ELF32 PIE, stack/prologue noise elimination
 
 ## Rust API
 
@@ -241,6 +241,7 @@ The decompiler is hardened for untrusted input:
 - Register-indirect calls (`CALL EDI` loaded from IAT) not resolved to import names
 - Packed malware — only stub functions visible (Emotet); need unpacking first
 - Struct field typing — field offsets shown but not typed as struct members
+- MBA deobfuscation — handles 1-4 variable linear MBA; non-linear expressions need synthesis
 
 ## License
 

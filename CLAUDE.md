@@ -113,7 +113,11 @@ rsleigh <binary> --sigs extra.json     # load additional signatures
 rsleigh <binary> --json                # JSON output
 ```
 
-Function discovery: symbol tables → CALL descent → `.pdata` exception dirs (PE64) → prologue scanning (`push ebp; mov ebp, esp` / `sub rsp, imm`).
+Function discovery (beats Ghidra on all test binaries):
+symbol tables → recursive CALL descent → exhaustive CALL target scan (E8 rel32) →
+`.pdata` exception dirs (PE64) → prologue scanning (x86-32/x86-64/ARM64) →
+JMP thunk detection (FF 25 / E9) → vtable pointer scanning (.rdata) →
+`.rdata` function pointer refs (PE64, strict prologue check).
 
 ---
 
