@@ -3950,6 +3950,146 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         *line = line.replace("(0xffffffff80000002)", "(HKEY_LOCAL_MACHINE)");
         *line = line.replace("(0x80000001)", "(HKEY_CURRENT_USER)");
         *line = line.replace("(0x80000002)", "(HKEY_LOCAL_MACHINE)");
+        *line = line.replace("(0x80000000)", "(HKEY_CLASSES_ROOT)");
+        *line = line.replace("(0x80000003)", "(HKEY_USERS)");
+        *line = line.replace("(0x80000005)", "(HKEY_CURRENT_CONFIG)");
+        // Registry access rights
+        *line = line.replace("0x20019", "KEY_READ");
+        *line = line.replace("0x20006", "KEY_WRITE");
+        *line = line.replace("0xf003f", "KEY_ALL_ACCESS");
+        // Process access rights
+        *line = line.replace("0x1fffff", "PROCESS_ALL_ACCESS");
+        *line = line.replace("0x001f0fff", "PROCESS_ALL_ACCESS");
+        // Window messages
+        if line.contains("SendMessage") || line.contains("PostMessage") {
+            *line = line.replace(", 0x10,", ", WM_CLOSE,");
+            *line = line.replace(", 0x12,", ", WM_QUIT,");
+            *line = line.replace(", 0x111,", ", WM_COMMAND,");
+            *line = line.replace(", 0x100,", ", WM_KEYDOWN,");
+            *line = line.replace(", 0x101,", ", WM_KEYUP,");
+            *line = line.replace(", 0x402,", ", PBM_SETPOS,");
+        }
+        // ShowWindow
+        if line.contains("ShowWindow") {
+            *line = line.replace(", 0)", ", SW_HIDE)").replace(", 1)", ", SW_SHOWNORMAL)")
+                .replace(", 5)", ", SW_SHOW)").replace(", 3)", ", SW_MAXIMIZE)");
+        }
+        // MessageBox type
+        if line.contains("MessageBox") {
+            *line = line.replace(", 0x30)", ", MB_ICONWARNING)").replace(", 0x10)", ", MB_ICONERROR)")
+                .replace(", 0x40)", ", MB_ICONINFORMATION)").replace(", 0x4)", ", MB_YESNO)");
+        }
+    }
+
+    // #HEX_MAGIC: Annotate well-known hex magic constants.
+    for line in &mut lines {
+        if line.contains("0xe06d7363") {
+            *line = line.replace("0xe06d7363", "0xe06d7363 /* MSVC C++ exception */");
+        }
+        if line.contains("0xbadf00d") && !line.contains("/*") {
+            *line = line.replace("0xbadf00d", "0xbadf00d /* BADF00D sentinel */");
+        }
+        if line.contains("0xdeadbeef") && !line.contains("/*") {
+            *line = line.replace("0xdeadbeef", "0xdeadbeef /* DEADBEEF sentinel */");
+        }
+        if line.contains("0xcccccccc") && !line.contains("/*") {
+            *line = line.replace("0xcccccccc", "0xcccccccc /* uninitialized stack */");
+        }
+        if line.contains("0xcdcdcdcd") && !line.contains("/*") {
+            *line = line.replace("0xcdcdcdcd", "0xcdcdcdcd /* uninitialized heap */");
+        }
+        if line.contains("0xfeeefeee") && !line.contains("/*") {
+            *line = line.replace("0xfeeefeee", "0xfeeefeee /* freed heap */");
+        }
+        if line.contains("0x5a4d") && !line.contains("/*") {
+            *line = line.replace("0x5a4d", "0x5a4d /* MZ header */");
+        }
+        if line.contains("0x4550") && !line.contains("/*") {
+            *line = line.replace("0x4550", "0x4550 /* PE signature */");
+        }
+        if line.contains("0x19930522") && !line.contains("/*") {
+            *line = line.replace("0x19930522", "0x19930522 /* MSVC FuncInfo magic */");
+        }
+    }
+
+    // #CRYPTO_CONSTANTS: Detect cryptographic constants and annotate references.
+    for line in &mut lines {
+        // AES S-box first byte
+        if line.contains("0x637c777b") || line.contains("637c777b") {
+            if !line.contains("/*") { *line = format!("{} // AES S-box", line.trim_end()); }
+        }
+        // SHA-256 first round constant
+        if line.contains("0x428a2f98") {
+            if !line.contains("/*") { *line = format!("{} // SHA-256 round constant", line.trim_end()); }
+        }
+        // SHA-1 constants
+        if line.contains("0x5a827999") || line.contains("0x6ed9eba1") || line.contains("0x8f1bbcdc") {
+            if !line.contains("/*") { *line = format!("{} // SHA-1 constant", line.trim_end()); }
+        }
+        // MD5 init values
+        if line.contains("0x67452301") && line.contains("0xefcdab89") {
+            if !line.contains("/*") { *line = format!("{} // MD5 init vector", line.trim_end()); }
+        }
+        // RC4 initialization (256-byte identity permutation check)
+        if line.contains("0x03020100") && line.contains("0x07060504") {
+            if !line.contains("/*") { *line = format!("{} // RC4/identity permutation", line.trim_end()); }
+        }
+        // CRC32 polynomial
+        if line.contains("0xedb88320") {
+            if !line.contains("/*") { *line = format!("{} // CRC32 polynomial", line.trim_end()); }
+        }
+        // Base64 alphabet reference
+        if line.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/") {
+            if !line.contains("/*") { *line = format!("{} // Base64 alphabet", line.trim_end()); }
+        }
+    }
+
+    // #STACK_STRING: Detect byte-by-byte stack string construction.
+    // Pattern: consecutive *(type*)(local_N + K) = 0xHH; where HH is printable ASCII
+    // Reconstruct the full string and add as a comment.
+    {
+        let mut i = 0;
+        while i < lines.len() {
+            let mut string_bytes: Vec<(usize, u8)> = Vec::new();
+            let mut j = i;
+
+            // Collect consecutive byte stores to adjacent offsets
+            while j < lines.len() {
+                let t = lines[j].trim();
+                // Match: *(type*)(EXPR) = 0xHH; or *(type*)(EXPR) = NN;
+                // where the value is a printable ASCII byte
+                let is_byte_store = t.contains("= 0x") && t.ends_with(';')
+                    && (t.contains("*(uint8_t*)") || t.contains("*(char*)") || t.contains("*(byte*)"));
+
+                if is_byte_store {
+                    // Extract the byte value
+                    if let Some(eq) = t.rfind("= 0x") {
+                        let hex_str = &t[eq+4..].trim_end_matches(';').trim();
+                        if hex_str.len() <= 2 {
+                            if let Ok(val) = u8::from_str_radix(hex_str, 16) {
+                                if val >= 0x20 && val < 0x7f { // printable ASCII
+                                    string_bytes.push((j, val));
+                                    j += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+
+            // If we found 4+ consecutive printable bytes, it's a stack string
+            if string_bytes.len() >= 4 {
+                let s: String = string_bytes.iter().map(|(_, b)| *b as char).collect();
+                let pad = " ".repeat(lines[i].len() - lines[i].trim_start().len());
+                // Insert comment before the first store
+                lines.insert(i, format!("{}// stack string: \"{}\"", pad, s));
+                i += string_bytes.len() + 1;
+            } else {
+                i += 1;
+            }
+        }
     }
 
     // #SUSPICIOUS_API: Flag dangerous/suspicious Windows API calls for malware analysis.
@@ -4144,6 +4284,67 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 continue;
             }
             i += 1;
+        }
+    }
+
+    // #CRT_WRAPPERS: Recognize common CRT wrapper functions by call pattern.
+    // func_XXX that just calls __security_check_cookie → rename to __security_check_cookie
+    // func_XXX that just calls __report_rangecheckfailure → rename
+    {
+        // Scan for single-call wrapper functions: "func_XXX(...) { known_call; }"
+        let _all_text = lines.join("\n");
+        let known_wrappers: &[(&str, &str)] = &[
+            ("__security_check_cookie", "__security_check_cookie"),
+            ("__report_rangecheckfailure", "__report_rangecheckfailure"),
+            ("__GSHandlerCheck", "__GSHandlerCheck"),
+            ("_invalid_parameter_noinfo_noreturn", "_invalid_parameter_noinfo"),
+            ("terminate()", "std::terminate"),
+            ("_CxxThrowException", "_CxxThrowException"),
+            ("_purecall", "_purecall"),
+            ("__std_exception_copy", "__std_exception_copy"),
+            ("__std_exception_destroy", "__std_exception_destroy"),
+        ];
+        let mut wrapper_renames: Vec<(String, String)> = Vec::new();
+
+        for (known, rename_to) in known_wrappers {
+            // Find func_XXX that contains only a call to this known function
+            // Pattern in output: "func_XXXXX(...) {\n    known_func(...);\n}"
+            let search = format!("{}(", known);
+            for line in &lines {
+                if line.contains(&search) && line.contains("func_") {
+                    // Extract the func_XXX name that wraps this call
+                    if let Some(pos) = line.find("func_") {
+                        let end = line[pos..].find('(').unwrap_or(line.len() - pos);
+                        let wrapper_name = &line[pos..pos + end];
+                        if wrapper_name.starts_with("func_") && wrapper_name.len() > 5 {
+                            wrapper_renames.push((wrapper_name.to_string(), rename_to.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also detect stack cookie check: func_XXX(VAR ^ RSP) → __security_check_cookie
+        for line in &lines {
+            if line.contains("^ RSP)") && line.contains("func_") && line.contains("// stack cookie") {
+                if let Some(pos) = line.find("func_") {
+                    let end = line[pos..].find('(').unwrap_or(line.len() - pos);
+                    let wrapper_name = &line[pos..pos + end];
+                    if wrapper_name.starts_with("func_") {
+                        wrapper_renames.push((wrapper_name.to_string(), "__security_check_cookie".to_string()));
+                    }
+                }
+            }
+        }
+
+        wrapper_renames.sort_by(|a, b| b.0.len().cmp(&a.0.len())); // longest first
+        wrapper_renames.dedup();
+        for (old, new_name) in &wrapper_renames {
+            for line in &mut lines {
+                if line.contains(old.as_str()) {
+                    *line = line.replace(old.as_str(), new_name.as_str());
+                }
+            }
         }
     }
 
@@ -4390,12 +4591,25 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         true
     });
 
-    // #RETURN_NEG1: Display 0xffffffffffffffff and 0xffffffff as -1 in return statements.
+    // #NEG1_CONSTANTS: Display 0xffffffffffffffff and 0xffffffff as -1 in all contexts.
+    // Also recognize INVALID_HANDLE_VALUE in comparisons with CreateFile results.
     for line in &mut lines {
         let t = line.trim();
         if t == "return 0xffffffffffffffff;" || t == "return 0xffffffff;" {
             let pad = " ".repeat(line.len() - line.trim_start().len());
             *line = format!("{}return -1;", pad);
+        }
+        // Comparisons: != 0xffffffff → != -1, == 0xffffffff → == -1
+        if line.contains("0xffffffffffffffff") && !line.contains("return") {
+            *line = line.replace("0xffffffffffffffff", "-1");
+        }
+        if line.contains("0xffffffff") && !line.contains("return") && !line.contains("HKEY_") {
+            // INVALID_HANDLE_VALUE context (after CreateFile)
+            if line.contains("!= 0xffffffff") || line.contains("== 0xffffffff") {
+                *line = line.replace("0xffffffff", "INVALID_HANDLE_VALUE");
+            } else {
+                *line = line.replace("0xffffffff", "-1");
+            }
         }
     }
 
