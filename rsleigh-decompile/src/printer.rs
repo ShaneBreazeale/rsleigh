@@ -1349,7 +1349,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     {
         let all_check = lines.join("");
         let is_arm32 = all_check.contains("mult_addr") || all_check.contains("shift_carry")
-            || (all_check.contains("r0") && all_check.contains("lr") && !all_check.contains("RSP"));
+            || matches!(ctx.arch, Architecture::ARM32);
 
         if is_arm32 {
             // 1. Remove flag computation noise — these are ARM CPSR flag updates
