@@ -6801,7 +6801,18 @@ fn format_vardef_expr(vdef: &VarDef, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &Reg
             return name.clone();
         }
     }
-    format_expr_tracked(&vdef.expr, ssa, ctx, tracker)
+    let result = format_expr_tracked(&vdef.expr, ssa, ctx, tracker);
+
+    // Add typed pointer cast for Load dereferences: *(addr) → *(type*)(addr)
+    // Only when the result is an untyped deref and the var has a known size
+    if matches!(&vdef.expr, Expr::Load(_)) && result.starts_with("*(") && !result.contains("*)(") {
+        let type_name = typed_name(vdef.size, vdef.inferred_type);
+        // Extract the address from *(addr) and re-wrap with type
+        if let Some(inner) = result.strip_prefix("*(").and_then(|s| s.strip_suffix(')')) {
+            return format!("*({}*)({})", type_name, inner);
+        }
+    }
+    result
 }
 
 fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> String {
@@ -6853,6 +6864,31 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
                     {
                         let cast = match rv.size { 1 => "(uint8_t)", 2 => "(uint16_t)", _ => "(uint)" };
                         r = format!("{}{}", cast, r);
+                    }
+                }
+                // Arithmetic right shift: cast to signed to distinguish from logical shift
+                BinOpKind::Asr => {
+                    let lv = ssa.var(*left);
+                    if lv.inferred_type != InferredType::Signed && !l.starts_with('(') {
+                        let cast = match lv.size { 1 => "(char)", 2 => "(short)", 4 => "(int)", _ => "(long)" };
+                        l = format!("{}{}", cast, l);
+                    }
+                }
+                // Logical right shift: cast to unsigned to distinguish from arithmetic
+                BinOpKind::Lsr => {
+                    let lv = ssa.var(*left);
+                    if lv.inferred_type == InferredType::Signed && !l.starts_with('(') {
+                        let cast = match lv.size { 1 => "(uint8_t)", 2 => "(uint16_t)", 4 => "(uint)", _ => "(uint64_t)" };
+                        l = format!("{}{}", cast, l);
+                    }
+                }
+                // Bitwise AND/OR/XOR: cast to unsigned when operating on signed values
+                BinOpKind::And | BinOpKind::Or | BinOpKind::Xor => {
+                    let lv = ssa.var(*left);
+                    if lv.inferred_type == InferredType::Signed && !l.starts_with('(')
+                        && !l.starts_with('-') {
+                        let cast = match lv.size { 1 => "(uint8_t)", 2 => "(uint16_t)", 4 => "(uint)", _ => "(uint64_t)" };
+                        l = format!("{}{}", cast, l);
                     }
                 }
                 _ => {}
@@ -7114,11 +7150,40 @@ fn format_condition_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &R
                 BinOpKind::SLess | BinOpKind::SLessEq => {
                     if lv.inferred_type != InferredType::Signed && !l.starts_with('(')
                         && !l.starts_with('-') && l != "0" {
-                        l = format!("(int){}", l);
+                        let cast = match lv.size { 1 => "(char)", 2 => "(short)", _ => "(int)" };
+                        l = format!("{}{}", cast, l);
                     }
                     if rv.inferred_type != InferredType::Signed && !r.starts_with('(')
                         && !r.starts_with('-') && !r.chars().next().map_or(false, |c| c.is_ascii_digit()) {
-                        r = format!("(int){}", r);
+                        let cast = match rv.size { 1 => "(char)", 2 => "(short)", _ => "(int)" };
+                        r = format!("{}{}", cast, r);
+                    }
+                }
+                BinOpKind::Less | BinOpKind::LessEq => {
+                    // Unsigned comparison: cast signed operands to unsigned
+                    if lv.inferred_type == InferredType::Signed && !l.starts_with('(') {
+                        let cast = match lv.size { 1 => "(uint8_t)", 2 => "(uint16_t)", _ => "(uint)" };
+                        l = format!("{}{}", cast, l);
+                    }
+                    if rv.inferred_type == InferredType::Signed && !r.starts_with('(')
+                        && !r.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+                        let cast = match rv.size { 1 => "(uint8_t)", 2 => "(uint16_t)", _ => "(uint)" };
+                        r = format!("{}{}", cast, r);
+                    }
+                }
+                BinOpKind::Eq | BinOpKind::NotEq => {
+                    // Size mismatch: cast smaller operand to match larger
+                    if lv.size != rv.size && lv.size > 0 && rv.size > 0
+                        && !l.starts_with('(') && !r.starts_with('(') {
+                        if lv.size < rv.size && l != "0"
+                            && !l.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+                            let cast = match rv.size { 8 => "(long)", 4 => "(int)", _ => "(int)" };
+                            l = format!("{}{}", cast, l);
+                        } else if rv.size < lv.size && r != "0"
+                            && !r.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+                            let cast = match lv.size { 8 => "(long)", 4 => "(int)", _ => "(int)" };
+                            r = format!("{}{}", cast, r);
+                        }
                     }
                 }
                 _ => {}
