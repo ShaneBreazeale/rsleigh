@@ -4564,6 +4564,131 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 (0x00, "Internal", "ULONG_PTR"), (0x08, "InternalHigh", "ULONG_PTR"),
                 (0x10, "Offset", "DWORD"), (0x14, "OffsetHigh", "DWORD"), (0x18, "hEvent", "HANDLE"),
             ]),
+            // Win32 GUI structs
+            ("RECT", &[
+                (0x00, "left", "LONG"), (0x04, "top", "LONG"),
+                (0x08, "right", "LONG"), (0x0c, "bottom", "LONG"),
+            ]),
+            ("POINT", &[
+                (0x00, "x", "LONG"), (0x04, "y", "LONG"),
+            ]),
+            ("MSG", &[
+                (0x00, "hwnd", "HWND"), (0x08, "message", "UINT"),
+                (0x10, "wParam", "WPARAM"), (0x18, "lParam", "LPARAM"),
+                (0x20, "time", "DWORD"), (0x24, "pt.x", "LONG"), (0x28, "pt.y", "LONG"),
+            ]),
+            ("PAINTSTRUCT", &[
+                (0x00, "hdc", "HDC"), (0x08, "fErase", "BOOL"),
+                (0x0c, "rcPaint.left", "LONG"), (0x10, "rcPaint.top", "LONG"),
+                (0x14, "rcPaint.right", "LONG"), (0x18, "rcPaint.bottom", "LONG"),
+            ]),
+            ("LOGFONTW", &[
+                (0x00, "lfHeight", "LONG"), (0x04, "lfWidth", "LONG"),
+                (0x08, "lfEscapement", "LONG"), (0x0c, "lfOrientation", "LONG"),
+                (0x10, "lfWeight", "LONG"), (0x14, "lfItalic", "BYTE"),
+                (0x15, "lfUnderline", "BYTE"), (0x16, "lfStrikeOut", "BYTE"),
+                (0x17, "lfCharSet", "BYTE"), (0x1c, "lfFaceName", "WCHAR[32]"),
+            ]),
+            ("BITMAP", &[
+                (0x00, "bmType", "LONG"), (0x04, "bmWidth", "LONG"),
+                (0x08, "bmHeight", "LONG"), (0x0c, "bmWidthBytes", "LONG"),
+                (0x10, "bmPlanes", "WORD"), (0x12, "bmBitsPixel", "WORD"),
+                (0x18, "bmBits", "LPVOID"),
+            ]),
+            // Win32 system structs
+            ("CRITICAL_SECTION", &[
+                (0x00, "DebugInfo", "void *"), (0x08, "LockCount", "LONG"),
+                (0x0c, "RecursionCount", "LONG"), (0x10, "OwningThread", "HANDLE"),
+                (0x18, "LockSemaphore", "HANDLE"), (0x20, "SpinCount", "ULONG_PTR"),
+            ]),
+            ("SYSTEM_INFO", &[
+                (0x00, "wProcessorArchitecture", "WORD"), (0x04, "dwPageSize", "DWORD"),
+                (0x08, "lpMinimumApplicationAddress", "LPVOID"),
+                (0x10, "lpMaximumApplicationAddress", "LPVOID"),
+                (0x18, "dwActiveProcessorMask", "DWORD_PTR"),
+                (0x20, "dwNumberOfProcessors", "DWORD"),
+                (0x24, "dwProcessorType", "DWORD"),
+                (0x28, "dwAllocationGranularity", "DWORD"),
+                (0x2c, "wProcessorLevel", "WORD"), (0x2e, "wProcessorRevision", "WORD"),
+            ]),
+            ("MEMORY_BASIC_INFORMATION", &[
+                (0x00, "BaseAddress", "PVOID"), (0x08, "AllocationBase", "PVOID"),
+                (0x10, "AllocationProtect", "DWORD"), (0x18, "RegionSize", "SIZE_T"),
+                (0x20, "State", "DWORD"), (0x24, "Protect", "DWORD"), (0x28, "Type", "DWORD"),
+            ]),
+            ("FILETIME", &[
+                (0x00, "dwLowDateTime", "DWORD"), (0x04, "dwHighDateTime", "DWORD"),
+            ]),
+            ("LARGE_INTEGER", &[
+                (0x00, "LowPart", "DWORD"), (0x04, "HighPart", "LONG"),
+            ]),
+            // Win32 network structs
+            ("WSADATA", &[
+                (0x00, "wVersion", "WORD"), (0x02, "wHighVersion", "WORD"),
+                (0x04, "iMaxSockets", "unsigned short"), (0x06, "iMaxUdpDg", "unsigned short"),
+                (0x08, "lpVendorInfo", "char *"),
+            ]),
+            // Win32 service structs
+            ("SERVICE_STATUS", &[
+                (0x00, "dwServiceType", "DWORD"), (0x04, "dwCurrentState", "DWORD"),
+                (0x08, "dwControlsAccepted", "DWORD"), (0x0c, "dwWin32ExitCode", "DWORD"),
+                (0x10, "dwServiceSpecificExitCode", "DWORD"), (0x14, "dwCheckPoint", "DWORD"),
+                (0x18, "dwWaitHint", "DWORD"),
+            ]),
+            ("SERVICE_TABLE_ENTRYW", &[
+                (0x00, "lpServiceName", "LPWSTR"), (0x08, "lpServiceProc", "LPSERVICE_MAIN_FUNCTION"),
+            ]),
+            // POSIX/Linux structs (x86-64 layout)
+            ("stat", &[
+                (0x00, "st_dev", "dev_t"), (0x08, "st_ino", "ino_t"),
+                (0x10, "st_nlink", "nlink_t"), (0x18, "st_mode", "mode_t"),
+                (0x1c, "st_uid", "uid_t"), (0x20, "st_gid", "gid_t"),
+                (0x28, "st_rdev", "dev_t"), (0x30, "st_size", "off_t"),
+                (0x38, "st_blksize", "blksize_t"), (0x40, "st_blocks", "blkcnt_t"),
+                (0x48, "st_atim", "timespec"), (0x58, "st_mtim", "timespec"),
+                (0x68, "st_ctim", "timespec"),
+            ]),
+            ("sockaddr_in", &[
+                (0x00, "sin_family", "sa_family_t"), (0x02, "sin_port", "in_port_t"),
+                (0x04, "sin_addr", "in_addr"),
+            ]),
+            ("addrinfo", &[
+                (0x00, "ai_flags", "int"), (0x04, "ai_family", "int"),
+                (0x08, "ai_socktype", "int"), (0x0c, "ai_protocol", "int"),
+                (0x10, "ai_addrlen", "socklen_t"), (0x18, "ai_addr", "struct sockaddr *"),
+                (0x20, "ai_canonname", "char *"), (0x28, "ai_next", "struct addrinfo *"),
+            ]),
+            ("timeval", &[
+                (0x00, "tv_sec", "time_t"), (0x08, "tv_usec", "suseconds_t"),
+            ]),
+            ("iovec", &[
+                (0x00, "iov_base", "void *"), (0x08, "iov_len", "size_t"),
+            ]),
+            ("pollfd", &[
+                (0x00, "fd", "int"), (0x04, "events", "short"), (0x06, "revents", "short"),
+            ]),
+            ("sigaction", &[
+                (0x00, "sa_handler", "sighandler_t"), (0x08, "sa_flags", "int"),
+                (0x10, "sa_restorer", "void (*)(void)"), (0x18, "sa_mask", "sigset_t"),
+            ]),
+            ("pthread_attr_t", &[
+                (0x00, "flags", "unsigned long"), (0x08, "stacksize", "size_t"),
+                (0x10, "guardsize", "size_t"), (0x18, "stackaddr", "void *"),
+            ]),
+            // Network (both Win32 and POSIX)
+            ("SOCKADDR_IN", &[
+                (0x00, "sin_family", "ADDRESS_FAMILY"), (0x02, "sin_port", "USHORT"),
+                (0x04, "sin_addr", "IN_ADDR"),
+            ]),
+            // Win32 file dialog
+            ("OPENFILENAMEW", &[
+                (0x00, "lStructSize", "DWORD"), (0x08, "hwndOwner", "HWND"),
+                (0x10, "hInstance", "HINSTANCE"), (0x18, "lpstrFilter", "LPCWSTR"),
+                (0x28, "nFilterIndex", "DWORD"), (0x30, "lpstrFile", "LPWSTR"),
+                (0x38, "nMaxFile", "DWORD"), (0x40, "lpstrFileTitle", "LPWSTR"),
+                (0x48, "nMaxFileTitle", "DWORD"), (0x50, "lpstrInitialDir", "LPCWSTR"),
+                (0x58, "lpstrTitle", "LPCWSTR"), (0x60, "Flags", "DWORD"),
+            ]),
         ];
 
         let mut param_fields: HashMap<String, std::collections::BTreeSet<u64>> = HashMap::new();
@@ -4600,15 +4725,75 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // we know its struct type regardless of field count.
         let api_struct_hints: &[(&str, usize, &str)] = &[
             // (api_name, param_index, struct_type)
+            // Process/startup
             ("GetStartupInfoW", 0, "STARTUPINFOW"),
             ("GetStartupInfoA", 0, "STARTUPINFOW"),
             ("CreateProcessW", 9, "STARTUPINFOW"),
             ("CreateProcessA", 9, "STARTUPINFOW"),
+            ("CreateProcessW", 10, "PROCESS_INFORMATION"),
+            ("CreateProcessA", 10, "PROCESS_INFORMATION"),
+            // Window class
             ("RegisterClassExW", 0, "WNDCLASSEXW"),
             ("RegisterClassExA", 0, "WNDCLASSEXW"),
+            // System info
             ("GetVersionExW", 0, "OSVERSIONINFOW"),
+            ("GetVersionExA", 0, "OSVERSIONINFOW"),
+            ("GetSystemInfo", 0, "SYSTEM_INFO"),
+            ("GetNativeSystemInfo", 0, "SYSTEM_INFO"),
+            // File operations
             ("FindFirstFileW", 1, "WIN32_FIND_DATAW"),
             ("FindNextFileW", 1, "WIN32_FIND_DATAW"),
+            ("FindFirstFileA", 1, "WIN32_FIND_DATAW"),
+            ("FindNextFileA", 1, "WIN32_FIND_DATAW"),
+            ("GetOpenFileNameW", 0, "OPENFILENAMEW"),
+            ("GetSaveFileNameW", 0, "OPENFILENAMEW"),
+            // Memory
+            ("VirtualQuery", 2, "MEMORY_BASIC_INFORMATION"),
+            ("VirtualQueryEx", 3, "MEMORY_BASIC_INFORMATION"),
+            // Critical section
+            ("InitializeCriticalSection", 0, "CRITICAL_SECTION"),
+            ("EnterCriticalSection", 0, "CRITICAL_SECTION"),
+            ("LeaveCriticalSection", 0, "CRITICAL_SECTION"),
+            ("DeleteCriticalSection", 0, "CRITICAL_SECTION"),
+            ("TryEnterCriticalSection", 0, "CRITICAL_SECTION"),
+            // GDI
+            ("BeginPaint", 1, "PAINTSTRUCT"),
+            ("EndPaint", 1, "PAINTSTRUCT"),
+            ("GetClientRect", 1, "RECT"),
+            ("GetWindowRect", 1, "RECT"),
+            ("InvalidateRect", 1, "RECT"),
+            ("FillRect", 1, "RECT"),
+            ("DrawTextW", 3, "RECT"),
+            ("DrawTextA", 3, "RECT"),
+            ("CreateFontIndirectW", 0, "LOGFONTW"),
+            ("CreateFontIndirectA", 0, "LOGFONTW"),
+            // Messages
+            ("GetMessageW", 0, "MSG"),
+            ("GetMessageA", 0, "MSG"),
+            ("PeekMessageW", 0, "MSG"),
+            ("PeekMessageA", 0, "MSG"),
+            ("TranslateMessage", 0, "MSG"),
+            ("DispatchMessageW", 0, "MSG"),
+            ("DispatchMessageA", 0, "MSG"),
+            // Service
+            ("StartServiceCtrlDispatcherW", 0, "SERVICE_TABLE_ENTRYW"),
+            ("SetServiceStatus", 1, "SERVICE_STATUS"),
+            // Overlapped I/O
+            ("ReadFile", 4, "OVERLAPPED"),
+            ("WriteFile", 4, "OVERLAPPED"),
+            ("ConnectNamedPipe", 1, "OVERLAPPED"),
+            // Network (Win32)
+            ("WSAStartup", 1, "WSADATA"),
+            // POSIX
+            ("stat", 1, "stat"),
+            ("fstat", 1, "stat"),
+            ("lstat", 1, "stat"),
+            ("getaddrinfo", 3, "addrinfo"),
+            ("gettimeofday", 0, "timeval"),
+            ("select", 4, "timeval"),
+            ("poll", 0, "pollfd"),
+            ("sigaction", 1, "sigaction"),
+            ("sigaction", 2, "sigaction"),
         ];
         let mut api_type_hints: HashMap<String, &str> = HashMap::new();
         for line in &lines {
@@ -4654,9 +4839,24 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             if fields.len() < 3 { continue; }
             if struct_matches.contains_key(base) { continue; } // already identified by API
 
-            // Try each known struct — score by how many of our fields match
+            // Try each known struct — score by how many of our fields match.
+            // Filter by binary type: Win32 structs only for PE, POSIX only for ELF.
+            let is_pe = matches!(ctx.arch, Architecture::X86_64 | Architecture::X86_32)
+                && ctx.binary.map_or(false, |b| b.len() > 2 && b[0] == b'M' && b[1] == b'Z');
+            let posix_structs = ["stat", "sockaddr_in", "addrinfo", "timeval", "iovec",
+                "pollfd", "sigaction", "pthread_attr_t"];
+            let win32_only_structs = ["STARTUPINFOW", "PROCESS_INFORMATION", "WNDCLASSEXW",
+                "OSVERSIONINFOW", "WIN32_FIND_DATAW", "OPENFILENAMEW", "WSADATA",
+                "SERVICE_STATUS", "SERVICE_TABLE_ENTRYW", "MSG", "PAINTSTRUCT", "LOGFONTW",
+                "BITMAP", "SYSTEM_INFO", "MEMORY_BASIC_INFORMATION", "SOCKADDR_IN",
+                "CRITICAL_SECTION", "OVERLAPPED", "RECT", "POINT", "EXCEPTION_RECORD",
+                "CONTEXT", "FILETIME", "LARGE_INTEGER"];
             let mut best_match: Option<(&str, usize)> = None;
             for (struct_name, struct_fields) in known_structs {
+                // Skip Win32 structs for ELF and POSIX structs for PE
+                if !is_pe && win32_only_structs.contains(struct_name) { continue; }
+                if is_pe && posix_structs.contains(struct_name) { continue; }
+
                 let struct_offsets: std::collections::BTreeSet<u64> = struct_fields.iter().map(|(o, _, _)| *o).collect();
                 let matching = fields.intersection(&struct_offsets).count();
                 // Require at least 3 matching fields and >50% of observed fields match
