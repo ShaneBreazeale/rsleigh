@@ -4137,28 +4137,54 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     .replace("putchar(0)", "putchar('\\0')");
     }
 
-    // #SIMPLIFY_DEREF: Simplify *(uint64_t*)(VAR) to *VAR and *(uint32_t*)(VAR) to *VAR
-    // when VAR is a simple param or variable (no arithmetic).
+    // #SIMPLIFY_DEREF: Clean up pointer dereference syntax.
+    // *(uint64_t*)(param_N) → *param_N
+    // *(param_N) → *param_N  (bare deref of a pointer parameter)
+    // *(lVar_N) → *lVar_N
     for line in &mut lines {
-        // *(uint64_t*)(param_N) → *param_N
-        // *(uint32_t*)(param_N) → *(int*)param_N
-        let t = line.trim().to_string();
-        for cast in ["*(uint64_t*)(", "*(int*)(", "*(long*)("] {
-            if t.contains(cast) {
-                // Find the closing paren and check if the content is a simple var
-                if let Some(start) = t.find(cast) {
+        // Typed casts: *(uint64_t*)(VAR) → *VAR
+        for cast in ["*(uint64_t*)(", "*(int*)(", "*(long*)(", "*(uint32_t*)(", "*(int64_t*)("] {
+            while line.contains(cast) {
+                if let Some(start) = line.find(cast) {
                     let inner_start = start + cast.len();
-                    if let Some(close) = t[inner_start..].find(')') {
-                        let inner = &t[inner_start..inner_start + close];
-                        // Only simplify if inner is a simple variable (no spaces, arithmetic)
-                        if inner.starts_with("param_") && !inner.contains(' ') {
+                    if let Some(close) = line[inner_start..].find(')') {
+                        let inner = &line[inner_start..inner_start + close].to_string();
+                        if (inner.starts_with("param_") || inner.starts_with("lVar")
+                            || inner.starts_with("iVar") || inner.starts_with("local_"))
+                            && !inner.contains(' ')
+                        {
                             let old = format!("{}{})", cast, inner);
-                            let new = format!("*{}", inner);
-                            *line = line.replace(&old, &new);
+                            let new_str = format!("*{}", inner);
+                            *line = line.replace(&old, &new_str);
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+        }
+        // Bare deref: *(param_N) → *param_N, *(lVar_N) → *lVar_N
+        // But NOT *(*(param_N)) — that's a double deref
+        while line.contains("*(param_") || line.contains("*(lVar") || line.contains("*(iVar") {
+            let mut replaced = false;
+            for prefix in ["*(param_", "*(lVar", "*(iVar"] {
+                if let Some(start) = line.find(prefix) {
+                    // Check it's not *(*(... — double deref
+                    if start > 0 && line.as_bytes()[start - 1] == b'(' { break; }
+                    let inner_start = start + 2; // skip "*("
+                    if let Some(close) = line[inner_start..].find(')') {
+                        let inner = line[inner_start..inner_start + close].to_string();
+                        if !inner.contains(' ') && !inner.contains('(') {
+                            let old = format!("*({})", inner);
+                            let new_str = format!("*{}", inner);
+                            *line = line.replace(&old, &new_str);
+                            replaced = true;
+                            break;
                         }
                     }
                 }
             }
+            if !replaced { break; }
         }
     }
 
@@ -4252,13 +4278,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             &["RSP", "ESP", "RBP", "EBP", "RIP", "EIP",
               "XMM0", "XMM1", "XMM2", "XMM3", "XMM4", "XMM5"]
         } else {
-            // x86-64: only skip stack/frame/instruction pointers and XMM.
-            // Param registers (RDI,RSI,RDX,RCX,R8,R9) are NOT skipped —
-            // they appear raw in the body when used as intermediates or
-            // when setting up arguments for other calls. The function's own
-            // params already have param_name and won't appear as bare regs.
-            &["RSP", "ESP", "RBP", "EBP", "RIP", "EIP",
-              "XMM0", "XMM1", "XMM2", "XMM3", "XMM4", "XMM5"]
+            // x86-64: only skip stack/frame/instruction pointers.
+            // Param registers and XMM are NOT skipped — they get auto-named.
+            &["RSP", "ESP", "RBP", "EBP", "RIP", "EIP"]
         };
 
         // Candidate registers for renaming
@@ -4294,6 +4316,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 ("R8B", "b"), ("R9B", "b"), ("R10B", "b"), ("R11B", "b"),
                 ("R12B", "b"), ("R13B", "b"), ("R14B", "b"), ("R15B", "b"),
                 ("AX", "w"), ("BX", "w"), ("CX", "w"), ("DX", "w"), ("SI", "w"), ("DI", "w"),
+                // XMM registers → dVar (double/SSE)
+                ("XMM0", "d"), ("XMM1", "d"), ("XMM2", "d"), ("XMM3", "d"),
+                ("XMM4", "d"), ("XMM5", "d"), ("XMM6", "d"), ("XMM7", "d"),
+                ("XMM8", "d"), ("XMM9", "d"), ("XMM10", "d"), ("XMM11", "d"),
+                ("XMM12", "d"), ("XMM13", "d"), ("XMM14", "d"), ("XMM15", "d"),
             ]
         };
 
