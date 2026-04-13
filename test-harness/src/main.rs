@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use pcode_ir::{AddressSpaceId, PcodeOp, Varnode};
 
 mod corpus;
@@ -279,28 +281,30 @@ fn main() {
 
 // ── Helpers for concise test assertions ──────────────────────────────
 
+#[allow(dead_code)]
 fn reg(offset: u64, size: u32) -> Varnode {
     Varnode::register(offset, size)
 }
+#[allow(dead_code)]
 fn con(value: u64, size: u32) -> Varnode {
     Varnode::constant(value, size)
 }
 
 // x86-64 register offsets (from Ghidra's x86-64 register map)
-const RAX: u64 = 0;
-const RCX: u64 = 8;
-const RDX: u64 = 16;
-const RBX: u64 = 24;
-const RSP: u64 = 32;
-const RBP: u64 = 40;
-const RSI: u64 = 48;
-const RDI: u64 = 56;
-const CF: u64 = 512;
-const PF: u64 = 514;
-const ZF: u64 = 518;
-const SF: u64 = 519;
-const OF: u64 = 523;
-const RIP: u64 = 648;
+#[allow(dead_code)] const RAX: u64 = 0;
+#[allow(dead_code)] const RCX: u64 = 8;
+#[allow(dead_code)] const RDX: u64 = 16;
+#[allow(dead_code)] const RBX: u64 = 24;
+#[allow(dead_code)] const RSP: u64 = 32;
+#[allow(dead_code)] const RBP: u64 = 40;
+#[allow(dead_code)] const RSI: u64 = 48;
+#[allow(dead_code)] const RDI: u64 = 56;
+#[allow(dead_code)] const CF: u64 = 512;
+#[allow(dead_code)] const PF: u64 = 514;
+#[allow(dead_code)] const ZF: u64 = 518;
+#[allow(dead_code)] const SF: u64 = 519;
+#[allow(dead_code)] const OF: u64 = 523;
+#[allow(dead_code)] const RIP: u64 = 648;
 
 /// Assert that the P-code sequence contains specific ops (in order, allowing gaps).
 fn assert_pcode_contains(pcode: &[PcodeOp], disasm: &str, checks: &[fn(&PcodeOp) -> bool]) {

@@ -1093,7 +1093,7 @@ fn discover_elf_functions(
                             let sz = inst.len as usize;
                             if sz == 0 { break; }
                             let dis = &inst.disassembly;
-                            let inst_addr = func_addr + pos as u64;
+                            let _inst_addr = func_addr + pos as u64;
 
                             // Track LEA reg, [RIP+disp] → reg = computed address
                             if dis.starts_with("LEA ") {
@@ -1265,7 +1265,7 @@ fn discover_elf_functions(
         for sh in &elf.section_headers {
             let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
             if name != ".data.rel.ro" { continue; }
-            let sec_addr = sh.sh_addr;
+            let _sec_addr = sh.sh_addr;
             let sec_off = sh.sh_offset as usize;
             let sec_size = sh.sh_size as usize;
             if sec_off + sec_size > data.len() || sec_size < 24 { continue; }
@@ -1315,11 +1315,11 @@ fn discover_elf_functions(
         // 5c. Full data section pointer scan — find ALL 8-byte values pointing into executable code
         // Covers vtables, function pointer arrays, switch jump tables, C++ RTTI
         {
-            let all_exec_start = elf.section_headers.iter()
+            let _all_exec_start = elf.section_headers.iter()
                 .filter(|sh| sh.sh_flags & 0x4 != 0 && sh.sh_addr > 0)
                 .map(|sh| sh.sh_addr)
                 .min().unwrap_or(text_addr);
-            let all_exec_end = elf.section_headers.iter()
+            let _all_exec_end = elf.section_headers.iter()
                 .filter(|sh| sh.sh_flags & 0x4 != 0 && sh.sh_addr > 0)
                 .map(|sh| sh.sh_addr + sh.sh_size)
                 .max().unwrap_or(text_end);
