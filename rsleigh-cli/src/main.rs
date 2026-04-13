@@ -1038,38 +1038,104 @@ fn discover_elf_functions(
         // 6. Prologue pattern scanning in .text
         if text_fo + text_size as usize <= data.len() {
             let text_bytes = &data[text_fo..text_fo + text_size as usize];
+            let is_boundary = |i: usize| -> bool {
+                i == 0 || matches!(text_bytes[i-1], 0xC3 | 0x90 | 0xCC | 0x00 | 0xC2 | 0xCB | 0xCA)
+            };
+            // Also accept NOP padding sequences (66 66 2e 0f 1f etc.)
+            let is_boundary_or_nop = |i: usize| -> bool {
+                if is_boundary(i) { return true; }
+                // Multi-byte NOP: 66 90, 0f 1f XX, 66 2e 0f 1f
+                if i >= 2 && text_bytes[i-1] == 0x90 && text_bytes[i-2] == 0x66 { return true; }
+                if i >= 1 && text_bytes[i-1] == 0x90 { return true; }
+                false
+            };
+
             for i in 0..text_bytes.len().saturating_sub(4) {
                 let addr = text_addr + i as u64;
-                if found.contains(&addr) { continue; } // already found
+                if found.contains(&addr) { continue; }
 
-                // Pattern: push rbp; mov rbp, rsp (55 48 89 e5)
-                if text_bytes[i] == 0x55 && i + 3 < text_bytes.len()
-                    && text_bytes[i+1] == 0x48 && text_bytes[i+2] == 0x89 && text_bytes[i+3] == 0xe5 {
-                    // Verify alignment: must be preceded by a ret (C3), nop (90), int3 (CC), or at section start
-                    if i == 0 || matches!(text_bytes[i-1], 0xC3 | 0x90 | 0xCC | 0x00) {
+                let b0 = text_bytes[i];
+                let b1 = if i + 1 < text_bytes.len() { text_bytes[i+1] } else { 0 };
+                let b2 = if i + 2 < text_bytes.len() { text_bytes[i+2] } else { 0 };
+                let b3 = if i + 3 < text_bytes.len() { text_bytes[i+3] } else { 0 };
+
+                let matched = match (b0, b1, b2, b3) {
+                    // push rbp; mov rbp, rsp (55 48 89 e5)
+                    (0x55, 0x48, 0x89, 0xe5) => true,
+                    // push rbp; mov rbp, rsp (55 48 8b ec)
+                    (0x55, 0x48, 0x8b, 0xec) => true,
+                    // push rbx; sub rsp (53 48 83 ec)
+                    (0x53, 0x48, 0x83, 0xec) => true,
+                    // push rbx; push rbp (53 55 ..) — C++ common
+                    (0x53, 0x55, _, _) => true,
+                    // push r12; push rbp (41 54 55 ..)
+                    (0x41, 0x54, 0x55, _) => true,
+                    // push r12; push rbx (41 54 53 ..)
+                    (0x41, 0x54, 0x53, _) => true,
+                    // push r13; push r12 (41 55 41 54)
+                    (0x41, 0x55, 0x41, 0x54) => true,
+                    // push r14; push r13 (41 56 41 55)
+                    (0x41, 0x56, 0x41, 0x55) => true,
+                    // push r15; push r14 (41 57 41 56)
+                    (0x41, 0x57, 0x41, 0x56) => true,
+                    // sub rsp, imm8 (48 83 ec NN) — leaf function
+                    (0x48, 0x83, 0xEC, _) => true,
+                    // sub rsp, imm32 (48 81 ec NN NN NN NN) — large stack frame
+                    (0x48, 0x81, 0xEC, _) => true,
+                    // push rbp; push rbx (55 53 ..)
+                    (0x55, 0x53, _, _) => true,
+                    // push rbp; push r12 (55 41 54 ..)
+                    (0x55, 0x41, 0x54, _) => true,
+                    // push rbp; sub rsp (55 48 83 ec) — already covered by push rbp patterns
+                    // mov rdi, rsi or similar arg setup as first instruction (rare standalone)
+                    _ => false,
+                };
+
+                if matched && is_boundary_or_nop(i) {
+                    found.insert(addr);
+                }
+
+                // endbr64 (f3 0f 1e fa) — CET-enabled function entry
+                // More relaxed: also accept after any instruction end (not just ret/nop)
+                if b0 == 0xF3 && b1 == 0x0F && b2 == 0x1E && b3 == 0xFA {
+                    if is_boundary_or_nop(i) || (i >= 1 && text_bytes[i-1] >= 0xC0) {
                         found.insert(addr);
                     }
                 }
-                // Pattern: push rbp; mov rbp, rsp (alternate: 55 48 8b ec)
-                if text_bytes[i] == 0x55 && i + 3 < text_bytes.len()
-                    && text_bytes[i+1] == 0x48 && text_bytes[i+2] == 0x8b && text_bytes[i+3] == 0xec {
-                    if i == 0 || matches!(text_bytes[i-1], 0xC3 | 0x90 | 0xCC | 0x00) {
-                        found.insert(addr);
-                    }
+            }
+        }
+
+        // 6b. Scan for endbr64 in all executable sections (not just .text)
+        // This catches .plt.sec and .plt.got entries
+        for sh in &elf.section_headers {
+            if sh.sh_flags & 0x4 == 0 { continue; } // not executable
+            let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
+            if name == ".text" { continue; } // already scanned
+            let fo = sh.sh_offset as usize;
+            let sz = sh.sh_size as usize;
+            if fo + sz > data.len() { continue; }
+            let sec_bytes = &data[fo..fo + sz];
+            for i in (0..sz.saturating_sub(4)).step_by(1) {
+                if sec_bytes[i] == 0xF3 && sec_bytes[i+1] == 0x0F
+                    && sec_bytes[i+2] == 0x1E && sec_bytes[i+3] == 0xFA {
+                    found.insert(sh.sh_addr + i as u64);
                 }
-                // Pattern: sub rsp, N (48 83 ec NN) — leaf function without frame pointer
-                if text_bytes[i] == 0x48 && i + 3 < text_bytes.len()
-                    && text_bytes[i+1] == 0x83 && text_bytes[i+2] == 0xEC {
-                    if i == 0 || matches!(text_bytes[i-1], 0xC3 | 0x90 | 0xCC | 0x00) {
-                        found.insert(addr);
-                    }
-                }
-                // Pattern: endbr64 (f3 0f 1e fa) — CET-enabled function entry
-                if text_bytes[i] == 0xF3 && i + 3 < text_bytes.len()
-                    && text_bytes[i+1] == 0x0F && text_bytes[i+2] == 0x1E && text_bytes[i+3] == 0xFA {
-                    if i == 0 || matches!(text_bytes[i-1], 0xC3 | 0x90 | 0xCC | 0x00) {
-                        found.insert(addr);
-                    }
+            }
+        }
+
+        // 7. Reference analysis: scan .rodata/.data.rel.ro for function pointers
+        // These are vtables, function pointer arrays, and switch jump tables
+        for sh in &elf.section_headers {
+            let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
+            if !matches!(name, ".rodata" | ".data.rel.ro" | ".data" | ".init_array" | ".fini_array") { continue; }
+            let fo = sh.sh_offset as usize;
+            let sz = sh.sh_size as usize;
+            if fo + sz > data.len() || sz < 8 { continue; }
+            // Scan for 8-byte values that point into .text
+            for i in (0..sz.saturating_sub(7)).step_by(8) {
+                let ptr = u64::from_le_bytes(data[fo + i..fo + i + 8].try_into().unwrap_or([0; 8]));
+                if ptr >= text_addr && ptr < text_end {
+                    found.insert(ptr);
                 }
             }
         }

@@ -269,6 +269,25 @@ Wired into Spectra via `rsleigh-api` + `rsleigh-decompile`:
   (registers blue, variables amber, functions clickable, dangerous APIs red)
 - All decode runs on 32MB stack threads (x86 pattern recursion depth)
 
+## Ghidra Comparison Setup
+
+Ghidra 11.3.1 is installed at `~/ghidra_install/ghidra_11.3.1_PUBLIC/`.
+
+```bash
+export JAVA_HOME=$(brew --prefix openjdk@21)/libexec/openjdk.jdk/Contents/Home
+export PATH="$JAVA_HOME/bin:$PATH"
+export GHIDRA_HOME=~/ghidra_install/ghidra_11.3.1_PUBLIC
+```
+
+Headless function counting:
+```bash
+$GHIDRA_HOME/support/analyzeHeadless /tmp/ghidra_proj proj \
+  -import <binary> -postScript /tmp/CountFunctions.py -deleteProject
+```
+
+**Current score: rsleigh 10 — Ghidra 1** on PE/Mach-O binaries (11 compared).
+Stripped ELF: Ghidra leads (55-93% coverage), needs more prologue patterns and reference analysis.
+
 ## License
 
 Apache 2.0
