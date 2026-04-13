@@ -5733,6 +5733,46 @@ fn inferred_type_to_c(ty: crate::ir::InferredType, size: u32) -> &'static str {
     }
 }
 
+/// Convert a signature type to a C cast string for call argument casts.
+fn sigtype_to_cast(ty: crate::signatures::SigType) -> Option<&'static str> {
+    use crate::signatures::SigType;
+    match ty {
+        SigType::Int => Some("int"),
+        SigType::UInt | SigType::DWord | SigType::RegSam => Some("DWORD"),
+        SigType::Long | SigType::LResult | SigType::LStatus | SigType::Ntstatus | SigType::HResult => Some("long"),
+        SigType::ULong => Some("unsigned long"),
+        SigType::SizeT => Some("size_t"),
+        SigType::CharPtr | SigType::LpStr | SigType::LpCStr => Some("char *"),
+        SigType::ConstCharPtr => Some("const char *"),
+        SigType::WCharPtr | SigType::LpWStr | SigType::LpCWStr => Some("LPCWSTR"),
+        SigType::ConstWCharPtr => Some("LPCWSTR"),
+        SigType::VoidPtr | SigType::LpVoid => Some("void *"),
+        SigType::ConstVoidPtr => Some("const void *"),
+        SigType::Handle | SigType::HModule | SigType::HInstance => Some("HANDLE"),
+        SigType::Hwnd => Some("HWND"),
+        SigType::HKey => Some("HKEY"),
+        SigType::HDc => Some("HDC"),
+        SigType::HIcon => Some("HICON"),
+        SigType::HBrush => Some("HBRUSH"),
+        SigType::HBitmap => Some("HBITMAP"),
+        SigType::HFont => Some("HFONT"),
+        SigType::HMenu => Some("HMENU"),
+        SigType::WParam => Some("WPARAM"),
+        SigType::LParam => Some("LPARAM"),
+        SigType::Atom => Some("ATOM"),
+        SigType::Word => Some("WORD"),
+        SigType::Byte => Some("BYTE"),
+        SigType::LpByte => Some("LPBYTE"),
+        SigType::LpDWord => Some("LPDWORD"),
+        SigType::PhKey => Some("PHKEY"),
+        SigType::ScHandle => Some("SC_HANDLE"),
+        SigType::Bool => Some("BOOL"),
+        SigType::FilePtr => Some("FILE *"),
+        SigType::Fd | SigType::SockFd => None, // int — no cast needed
+        SigType::Void => None,
+    }
+}
+
 fn filter_boilerplate(stmts: &[StructuredStmt], ssa: &SsaCfg) -> Vec<StructuredStmt> {
     stmts.iter().filter(|stmt| {
         match stmt {
@@ -6065,7 +6105,26 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
 
             // Format RHS BEFORE any invalidation of this register
             let name = var_name(&vdef.varnode, ctx);
-            let rhs = format_vardef_expr(vdef, ssa, ctx, tracker);
+            let mut rhs = format_vardef_expr(vdef, ssa, ctx, tracker);
+
+            // Add narrowing cast when output is smaller than input (Subpiece truncation)
+            if let Expr::Var(src_id) = &vdef.expr {
+                let src = ssa.var(*src_id);
+                if src.size > vdef.size && vdef.size > 0 && vdef.size < 8 {
+                    let cast = match (vdef.inferred_type, vdef.size) {
+                        (InferredType::Signed, 4) => "(int)",
+                        (InferredType::Signed, 2) => "(short)",
+                        (InferredType::Signed, 1) => "(char)",
+                        (_, 4) => "(uint)",
+                        (_, 2) => "(uint16_t)",
+                        (_, 1) => "(uint8_t)",
+                        _ => "",
+                    };
+                    if !cast.is_empty() && !rhs.starts_with('(') {
+                        rhs = format!("{}{}", cast, rhs);
+                    }
+                }
+            }
 
             // NOW invalidate if this was a computed expression (not a copy/load)
             if vdef.varnode.space == AddressSpaceId::Register {
@@ -6190,9 +6249,34 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                 let args_str: Vec<String> = args.iter().enumerate()
                     .map(|(i, a)| {
                         let vdef = ssa.var(*a);
-                        let expr_str = format_vardef_expr(vdef, ssa, ctx, tracker);
+                        let mut expr_str = format_vardef_expr(vdef, ssa, ctx, tracker);
                         if let Some(sig) = call_sig {
                             if let Some(param) = sig.params.get(i) {
+                                // Add type cast when param has a specific type and arg is a raw value
+                                if let Some(cast) = sigtype_to_cast(param.ty) {
+                                    let needs_cast = !expr_str.starts_with('"')
+                                        && !expr_str.starts_with("L\"")
+                                        && !expr_str.starts_with('(') // already cast
+                                        && expr_str != "0"
+                                        && !expr_str.contains(cast); // already has the type
+                                    // Only cast numeric-looking args, variables, and pointer exprs
+                                    // Don't cast if it's already a function call result
+                                    let is_castable = needs_cast && (
+                                        expr_str.starts_with("0x")
+                                        || expr_str.starts_with("local_")
+                                        || expr_str.starts_with("param_")
+                                        || expr_str.starts_with("lVar")
+                                        || expr_str.starts_with("iVar")
+                                        || expr_str.starts_with("bVar")
+                                        || expr_str.starts_with("wVar")
+                                        || expr_str.starts_with("dVar")
+                                        || expr_str.starts_with("DAT_")
+                                        || expr_str.chars().next().map_or(false, |c| c.is_ascii_digit())
+                                    );
+                                    if is_castable {
+                                        expr_str = format!("({}){}", cast, expr_str);
+                                    }
+                                }
                                 let is_simple = expr_str.starts_with('"')
                                     || expr_str.starts_with("L\"")
                                     || expr_str == "0"
@@ -6724,8 +6808,8 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
     match expr {
         Expr::Var(id) => format_var_tracked(*id, ssa, ctx, tracker),
         Expr::BinOp(kind, left, right) => {
-            let l = format_var_tracked(*left, ssa, ctx, tracker);
-            let r = format_var_tracked(*right, ssa, ctx, tracker);
+            let mut l = format_var_tracked(*left, ssa, ctx, tracker);
+            let mut r = format_var_tracked(*right, ssa, ctx, tracker);
             let op = binop_str(*kind);
             if matches!(kind, BinOpKind::Add) {
                 let rv = ssa.var(*right);
@@ -6736,15 +6820,92 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
                     }
                 }
             }
+            // Add signedness casts for signed operations
+            match kind {
+                BinOpKind::SLess | BinOpKind::SLessEq | BinOpKind::SDiv | BinOpKind::SRem => {
+                    let lv = ssa.var(*left);
+                    let rv = ssa.var(*right);
+                    // Cast operands to signed if they're not already signed
+                    if lv.inferred_type != InferredType::Signed && !l.starts_with('(')
+                        && !l.starts_with('-') && !l.starts_with('"') && l != "0"
+                    {
+                        let cast = match lv.size { 1 => "(char)", 2 => "(short)", _ => "(int)" };
+                        l = format!("{}{}", cast, l);
+                    }
+                    if rv.inferred_type != InferredType::Signed && !r.starts_with('(')
+                        && !r.starts_with('-') && !r.starts_with('"') && r != "0"
+                        && !r.chars().next().map_or(false, |c| c.is_ascii_digit())
+                    {
+                        let cast = match rv.size { 1 => "(char)", 2 => "(short)", _ => "(int)" };
+                        r = format!("{}{}", cast, r);
+                    }
+                }
+                BinOpKind::Div | BinOpKind::Rem | BinOpKind::Less | BinOpKind::LessEq => {
+                    let lv = ssa.var(*left);
+                    let rv = ssa.var(*right);
+                    // Cast to unsigned for explicitly unsigned comparisons/arithmetic
+                    if lv.inferred_type == InferredType::Signed && !l.starts_with('(') {
+                        let cast = match lv.size { 1 => "(uint8_t)", 2 => "(uint16_t)", _ => "(uint)" };
+                        l = format!("{}{}", cast, l);
+                    }
+                    if rv.inferred_type == InferredType::Signed && !r.starts_with('(')
+                        && !r.chars().next().map_or(false, |c| c.is_ascii_digit())
+                    {
+                        let cast = match rv.size { 1 => "(uint8_t)", 2 => "(uint16_t)", _ => "(uint)" };
+                        r = format!("{}{}", cast, r);
+                    }
+                }
+                _ => {}
+            }
             format!("{} {} {}", l, op, r)
         }
         Expr::UnaryOp(kind, input) => {
             let i = format_var_tracked(*input, ssa, ctx, tracker);
+            let input_def = ssa.var(*input);
             match kind {
                 UnaryOpKind::Neg => format!("-{}", i),
                 UnaryOpKind::Not => format!("~{}", i),
                 UnaryOpKind::BoolNot => format!("!{}", i),
-                UnaryOpKind::Zext | UnaryOpKind::Sext => i, // sign/zero-extend implicit in C
+                UnaryOpKind::Zext => {
+                    // Zero-extend: cast to unsigned target type when widening
+                    // Only emit cast when input is narrower (actual widening)
+                    let input_size = input_def.size;
+                    if input_size <= 4 && input_size > 0 {
+                        let cast_type = match input_size {
+                            1 => "uint8_t",
+                            2 => "uint16_t",
+                            4 => "uint",
+                            _ => "uint",
+                        };
+                        format!("({}){}", cast_type, i)
+                    } else {
+                        i
+                    }
+                }
+                UnaryOpKind::Sext => {
+                    // Sign-extend: cast to signed type of the INPUT size
+                    let input_size = input_def.size;
+                    if input_size <= 4 && input_size > 0 {
+                        let cast_type = match input_size {
+                            1 => "char",
+                            2 => "short",
+                            4 => "int",
+                            _ => "int",
+                        };
+                        format!("({}){}", cast_type, i)
+                    } else {
+                        i
+                    }
+                }
+                UnaryOpKind::Int2Float => format!("(float){}", i),
+                UnaryOpKind::Trunc => {
+                    // Float-to-int truncation
+                    format!("(int){}", i)
+                }
+                UnaryOpKind::Float2Float => {
+                    // Float precision conversion
+                    format!("(double){}", i)
+                }
                 _ => format!("{}({})", unaryop_str(*kind), i),
             }
         }
@@ -6943,10 +7104,27 @@ fn format_condition_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &R
             // For conditions, render operands via their SSA expression first,
             // falling back to tracker. This avoids the tracker aliasing both
             // operands to the same register name.
-            let l = format_cond_operand(*left, ssa, ctx, tracker);
-            let r = format_cond_operand(*right, ssa, ctx, tracker);
-            // Canonicalize: if LHS is a constant, swap operands and use swapped operator string
+            let mut l = format_cond_operand(*left, ssa, ctx, tracker);
+            let mut r = format_cond_operand(*right, ssa, ctx, tracker);
+
+            // Add signedness casts for signed/unsigned comparisons
             let lv = ssa.var(*left);
+            let rv = ssa.var(*right);
+            match kind {
+                BinOpKind::SLess | BinOpKind::SLessEq => {
+                    if lv.inferred_type != InferredType::Signed && !l.starts_with('(')
+                        && !l.starts_with('-') && l != "0" {
+                        l = format!("(int){}", l);
+                    }
+                    if rv.inferred_type != InferredType::Signed && !r.starts_with('(')
+                        && !r.starts_with('-') && !r.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+                        r = format!("(int){}", r);
+                    }
+                }
+                _ => {}
+            }
+
+            // Canonicalize: if LHS is a constant, swap operands and use swapped operator string
             let l_is_const = matches!(&lv.expr, Expr::Const(_, _));
             if l_is_const {
                 if let Some(swapped_op) = swap_comparison_str(*kind) {
@@ -7396,11 +7574,28 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
         }
         Expr::UnaryOp(kind, input) => {
             let i = format_var(*input, ssa, ctx);
+            let input_def = ssa.var(*input);
             match kind {
                 UnaryOpKind::Neg => format!("-{}", i),
                 UnaryOpKind::Not => format!("~{}", i),
                 UnaryOpKind::BoolNot => format!("!{}", i),
-                UnaryOpKind::Zext | UnaryOpKind::Sext => i, // sign/zero-extend implicit in C
+                UnaryOpKind::Zext => {
+                    let sz = input_def.size;
+                    if sz <= 4 && sz > 0 {
+                        let cast = match sz { 1 => "uint8_t", 2 => "uint16_t", _ => "uint" };
+                        format!("({}){}", cast, i)
+                    } else { i }
+                }
+                UnaryOpKind::Sext => {
+                    let sz = input_def.size;
+                    if sz <= 4 && sz > 0 {
+                        let cast = match sz { 1 => "char", 2 => "short", _ => "int" };
+                        format!("({}){}", cast, i)
+                    } else { i }
+                }
+                UnaryOpKind::Int2Float => format!("(float){}", i),
+                UnaryOpKind::Trunc => format!("(int){}", i),
+                UnaryOpKind::Float2Float => format!("(double){}", i),
                 _ => format!("{}({})", unaryop_str(*kind), i),
             }
         }
