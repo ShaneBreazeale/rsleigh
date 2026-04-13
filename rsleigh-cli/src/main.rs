@@ -328,11 +328,50 @@ fn parse_binary(obj: &goblin::Object, _data: &[u8]) -> Option<(rsleigh_api::Arch
                 }
             }
             let mut syms = Vec::new();
+            // Exported/defined symbols
             if let Some(ref st) = m.symbols {
                 for s in st.iter() {
                     if let Ok((name, nlist)) = s {
                         if nlist.n_type & 0xe == 0xe && nlist.n_value != 0 {
                             syms.push((nlist.n_value, name.strip_prefix('_').unwrap_or(name).to_string()));
+                        }
+                    }
+                }
+            }
+            // Parse LC_FUNCTION_STARTS — gives ALL function entry points as ULEB128 deltas.
+            // This is the Mach-O equivalent of PE .pdata — the most reliable function discovery.
+            let text_vmaddr = m.segments.iter()
+                .find(|s| s.name().ok() == Some("__TEXT"))
+                .map(|s| s.vmaddr)
+                .unwrap_or(0);
+            if text_vmaddr > 0 {
+                for lc in &m.load_commands {
+                    if let goblin::mach::load_command::CommandVariant::FunctionStarts(ref fs) = lc.command {
+                        let off = fs.dataoff as usize;
+                        let size = fs.datasize as usize;
+                        if off + size <= _data.len() {
+                            let mut pos = off;
+                            let end = off + size;
+                            let mut addr = text_vmaddr;
+                            while pos < end {
+                                // ULEB128 decode
+                                let mut delta: u64 = 0;
+                                let mut shift = 0;
+                                loop {
+                                    if pos >= end { break; }
+                                    let b = _data[pos] as u64;
+                                    pos += 1;
+                                    delta |= (b & 0x7f) << shift;
+                                    shift += 7;
+                                    if b & 0x80 == 0 { break; }
+                                }
+                                if delta == 0 { break; }
+                                addr += delta;
+                                // Add if not already in symbol list
+                                if !syms.iter().any(|(a, _)| *a == addr) {
+                                    syms.push((addr, format!("FUN_{:x}", addr)));
+                                }
+                            }
                         }
                     }
                 }
@@ -462,22 +501,30 @@ fn discover_pe_functions(
                         let fo = sec.pointer_to_raw_data as usize;
                         let sz = sec.virtual_size.min(sec.size_of_raw_data) as usize;
                         if fo + sz <= data.len() {
-                            // Each RUNTIME_FUNCTION is 12 bytes: BeginAddress(4), EndAddress(4), UnwindData(4)
+                            // Entry size depends on architecture:
+                            // x86-64: 12 bytes (BeginAddress:4, EndAddress:4, UnwindData:4)
+                            // ARM64:  8 bytes (BeginAddress:4, UnwindData:4)
+                            let pe_off_local = u32::from_le_bytes(
+                                data[0x3c..0x40].try_into().unwrap_or([0;4])) as usize;
+                            let machine = u16::from_le_bytes([
+                                data[pe_off_local+4], data[pe_off_local+5]
+                            ]);
+                            let entry_size: usize = if machine == 0xAA64 { 8 } else { 12 };
+
                             let mut off = 0;
-                            while off + 12 <= sz {
+                            while off + entry_size <= sz {
                                 let begin_rva = u32::from_le_bytes([
                                     data[fo+off], data[fo+off+1], data[fo+off+2], data[fo+off+3]
                                 ]) as u64;
                                 if begin_rva == 0 { break; }
                                 let func_va = base + begin_rva;
                                 if !found.contains(&func_va) {
-                                    // Verify the address is in an executable segment
                                     let in_seg = segs.iter().any(|(va, sz, _)| func_va >= *va && func_va < va + sz);
                                     if in_seg {
                                         found.insert(func_va);
                                     }
                                 }
-                                off += 12;
+                                off += entry_size;
                             }
                         }
                     }
