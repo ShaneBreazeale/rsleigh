@@ -64,44 +64,20 @@ def run_rsleigh(binary_path, rsleigh_bin=None):
     start = time.time()
 
     if rsleigh_bin:
-        # List functions
         result = subprocess.run([rsleigh_bin, binary_path],
                                 capture_output=True, text=True, timeout=120)
         func_count = len([l for l in result.stdout.split('\n') if l.strip().startswith('0x')])
-
-        # Decompile all
-        result = subprocess.run([rsleigh_bin, binary_path, "--all"],
-                                capture_output=True, text=True, timeout=600)
         output = result.stdout
     else:
         result = subprocess.run(["cargo", "run", "-p", "rsleigh-cli", "--release", "--", binary_path],
                                 capture_output=True, text=True, timeout=120)
         func_count = len([l for l in result.stdout.split('\n') if l.strip().startswith('0x')])
-
-        result = subprocess.run(["cargo", "run", "-p", "rsleigh-cli", "--release", "--", binary_path, "--all"],
-                                capture_output=True, text=True, timeout=600)
         output = result.stdout
 
     elapsed = time.time() - start
 
-    # Collect metrics
-    lines = output.count('\n')
-    strings = len(set(re.findall(r'"[^"]{5,}', output)))
-    annotations = output.count('/*')
-    cookies = output.count('stack cookie')
-    cout_ops = output.count('cout <<')
-    cin_ops = output.count('cin >>')
-    security_checks = output.count('__security_check_cookie')
-
     return {
         "functions": func_count,
-        "lines": lines,
-        "strings": strings,
-        "annotations": annotations,
-        "cookies": cookies,
-        "cout": cout_ops,
-        "cin": cin_ops,
-        "security": security_checks,
         "time": elapsed,
     }
 
@@ -164,8 +140,7 @@ def main():
                 status += " REGRESSION!"
                 regressions.append((name, funcs, baseline))
 
-            print(f"{funcs} funcs, {metrics['lines']} lines, "
-                  f"{metrics['strings']} strings, {metrics['time']:.1f}s  {status}")
+            print(f"{funcs} funcs, {metrics['time']:.1f}s  {status}")
 
         except subprocess.TimeoutExpired:
             print("TIMEOUT")

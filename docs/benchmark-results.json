@@ -1,0 +1,38 @@
+{
+  "ChocolateFactory.exe": {
+    "functions": 603,
+    "time": 0.005873918533325195
+  },
+  "FLRSCRNSVR.SCR": {
+    "functions": 93,
+    "time": 0.0031156539916992188
+  },
+  "FrhedPortable_2017.11.paf.exe": {
+    "functions": 144,
+    "time": 0.01924300193786621
+  },
+  "cb_baristas_secret_x64.exe": {
+    "functions": 133,
+    "time": 0.013644218444824219
+  },
+  "crackme_bobgambling.exe": {
+    "functions": 80,
+    "time": 0.003676891326904297
+  },
+  "crackme_shroud.exe": {
+    "functions": 3327,
+    "time": 0.15536880493164062
+  },
+  "main.exe": {
+    "functions": 2737,
+    "time": 0.016136884689331055
+  },
+  "rust-crackme-easy.exe": {
+    "functions": 487,
+    "time": 0.0058248043060302734
+  },
+  "vm-final.exe": {
+    "functions": 235,
+    "time": 0.0037751197814941406
+  }
+}
