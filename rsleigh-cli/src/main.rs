@@ -509,22 +509,14 @@ fn discover_pe_functions(
                     (bytes[off] == 0x55 && off + 3 <= sz
                         && ((bytes[off+1] == 0x8B && bytes[off+2] == 0xEC)
                             || (bytes[off+1] == 0x89 && bytes[off+2] == 0xE5)))
-                    // push esi/edi at boundary
+                    // push esi/edi at boundary — only if followed by another push or sub esp
                     || (off + 2 <= sz && (bytes[off] == 0x56 || bytes[off] == 0x57)
-                        && boundary && off > 0)
+                        && boundary && off > 0
+                        && matches!(bytes[off+1], 0x53 | 0x55 | 0x56 | 0x57 | 0x83 | 0x8B))
                     // mov reg, [esp+4] at boundary
                     || (off + 4 <= sz && bytes[off] == 0x8B
                         && (bytes[off+1] == 0x44 || bytes[off+1] == 0x4C)
                         && bytes[off+2] == 0x24 && bytes[off+3] == 0x04
-                        && boundary && off > 0)
-                    // sub esp at boundary
-                    || (off + 2 <= sz && bytes[off] == 0x83
-                        && (bytes[off+1] == 0xEC || bytes[off+1] == 0x7C)
-                        && boundary && off > 0)
-                    // push imm + forwarding stub at boundary
-                    || (off + 2 <= sz
-                        && (bytes[off] == 0x68 || bytes[off] == 0x6A
-                            || (bytes[off] == 0xFF && bytes[off+1] == 0x74))
                         && boundary && off > 0)
                     // === x86-64 patterns ===
                     // sub rsp, imm8 (48 83 EC xx) — standard x86-64 prologue
@@ -563,6 +555,119 @@ fn discover_pe_functions(
                 }
             }
             off += 1;
+        }
+    }
+
+    // Phase 3: Thunk discovery — find JMP [rip+disp] import thunks at function boundaries.
+    // Only for PE64 — PE32 thunks are already found by the prologue scanner or import resolution.
+    let is_pe64 = goblin::Object::parse(data).ok()
+        .and_then(|o| if let goblin::Object::PE(pe) = o { Some(pe.is_64) } else { None })
+        .unwrap_or(false);
+    if is_pe64 {
+    for (seg_va, seg_sz, seg_fo) in segs {
+        let fo = *seg_fo as usize;
+        let sz = (*seg_sz as usize).min(data.len().saturating_sub(fo));
+        if fo + sz > data.len() { continue; }
+        let bytes = &data[fo..fo + sz];
+
+        let mut off = 0usize;
+        while off + 2 <= sz {
+            let va = seg_va + off as u64;
+            if !found.contains(&va) {
+                let boundary = off == 0 || matches!(bytes[off - 1], 0xC3 | 0xCC | 0x90 | 0x00);
+                if boundary {
+                    let is_thunk =
+                        // JMP [rip+disp32]: FF 25 xx xx xx xx (import thunks only)
+                        // These are 6-byte stubs: FF 25 [disp32] followed by NOP/INT3 padding
+                        (off + 6 <= sz && bytes[off] == 0xFF && bytes[off+1] == 0x25
+                            && (off + 6 >= sz || matches!(bytes[off + 6], 0xCC | 0x90 | 0x00
+                                | 0xFF | 0x48 | 0x55)));
+
+                    if is_thunk {
+                        found.insert(va);
+                    }
+                }
+            }
+            off += 1;
+        }
+    }
+    } // end if is_pe64
+
+    // Phase 4: Data reference scanning — find function pointers in .rdata/.data sections.
+    // Vtable entries, C++ exception handler tables, and callback registrations point to
+    // code addresses that aren't reached by CALL descent.
+    // Only for PE64 — PE32 has too many false positives from 32-bit values that look like pointers.
+    if let Ok(obj) = goblin::Object::parse(data) {
+        if let goblin::Object::PE(pe) = &obj {
+            if !pe.is_64 { /* skip PE32 */ } else {
+            let base = pe.image_base as u64;
+            // Identify executable address range
+            let mut text_start = u64::MAX;
+            let mut text_end = 0u64;
+            for seg in segs.iter() {
+                text_start = text_start.min(seg.0);
+                text_end = text_end.max(seg.0 + seg.1);
+            }
+
+            for sec in &pe.sections {
+                let name = std::str::from_utf8(&sec.name).unwrap_or("").trim_end_matches('\0');
+                if name == ".rdata" || name == ".data" || name == "_RDATA" {
+                    let fo = sec.pointer_to_raw_data as usize;
+                    let sz = sec.virtual_size.min(sec.size_of_raw_data) as usize;
+                    if fo + sz > data.len() { continue; }
+                    let ptr_size = if pe.is_64 { 8 } else { 4 };
+
+                    let mut off = 0usize;
+                    while off + ptr_size <= sz {
+                        let ptr = if pe.is_64 {
+                            u64::from_le_bytes(data[fo+off..fo+off+8].try_into().unwrap_or([0;8]))
+                        } else {
+                            u32::from_le_bytes(data[fo+off..fo+off+4].try_into().unwrap_or([0;4])) as u64
+                        };
+
+                        // Check if pointer targets executable code
+                        if ptr >= text_start && ptr < text_end && !found.contains(&ptr) {
+                            // Verify: target should look like the start of a function
+                            // (not the middle of an instruction)
+                            let target_fo = segs.iter().find_map(|(va, sz, sfo)| {
+                                if ptr >= *va && ptr < va + sz { Some(sfo + (ptr - va)) } else { None }
+                            });
+                            if let Some(target_fo) = target_fo {
+                                let tfo = target_fo as usize;
+                                if tfo + 2 <= data.len() {
+                                    let b0 = data[tfo];
+                                    // Accept if it starts with a reasonable instruction
+                                    // Strict: only accept targets that start with known
+                                    // function prologues (not arbitrary instructions)
+                                    let b1 = if tfo + 1 < data.len() { data[tfo + 1] } else { 0 };
+                                    let b2 = if tfo + 2 < data.len() { data[tfo + 2] } else { 0 };
+                                    let looks_like_func =
+                                        // sub rsp, imm8 (48 83 EC)
+                                        (b0 == 0x48 && b1 == 0x83 && b2 == 0xEC)
+                                        // sub rsp, imm32 (48 81 EC)
+                                        || (b0 == 0x48 && b1 == 0x81 && b2 == 0xEC)
+                                        // push rbp (55) followed by REX
+                                        || (b0 == 0x55 && (b1 == 0x48 || b1 == 0x57 || b1 == 0x56))
+                                        // push rbx/rsi/rdi at boundary
+                                        || (b0 == 0x53 || b0 == 0x56 || b0 == 0x57)
+                                            && (tfo == 0 || matches!(data[tfo-1], 0xC3 | 0xCC | 0x90))
+                                        // mov [rsp+N], reg (48 89 5C/7C 24)
+                                        || (b0 == 0x48 && b1 == 0x89 && (b2 == 0x5C || b2 == 0x7C))
+                                        // JMP thunks
+                                        || (b0 == 0xFF && b1 == 0x25) || b0 == 0xE9
+                                        // push rbp; mov ebp, esp (32-bit)
+                                        || (b0 == 0x55 && b1 == 0x8B && b2 == 0xEC);
+                                    if looks_like_func {
+                                        found.insert(ptr);
+                                    }
+                                }
+                            }
+                        }
+                        off += ptr_size;
+                    }
+                }
+            }
+            }
         }
     }
 
