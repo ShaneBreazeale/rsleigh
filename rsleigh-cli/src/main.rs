@@ -376,6 +376,81 @@ fn parse_binary(obj: &goblin::Object, _data: &[u8]) -> Option<(rsleigh_api::Arch
                     }
                 }
             }
+            // Parse ObjC method lists for implementation addresses.
+            // __objc_methlist contains relative method lists with IMP pointers.
+            // __objc_const in __DATA contains class_ro_t with baseMethods pointers.
+            for seg in &m.segments {
+                if let Ok(secs) = seg.sections() {
+                    for (sec, _sec_data) in secs {
+                        let sname = std::str::from_utf8(&sec.sectname).unwrap_or("").trim_end_matches('\0');
+                        // __objc_stubs: each entry is a small stub (ADRP+LDR+BR on ARM64,
+                        // JMP on x86_64). Every stub_size-aligned address is a function.
+                        if sname == "__objc_stubs" || sname == "__stubs" {
+                            let soff = sec.offset as usize;
+                            let ssize = sec.size as usize;
+                            let saddr = sec.addr;
+                            // Determine stub size: ARM64=12 bytes, x86_64=8 bytes
+                            let stub_size: usize = if matches!(arch, rsleigh_api::Architecture::AArch64) { 12 } else { 8 };
+                            let mut pos = 0usize;
+                            while pos + stub_size <= ssize {
+                                let addr = saddr + pos as u64;
+                                if !syms.iter().any(|(a, _)| *a == addr) {
+                                    syms.push((addr, format!("objc_stub_{:x}", addr)));
+                                }
+                                pos += stub_size;
+                            }
+                        }
+                        if sname == "__objc_methlist" {
+                            // Relative method lists (modern ObjC, ARM64)
+                            // Each method_list_t: uint32_t entsize_and_flags, uint32_t count
+                            // Then count × method_t entries (relative offsets)
+                            let soff = sec.offset as usize;
+                            let ssize = sec.size as usize;
+                            let saddr = sec.addr;
+                            let mut pos = 0usize;
+                            while pos + 8 <= ssize && soff + pos + 8 <= _data.len() {
+                                let entsize_flags = u32::from_le_bytes(
+                                    _data[soff+pos..soff+pos+4].try_into().unwrap_or([0;4]));
+                                let count = u32::from_le_bytes(
+                                    _data[soff+pos+4..soff+pos+8].try_into().unwrap_or([0;4]));
+                                let entsize = (entsize_flags & 0x3FFFFFFF) as usize;
+                                let is_relative = entsize_flags & 0x80000000 != 0;
+
+                                if count > 1000 || entsize == 0 || entsize > 64 { pos += 8; continue; }
+                                let list_start = pos;
+
+                                for m_idx in 0..count as usize {
+                                    let m_off = soff + pos + 8 + m_idx * entsize;
+                                    if m_off + entsize > _data.len() { break; }
+
+                                    if is_relative && entsize >= 12 {
+                                        // Relative method_t: int32_t name, int32_t types, int32_t imp
+                                        // imp is relative to its own address
+                                        let imp_field_addr = saddr + (pos + 8 + m_idx * entsize + 8) as u64;
+                                        let imp_rel = i32::from_le_bytes(
+                                            _data[m_off+8..m_off+12].try_into().unwrap_or([0;4]));
+                                        let imp = imp_field_addr.wrapping_add(imp_rel as i64 as u64);
+                                        if !syms.iter().any(|(a, _)| *a == imp) {
+                                            syms.push((imp, format!("objc_method_{:x}", imp)));
+                                        }
+                                    } else if !is_relative && entsize >= 24 {
+                                        // Absolute method_t: ptr name, ptr types, ptr imp
+                                        let imp = u64::from_le_bytes(
+                                            _data[m_off+16..m_off+24].try_into().unwrap_or([0;8]));
+                                        if imp > 0 && !syms.iter().any(|(a, _)| *a == imp) {
+                                            syms.push((imp, format!("objc_method_{:x}", imp)));
+                                        }
+                                    }
+                                }
+                                pos += 8 + count as usize * entsize;
+                                // Align to 4 bytes
+                                if pos % 4 != 0 { pos += 4 - (pos % 4); }
+                            }
+                        }
+                    }
+                }
+            }
+
             Some((arch, segs, syms))
         }
         goblin::Object::Elf(elf) => {
