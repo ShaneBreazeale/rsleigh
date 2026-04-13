@@ -582,6 +582,193 @@ fn resolve_pe(pe: &goblin::pe::PE, binary: &[u8], map: &mut HashMap<u64, String>
             }
         }
     }
+
+    // Resolve PE thunk stubs: scan executable sections for JMP [IAT_addr] patterns.
+    // These are small stubs (typically 6-8 bytes) that redirect to IAT entries.
+    // Map the thunk VA to the same import name so CALL thunk_addr resolves.
+    let iat_snapshot: HashMap<u64, String> = map.clone();
+    for sec in &pe.sections {
+        if sec.characteristics & 0x20000000 == 0 { continue; } // not executable
+        let sec_va = base + sec.virtual_address as u64;
+        let sec_fo = sec.pointer_to_raw_data as usize;
+        let sec_sz = (sec.virtual_size as usize).min(sec.size_of_raw_data as usize);
+        if sec_fo + sec_sz > binary.len() { continue; }
+        let sec_bytes = &binary[sec_fo..sec_fo + sec_sz];
+
+        let mut off = 0usize;
+        while off + 6 <= sec_sz {
+            // FF 25 disp32 = JMP [rip+disp32] (6 bytes)
+            if sec_bytes[off] == 0xFF && sec_bytes[off + 1] == 0x25 {
+                let disp = i32::from_le_bytes([
+                    sec_bytes[off + 2], sec_bytes[off + 3],
+                    sec_bytes[off + 4], sec_bytes[off + 5],
+                ]);
+                let thunk_va = sec_va + off as u64;
+                let iat_addr = if pe.is_64 {
+                    // RIP-relative: target = thunk_va + 6 + disp
+                    (thunk_va + 6).wrapping_add(disp as i64 as u64)
+                } else {
+                    // Absolute address for 32-bit
+                    disp as u32 as u64
+                };
+                if let Some(name) = iat_snapshot.get(&iat_addr) {
+                    map.insert(thunk_va, name.clone());
+                }
+            }
+            off += 1;
+        }
+    }
+
+    // Recognize MSVC CRT wrapper functions (printf, fprintf, wprintf, etc.)
+    // Pattern: short function that CALLs __acrt_iob_func + __stdio_common_vfprintf
+    resolve_pe_crt_wrappers(pe, binary, map);
+}
+
+/// Identify MSVC CRT wrapper functions and map them to standard C names.
+///
+/// MSVC's universal CRT implements printf/fprintf/etc. as thin wrappers:
+///   printf  → __acrt_iob_func(1) + __stdio_common_vfprintf
+///   fprintf → __stdio_common_vfprintf (stream passed directly)
+///   wprintf → __acrt_iob_func(1) + __stdio_common_vfwprintf
+///
+/// We scan executable sections for short functions (up to first RET) that
+/// CALL known import thunks and assign friendly names.
+fn resolve_pe_crt_wrappers(pe: &goblin::pe::PE, binary: &[u8], map: &mut HashMap<u64, String>) {
+    let base = pe.image_base as u64;
+
+    // Find thunk addresses for the CRT functions we care about
+    let mut iob_func_addr: Option<u64> = None;
+    let mut vfprintf_addr: Option<u64> = None;
+    let mut vfwprintf_addr: Option<u64> = None;
+    let mut vfscanf_addr: Option<u64> = None;
+    for (addr, name) in map.iter() {
+        match name.as_str() {
+            "__acrt_iob_func" => iob_func_addr = Some(*addr),
+            "__stdio_common_vfprintf" => vfprintf_addr = Some(*addr),
+            "__stdio_common_vfwprintf" => vfwprintf_addr = Some(*addr),
+            "__stdio_common_vfscanf" => vfscanf_addr = Some(*addr),
+            _ => {}
+        }
+    }
+
+    // Need at least vfprintf to do anything useful
+    if vfprintf_addr.is_none() { return; }
+
+    for sec in &pe.sections {
+        if sec.characteristics & 0x20000000 == 0 { continue; }
+        let sec_va = base + sec.virtual_address as u64;
+        let sec_fo = sec.pointer_to_raw_data as usize;
+        let sec_sz = (sec.virtual_size as usize).min(sec.size_of_raw_data as usize);
+        if sec_fo + sec_sz > binary.len() { continue; }
+        let sec_bytes = &binary[sec_fo..sec_fo + sec_sz];
+
+        // Scan for function prologues that might be CRT wrappers.
+        // We look for E8 (CALL rel32) instructions within short spans before a C3 (RET).
+        let mut off = 0usize;
+        while off < sec_sz {
+            // Find the next potential function start (skip NOP padding)
+            if sec_bytes[off] == 0x90 || sec_bytes[off] == 0xCC {
+                off += 1;
+                continue;
+            }
+
+            let func_start = off;
+            let func_va = sec_va + func_start as u64;
+
+            // Already mapped (thunk or import)
+            if map.contains_key(&func_va) {
+                off += 1;
+                continue;
+            }
+
+            // Scan up to 128 bytes for CALLs and RET
+            let max_scan = (func_start + 128).min(sec_sz);
+            let mut calls_iob = false;
+            let mut calls_vfprintf = false;
+            let mut calls_vfwprintf = false;
+            let mut calls_vfscanf = false;
+            let mut iob_index: Option<u8> = None;
+            let mut found_ret = false;
+
+            let mut i = func_start;
+            while i + 5 <= max_scan {
+                let b = sec_bytes[i];
+                if b == 0xC3 { // RET
+                    found_ret = true;
+                    break;
+                }
+                if b == 0xE8 { // CALL rel32
+                    let disp = i32::from_le_bytes([
+                        sec_bytes[i + 1], sec_bytes[i + 2],
+                        sec_bytes[i + 3], sec_bytes[i + 4],
+                    ]);
+                    let call_va = sec_va + i as u64 + 5;
+                    let target = call_va.wrapping_add(disp as i64 as u64);
+
+                    if iob_func_addr == Some(target) {
+                        calls_iob = true;
+                        // Look for MOV ECX, imm8 before this CALL to get the stream index
+                        // B9 xx 00 00 00 = mov ecx, xx
+                        if i >= func_start + 5 {
+                            for back in 1..=40 {
+                                if i < func_start + back { break; }
+                                let p = i - back;
+                                if sec_bytes[p] == 0xB9 && p + 5 <= i
+                                    && sec_bytes[p + 2] == 0 && sec_bytes[p + 3] == 0 && sec_bytes[p + 4] == 0
+                                {
+                                    iob_index = Some(sec_bytes[p + 1]);
+                                    break;
+                                }
+                            }
+                        }
+                    } else if vfprintf_addr == Some(target) {
+                        calls_vfprintf = true;
+                    } else if vfwprintf_addr == Some(target) {
+                        calls_vfwprintf = true;
+                    } else if vfscanf_addr == Some(target) {
+                        calls_vfscanf = true;
+                    }
+                }
+                i += 1;
+            }
+
+            if !found_ret { off += 1; continue; }
+
+            // Classify the wrapper
+            let name = if calls_iob && calls_vfprintf {
+                match iob_index {
+                    Some(1) => Some("printf"),
+                    Some(2) => Some("fprintf_stderr"),
+                    _ => Some("fprintf"),
+                }
+            } else if calls_iob && calls_vfwprintf {
+                match iob_index {
+                    Some(1) => Some("wprintf"),
+                    Some(2) => Some("fwprintf_stderr"),
+                    _ => Some("fwprintf"),
+                }
+            } else if !calls_iob && calls_vfprintf {
+                // Direct __stdio_common_vfprintf without __acrt_iob_func
+                // This is fprintf (stream passed by caller)
+                Some("fprintf")
+            } else if !calls_iob && calls_vfwprintf {
+                Some("fwprintf")
+            } else if calls_iob && calls_vfscanf {
+                match iob_index {
+                    Some(0) => Some("scanf"),
+                    _ => Some("fscanf"),
+                }
+            } else {
+                None
+            };
+
+            if let Some(name) = name {
+                map.insert(func_va, name.to_string());
+            }
+
+            off = i + 1; // skip past the RET
+        }
+    }
 }
 
 /// Manual PE import parsing for malformed binaries that goblin can't handle.
@@ -608,7 +795,7 @@ fn resolve_pe_manual(binary: &[u8], map: &mut HashMap<u64, String>) {
     let num_sec = u16::from_le_bytes(binary[pe_off+6..pe_off+8].try_into().unwrap_or([0;2])) as usize;
     let opt_hdr_size = u16::from_le_bytes(binary[pe_off+20..pe_off+22].try_into().unwrap_or([0;2])) as usize;
     let sec_off = opt_off + opt_hdr_size;
-    struct Sec { va: u64, vsz: u64, raw: u64 }
+    struct Sec { va: u64, vsz: u64, raw: u64, chars: u32 }
     let mut sections: Vec<Sec> = Vec::new();
     for i in 0..num_sec.min(32) {
         let off = sec_off + i * 40;
@@ -617,6 +804,7 @@ fn resolve_pe_manual(binary: &[u8], map: &mut HashMap<u64, String>) {
             va: u32::from_le_bytes(binary[off+12..off+16].try_into().unwrap_or([0;4])) as u64,
             vsz: u32::from_le_bytes(binary[off+8..off+12].try_into().unwrap_or([0;4])) as u64,
             raw: u32::from_le_bytes(binary[off+20..off+24].try_into().unwrap_or([0;4])) as u64,
+            chars: u32::from_le_bytes(binary[off+36..off+40].try_into().unwrap_or([0;4])),
         });
     }
     let rva_to_off = |rva: u64| -> Option<usize> {
@@ -685,6 +873,36 @@ fn resolve_pe_manual(binary: &[u8], map: &mut HashMap<u64, String>) {
                 }
             }
             // Skip entries with invalid hint RVA (corrupted/anti-analysis)
+        }
+    }
+
+    // Scan executable sections for JMP [IAT_addr] thunk stubs
+    let iat_snapshot: HashMap<u64, String> = map.clone();
+    for sec in &sections {
+        if sec.chars & 0x20000000 == 0 { continue; }
+        let sec_va = image_base + sec.va;
+        let sec_fo = sec.raw as usize;
+        let sec_sz = sec.vsz as usize;
+        if sec_fo + sec_sz > binary.len() { continue; }
+        let sec_bytes = &binary[sec_fo..sec_fo + sec_sz];
+        let mut off = 0usize;
+        while off + 6 <= sec_sz {
+            if sec_bytes[off] == 0xFF && sec_bytes[off + 1] == 0x25 {
+                let disp = i32::from_le_bytes([
+                    sec_bytes[off + 2], sec_bytes[off + 3],
+                    sec_bytes[off + 4], sec_bytes[off + 5],
+                ]);
+                let thunk_va = sec_va + off as u64;
+                let iat_addr = if is_64 {
+                    (thunk_va + 6).wrapping_add(disp as i64 as u64)
+                } else {
+                    disp as u32 as u64
+                };
+                if let Some(name) = iat_snapshot.get(&iat_addr) {
+                    map.insert(thunk_va, name.clone());
+                }
+            }
+            off += 1;
         }
     }
 }

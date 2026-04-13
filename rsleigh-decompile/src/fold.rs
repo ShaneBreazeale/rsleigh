@@ -20,8 +20,8 @@ const SYSV_ARG_REGS: &[u64] = &[56, 48, 16, 8, 128, 136]; // RDI, RSI, RDX, RCX,
 /// Windows x64 ABI argument register offsets.
 const WIN64_ARG_REGS: &[u64] = &[8, 16, 128, 136]; // RCX, RDX, R8, R9
 
-/// Active argument register offsets — set by fold_with_cc() based on binary format.
-/// Uses thread_local to avoid unsafe static mut.
+// Active argument register offsets — set by fold_with_cc() based on binary format.
+// Uses thread_local to avoid unsafe static mut.
 std::thread_local! {
     static ARG_REG_OFFSETS_TLS: std::cell::RefCell<&'static [u64]> = const { std::cell::RefCell::new(SYSV_ARG_REGS) };
 }
@@ -288,62 +288,6 @@ fn collect_base_vars(expr: &Expr, vars: &[VarDef], bases: &mut Vec<VarId>, depth
     }
 }
 
-/// Evaluate an expression on all sample input combinations.
-/// Returns a vector of output values, one per sample combination.
-fn evaluate_expr_samples(
-    expr: &Expr, vars: &[VarDef], bases: &[VarId],
-    samples: &[u64], mask: u64,
-) -> Option<Vec<u64>> {
-    let n = samples.len();
-    let combos = match bases.len() {
-        1 => n,
-        2 => n * n,
-        3 => n.min(8) * n.min(8) * n.min(8), // limit 3-var combos
-        _ => return None,
-    };
-
-    let mut outputs = Vec::with_capacity(combos);
-    let mut env: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
-
-    match bases.len() {
-        1 => {
-            for &s0 in samples {
-                env.clear();
-                env.insert(bases[0].0, s0);
-                let val = eval_expr(expr, vars, &env, mask, 0)?;
-                outputs.push(val);
-            }
-        }
-        2 => {
-            for &s0 in samples {
-                for &s1 in samples {
-                    env.clear();
-                    env.insert(bases[0].0, s0);
-                    env.insert(bases[1].0, s1);
-                    let val = eval_expr(expr, vars, &env, mask, 0)?;
-                    outputs.push(val);
-                }
-            }
-        }
-        3 => {
-            for &s0 in &samples[..samples.len().min(8)] {
-                for &s1 in &samples[..samples.len().min(8)] {
-                    for &s2 in &samples[..samples.len().min(8)] {
-                        env.clear();
-                        env.insert(bases[0].0, s0);
-                        env.insert(bases[1].0, s1);
-                        env.insert(bases[2].0, s2);
-                        let val = eval_expr(expr, vars, &env, mask, 0)?;
-                        outputs.push(val);
-                    }
-                }
-            }
-        }
-        _ => return None,
-    }
-
-    Some(outputs)
-}
 
 /// Symbolically evaluate an expression with given variable bindings.
 fn eval_expr(expr: &Expr, vars: &[VarDef], env: &std::collections::HashMap<u32, u64>, mask: u64, depth: usize) -> Option<u64> {
@@ -406,41 +350,6 @@ fn eval_expr(expr: &Expr, vars: &[VarDef], env: &std::collections::HashMap<u32, 
 ///
 /// For 1 variable: f(a) = c0 + c1*a, 2 evaluations.
 /// For 3 variables: f(a,b,c) = 8 coefficients over {1,a,b,c,a&b,a&c,b&c,a&b&c}.
-fn find_simpler_match(
-    bases: &[VarId], _target_outputs: &[u64], _samples: &[u64], mask: u64,
-    vars: &[VarDef], sz: u32,
-) -> Option<Expr> {
-    let n = bases.len();
-    let m = mask;
-
-    // Helper: evaluate the original expression with given variable bindings
-    let eval = |bindings: &[(VarId, u64)]| -> Option<u64> {
-        let mut env: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
-        for (id, val) in bindings {
-            env.insert(id.0, *val);
-        }
-        // We need the var index for the expression — it's not passed directly.
-        // We'll use _target_outputs which was pre-computed with the sample inputs.
-        None // This path won't be used; we'll compute inline below
-    };
-    let _ = eval; // suppress unused
-
-    // For 1 variable: f(a) = c0 + c1*a
-    if n == 1 {
-        let a = bases[0];
-        let mut env = std::collections::HashMap::new();
-
-        env.insert(a.0, 0u64);
-        // We can't easily get the expression for var v here, so we use the
-        // pre-computed target_outputs instead. But they were computed with the
-        // SAMPLES array, not with 0/1. Let me use a different approach:
-        // evaluate directly from the parent.
-        return None; // handled by the sample-based approach below
-    }
-
-    None
-}
-
 /// SiMBA coefficient recovery for 2-variable MBA expressions.
 /// Called from mba_oracle_simplify when exactly 2 base variables are found.
 fn simba_simplify_2var(
@@ -550,7 +459,7 @@ fn simba_simplify_2var(
 /// SiMBA coefficient recovery for 3-variable MBA expressions.
 /// Boolean basis: {1, a, b, c, a&b, a&c, b&c, a&b&c} — 8 coefficients from 8 evaluations.
 fn simba_simplify_3var(
-    var_idx: usize, vars: &[VarDef], bases: &[VarId], mask: u64, sz: u32,
+    var_idx: usize, vars: &[VarDef], bases: &[VarId], mask: u64, _sz: u32,
 ) -> Option<Expr> {
     if bases.len() != 3 { return None; }
     let (a_id, b_id, c_id) = (bases[0], bases[1], bases[2]);
@@ -681,14 +590,14 @@ fn simba_simplify_3var(
 ///                 a&b&c, a&b&d, a&c&d, b&c&d, a&b&c&d}
 /// 16 coefficients from 16 evaluations via Möbius inversion.
 fn simba_simplify_4var(
-    var_idx: usize, vars: &[VarDef], bases: &[VarId], mask: u64, sz: u32,
+    var_idx: usize, vars: &[VarDef], bases: &[VarId], mask: u64, _sz: u32,
 ) -> Option<Expr> {
     if bases.len() != 4 { return None; }
     let ids = [bases[0], bases[1], bases[2], bases[3]];
 
     // Evaluate f on all 16 combinations of (0,1) for (a,b,c,d)
     let mut env = std::collections::HashMap::new();
-    let mut f = [[[[0u64; 1]; 2]; 2]; 2]; // f[a][b][c] with d=0..1 flattened
+    let _f = [[[[0u64; 1]; 2]; 2]; 2]; // f[a][b][c] with d=0..1 flattened
     let mut vals = std::collections::HashMap::new();
     for a in 0u64..=1 {
         for b in 0u64..=1 {
@@ -823,25 +732,6 @@ fn simba_simplify_4var(
     None
 }
 
-/// Compute base variable outputs for brute-force matching (3-variable fallback).
-fn compute_base_outputs(base_idx: usize, n_bases: usize, samples: &[u64], mask: u64) -> Vec<u64> {
-    let mut outputs = Vec::new();
-    let lim = samples.len().min(8);
-    match n_bases {
-        3 => {
-            for i in 0..lim {
-                for j in 0..lim {
-                    for k in 0..lim {
-                        let val = match base_idx { 0 => samples[i], 1 => samples[j], _ => samples[k] };
-                        outputs.push(val & mask);
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-    outputs
-}
 
 fn simba_simplify_1var(
     var_idx: usize, vars: &[VarDef], base: VarId, mask: u64, sz: u32,

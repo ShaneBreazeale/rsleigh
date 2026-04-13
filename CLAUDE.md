@@ -113,11 +113,14 @@ rsleigh <binary> --sigs extra.json     # load additional signatures
 rsleigh <binary> --json                # JSON output
 ```
 
-Function discovery (beats Ghidra on all test binaries):
-symbol tables → recursive CALL descent → exhaustive CALL target scan (E8 rel32) →
-`.pdata` exception dirs (PE64) → prologue scanning (x86-32/x86-64/ARM64) →
+Function discovery (beats Ghidra on 11/13 test binaries):
+symbol tables → recursive CALL descent → exhaustive CALL target scan (E8/BL) →
+`.pdata` exception dirs (PE64 x86-64 + ARM64 8-byte entries) →
+`LC_FUNCTION_STARTS` (Mach-O) → `__objc_stubs` + `__stubs` (Mach-O) →
+prologue scanning (x86-32/x86-64/AArch64 STP+SUB+ADRP) →
 JMP thunk detection (FF 25 / E9) → vtable pointer scanning (.rdata) →
 `.rdata` function pointer refs (PE64, strict prologue check).
+PE machine type auto-detection: x86-64 (0x8664), ARM64 (0xAA64), i386 (0x014C).
 
 ---
 
@@ -210,9 +213,14 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - PE import thunk resolution: `JMP [IAT_addr]` stubs → import names
 - MSVC CRT wrapper recognition: `__acrt_iob_func + __stdio_common_vfprintf` → `printf`
 - **ObjC bracket syntax:** `objc_msgSend$setText:` → `[self setText:arg]` with receiver tracking
+- **MSVC C++ demangling:** `??6?$basic_ostream@...` → `cout <<`, `cin >>`, `cin.ignore`
+- **C++ wrapper inlining:** `func_XXX(cout, "text")` → `cout << "text"` (chained `<<` supported)
 - **Global data naming:** `*(0x4326f4)` → `DAT_004326f4` (auto-detected from address range)
 - **ARM64 prologue/epilogue elision:** callee-saved saves, FP/LR setup, ObjC ARC noise removal
-- **Architecture-aware register auto-naming:** x86-32 ESI/EDI → iVar, ARM64 x19-x28 → lVar
+- **Architecture-aware register auto-naming:** x86-32 ESI/EDI → iVar, ARM64 x19-x28 → lVar,
+  x86-64 XMM0-15 → dVar, x86-64 param regs (RDI/RSI/RDX/RCX/R8/R9) → lVar in function body
+- **Pointer deref simplification:** `*(param_N)` → `*param_N`, `*(uint64_t*)(lVar)` → `*lVar`
+- **x86-64 RBP/RSP → local_XX:** `RBP + 560` → `local_230`, `N + RSP` → `local_N`
 - Control flow recovery: for-loops, **do-while** (back-edge post-test), switch/case, else-if
 - Simplifications: dead stores, unreachable returns, phi artifact cleanup, increment shorthand,
   constant folding, ESP/RSP stack noise elimination, pointer deref simplification

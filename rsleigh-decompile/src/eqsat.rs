@@ -376,7 +376,7 @@ pub fn simplify_expr(
     if egg_expr.as_ref().len() < 5 { return None; }
 
     let original_cost = {
-        let mut cost_fn = MbaCost;
+        let _cost_fn = MbaCost;
         let root = Id::from(egg_expr.as_ref().len() - 1);
         egg::Extractor::new(&{
             let mut r = egg::EGraph::<Mba, ()>::default();

@@ -4269,7 +4269,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     {
         // Phase 1: Detect which func_XXX is the cout << wrapper.
         // Heuristic: if a function is called 3+ times with cout as first arg, it's operator<<
-        let all_text = lines.join("\n");
+        let _all_text = lines.join("\n");
         let mut cout_call_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         let mut cin_call_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
@@ -4302,7 +4302,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             .filter(|(_, count)| *count >= 3)
             .map(|(name, _)| name)
             .collect();
-        let cin_wrappers: Vec<String> = cin_call_counts.into_iter()
+        let _cin_wrappers: Vec<String> = cin_call_counts.into_iter()
             .filter(|(_, count)| *count >= 2)
             .map(|(name, _)| name)
             .collect();

@@ -386,7 +386,7 @@ fn parse_binary(obj: &goblin::Object, _data: &[u8]) -> Option<(rsleigh_api::Arch
                         // __objc_stubs: each entry is a small stub (ADRP+LDR+BR on ARM64,
                         // JMP on x86_64). Every stub_size-aligned address is a function.
                         if sname == "__objc_stubs" || sname == "__stubs" {
-                            let soff = sec.offset as usize;
+                            let _soff = sec.offset as usize;
                             let ssize = sec.size as usize;
                             let saddr = sec.addr;
                             // Determine stub size: ARM64=12 bytes, x86_64=8 bytes
@@ -417,7 +417,7 @@ fn parse_binary(obj: &goblin::Object, _data: &[u8]) -> Option<(rsleigh_api::Arch
                                 let is_relative = entsize_flags & 0x80000000 != 0;
 
                                 if count > 1000 || entsize == 0 || entsize > 64 { pos += 8; continue; }
-                                let list_start = pos;
+                                let _list_start = pos;
 
                                 for m_idx in 0..count as usize {
                                     let m_off = soff + pos + 8 + m_idx * entsize;
@@ -723,7 +723,7 @@ fn discover_pe_functions(
                         && ((insn >> 5) & 0x1F) == 31;
 
                     // STP with SP base (callee-saved register saves, any register pair)
-                    let is_stp_sp = (insn & 0xFFC00000) == 0xA9000000 && rn == 31;
+                    let _is_stp_sp = (insn & 0xFFC00000) == 0xA9000000 && rn == 31;
 
                     // ADRP — common leaf function start (loads page address)
                     let is_adrp = (insn & 0x9F000000) == 0x90000000;
@@ -852,7 +852,7 @@ fn discover_pe_functions(
     if let Ok(obj) = goblin::Object::parse(data) {
         if let goblin::Object::PE(pe) = &obj {
             if !pe.is_64 { /* skip PE32 */ } else {
-            let base = pe.image_base as u64;
+            let _base = pe.image_base as u64;
             // Identify executable address range
             let mut text_start = u64::MAX;
             let mut text_end = 0u64;
