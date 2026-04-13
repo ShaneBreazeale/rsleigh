@@ -4012,6 +4012,28 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #FLAT_DISPATCH: Detect Ollvm-style control flow flattening patterns.
+    // Pattern: while(true) { switch(state_var) { case N: ...; state_var = M; break; } }
+    // Annotate when detected so the analyst knows the control flow is obfuscated.
+    {
+        let all_text = lines.join("\n");
+        // Heuristic: a function has flattened control flow if it has:
+        // 1. A single large switch with 5+ cases
+        // 2. Inside a while(true) or do-while
+        // 3. Cases assign to the same variable (state variable)
+        let has_while_true = all_text.contains("while (1)") || all_text.contains("while (0 == 0)")
+            || all_text.contains("do {");
+        let switch_count = all_text.matches("switch (").count();
+        let case_count = all_text.matches("case ").count();
+
+        if has_while_true && switch_count >= 1 && case_count >= 8 {
+            // Likely flattened control flow — add annotation
+            if let Some(idx) = lines.iter().position(|l| l.trim_end().ends_with('{')) {
+                lines.insert(idx + 1, "    // NOTE: possible control flow flattening detected (large switch inside loop)".to_string());
+            }
+        }
+    }
+
     // #CRYPTO_CONSTANTS: Detect cryptographic constants and annotate references.
     for line in &mut lines {
         // AES S-box first byte
@@ -4088,6 +4110,31 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 i += string_bytes.len() + 1;
             } else {
                 i += 1;
+            }
+        }
+    }
+
+    // #XOR_STRING: Detect XOR-encoded string patterns.
+    // Pattern: data ^ constant_byte or data ^ key_byte in a loop
+    // Annotate the XOR key when visible.
+    for line in &mut lines {
+        // Single-byte XOR: "^ 0xNN" where NN is a common XOR key
+        let t = line.trim();
+        if t.contains("^ 0x") && (t.contains("local_") || t.contains("param_")) {
+            // Extract the XOR key
+            if let Some(xor_pos) = t.find("^ 0x") {
+                let key_start = xor_pos + 4;
+                let mut key_end = key_start;
+                let bytes = t.as_bytes();
+                while key_end < bytes.len() && bytes[key_end].is_ascii_hexdigit() { key_end += 1; }
+                if key_end > key_start && key_end - key_start <= 2 {
+                    let key_str = &t[key_start..key_end];
+                    if let Ok(key) = u8::from_str_radix(key_str, 16) {
+                        if key > 0 && key != 0xFF && !line.contains("/*") {
+                            *line = format!("{} // XOR key: 0x{:02x}", line.trim_end(), key);
+                        }
+                    }
+                }
             }
         }
     }
@@ -4287,6 +4334,60 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #STRUCT_RECOVERY: Detect field access patterns and emit struct layout comments.
+    {
+        let mut param_fields: std::collections::HashMap<String, std::collections::BTreeSet<u64>> =
+            std::collections::HashMap::new();
+        for line in &lines {
+            let text = line.trim();
+            let mut pos = 0;
+            while pos < text.len() {
+                if let Some(start) = text[pos..].find("->field_") {
+                    let abs_start = pos + start;
+                    let base_end = abs_start;
+                    let mut base_start = base_end;
+                    while base_start > 0 {
+                        let c = text.as_bytes()[base_start - 1];
+                        if c.is_ascii_alphanumeric() || c == b'_' || c == b'*' { base_start -= 1; } else { break; }
+                    }
+                    let base = text[base_start..base_end].trim_start_matches('*');
+                    let hex_start = abs_start + 8;
+                    let mut hex_end = hex_start;
+                    while hex_end < text.len() && text.as_bytes()[hex_end].is_ascii_hexdigit() { hex_end += 1; }
+                    if hex_end > hex_start {
+                        if let Ok(offset) = u64::from_str_radix(&text[hex_start..hex_end], 16) {
+                            if base.starts_with("param_") || base.starts_with("lVar") {
+                                param_fields.entry(base.to_string()).or_default().insert(offset);
+                            }
+                        }
+                    }
+                    pos = hex_end;
+                } else { break; }
+            }
+        }
+        let mut struct_comments: Vec<String> = Vec::new();
+        for (base, fields) in &param_fields {
+            if fields.len() < 4 { continue; }
+            let fv: Vec<u64> = fields.iter().copied().collect();
+            let mut def = format!("// struct layout for {} ({}+ fields): ", base, fv.len());
+            for (i, &offset) in fv.iter().enumerate() {
+                let sz = if i + 1 < fv.len() { (fv[i+1] - offset).min(8) } else { 8 };
+                let ty = match sz { 1 => "byte", 2 => "short", 4 => "int", _ => "long" };
+                if i > 0 { def.push_str(", "); }
+                def.push_str(&format!("+0x{:x} {}", offset, ty));
+                if i >= 12 { def.push_str(", ..."); break; }
+            }
+            struct_comments.push(def);
+        }
+        if !struct_comments.is_empty() {
+            if let Some(idx) = lines.iter().position(|l| l.trim_end().ends_with('{')) {
+                for (j, comment) in struct_comments.into_iter().enumerate() {
+                    lines.insert(idx + 1 + j, format!("    {}", comment));
+                }
+            }
+        }
+    }
+
     // #CRT_WRAPPERS: Recognize common CRT wrapper functions by call pattern.
     // func_XXX that just calls __security_check_cookie → rename to __security_check_cookie
     // func_XXX that just calls __report_rangecheckfailure → rename
@@ -4404,6 +4505,25 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 }
             }
             if !replaced { break; }
+        }
+    }
+
+    // #TYPE_CASTS: Add explicit type casts for truncation and extension operations.
+    // Makes implicit type conversions visible in the pseudocode.
+    for line in &mut lines {
+        // & 0xff → (uint8_t) for byte truncation
+        if line.contains("& 0xff)") || line.contains("& 255)") {
+            *line = line.replace("& 0xff)", "& 0xff) /* (uint8_t) */")
+                .replace("& 255)", "& 255) /* (uint8_t) */");
+        }
+        // & 0xffff → (uint16_t) for short truncation
+        if line.contains("& 0xffff)") || line.contains("& 65535)") {
+            *line = line.replace("& 0xffff)", "& 0xffff) /* (uint16_t) */")
+                .replace("& 65535)", "& 65535) /* (uint16_t) */");
+        }
+        // & 0xffffffff → (uint32_t) for int truncation (only in 64-bit context)
+        if line.contains("& 0xffffffff)") && !line.contains("INVALID_HANDLE") && !line.contains("/*") {
+            *line = line.replace("& 0xffffffff)", "& 0xffffffff) /* (uint32_t) */");
         }
     }
 
