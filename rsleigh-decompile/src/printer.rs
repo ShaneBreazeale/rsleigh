@@ -1417,11 +1417,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
 
             // 4. Rename ARM registers to parameter/variable names
             // ARM calling convention: r0-r3 = params, r4-r11 = callee-saved locals
+            // lr (link register) → return_addr (usually noise, but kept when meaningful)
             let param_regs = [("r0", "param_0"), ("r1", "param_1"), ("r2", "param_2"), ("r3", "param_3")];
             let local_regs = [
                 ("r4", "lVar1"), ("r5", "lVar2"), ("r6", "lVar3"), ("r7", "lVar4"),
                 ("r8", "lVar5"), ("r9", "lVar6"), ("r10", "lVar7"), ("r11", "lVar8"),
-                ("r12", "iVar1"),
+                ("r12", "iVar1"), ("lr", "lrVar"),
             ];
 
             // Only rename if the register appears as a standalone identifier
@@ -1472,24 +1473,94 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 }
             }
 
-            // 5. Simplify ARM condition patterns in if-statements
-            // if (ZR) → if (result == 0); if (!ZR) → if (result != 0)
-            // if (CY && !ZR) → if (result > 0) (unsigned greater)
+            // 5. Clean remaining ARM-specific artifacts
+            lines.retain(|line| {
+                let t = line.trim();
+                // Remove remaining standalone flag stores not caught earlier
+                if t.ends_with(';') && !t.contains("func_") && !t.contains("param_") {
+                    // lr = expr; (return address setup — noise)
+                    if t.starts_with("lr = ") || t.starts_with("lr =") { return false; }
+                    // return sp; or return sp + N;
+                    if t.starts_with("return sp") { return false; }
+                    // Remaining flag patterns: NG = ..., ZR = ..., etc in middle of lines
+                    for flag in ["NG = ", "ZR = ", "CY = ", "OV = ", "tmpNG ", "tmpZR ", "tmpCY ", "tmpOV "] {
+                        if t.starts_with(flag) { return false; }
+                    }
+                }
+                true
+            });
+
+            // 5b. Fix r-NNN artifacts (negative register offsets from ARM subtract)
+            for line in &mut lines {
+                // r-0xNNN → -0xNNN (these are computed addresses, drop the 'r' prefix)
+                while let Some(pos) = line.find("r-0x") {
+                    let before_ok = pos == 0 || !line.as_bytes()[pos - 1].is_ascii_alphanumeric();
+                    if before_ok {
+                        line.replace_range(pos..pos+1, ""); // remove the 'r'
+                    } else {
+                        break;
+                    }
+                }
+                while let Some(pos) = line.find("r-") {
+                    let before_ok = pos == 0 || !line.as_bytes()[pos - 1].is_ascii_alphanumeric();
+                    let after = &line[pos+2..];
+                    let is_neg_num = after.starts_with("0x") || after.chars().next().map_or(false, |c| c.is_ascii_digit());
+                    if before_ok && is_neg_num {
+                        line.replace_range(pos..pos+1, "");
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            // 5c. Simplify ARM condition patterns in if-statements
             for line in &mut lines {
                 let t = line.trim().to_string();
-                if t.starts_with("if (") {
+                if t.starts_with("if (") || t.starts_with("} else if (") || t.starts_with("while (") {
                     let indent = line.len() - line.trim_start().len();
                     let pad = " ".repeat(indent);
-                    // Simple flag conditions
-                    if t == "if (ZR) {" { *line = format!("{}if (result == 0) {{", pad); }
-                    else if t == "if (!ZR) {" { *line = format!("{}if (result != 0) {{", pad); }
-                    else if t == "if (CY) {" { *line = format!("{}if (carry) {{", pad); }
-                    else if t == "if (!CY) {" { *line = format!("{}if (!carry) {{", pad); }
-                    else if t == "if (NG) {" { *line = format!("{}if (result < 0) {{", pad); }
-                    else if t == "if (true) {" { *line = format!("{}{{", pad); } // unconditional
-                    // Compound: CY && !ZR = unsigned greater than
-                    else if t == "if (CY && !ZR) {" { *line = format!("{}if (a > b) {{ // unsigned", pad); }
-                    else if t == "if (!CY || ZR) {" { *line = format!("{}if (a <= b) {{ // unsigned", pad); }
+                    // Extract the condition and surrounding syntax
+                    let (prefix, cond, suffix) = if let Some(rest) = t.strip_prefix("if (") {
+                        if let Some(cond) = rest.strip_suffix(") {") {
+                            ("if (", cond, ") {")
+                        } else { continue; }
+                    } else if let Some(rest) = t.strip_prefix("} else if (") {
+                        if let Some(cond) = rest.strip_suffix(") {") {
+                            ("} else if (", cond, ") {")
+                        } else { continue; }
+                    } else if let Some(rest) = t.strip_prefix("while (") {
+                        if let Some(cond) = rest.strip_suffix(") {") {
+                            ("while (", cond, ") {")
+                        } else { continue; }
+                    } else { continue; };
+
+                    // Replace flag-based conditions with readable ones
+                    let new_cond = match cond {
+                        "ZR" => "result == 0",
+                        "!ZR" | "!(ZR)" => "result != 0",
+                        "CY" => "result < 0 /* unsigned */",
+                        "!CY" | "!(CY)" => "result >= 0 /* unsigned */",
+                        "NG" => "result < 0",
+                        "!NG" | "!(NG)" => "result >= 0",
+                        "true" => "true",
+                        "CY && !ZR" | "!ZR && CY" => "result > 0 /* unsigned */",
+                        "!CY || ZR" | "ZR || !CY" => "result <= 0 /* unsigned */",
+                        _ => {
+                            // Try to clean up remaining flag references in conditions
+                            if cond.contains("CY") || cond.contains("ZR") || cond.contains("NG") || cond.contains("OV") {
+                                // Complex flag condition — simplify common patterns
+                                let cleaned = cond
+                                    .replace("!NG == OV", "result >= 0")
+                                    .replace("NG == OV", "result >= 0")
+                                    .replace("NG != OV", "result < 0");
+                                if cleaned != cond {
+                                    *line = format!("{}{}{}{}", pad, prefix, cleaned, suffix);
+                                }
+                            }
+                            continue;
+                        }
+                    };
+                    *line = format!("{}{}{}{}", pad, prefix, new_cond, suffix);
                 }
             }
 
