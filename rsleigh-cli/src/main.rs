@@ -1039,7 +1039,8 @@ fn discover_elf_functions(
         if text_fo + text_size as usize <= data.len() {
             let text_bytes = &data[text_fo..text_fo + text_size as usize];
             let is_boundary = |i: usize| -> bool {
-                i == 0 || matches!(text_bytes[i-1], 0xC3 | 0x90 | 0xCC | 0x00 | 0xC2 | 0xCB | 0xCA)
+                i == 0 || matches!(text_bytes[i-1], 0xC3 | 0x90 | 0xCC | 0x00 | 0xC2 | 0xCB | 0xCA
+                    | 0xFF /* JMP indirect/tail call */)
             };
             // Also accept NOP padding sequences (66 66 2e 0f 1f etc.)
             let is_boundary_or_nop = |i: usize| -> bool {
@@ -1096,11 +1097,10 @@ fn discover_elf_functions(
                 }
 
                 // endbr64 (f3 0f 1e fa) — CET-enabled function entry
-                // More relaxed: also accept after any instruction end (not just ret/nop)
+                // Accept unconditionally: endbr64 is ONLY placed at function entries
+                // and indirect branch targets by the compiler (Intel CET).
                 if b0 == 0xF3 && b1 == 0x0F && b2 == 0x1E && b3 == 0xFA {
-                    if is_boundary_or_nop(i) || (i >= 1 && text_bytes[i-1] >= 0xC0) {
-                        found.insert(addr);
-                    }
+                    found.insert(addr);
                 }
             }
         }
