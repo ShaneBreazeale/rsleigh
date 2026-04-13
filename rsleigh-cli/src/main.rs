@@ -705,21 +705,34 @@ fn discover_pe_functions(
                     let insn = u32::from_le_bytes([bytes[off], bytes[off+1], bytes[off+2], bytes[off+3]]);
 
                     // Check for AArch64 function prologues:
-                    // STP X29, X30, [SP, #-N]! — save FP+LR with pre-index writeback
-                    //   Encoding: x010_1001_00xx_xxxx_x111_01xx_x111_11xx
-                    //   Mask: opc=10, V=0, L=0, Rt=29(11101), Rn=31(11111), Rt2=30(11110)
-                    let is_stp_fp_lr = (insn & 0xFFE00000) == 0xA9800000  // STP pre-index
-                        && (insn & 0x1F) == 29       // Rt = X29 (FP)
-                        && ((insn >> 10) & 0x1F) == 30; // Rt2 = X30 (LR)
+                    // STP X29, X30, [SP, #off] — save FP+LR (both pre-index and signed offset)
+                    //   Pre-index: A98xxxxx (STP X29,X30,[SP,#-N]!)
+                    //   Signed offset: A9BF7BFD etc. (STP X29,X30,[SP,#-16])
+                    // Check: Rt=29(FP), Rt2=30(LR), Rn=31(SP), opc=10 (64-bit)
+                    let rt = insn & 0x1F;
+                    let rt2 = (insn >> 10) & 0x1F;
+                    let rn = (insn >> 5) & 0x1F;
+                    let is_stp_fp_lr =
+                        // STP pre-index: A98xxxxx
+                        ((insn & 0xFFE00000) == 0xA9800000 && rt == 29 && rt2 == 30)
+                        // STP signed offset: A9xxxxxx where Rt=29, Rt2=30, Rn=31
+                        || ((insn & 0xFFC00000) == 0xA9000000 && rt == 29 && rt2 == 30 && rn == 31);
 
                     // SUB SP, SP, #imm — stack frame allocation
-                    //   Encoding: 1101_0001_00xx_xxxx_xxxx_xx11_111x_xxxx
-                    let is_sub_sp = (insn & 0xFF0003E0) == 0xD10003E0  // SUB Xd=SP, Xn=SP
-                        && ((insn >> 5) & 0x1F) == 31;  // Rn = SP
+                    let is_sub_sp = (insn & 0xFF0003E0) == 0xD10003E0
+                        && ((insn >> 5) & 0x1F) == 31;
 
-                    // STP with SP base (callee-saved register saves)
-                    let is_stp_sp = (insn & 0x7FC00000) == 0x29000000  // STP signed offset, SP base
-                        && ((insn >> 5) & 0x1F) == 31;  // Rn = SP
+                    // STP with SP base (callee-saved register saves, any register pair)
+                    let is_stp_sp = (insn & 0xFFC00000) == 0xA9000000 && rn == 31;
+
+                    // ADRP — common leaf function start (loads page address)
+                    let is_adrp = (insn & 0x9F000000) == 0x90000000;
+
+                    // MOV X29, SP (set frame pointer without STP — some leaf functions)
+                    let is_mov_fp_sp = insn == 0x910003FD; // ADD X29, SP, #0
+
+                    // LDR from literal pool or GOT — common in position-independent thunks
+                    let is_ldr_lit = (insn & 0xFF000000) == 0x58000000; // LDR Xt, label
 
                     // Boundary check: previous instruction should be RET (D65F03C0) or 0/padding
                     let prev_ok = if off >= 4 {
@@ -732,7 +745,11 @@ fn discover_pe_functions(
                         true // start of section
                     };
 
-                    if prev_ok && (is_stp_fp_lr || is_sub_sp) {
+                    if is_stp_fp_lr || is_sub_sp {
+                        // STP FP/LR and SUB SP are strong prologues — accept with loose boundary
+                        found.insert(va);
+                    } else if prev_ok && (is_adrp || is_mov_fp_sp || is_ldr_lit) {
+                        // Weaker patterns — require boundary check
                         found.insert(va);
                     }
                 }
