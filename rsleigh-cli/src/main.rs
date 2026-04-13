@@ -1020,16 +1020,56 @@ fn discover_elf_functions(
         let text_fo = text.sh_offset as usize;
         let text_end = text_addr + text_size;
 
-        // 5. Decoder-based CALL target discovery.
-        // Instead of raw E8 byte scanning (which finds false positives from coincidental
-        // 0xE8 bytes inside other instructions), decode from known function starts and
-        // collect CALL targets from real decoded instructions.
+        // 5. Decoder-based CALL target discovery with indirect call resolution.
+        // Decode from known function starts, track register values via LEA/MOV,
+        // and resolve both direct CALL 0xNNNN and indirect CALL RAX/CALL [RIP+N].
         {
             let mut dec = rsleigh_api::Decoder::new(arch);
             let mut new_targets = BTreeSet::new();
-            // Iterate: decode from all known functions, collect CALL targets, repeat.
-            // Limit total decoding work to avoid slowdowns on large binaries.
-            let max_seeds = 2000; // cap seeds per round
+            let max_seeds = 2000;
+
+            // Helper: read a 64-bit pointer from a virtual address in the binary
+            let read_ptr = |va: u64| -> Option<u64> {
+                let off = segs.iter().find_map(|(sva, sz, fo)| {
+                    if va >= *sva && va < sva + sz { Some((fo + (va - sva)) as usize) } else { None }
+                })?;
+                if off + 8 <= data.len() {
+                    Some(u64::from_le_bytes(data[off..off+8].try_into().ok()?))
+                } else { None }
+            };
+
+            // Also scan .text raw bytes for CALL [RIP+disp32] (FF 15 XX XX XX XX)
+            // These are indirect calls through GOT — the GOT entry may contain
+            // a resolved function address (for statically linked or pre-resolved).
+            if text_fo + text_size as usize <= data.len() {
+                let text_bytes = &data[text_fo..text_fo + text_size as usize];
+                for i in 0..text_bytes.len().saturating_sub(6) {
+                    if text_bytes[i] == 0xFF && text_bytes[i+1] == 0x15 {
+                        // CALL [RIP+disp32]
+                        let disp = i32::from_le_bytes(text_bytes[i+2..i+6].try_into().unwrap_or([0;4]));
+                        let got_va = (text_addr as i64 + i as i64 + 6 + disp as i64) as u64;
+                        if let Some(target) = read_ptr(got_va) {
+                            if target >= text_addr && target < text_end {
+                                new_targets.insert(target);
+                            }
+                        }
+                    }
+                    // JMP [RIP+disp32] (FF 25 XX XX XX XX) — PLT-style indirect jump
+                    if text_bytes[i] == 0xFF && text_bytes[i+1] == 0x25 {
+                        let disp = i32::from_le_bytes(text_bytes[i+2..i+6].try_into().unwrap_or([0;4]));
+                        let got_va = (text_addr as i64 + i as i64 + 6 + disp as i64) as u64;
+                        if let Some(target) = read_ptr(got_va) {
+                            if target >= text_addr && target < text_end {
+                                new_targets.insert(target);
+                            }
+                        }
+                    }
+                }
+            }
+            for t in &new_targets { found.insert(*t); }
+            new_targets.clear();
+
+            // Decoder-based discovery with register tracking
             for _round in 0..2 {
                 let start_count = found.len();
                 let seeds: Vec<u64> = found.iter()
@@ -1043,6 +1083,9 @@ fn discover_elf_functions(
                     let max = 4096.min(data.len().saturating_sub(off));
                     if max < 2 { continue; }
                     let bytes = &data[off..off + max];
+
+                    // Mini register tracker: maps register name → known address value
+                    let mut reg_vals: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
                     let mut pos = 0;
                     for _ in 0..500 {
                         if pos + 1 >= bytes.len() { break; }
@@ -1050,18 +1093,88 @@ fn discover_elf_functions(
                             let sz = inst.len as usize;
                             if sz == 0 { break; }
                             let dis = &inst.disassembly;
-                            // Collect CALL targets
-                            if dis.starts_with("CALL ") {
-                                if let Some(target_str) = dis.split_whitespace().nth(1) {
-                                    if let Some(hex) = target_str.strip_prefix("0x") {
-                                        if let Ok(target) = u64::from_str_radix(hex, 16) {
-                                            if target >= text_addr && target < text_end {
-                                                new_targets.insert(target);
-                                            }
+                            let inst_addr = func_addr + pos as u64;
+
+                            // Track LEA reg, [RIP+disp] → reg = computed address
+                            if dis.starts_with("LEA ") {
+                                let parts: Vec<&str> = dis.splitn(3, |c: char| c == ',' || c == ' ').collect();
+                                if parts.len() >= 3 {
+                                    let dest = parts[1].trim().trim_end_matches(',');
+                                    let src = parts[2].trim();
+                                    // LEA with immediate address: "LEA RAX,0xNNNN" or "LEA RAX,[0xNNNN]"
+                                    let addr_str = src.trim_start_matches('[').trim_end_matches(']');
+                                    if let Some(hex) = addr_str.strip_prefix("0x") {
+                                        if let Ok(addr) = u64::from_str_radix(hex, 16) {
+                                            reg_vals.insert(dest.to_string(), addr);
                                         }
                                     }
                                 }
                             }
+
+                            // Track MOV reg, imm → reg = constant
+                            if dis.starts_with("MOV ") && !dis.contains('[') {
+                                let parts: Vec<&str> = dis.splitn(3, |c: char| c == ',' || c == ' ').collect();
+                                if parts.len() >= 3 {
+                                    let dest = parts[1].trim().trim_end_matches(',');
+                                    let src = parts[2].trim();
+                                    if let Some(hex) = src.strip_prefix("0x") {
+                                        if let Ok(val) = u64::from_str_radix(hex, 16) {
+                                            reg_vals.insert(dest.to_string(), val);
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Collect CALL targets — both direct and indirect
+                            if dis.starts_with("CALL ") {
+                                let target_part = &dis[5..];
+                                if let Some(hex) = target_part.trim().strip_prefix("0x") {
+                                    // Direct CALL 0xNNNN
+                                    if let Ok(target) = u64::from_str_radix(hex, 16) {
+                                        if target >= text_addr && target < text_end {
+                                            new_targets.insert(target);
+                                        }
+                                    }
+                                } else if target_part.contains('[') {
+                                    // Indirect CALL [addr] — try to resolve via P-code ops
+                                    // Parse: "CALL dword ptr [0xNNNN]" or "CALL qword ptr [RIP + 0xNN]"
+                                    let bracket_content = target_part
+                                        .split('[').nth(1).unwrap_or("")
+                                        .split(']').next().unwrap_or("");
+                                    if let Some(hex) = bracket_content.strip_prefix("0x") {
+                                        if let Ok(mem_addr) = u64::from_str_radix(hex, 16) {
+                                            if let Some(target) = read_ptr(mem_addr) {
+                                                if target >= text_addr && target < text_end {
+                                                    new_targets.insert(target);
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // Indirect CALL REG — resolve from tracked register value
+                                    let reg = target_part.trim();
+                                    if let Some(&val) = reg_vals.get(reg) {
+                                        if val >= text_addr && val < text_end {
+                                            new_targets.insert(val);
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Invalidate destination register on any other write
+                            // (simplistic: CALL clobbers RAX, other writes clobber dest)
+                            if dis.starts_with("CALL ") {
+                                reg_vals.remove("RAX");
+                                reg_vals.remove("RCX");
+                                reg_vals.remove("RDX");
+                                reg_vals.remove("RSI");
+                                reg_vals.remove("RDI");
+                                reg_vals.remove("R8");
+                                reg_vals.remove("R9");
+                                reg_vals.remove("R10");
+                                reg_vals.remove("R11");
+                            }
+
                             if dis.starts_with("RET") || dis.starts_with("HLT") { break; }
                             pos += sz;
                         } else {
@@ -1069,11 +1182,9 @@ fn discover_elf_functions(
                         }
                     }
                 }
-                for t in &new_targets {
-                    found.insert(*t);
-                }
+                for t in &new_targets { found.insert(*t); }
                 new_targets.clear();
-                if found.len() == start_count { break; } // no new functions found
+                if found.len() == start_count { break; }
             }
         }
 
@@ -1125,29 +1236,46 @@ fn discover_elf_functions(
 
             for sh in &elf.section_headers {
                 let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
-                // Only scan read-only data sections — .rodata has vtables and const fn ptrs,
-                // .data.rel.ro has relocated function pointers (C++ vtables after relocation).
-                // Skip .got, .dynamic, .data — these have too many internal code pointers.
                 if !matches!(name, ".rodata" | ".data.rel.ro") { continue; }
                 let fo = sh.sh_offset as usize;
                 let sz = sh.sh_size as usize;
                 if fo + sz > data.len() || sz < 8 { continue; }
+                let is_vtable_section = name == ".data.rel.ro";
                 for i in (0..sz.saturating_sub(7)).step_by(8) {
                     let ptr = u64::from_le_bytes(data[fo + i..fo + i + 8].try_into().unwrap_or([0; 8]));
                     if ptr >= text_addr && ptr < text_end {
-                        // Validate: target should look like a function start (not mid-instruction)
-                        let target_idx = (ptr - text_addr) as usize;
-                        if text_fo + target_idx + 1 < data.len() {
-                            let tb = data[text_fo + target_idx];
-                            let valid = matches!(tb,
-                                0x48 | 0x49 | 0x4C | 0x4D | // REX.W
-                                0x53 | 0x55 | 0x56 | 0x57 | // push
-                                0x41 | 0xF3 | 0x50 | 0x51 | 0x52 |
-                                0xE9 | // JMP (thunk)
-                                0x31 | 0x33 | 0x45 // xor reg,reg (common entry)
-                            );
-                            if valid {
-                                found.insert(ptr);
+                        if is_vtable_section {
+                            // .data.rel.ro: vtable entries are always function pointers
+                            found.insert(ptr);
+                        } else {
+                            // .rodata: could be switch tables or data. Validate that the
+                            // target is part of a consecutive run of 3+ code pointers
+                            // (vtable pattern) or starts with a strong prologue.
+                            let target_idx = (ptr - text_addr) as usize;
+                            if text_fo + target_idx + 4 < data.len() {
+                                let b0 = data[text_fo + target_idx];
+                                let b1 = data[text_fo + target_idx + 1];
+                                let strong = matches!((b0, b1),
+                                    (0x55, 0x48) | (0x55, 0x53) | (0x53, 0x48) | (0x53, 0x55) |
+                                    (0x41, 0x54) | (0x41, 0x55) | (0x41, 0x56) | (0x41, 0x57) |
+                                    (0x48, 0x83) | (0x48, 0x81) | (0xF3, 0x0F) | (0x55, 0x41)
+                                );
+                                if strong {
+                                    found.insert(ptr);
+                                } else {
+                                    // Check: is this part of a consecutive pointer run (vtable)?
+                                    let mut run = 0;
+                                    for k in [-8i64, 8, 16].iter() {
+                                        let neighbor = i as i64 + k;
+                                        if neighbor >= 0 && (neighbor as usize) + 8 <= sz {
+                                            let np = u64::from_le_bytes(data[fo + neighbor as usize..fo + neighbor as usize + 8].try_into().unwrap_or([0;8]));
+                                            if np >= text_addr && np < text_end { run += 1; }
+                                        }
+                                    }
+                                    if run >= 2 { // 2+ neighbors also point to .text → vtable
+                                        found.insert(ptr);
+                                    }
+                                }
                             }
                         }
                     }
