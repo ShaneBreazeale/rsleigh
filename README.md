@@ -1,4 +1,4 @@
-# rsleigh
+# rSleigh
 
 Compile Ghidra's SLEIGH architecture specs into native Rust decoders that disassemble and decompile binaries to C-like pseudocode. No JVM, no C++, just `cargo build`.
 
