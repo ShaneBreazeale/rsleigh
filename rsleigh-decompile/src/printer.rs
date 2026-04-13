@@ -2044,13 +2044,14 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     }
                 }
                 if count >= 3 && merged.len() >= 6 {
+                    let unique: std::collections::HashSet<char> = merged.chars().collect();
+                    if unique.len() >= 4 {
                     let indent = lines[i].len() - lines[i].trim_start().len();
                     let pad = " ".repeat(indent);
                     let _var_name = lt.split(' ').next().unwrap_or("buf");
                     for idx in (i + 1..=end).rev() { lines.remove(idx); }
                     lines[i] = format!("{}// stack string: \"{}\"", pad, merged);
-                    // Keep the first var assignment for reference
-                    // Actually just show the merged string as a comment
+                    }
                 }
             }
             i += 1;
@@ -4067,7 +4068,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     }
 
     // #STACK_STRING: Detect byte-by-byte stack string construction.
-    // Pattern: consecutive *(type*)(local_N + K) = 0xHH; where HH is printable ASCII
+    // Patterns:
+    //   *(uint8_t*)(EXPR) = 0xHH; — explicit byte store (cast)
+    //   local_N = 0xHH; — small hex constant assigned to stack var
+    //   local_N = NN; — small decimal constant assigned to stack var
+    //   *(uint32_t*)(EXPR) = 0xHHHHHHHH; — packed 4-byte ASCII in dword store
     // Reconstruct the full string and add as a comment.
     {
         let mut i = 0;
@@ -4075,25 +4080,76 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let mut string_bytes: Vec<(usize, u8)> = Vec::new();
             let mut j = i;
 
-            // Collect consecutive byte stores to adjacent offsets
             while j < lines.len() {
                 let t = lines[j].trim();
-                // Match: *(type*)(EXPR) = 0xHH; or *(type*)(EXPR) = NN;
-                // where the value is a printable ASCII byte
-                let is_byte_store = t.contains("= 0x") && t.ends_with(';')
+                if !t.ends_with(';') { break; }
+                // Skip lines that are function calls, contain string literals, or comments
+                if t.contains('(') && !t.contains("*(") { break; }
+                if t.contains('"') || t.contains("//") { break; }
+
+                // Pattern 1: *(type*)(EXPR) = 0xHH; (byte cast store)
+                let is_byte_cast = t.contains("= 0x")
                     && (t.contains("*(uint8_t*)") || t.contains("*(char*)") || t.contains("*(byte*)"));
 
-                if is_byte_store {
-                    // Extract the byte value
+                // Pattern 2: local_N = 0xHH; or var_N = 0xHH; (simple hex assignment)
+                let is_local_hex = t.contains("= 0x")
+                    && (t.starts_with("local_") || t.starts_with("var_") || t.starts_with("-local_"));
+
+                // Pattern 3: local_N = NN; (decimal assignment in printable range)
+                let is_local_dec = !t.contains("0x")
+                    && (t.starts_with("local_") || t.starts_with("var_") || t.starts_with("-local_"))
+                    && t.contains(" = ");
+
+                if is_byte_cast || is_local_hex {
                     if let Some(eq) = t.rfind("= 0x") {
-                        let hex_str = &t[eq+4..].trim_end_matches(';').trim();
+                        let hex_str = t[eq+4..].trim_end_matches(';').trim();
+                        // Single byte (1-2 hex digits)
                         if hex_str.len() <= 2 {
                             if let Ok(val) = u8::from_str_radix(hex_str, 16) {
-                                if val >= 0x20 && val < 0x7f { // printable ASCII
+                                if val >= 0x20 && val < 0x7f {
                                     string_bytes.push((j, val));
                                     j += 1;
                                     continue;
                                 }
+                            }
+                        }
+                        // Packed dword (8 hex digits = 4 ASCII chars, little-endian)
+                        if hex_str.len() == 8 {
+                            if let Ok(val) = u32::from_str_radix(hex_str, 16) {
+                                let b = val.to_le_bytes();
+                                if b.iter().all(|&x| (x >= 0x20 && x < 0x7f) || x == 0) {
+                                    for &byte in &b {
+                                        if byte == 0 { break; }
+                                        string_bytes.push((j, byte));
+                                    }
+                                    j += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                        // Packed word (4 hex digits = 2 ASCII chars)
+                        if hex_str.len() == 4 {
+                            if let Ok(val) = u16::from_str_radix(hex_str, 16) {
+                                let b = val.to_le_bytes();
+                                if b.iter().all(|&x| (x >= 0x20 && x < 0x7f) || x == 0) {
+                                    for &byte in &b {
+                                        if byte == 0 { break; }
+                                        string_bytes.push((j, byte));
+                                    }
+                                    j += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                } else if is_local_dec {
+                    if let Some(eq) = t.rfind(" = ") {
+                        let val_str = t[eq+3..].trim_end_matches(';').trim();
+                        if let Ok(val) = val_str.parse::<u64>() {
+                            if val >= 0x20 && val < 0x7f {
+                                string_bytes.push((j, val as u8));
+                                j += 1;
+                                continue;
                             }
                         }
                     }
@@ -4101,38 +4157,157 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 break;
             }
 
-            // If we found 4+ consecutive printable bytes, it's a stack string
+            // 4+ consecutive printable bytes = stack string
             if string_bytes.len() >= 4 {
                 let s: String = string_bytes.iter().map(|(_, b)| *b as char).collect();
-                let pad = " ".repeat(lines[i].len() - lines[i].trim_start().len());
-                // Insert comment before the first store
-                lines.insert(i, format!("{}// stack string: \"{}\"", pad, s));
-                i += string_bytes.len() + 1;
+                // Validate: reject if it looks like a repeated pattern or false positive
+                let unique_chars: std::collections::HashSet<char> = s.chars().collect();
+                let is_valid = unique_chars.len() >= 3
+                    && !s.chars().all(|c| c == s.chars().next().unwrap_or(' '))
+                    // Reject if string is already visible as a literal in nearby lines
+                    && !lines[i..lines.len().min(i + string_bytes.len() + 5)]
+                        .iter().any(|l| l.contains(&format!("\"{}\"", &s[..s.len().min(8)])));
+                if is_valid {
+                    let pad = " ".repeat(lines[i].len() - lines[i].trim_start().len());
+                    // Look ahead for XOR key in nearby lines (within 10 lines after the stores)
+                    let look_end = lines.len().min(i + string_bytes.len() + 10);
+                    let xor_key = lines[i..look_end].iter().find_map(|l| {
+                        let t = l.trim();
+                        // Match: "^ NN" or "^ 0xHH" where NN is a decimal or hex constant
+                        if let Some(xor_pos) = t.find("^ ") {
+                            let after = &t[xor_pos + 2..];
+                            if after.starts_with("0x") {
+                                let hex = after[2..].split(|c: char| !c.is_ascii_hexdigit()).next().unwrap_or("");
+                                if hex.len() <= 2 { return u8::from_str_radix(hex, 16).ok(); }
+                            } else {
+                                let dec = after.split(|c: char| !c.is_ascii_digit()).next().unwrap_or("");
+                                if let Ok(v) = dec.parse::<u64>() {
+                                    if v > 0 && v < 256 { return Some(v as u8); }
+                                }
+                            }
+                        }
+                        None
+                    });
+                    let comment = if let Some(key) = xor_key {
+                        let decrypted: String = string_bytes.iter()
+                            .map(|(_, b)| (*b ^ key) as char)
+                            .filter(|c| c.is_ascii_graphic() || *c == ' ')
+                            .collect();
+                        if decrypted.len() >= 4 {
+                            format!("{}// XOR-encrypted string (key=0x{:02x}): \"{}\"", pad, key, decrypted)
+                        } else {
+                            format!("{}// stack string: \"{}\"", pad, s)
+                        }
+                    } else {
+                        format!("{}// stack string: \"{}\"", pad, s)
+                    };
+                    lines.insert(i, comment);
+                    i += string_bytes.len() + 1;
+                } else {
+                    i += 1;
+                }
             } else {
                 i += 1;
             }
         }
     }
 
-    // #XOR_STRING: Detect XOR-encoded string patterns.
-    // Pattern: data ^ constant_byte or data ^ key_byte in a loop
-    // Annotate the XOR key when visible.
+    // #XOR_STRING: Detect XOR-encoded string patterns and try to decrypt.
+    // Pattern: data ^ constant_byte or data ^ key_byte in a loop.
+    // Also try XOR decryption on DAT_ addresses referenced near XOR operations.
     for line in &mut lines {
-        // Single-byte XOR: "^ 0xNN" where NN is a common XOR key
         let t = line.trim();
-        if t.contains("^ 0x") && (t.contains("local_") || t.contains("param_")) {
-            // Extract the XOR key
+        if t.contains("^ 0x") && (t.contains("local_") || t.contains("param_") || t.contains("DAT_")) {
             if let Some(xor_pos) = t.find("^ 0x") {
                 let key_start = xor_pos + 4;
                 let mut key_end = key_start;
                 let bytes = t.as_bytes();
                 while key_end < bytes.len() && bytes[key_end].is_ascii_hexdigit() { key_end += 1; }
                 if key_end > key_start && key_end - key_start <= 2 {
-                    let key_str = &t[key_start..key_end];
-                    if let Ok(key) = u8::from_str_radix(key_str, 16) {
-                        if key > 0 && key != 0xFF && !line.contains("/*") {
+                    if let Ok(key) = u8::from_str_radix(&t[key_start..key_end], 16) {
+                        if key > 0 && key != 0xFF && !line.contains("/*") && !line.contains("// ") {
                             *line = format!("{} // XOR key: 0x{:02x}", line.trim_end(), key);
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // #XOR_DECRYPT: Try XOR decryption on DAT_ addresses.
+    // When we see DAT_XXXXXXXX referenced in the code, try single-byte and multi-byte
+    // XOR decryption on the data at that address.
+    if ctx.binary.is_some() {
+        let mut decrypted_addrs: HashMap<u64, String> = HashMap::new();
+        // Collect all DAT_ addresses referenced in the output
+        for line in &lines {
+            let t = line.trim();
+            let mut pos = 0;
+            while let Some(dat_pos) = t[pos..].find("DAT_") {
+                let abs_pos = pos + dat_pos + 4;
+                let mut end = abs_pos;
+                while end < t.len() && t.as_bytes()[end].is_ascii_hexdigit() { end += 1; }
+                if end > abs_pos {
+                    if let Ok(addr) = u64::from_str_radix(&t[abs_pos..end], 16) {
+                        if !decrypted_addrs.contains_key(&addr) {
+                            // Try single-byte XOR
+                            if let Some((decrypted, key)) = try_xor_decrypt_single(addr, ctx) {
+                                decrypted_addrs.insert(addr, format!("\"{}\" (XOR 0x{:02x})", decrypted, key));
+                            }
+                            // Try multi-byte XOR
+                            else if let Some((decrypted, key)) = try_xor_decrypt_multi(addr, ctx) {
+                                let key_str = key.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("");
+                                decrypted_addrs.insert(addr, format!("\"{}\" (XOR 0x{})", decrypted, key_str));
+                            }
+                        }
+                    }
+                }
+                pos = end;
+            }
+        }
+        // Annotate lines that reference decrypted addresses
+        if !decrypted_addrs.is_empty() {
+            for line in &mut lines {
+                for (addr, decrypted) in &decrypted_addrs {
+                    let dat_name = format!("DAT_{:08x}", addr);
+                    let dat_name_upper = format!("DAT_{:X}", addr);
+                    if (line.contains(&dat_name) || line.contains(&dat_name_upper))
+                        && !line.contains("// decrypted:") {
+                        *line = format!("{} // decrypted: {}", line.trim_end(), decrypted);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // #BASE64_DECODE: Detect base64-encoded strings and show decoded value.
+    for line in &mut lines {
+        if line.contains("// ") { continue; } // already annotated
+        // Find string literals that look like base64
+        let t = line.trim();
+        if let Some(q1) = t.find('"') {
+            if let Some(q2) = t[q1+1..].find('"') {
+                let s = &t[q1+1..q1+1+q2];
+                if s.len() >= 8 {
+                    if let Some(decoded) = try_base64_decode(s) {
+                        *line = format!("{} // base64 decoded: \"{}\"", line.trim_end(), decoded);
+                    }
+                }
+            }
+        }
+    }
+
+    // #ROT13_DECODE: Detect ROT13-encoded strings and show decoded value.
+    for line in &mut lines {
+        if line.contains("// ") { continue; }
+        let t = line.trim();
+        if let Some(q1) = t.find('"') {
+            if let Some(q2) = t[q1+1..].find('"') {
+                let s = &t[q1+1..q1+1+q2];
+                if s.len() >= 8 {
+                    if let Some(decoded) = try_rot13(s) {
+                        *line = format!("{} // ROT13 decoded: \"{}\"", line.trim_end(), decoded);
                     }
                 }
             }
@@ -5262,6 +5437,16 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // This catches param_N[RSP] patterns created by AUTONAME/DECLARATIONS passes,
     // RBP+N patterns created by other transformations, and any remaining raw registers.
     {
+        // Elide x86-64 callee-saved RBP spills (push rbp to stack slot).
+        // Various forms: -local_XX = RBP; / -param_N[RSP] = RBP; / -var_XX = RBP;
+        lines.retain(|line| {
+            let t = line.trim();
+            if t.ends_with("= RBP;") && t.starts_with("-") && !t.contains("func_") {
+                return false;
+            }
+            true
+        });
+
         // Re-run param_N[RSP] → local_XX
         for line in &mut lines {
             let mut search_from = 0usize;
@@ -5340,6 +5525,90 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         }
                     }
                     break;
+                }
+            }
+        }
+
+        // After all RBP+N → local_N conversions, rename remaining bare RBP/EBP
+        // to lVar (they're callee-saved general-purpose uses, not frame pointer)
+        let has_bare_rbp = lines.iter().any(|l| {
+            let t = l.trim();
+            // Only rename if RBP appears as a value, not in local_XX patterns
+            t.contains("RBP") && !t.contains("RBP + ") && !t.contains("RBP -")
+                && !t.starts_with("-local_") && !t.starts_with("local_")
+        });
+        if has_bare_rbp {
+            // Find the next available lVar index
+            let max_lvar = lines.iter().filter_map(|l| {
+                let mut max = 0usize;
+                let mut pos = 0;
+                while let Some(idx) = l[pos..].find("lVar") {
+                    let start = pos + idx + 4;
+                    let end = l[start..].find(|c: char| !c.is_ascii_digit()).map(|e| start + e).unwrap_or(l.len());
+                    if end > start {
+                        if let Ok(n) = l[start..end].parse::<usize>() {
+                            if n > max { max = n; }
+                        }
+                    }
+                    pos = end;
+                }
+                if max > 0 { Some(max) } else { None }
+            }).max().unwrap_or(0);
+            let rbp_var = format!("lVar{}", max_lvar + 1);
+            let ebp_var = format!("iVar{}", max_lvar + 1);
+            for line in &mut lines {
+                // Don't rename in callee-saved spill lines (already handled by elision)
+                if line.trim().starts_with("-local_") { continue; }
+                // Replace bare RBP (word boundary: not preceded/followed by alphanumeric)
+                let mut result_line = String::new();
+                let mut remaining = line.as_str();
+                while let Some(pos) = remaining.find("RBP") {
+                    // Check word boundaries
+                    let before_ok = pos == 0 || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric();
+                    let after_pos = pos + 3;
+                    let after_ok = after_pos >= remaining.len() || !remaining.as_bytes()[after_pos].is_ascii_alphanumeric();
+                    if before_ok && after_ok {
+                        // Don't rename RBP + N (frame pointer offset) — should already be converted
+                        let after = &remaining[after_pos..];
+                        if after.starts_with(" + ") || after.starts_with(" - ") {
+                            result_line.push_str(&remaining[..after_pos]);
+                            remaining = &remaining[after_pos..];
+                            continue;
+                        }
+                        result_line.push_str(&remaining[..pos]);
+                        result_line.push_str(&rbp_var);
+                        remaining = &remaining[after_pos..];
+                    } else {
+                        result_line.push_str(&remaining[..after_pos]);
+                        remaining = &remaining[after_pos..];
+                    }
+                }
+                result_line.push_str(remaining);
+                if result_line != *line {
+                    *line = result_line;
+                }
+            }
+            // Same for EBP
+            for line in &mut lines {
+                if line.trim().starts_with("-local_") { continue; }
+                let mut result_line = String::new();
+                let mut remaining = line.as_str();
+                while let Some(pos) = remaining.find("EBP") {
+                    let before_ok = pos == 0 || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric();
+                    let after_pos = pos + 3;
+                    let after_ok = after_pos >= remaining.len() || !remaining.as_bytes()[after_pos].is_ascii_alphanumeric();
+                    if before_ok && after_ok {
+                        result_line.push_str(&remaining[..pos]);
+                        result_line.push_str(&ebp_var);
+                        remaining = &remaining[after_pos..];
+                    } else {
+                        result_line.push_str(&remaining[..after_pos]);
+                        remaining = &remaining[after_pos..];
+                    }
+                }
+                result_line.push_str(remaining);
+                if result_line != *line {
+                    *line = result_line;
                 }
             }
         }
@@ -7444,6 +7713,197 @@ fn try_read_string(va: u64, ctx: &PrintCtx) -> Option<String> {
         || (c as u32 >= 0x80 && !c.is_control())) {
         Some(s.to_string())
     } else { None }
+}
+
+/// Read raw bytes at a virtual address from the binary (any section).
+fn try_read_bytes_at_va(va: u64, ctx: &PrintCtx, max_len: usize) -> Option<Vec<u8>> {
+    let binary = ctx.binary?;
+    let obj = goblin::Object::parse(binary).ok()?;
+    let file_offset = match &obj {
+        goblin::Object::PE(pe) => {
+            let rva = va.checked_sub(pe.image_base as u64)? as u64;
+            pe.sections.iter().find_map(|s| {
+                let sr = s.virtual_address as u64;
+                if rva >= sr && rva < sr + s.virtual_size as u64 {
+                    Some((s.pointer_to_raw_data as u64 + (rva - sr)) as usize)
+                } else { None }
+            })?
+        }
+        goblin::Object::Elf(elf) => {
+            elf.section_headers.iter().find_map(|sh| {
+                if sh.sh_type == 8 { return None; } // SHT_NOBITS
+                if va >= sh.sh_addr && va < sh.sh_addr + sh.sh_size {
+                    Some((sh.sh_offset + (va - sh.sh_addr)) as usize)
+                } else { None }
+            })?
+        }
+        goblin::Object::Mach(goblin::mach::Mach::Binary(macho)) => {
+            macho.segments.iter().find_map(|seg| {
+                if va >= seg.vmaddr && va < seg.vmaddr + seg.vmsize {
+                    Some((seg.fileoff + (va - seg.vmaddr)) as usize)
+                } else { None }
+            })?
+        }
+        _ => return None,
+    };
+    if file_offset >= binary.len() { return None; }
+    let len = max_len.min(binary.len() - file_offset);
+    Some(binary[file_offset..file_offset + len].to_vec())
+}
+
+/// Try single-byte XOR decryption on data at a virtual address.
+/// Returns the decrypted string and key if the result is printable ASCII.
+fn try_xor_decrypt_single(va: u64, ctx: &PrintCtx) -> Option<(String, u8)> {
+    let data = try_read_bytes_at_va(va, ctx, 256)?;
+    if data.len() < 4 { return None; }
+    // Skip if the data is already a plaintext string (no encryption needed)
+    let null_pos_raw = data.iter().position(|&b| b == 0).unwrap_or(data.len());
+    if null_pos_raw >= 4 && null_pos_raw <= 200 {
+        if data[..null_pos_raw].iter().all(|&b| (b >= 0x20 && b < 0x7f) || b == b'\n') {
+            return None; // Already plaintext
+        }
+    }
+
+    for key in 1u8..=0xFE {
+        let decrypted: Vec<u8> = data.iter().map(|b| b ^ key).collect();
+        let null_pos = decrypted.iter().position(|&b| b == 0).unwrap_or(decrypted.len());
+        if null_pos < 6 || null_pos > 200 { continue; }
+        let candidate = &decrypted[..null_pos];
+        if candidate.iter().all(|&b| (b >= 0x20 && b < 0x7f) || b == b'\n' || b == b'\t') {
+            if let Ok(s) = std::str::from_utf8(candidate) {
+                let unique: std::collections::HashSet<u8> = candidate.iter().copied().collect();
+                // Reject: key byte appears as most common char (null bytes → repeated key)
+                let key_char_count = candidate.iter().filter(|&&b| b == key).count();
+                let has_letter = candidate.iter().any(|&b| b.is_ascii_alphabetic());
+                // Require: 5+ unique chars, has letters, key byte isn't dominant
+                if unique.len() >= 5 && has_letter
+                    && key_char_count * 3 < candidate.len()
+                    && s.trim().len() >= 6
+                {
+                    return Some((s.to_string(), key));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Try multi-byte XOR decryption (2-4 byte key) on data at a virtual address.
+/// Uses known-plaintext attack: assumes common string prefixes and endings.
+fn try_xor_decrypt_multi(va: u64, ctx: &PrintCtx) -> Option<(String, Vec<u8>)> {
+    let data = try_read_bytes_at_va(va, ctx, 256)?;
+    if data.len() < 12 { return None; }
+    // Skip if already plaintext
+    let null_raw = data.iter().position(|&b| b == 0).unwrap_or(data.len());
+    if null_raw >= 6 && data[..null_raw].iter().all(|&b| b >= 0x20 && b < 0x7f) {
+        return None;
+    }
+
+    // Try common plaintext prefixes to derive the key
+    let prefixes: &[&[u8]] = &[
+        b"http", b"HTTP", b"https", b"cmd ", b"cmd.",
+        b"C:\\", b"C:/", b"/bin", b"/tmp", b"/etc",
+        b"HKEY", b"Soft", b"\\\\.",
+        b"powershell", b"rundll32", b"regsvr32",
+    ];
+
+    for key_len in 2..=4usize {
+        for prefix in prefixes {
+            if prefix.len() < key_len { continue; }
+            // Derive key from known plaintext
+            let key: Vec<u8> = (0..key_len).map(|i| data[i] ^ prefix[i]).collect();
+            if key.iter().all(|&k| k == 0) { continue; }
+
+            let decrypted: Vec<u8> = data.iter().enumerate()
+                .map(|(i, b)| b ^ key[i % key_len])
+                .collect();
+            let null_pos = decrypted.iter().position(|&b| b == 0).unwrap_or(decrypted.len());
+            if null_pos < 8 || null_pos > 200 { continue; }
+            let candidate = &decrypted[..null_pos];
+            if candidate.iter().all(|&b| (b >= 0x20 && b < 0x7f) || b == b'\n' || b == b'\t') {
+                if let Ok(s) = std::str::from_utf8(candidate) {
+                    let unique: std::collections::HashSet<u8> = candidate.iter().copied().collect();
+                    let has_letter = candidate.iter().any(|&b| b.is_ascii_alphabetic());
+                    if unique.len() >= 5 && has_letter && s.trim().len() >= 8 {
+                        return Some((s.to_string(), key));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Try ROT13 decryption on a string.
+fn try_rot13(s: &str) -> Option<String> {
+    if s.len() < 8 { return None; }
+    // Must be mostly alphabetic to be a ROT13 candidate
+    let alpha_ratio = s.chars().filter(|c| c.is_ascii_alphabetic()).count() as f64 / s.len() as f64;
+    if alpha_ratio < 0.6 { return None; }
+
+    let decoded: String = s.chars().map(|c| match c {
+        'a'..='m' | 'A'..='M' => (c as u8 + 13) as char,
+        'n'..='z' | 'N'..='Z' => (c as u8 - 13) as char,
+        _ => c,
+    }).collect();
+
+    // Check if decoded contains common English words
+    let common_words = ["the", "and", "for", "are", "but", "not", "you", "all",
+        "can", "her", "was", "one", "our", "out", "has", "his", "how", "its",
+        "let", "may", "new", "now", "old", "see", "way", "who", "did", "get",
+        "com", "org", "net", "http", "file", "open", "read", "write", "exec",
+        "system", "shell", "command", "password", "error", "failed", "success",
+        "connect", "send", "recv", "socket", "server", "client", "path", "name"];
+    let decoded_lower = decoded.to_lowercase();
+    let word_hits = common_words.iter().filter(|w| decoded_lower.contains(**w)).count();
+    let original_lower = s.to_lowercase();
+    let orig_hits = common_words.iter().filter(|w| original_lower.contains(**w)).count();
+
+    if word_hits > orig_hits && word_hits >= 2 {
+        Some(decoded)
+    } else {
+        None
+    }
+}
+
+/// Try base64 decoding on a string.
+fn try_base64_decode(s: &str) -> Option<String> {
+    if s.len() < 8 { return None; }
+    // Must look like base64: alphanumeric + / + = padding
+    if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=') {
+        return None;
+    }
+    // Must have both upper and lowercase
+    let has_upper = s.chars().any(|c| c.is_ascii_uppercase());
+    let has_lower = s.chars().any(|c| c.is_ascii_lowercase());
+    if !has_upper || !has_lower { return None; }
+
+    // Simple base64 decoder (no external dep needed)
+    let table = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let trimmed = s.trim_end_matches('=');
+    let mut bytes = Vec::new();
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+    for ch in trimmed.bytes() {
+        let val = table.iter().position(|&b| b == ch)?;
+        buf = (buf << 6) | val as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            bytes.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+    if bytes.len() < 4 { return None; }
+    // Check if result is printable ASCII
+    if bytes.iter().all(|&b| (b >= 0x20 && b < 0x7f) || b == b'\n' || b == b'\t' || b == 0) {
+        let null_pos = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+        let decoded = std::str::from_utf8(&bytes[..null_pos]).ok()?;
+        if decoded.len() >= 4 {
+            return Some(decoded.to_string());
+        }
+    }
+    None
 }
 
 /// Try to read a wide string (UTF-16LE) from a virtual address in the binary.
