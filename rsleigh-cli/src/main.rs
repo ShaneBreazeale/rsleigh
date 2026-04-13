@@ -1020,68 +1020,60 @@ fn discover_elf_functions(
         let text_fo = text.sh_offset as usize;
         let text_end = text_addr + text_size;
 
-        // 5. Exhaustive E8 CALL rel32 scanning in .text.
-        // Collect all unique targets first, then validate to reduce false positives
-        // from data bytes that happen to look like E8 XX XX XX XX.
-        let mut e8_targets = std::collections::BTreeSet::new();
-        if text_fo + text_size as usize <= data.len() {
-            let text_bytes = &data[text_fo..text_fo + text_size as usize];
-            for i in 0..text_bytes.len().saturating_sub(5) {
-                if text_bytes[i] == 0xE8 {
-                    let rel = i32::from_le_bytes(text_bytes[i+1..i+5].try_into().unwrap_or([0; 4]));
-                    let target = (text_addr as i64 + i as i64 + 5 + rel as i64) as u64;
-                    if target >= text_addr && target < text_end && target != text_addr + i as u64 + 5 {
-                        e8_targets.insert(target);
+        // 5. Decoder-based CALL target discovery.
+        // Instead of raw E8 byte scanning (which finds false positives from coincidental
+        // 0xE8 bytes inside other instructions), decode from known function starts and
+        // collect CALL targets from real decoded instructions.
+        {
+            let mut dec = rsleigh_api::Decoder::new(arch);
+            let mut new_targets = BTreeSet::new();
+            // Iterate: decode from all known functions, collect CALL targets, repeat.
+            // Limit total decoding work to avoid slowdowns on large binaries.
+            let max_seeds = 2000; // cap seeds per round
+            for _round in 0..2 {
+                let start_count = found.len();
+                let seeds: Vec<u64> = found.iter()
+                    .filter(|a| **a >= text_addr && **a < text_end)
+                    .take(max_seeds).copied().collect();
+                for func_addr in seeds {
+                    let off = segs.iter().find_map(|(va, sz, fo)| {
+                        if func_addr >= *va && func_addr < va + sz { Some((fo + (func_addr - va)) as usize) } else { None }
+                    });
+                    let Some(off) = off else { continue };
+                    let max = 4096.min(data.len().saturating_sub(off));
+                    if max < 2 { continue; }
+                    let bytes = &data[off..off + max];
+                    let mut pos = 0;
+                    for _ in 0..500 {
+                        if pos + 1 >= bytes.len() { break; }
+                        if let Ok(inst) = dec.decode(&bytes[pos..], func_addr + pos as u64) {
+                            let sz = inst.len as usize;
+                            if sz == 0 { break; }
+                            let dis = &inst.disassembly;
+                            // Collect CALL targets
+                            if dis.starts_with("CALL ") {
+                                if let Some(target_str) = dis.split_whitespace().nth(1) {
+                                    if let Some(hex) = target_str.strip_prefix("0x") {
+                                        if let Ok(target) = u64::from_str_radix(hex, 16) {
+                                            if target >= text_addr && target < text_end {
+                                                new_targets.insert(target);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if dis.starts_with("RET") || dis.starts_with("HLT") { break; }
+                            pos += sz;
+                        } else {
+                            break;
+                        }
                     }
                 }
-                // E9 JMP rel32 — only count as function if target is already known
-                // (tail call to a known function). Don't blindly add all JMP targets
-                // as that creates massive false positives from intra-function branches.
-                // We'll do a second pass below after E8 targets are collected.
-            }
-            // Validate E8 targets: accept if called by 2+ different call sites (high confidence),
-            // or if it's the only target at that address (likely real).
-            // Count how many times each target is called.
-            let mut target_counts: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
-            for i in 0..text_bytes.len().saturating_sub(5) {
-                if text_bytes[i] == 0xE8 {
-                    let rel = i32::from_le_bytes(text_bytes[i+1..i+5].try_into().unwrap_or([0; 4]));
-                    let target = (text_addr as i64 + i as i64 + 5 + rel as i64) as u64;
-                    if e8_targets.contains(&target) {
-                        *target_counts.entry(target).or_insert(0) += 1;
-                    }
+                for t in &new_targets {
+                    found.insert(*t);
                 }
-            }
-            // Accept E8 targets: 2+ call sites = definite function.
-            // 1 call site = require strong prologue (2-byte pattern check).
-            for &target in &e8_targets {
-                let count = target_counts.get(&target).copied().unwrap_or(0);
-                if count >= 2 {
-                    found.insert(target);
-                } else {
-                    let idx = (target - text_addr) as usize;
-                    if idx + 3 < text_bytes.len() {
-                        let b0 = text_bytes[idx];
-                        let b1 = text_bytes[idx + 1];
-                        let b2 = text_bytes[idx + 2];
-                        let b3 = text_bytes[idx + 3];
-                        // Require strong 2+ byte prologue match
-                        let strong = matches!((b0, b1, b2, b3),
-                            (0x55, 0x48, 0x89, 0xe5) | // push rbp; mov rbp, rsp
-                            (0x55, 0x48, 0x8b, 0xec) | // push rbp; mov rbp, rsp (alt)
-                            (0x55, 0x53, _, _) | (0x53, 0x48, _, _) | // push rbx/rbp chains
-                            (0x53, 0x55, _, _) |
-                            (0x41, 0x54, _, _) | (0x41, 0x55, _, _) | // push r12/r13
-                            (0x41, 0x56, _, _) | (0x41, 0x57, _, _) | // push r14/r15
-                            (0x48, 0x83, 0xEC, _) | // sub rsp, imm8
-                            (0x48, 0x81, 0xEC, _) | // sub rsp, imm32
-                            (0xF3, 0x0F, 0x1E, 0xFA) | // endbr64
-                            (0x55, 0x41, _, _) | // push rbp; push rXX
-                            (0xE9, _, _, _)     // JMP thunk
-                        );
-                        if strong { found.insert(target); }
-                    }
-                }
+                new_targets.clear();
+                if found.len() == start_count { break; } // no new functions found
             }
         }
 
@@ -1326,57 +1318,8 @@ fn discover_elf_functions(
             }
         }
 
-        // 8. Recursive CALL descent from non-.text entry points only (PLT, init, fini).
-        // The exhaustive E8 scan already covers .text; descent adds value for PLT stubs
-        // and init/fini functions that may call into .text.
-        let mut queue: std::collections::VecDeque<u64> = found.iter()
-            .filter(|a| **a < text_addr || **a >= text_end)
-            .copied().collect();
-        // Also add entry point
-        queue.push_back(elf.header.e_entry);
-        let mut visited = std::collections::HashSet::new();
-        let mut dec = rsleigh_api::Decoder::new(arch);
-
-        while let Some(func_addr) = queue.pop_front() {
-            if !visited.insert(func_addr) { continue; }
-            let off = segs.iter().find_map(|(va, sz, fo)| {
-                if func_addr >= *va && func_addr < va + sz { Some(fo + (func_addr - va)) } else { None }
-            });
-            let Some(off) = off else { continue };
-            let max = 4096.min(data.len().saturating_sub(off as usize));
-            if max == 0 { continue; }
-            let bytes = &data[off as usize..off as usize + max];
-
-            let mut pos = 0;
-            for _ in 0..500 {
-                if pos >= bytes.len() { break; }
-                if let Ok(inst) = dec.decode(&bytes[pos..], func_addr + pos as u64) {
-                    let sz = inst.len as usize;
-                    if sz == 0 { break; }
-
-                    // Check for CALL instructions
-                    let dis = &inst.disassembly;
-                    if dis.starts_with("CALL ") {
-                        if let Some(target_str) = dis.split_whitespace().nth(1) {
-                            if let Some(hex) = target_str.strip_prefix("0x") {
-                                if let Ok(target) = u64::from_str_radix(hex, 16) {
-                                    if target >= text_addr && target < text_end && !found.contains(&target) {
-                                        found.insert(target);
-                                        queue.push_back(target);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Stop at RET
-                    if dis.starts_with("RET") { break; }
-                    pos += sz;
-                } else {
-                    break;
-                }
-            }
-        }
+        // Step 5 (decoder-based CALL discovery) already covers recursive descent.
+        // No separate pass needed.
     }
 
     // Filter: remove addresses in PLT range that aren't PLT entries
