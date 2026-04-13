@@ -90,6 +90,24 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
         }
     }
 
+    // For stripped ELF binaries: discover functions via entry point, CALL scanning, prologues
+    // Also trigger for ELF with only import symbols (dynsym but no symtab)
+    let is_elf_stripped = if let goblin::Object::Elf(elf) = &obj {
+        elf.syms.len() == 0 || symbols.iter().all(|(_, n)| n.starts_with("FUN_"))
+    } else { false };
+    if is_elf_stripped || (symbols.is_empty() && matches!(&obj, goblin::Object::Elf(_))) {
+        if let goblin::Object::Elf(elf) = &obj {
+            let discovered = discover_elf_functions(elf, &segs, &data, arch);
+            // Merge: keep existing named symbols, add discovered ones
+            let existing: std::collections::BTreeSet<u64> = symbols.iter().map(|(a, _)| *a).collect();
+            for (addr, name) in discovered {
+                if !existing.contains(&addr) {
+                    symbols.push((addr, name));
+                }
+            }
+        }
+    }
+
     // Determine which functions to process
     // Skip --flag arguments and their values (e.g., --sigs path.json)
     let sigs_arg_idx = args.iter().position(|a| a == "--sigs");
@@ -941,4 +959,212 @@ fn discover_pe_functions(
     sorted.iter().enumerate().map(|(_i, addr)| {
         (*addr, format!("FUN_{:08x}", addr))
     }).collect()
+}
+
+/// Discover functions in a stripped ELF binary.
+/// Uses entry point, CALL scanning, prologue patterns, PLT enumeration, and .init_array.
+fn discover_elf_functions(
+    elf: &goblin::elf::Elf, segs: &[(u64, u64, u64)], data: &[u8], arch: rsleigh_api::Architecture,
+) -> Vec<(u64, String)> {
+    use std::collections::BTreeSet;
+
+    let mut found = BTreeSet::new();
+
+    // 1. Entry point
+    let entry = elf.header.e_entry;
+    if entry != 0 { found.insert(entry); }
+
+    // 2. .init and .fini section addresses
+    for sh in &elf.section_headers {
+        let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
+        if (name == ".init" || name == ".fini") && sh.sh_addr != 0 {
+            found.insert(sh.sh_addr);
+        }
+        // .init_array / .fini_array contain function pointers
+        if (name == ".init_array" || name == ".fini_array") && sh.sh_size > 0 {
+            let fo = sh.sh_offset as usize;
+            let count = (sh.sh_size / 8) as usize;
+            for i in 0..count {
+                if fo + i * 8 + 8 <= data.len() {
+                    let ptr = u64::from_le_bytes(data[fo + i * 8..fo + i * 8 + 8].try_into().unwrap_or([0; 8]));
+                    if ptr != 0 && ptr != u64::MAX {
+                        found.insert(ptr);
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. PLT entries — each is a small stub that jumps to a GOT entry
+    for sh in &elf.section_headers {
+        let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
+        if name.starts_with(".plt") && sh.sh_addr != 0 && sh.sh_size > 0 {
+            // PLT entries are typically 16 bytes each (first entry is special)
+            let entry_size = if sh.sh_entsize > 0 { sh.sh_entsize } else { 16 };
+            let mut addr = sh.sh_addr + entry_size; // skip PLT[0]
+            while addr < sh.sh_addr + sh.sh_size {
+                found.insert(addr);
+                addr += entry_size;
+            }
+        }
+    }
+
+    // 4. Find .text section bounds for CALL scanning
+    let text_section = elf.section_headers.iter().find(|sh| {
+        elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("") == ".text"
+    });
+
+    if let Some(text) = text_section {
+        let text_addr = text.sh_addr;
+        let text_size = text.sh_size;
+        let text_fo = text.sh_offset as usize;
+        let text_end = text_addr + text_size;
+
+        // 5. Exhaustive E8 CALL rel32 scanning in .text
+        if text_fo + text_size as usize <= data.len() {
+            let text_bytes = &data[text_fo..text_fo + text_size as usize];
+            for i in 0..text_bytes.len().saturating_sub(5) {
+                if text_bytes[i] == 0xE8 {
+                    // CALL rel32
+                    let rel = i32::from_le_bytes(text_bytes[i+1..i+5].try_into().unwrap_or([0; 4]));
+                    let target = (text_addr as i64 + i as i64 + 5 + rel as i64) as u64;
+                    if target >= text_addr && target < text_end && target != text_addr + i as u64 + 5 {
+                        found.insert(target);
+                    }
+                }
+            }
+        }
+
+        // 6. Prologue pattern scanning in .text
+        if text_fo + text_size as usize <= data.len() {
+            let text_bytes = &data[text_fo..text_fo + text_size as usize];
+            for i in 0..text_bytes.len().saturating_sub(4) {
+                let addr = text_addr + i as u64;
+                if found.contains(&addr) { continue; } // already found
+
+                // Pattern: push rbp; mov rbp, rsp (55 48 89 e5)
+                if text_bytes[i] == 0x55 && i + 3 < text_bytes.len()
+                    && text_bytes[i+1] == 0x48 && text_bytes[i+2] == 0x89 && text_bytes[i+3] == 0xe5 {
+                    // Verify alignment: must be preceded by a ret (C3), nop (90), int3 (CC), or at section start
+                    if i == 0 || matches!(text_bytes[i-1], 0xC3 | 0x90 | 0xCC | 0x00) {
+                        found.insert(addr);
+                    }
+                }
+                // Pattern: push rbp; mov rbp, rsp (alternate: 55 48 8b ec)
+                if text_bytes[i] == 0x55 && i + 3 < text_bytes.len()
+                    && text_bytes[i+1] == 0x48 && text_bytes[i+2] == 0x8b && text_bytes[i+3] == 0xec {
+                    if i == 0 || matches!(text_bytes[i-1], 0xC3 | 0x90 | 0xCC | 0x00) {
+                        found.insert(addr);
+                    }
+                }
+                // Pattern: sub rsp, N (48 83 ec NN) — leaf function without frame pointer
+                if text_bytes[i] == 0x48 && i + 3 < text_bytes.len()
+                    && text_bytes[i+1] == 0x83 && text_bytes[i+2] == 0xEC {
+                    if i == 0 || matches!(text_bytes[i-1], 0xC3 | 0x90 | 0xCC | 0x00) {
+                        found.insert(addr);
+                    }
+                }
+                // Pattern: endbr64 (f3 0f 1e fa) — CET-enabled function entry
+                if text_bytes[i] == 0xF3 && i + 3 < text_bytes.len()
+                    && text_bytes[i+1] == 0x0F && text_bytes[i+2] == 0x1E && text_bytes[i+3] == 0xFA {
+                    if i == 0 || matches!(text_bytes[i-1], 0xC3 | 0x90 | 0xCC | 0x00) {
+                        found.insert(addr);
+                    }
+                }
+            }
+        }
+
+        // 7. Recursive CALL descent from all found entry points
+        let mut queue: std::collections::VecDeque<u64> = found.iter().copied().collect();
+        let mut visited = std::collections::HashSet::new();
+        let mut dec = rsleigh_api::Decoder::new(arch);
+
+        while let Some(func_addr) = queue.pop_front() {
+            if !visited.insert(func_addr) { continue; }
+            let off = segs.iter().find_map(|(va, sz, fo)| {
+                if func_addr >= *va && func_addr < va + sz { Some(fo + (func_addr - va)) } else { None }
+            });
+            let Some(off) = off else { continue };
+            let max = 4096.min(data.len().saturating_sub(off as usize));
+            if max == 0 { continue; }
+            let bytes = &data[off as usize..off as usize + max];
+
+            let mut pos = 0;
+            for _ in 0..500 {
+                if pos >= bytes.len() { break; }
+                if let Ok(inst) = dec.decode(&bytes[pos..], func_addr + pos as u64) {
+                    let sz = inst.len as usize;
+                    if sz == 0 { break; }
+
+                    // Check for CALL instructions
+                    let dis = &inst.disassembly;
+                    if dis.starts_with("CALL ") {
+                        if let Some(target_str) = dis.split_whitespace().nth(1) {
+                            if let Some(hex) = target_str.strip_prefix("0x") {
+                                if let Ok(target) = u64::from_str_radix(hex, 16) {
+                                    if target >= text_addr && target < text_end && !found.contains(&target) {
+                                        found.insert(target);
+                                        queue.push_back(target);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Stop at RET
+                    if dis.starts_with("RET") { break; }
+                    pos += sz;
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Filter: remove addresses in PLT range that aren't PLT entries
+    // and sort results
+    let mut result: Vec<(u64, String)> = found.into_iter().map(|addr| {
+        // Try to resolve PLT names from dynamic relocations
+        let plt_name = resolve_plt_name(elf, addr);
+        let name = plt_name.unwrap_or_else(|| format!("FUN_{:08x}", addr));
+        (addr, name)
+    }).collect();
+    result.sort_by_key(|(addr, _)| *addr);
+    result
+}
+
+/// Try to resolve a PLT entry address to its import name via .rela.plt relocations.
+fn resolve_plt_name(elf: &goblin::elf::Elf, addr: u64) -> Option<String> {
+    // Check if addr is in a PLT section
+    let in_plt = elf.section_headers.iter().any(|sh| {
+        let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
+        name.starts_with(".plt") && addr >= sh.sh_addr && addr < sh.sh_addr + sh.sh_size
+    });
+    if !in_plt { return None; }
+
+    // Find which PLT slot this is (by index)
+    let plt_sec = elf.section_headers.iter().find(|sh| {
+        let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
+        name == ".plt.sec" || name == ".plt"
+    })?;
+    let entry_size = if plt_sec.sh_entsize > 0 { plt_sec.sh_entsize } else { 16 };
+    let plt_name = elf.shdr_strtab.get_at(plt_sec.sh_name).unwrap_or("");
+    let base = if plt_name == ".plt.sec" { plt_sec.sh_addr } else { plt_sec.sh_addr + entry_size };
+    if addr < base { return None; }
+    let idx = ((addr - base) / entry_size) as usize;
+
+    // Match against .rela.plt relocations
+    for rel in &elf.pltrelocs {
+        // The PLT index corresponds to the relocation index
+        let sym = &elf.dynsyms.get(rel.r_sym)?;
+        let name = elf.dynstrtab.get_at(sym.st_name)?;
+        if !name.is_empty() {
+            // Count which relocation this is
+            let rel_idx = elf.pltrelocs.iter().position(|r| r.r_offset == rel.r_offset)?;
+            if rel_idx == idx {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
 }

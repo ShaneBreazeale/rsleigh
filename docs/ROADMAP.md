@@ -4,16 +4,47 @@
 
 **6 architectures** (x86-64, x86-32, AArch64, ARM32, MIPS32, RISC-V 64), **5 binary formats** (ELF 32/64, Mach-O, PE32, PE64 including ARM64 Windows).
 
-**Beats Ghidra on function discovery** on 11 of 13 test binaries across PE32, PE64, Mach-O, and ARM64.
+**Beats Ghidra on function discovery** on 10 of 11 compared test binaries across PE32, PE64, Mach-O, ELF, and ARM64.
 
-**Key features:** 38K+ function signatures with param annotations, MSVC C++ demangling, ObjC bracket syntax, C++ stream wrapper inlining, Win32 typedef propagation (HKEY, HWND, REGSAM), MBA deobfuscation (SiMBA + equality saturation), interprocedural two-pass type propagation, do-while recovery, Ghidra-style local declarations with array sizing.
+**Key features:** 38K+ function signatures with param annotations, MSVC C++ demangling, ObjC bracket syntax, C++ stream wrapper inlining, Win32 typedef propagation (HKEY, HWND, REGSAM), MBA deobfuscation (SiMBA + equality saturation), interprocedural two-pass type propagation, do-while recovery, Ghidra-style local declarations with array sizing, type cast emission (94% of Ghidra), struct recovery (9 known Win32 structs, 1,824 named fields), string decryption engine (XOR auto-decrypt, stack strings, base64, ROT13).
+
+---
+
+## ✅ Completed
+
+### Printer Pipeline Refactor ✅
+Added `#FINAL_PASS` at end of post-processing to re-run critical simplifications after earlier passes create new patterns. Reduced `param_N[RSP]` from 768 to 3 on main.exe. Surgical fix — no full rewrite needed.
+
+### Do-While Recovery Fixes ✅
+Fixed 3 bug classes: `if (} while (cond))` text corruption from call-return inlining treating `} while` as function calls; impossible constant conditions (`} while (1 < 0)`); dead do-while loops where body unconditionally returns.
+
+### ELF Linux Binary Testing ✅
+Tested on stripped ELF x86-64 bash (905KB, 1,242 functions). Fixed: RBP callee-saved spill elision (201→0), bare RBP→lVar auto-naming (1,099→18 RBP leaks), call-return inlining guard. 1,424 string literals, 979 API annotations recovered.
+
+### Type Cast Emission ✅
+0 → 4,616 casts on main.exe (94% of Ghidra's 4,911). Sources: narrowing (Subpiece 64→32), Zext/Sext with sized casts, signed comparison casts, unsigned comparison casts, bitwise/shift casts, call argument casts from signatures (DWORD, void *, LPCWSTR), typed Load dereferences `*(uint32_t*)(addr)`, float conversions.
+
+### Struct Recovery ✅
+9 known Win32 struct definitions (STARTUPINFOW, CONTEXT, WNDCLASSEXW, PROCESS_INFORMATION, SECURITY_ATTRIBUTES, OSVERSIONINFOW, EXCEPTION_RECORD, WIN32_FIND_DATAW, OVERLAPPED). API-based identification (GetStartupInfoW → STARTUPINFOW *). Field offset matching with 3+ field / >50% threshold. 195 struct identifications, 1,824 named fields on main.exe.
+
+### String Decryption Engine ✅
+No other decompiler does this automatically:
+- XOR auto-decrypt: detect key from nearby loop, decrypt stack bytes in-place (found real encrypted strings in PsExec, key=0x5A)
+- Stack string detection: packed dword/word stores, byte-by-byte construction, string literal concatenation
+- XOR .rdata brute-force: single-byte (0x01-0xFE) scan with strict validation
+- Multi-byte XOR: known-plaintext attack using common prefixes (http, cmd, C:\)
+- Base64 decode: detect base64 in string literals, decode and annotate
+- ROT13 decode: common English word matching after ROT13 transform
+
+### Benchmark Suite ✅
+`scripts/benchmark.py` — runs rsleigh on all test_bin binaries, compares function counts against Ghidra baselines, detects regressions. 14 binaries in test corpus.
 
 ---
 
 ## Ship Quality — Make It Production-Ready
 
-### ELF Linux Binary Testing
-Completely untested against real Linux binaries this session. High risk of hidden bugs in ELF PLT/GOT resolution, DWARF parsing, and function discovery for stripped Linux executables. Test against common CTF binaries, server daemons, and malware samples.
+### CI Pipeline
+Automated builds and testing to prevent regressions. Run benchmark suite on every push, compare function counts against saved baselines, flag output quality regressions. GitHub Actions with matrix testing.
 
 ### MIPS/RISC-V/ARM32 Testing
 Three supported architectures with zero real-world validation beyond golden P-code tests. Need end-to-end decompilation testing on real firmware images (MIPS routers), IoT binaries (ARM32), and RISC-V toolchain output.
@@ -21,37 +52,22 @@ Three supported architectures with zero real-world validation beyond golden P-co
 ### Spectra Integration Testing
 rsleigh is the decompilation backend for Spectra. The `rsleigh-api` + `rsleigh-decompile` API contract is untested in the UI context. Verify function discovery, ASM view, P-code view, and Code view all work correctly with the latest changes.
 
-### CI Pipeline
-Automated builds and testing to prevent regressions. Run on all test_bin binaries, compare function counts against saved baselines, flag any output quality regressions. GitHub Actions with matrix testing across architectures.
-
 ---
 
 ## Output Quality — Close the Gap with Ghidra
 
-### Printer Pipeline Refactor
-The printer has 20+ post-processing passes that sometimes conflict (RSP simplification undone by later passes, causing 768 `param_N[RSP]` regressions on main.exe). Refactor into a clean single-pass pipeline with well-defined ordering. This would fix the largest remaining output quality issue.
-
-### Struct Recovery
-Detect repeated field access patterns (`param_0->field_0`, `param_0->field_8`, `param_0->field_10`) and create struct type definitions. Map field offsets to names when the struct is passed to known APIs (e.g., `WNDCLASS`, `STARTUPINFO`). This is a significant analysis pass — Ghidra does it via Pspec type archives.
-
-### Type Cast Emission
-Ghidra shows 4,911 explicit casts on main.exe (`(uint)`, `(DWORD)`, `(char *)`). rsleigh shows zero. Emit casts when narrowing (64→32 bit), widening (32→64), changing signedness (signed→unsigned), or converting between pointer types. Makes implicit truncation visible.
-
 ### Better Control Flow
 The remaining 282 deeply nested if/else chains should use `goto` for complex multi-exit patterns. Add `break` label support for nested loops. Detect and emit `switch` for computed jump tables that the current pattern matcher misses.
+
+### Expand Struct Recovery
+Add more known structs (CRITICAL_SECTION, LARGE_INTEGER, SOCKADDR_IN, sockaddr, stat, dirent, etc.). Cross-function struct propagation — when a struct is identified in one function, propagate to callers/callees. Infer field types from usage context (field passed to `strlen` → `char *`).
+
+### Remaining Type Cast Gap (6%)
+Currently at 94% of Ghidra's cast count. Remaining: casts inside deeply nested expressions, cross-function return type mismatches, constant type annotations for large hex values.
 
 ---
 
 ## New Capabilities — Things Ghidra Doesn't Do
-
-### String Decryption
-Detect common string obfuscation patterns at decompile time:
-- XOR with single-byte or multi-byte key
-- ROT13/ROT47 rotation
-- Base64 decode from .rdata constants
-- Stack string construction (byte-by-byte push/mov)
-
-Show the decoded string as a comment next to the encoded reference. This would be uniquely valuable for malware analysis — no other decompiler does this automatically.
 
 ### Crypto Algorithm Detection
 Recognize cryptographic constants in .rdata and annotate their usage:
@@ -94,15 +110,6 @@ Detect always-true/false conditions inserted by obfuscation tools:
 
 Evaluate symbolically or via sampling and fold the dead branch.
 
-### String Deobfuscation
-Recognize stack string construction patterns where bytes are assigned one at a time:
-```
-mov [rbp-0x10], 0x48  // 'H'
-mov [rbp-0x0f], 0x65  // 'e'
-mov [rbp-0x0e], 0x6c  // 'l'
-```
-Reconstruct the full string and show it as a comment or replace the individual stores.
-
 ---
 
 ## Platform Expansion
@@ -126,16 +133,6 @@ Windows `.sys` file support with:
 ---
 
 ## Benchmarking
-
-### Reproducible Benchmark Suite
-Script that runs rsleigh on all test_bin binaries and reports:
-- Function counts vs saved Ghidra baselines
-- String recovery counts
-- Output line counts
-- Key crackme findings (flag strings, secret keys)
-- Timing (seconds per binary)
-
-Run as part of CI to catch regressions. Store baselines in the repo.
 
 ### Expanded Test Corpus
 Add binaries covering:
