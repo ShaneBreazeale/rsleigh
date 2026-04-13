@@ -1150,41 +1150,59 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
 
     // Simplify "param_NNN[RSP ...]" and "N + RSP" patterns.
     // These are stack-relative accesses. Replace with local variable names.
+    // param_48[RSP] → local_30 (decimal 48 = hex 0x30)
+    // param_96[RSP - 8 - 8 - 304 - 8] → local_60
     for line in &mut lines {
-        // Pattern: "param_NNN[RSP...]" — replace whole thing with local_XX
-        // Handles: param_56[RSP], param_72[RSP - 8 - 8 - 0x69-8], etc.
-        while let Some(start) = line.find("param_") {
-            if let Some(bracket) = line[start..].find("[RSP") {
-                let abs_bracket = start + bracket;
-                // Find matching ] (handle nested brackets)
-                let mut depth = 1;
-                let mut pos = abs_bracket + 1;
-                let bytes = line.as_bytes();
-                while pos < bytes.len() && depth > 0 {
-                    if bytes[pos] == b'[' { depth += 1; }
-                    if bytes[pos] == b']' { depth -= 1; }
-                    pos += 1;
-                }
-                if depth == 0 {
-                    let abs_close = pos - 1;
-                    // Extract the param index as the local variable identifier
-                    let param_part = &line[start..abs_bracket];
-                    if let Some(idx_str) = param_part.strip_prefix("param_") {
-                        // Use the param index as the local offset
-                        let offset = if let Ok(n) = idx_str.parse::<u64>() { n } else {
-                            u64::from_str_radix(idx_str.trim_start_matches("0x").trim_start_matches('-'), 16).unwrap_or(0)
-                        };
-                        let replacement = if offset > 0 {
-                            format!("local_{:x}", offset)
-                        } else {
-                            format!("local_0")
-                        };
-                        *line = format!("{}{}{}", &line[..start], replacement, &line[abs_close + 1..]);
-                        continue;
-                    }
-                }
+        // Scan for all param_NNN[RSP...] patterns in the line
+        let mut search_from = 0usize;
+        loop {
+            let remaining = &line[search_from..];
+            let Some(rel_start) = remaining.find("param_") else { break };
+            let start = search_from + rel_start;
+
+            // Check if this param_ is followed by [RSP
+            let after_param = &line[start..];
+            let Some(bracket_rel) = after_param.find("[RSP") else {
+                search_from = start + 6;
+                continue;
+            };
+            let abs_bracket = start + bracket_rel;
+
+            // Verify the part between param_ and [RSP is a number > 7
+            // (real function params are param_0..param_5, stack slots start at higher offsets)
+            let idx_str = &line[start + 6..abs_bracket];
+            let Ok(offset) = idx_str.parse::<u64>() else {
+                search_from = start + 6;
+                continue;
+            };
+            if offset < 8 {
+                // Low offsets are real function parameters, not stack slots
+                search_from = start + 6;
+                continue;
             }
-            break;
+
+            // Find matching ]
+            let mut depth = 1;
+            let mut pos = abs_bracket + 1;
+            let bytes = line.as_bytes();
+            while pos < bytes.len() && depth > 0 {
+                if bytes[pos] == b'[' { depth += 1; }
+                if bytes[pos] == b']' { depth -= 1; }
+                pos += 1;
+            }
+            if depth != 0 {
+                search_from = start + 6;
+                continue;
+            }
+            let abs_close = pos - 1;
+
+            let replacement = if offset > 0 {
+                format!("local_{:x}", offset)
+            } else {
+                "local_0".to_string()
+            };
+            *line = format!("{}{}{}", &line[..start], replacement, &line[abs_close + 1..]);
+            // Don't advance search_from — the replacement might enable more matches
         }
         // Pattern: "NNN + RSP" → "local_NNN" (decimal offset + RSP)
         while let Some(pos) = line.find(" + RSP") {
