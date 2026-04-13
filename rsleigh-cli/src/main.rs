@@ -8,6 +8,8 @@
 //!   rsleigh <binary> <func> --json      # decompile as JSON
 //!   rsleigh <binary> --disasm <func>    # disassemble (P-code)
 
+mod wasm;
+
 use std::path::Path;
 
 fn main() {
@@ -70,6 +72,13 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
         Ok(d) => d,
         Err(e) => { eprintln!("Error: cannot read {}: {}", binary_path, e); std::process::exit(1); }
     };
+
+    // WebAssembly detection: magic bytes \0asm
+    if data.len() >= 4 && &data[0..4] == b"\0asm" {
+        run_wasm(&data, args, all_mode);
+        return;
+    }
+
     let path = Path::new(binary_path);
     let obj = match goblin::Object::parse(&data) {
         Ok(o) => o,
@@ -329,6 +338,53 @@ fn decompile_func(
     let insts = decode_func(fa, symbols, segs, data, dec);
     if insts.is_empty() { return "// no instructions\n".to_string(); }
     rsleigh_decompile::decompile_with_binary(arch, &insts, Some(data), Some(path))
+}
+
+fn run_wasm(data: &[u8], args: &[String], all_mode: bool) {
+    eprintln!("Architecture: WebAssembly");
+    let funcs = wasm::parse_wasm(data);
+
+    // Which functions to decompile?
+    let func_args: Vec<&str> = args[2..].iter()
+        .filter(|a| !a.starts_with("--"))
+        .map(|a| a.as_str())
+        .collect();
+
+    if func_args.is_empty() && !all_mode {
+        // List functions
+        println!("{} functions:", funcs.len());
+        for f in &funcs {
+            let params: Vec<&str> = f.params.iter().map(|t| match t {
+                wasmparser::ValType::I32 => "i32",
+                wasmparser::ValType::I64 => "i64",
+                wasmparser::ValType::F32 => "f32",
+                wasmparser::ValType::F64 => "f64",
+                _ => "?",
+            }).collect();
+            let ret = f.results.first().map(|t| match t {
+                wasmparser::ValType::I32 => "i32",
+                wasmparser::ValType::I64 => "i64",
+                wasmparser::ValType::F32 => "f32",
+                wasmparser::ValType::F64 => "f64",
+                _ => "?",
+            }).unwrap_or("void");
+            println!("  func[{}]  {:20} ({}) -> {}", f.index, f.name, params.join(", "), ret);
+        }
+    } else {
+        // Decompile
+        let to_decompile: Vec<&wasm::WasmFunc> = if all_mode {
+            funcs.iter().collect()
+        } else {
+            funcs.iter().filter(|f| {
+                func_args.iter().any(|a| f.name == *a || format!("func_{}", f.index) == *a)
+            }).collect()
+        };
+
+        for f in &to_decompile {
+            let code = wasm::decompile_wasm_func(data, f, &funcs);
+            println!("{}", code);
+        }
+    }
 }
 
 fn parse_binary(obj: &goblin::Object, _data: &[u8]) -> Option<(rsleigh_api::Architecture, Vec<(u64, u64, u64)>, Vec<(u64, String)>)> {
