@@ -1222,6 +1222,96 @@ fn discover_elf_functions(
             }
         }
 
+        // 5b2. Parse .eh_frame directly for FDE initial_location addresses.
+        // Complements .eh_frame_hdr: catches FDEs not in the index and works when
+        // .eh_frame_hdr is missing. Each FDE has a PC-relative initial_location.
+        for sh in &elf.section_headers {
+            let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
+            if name != ".eh_frame" { continue; }
+            let ef_addr = sh.sh_addr;
+            let ef_off = sh.sh_offset as usize;
+            let ef_size = sh.sh_size as usize;
+            if ef_off + ef_size > data.len() { break; }
+
+            let mut pos = 0;
+            while pos + 8 < ef_size {
+                let fo = ef_off + pos;
+                let length = u32::from_le_bytes(data[fo..fo+4].try_into().unwrap_or([0;4])) as usize;
+                if length == 0 { break; } // terminator
+                if length > ef_size - pos { break; } // corrupt
+                let record_start = pos + 4;
+                let cie_id = u32::from_le_bytes(data[fo+4..fo+8].try_into().unwrap_or([0;4]));
+
+                if cie_id != 0 {
+                    // FDE: initial_location is at offset 8 from record start,
+                    // encoded as sdata4 PC-relative (most common for x86-64 gcc/clang)
+                    let iloc_off = fo + 8;
+                    if iloc_off + 4 <= data.len() {
+                        let iloc_rel = i32::from_le_bytes(data[iloc_off..iloc_off+4].try_into().unwrap_or([0;4]));
+                        let iloc = (ef_addr as i64 + (iloc_off - ef_off) as i64 + iloc_rel as i64) as u64;
+                        if iloc > 0 && iloc < text_end + 0x10000 {
+                            found.insert(iloc);
+                        }
+                    }
+                }
+                pos = record_start + length;
+            }
+        }
+
+        // 5b3. C++ RTTI vtable chain walking.
+        // Vtable layout: [offset_to_top(8)] [typeinfo_ptr(8)] [vfunc0(8)] [vfunc1(8)] ...
+        // Identify vtables by: offset_to_top is 0 or small, typeinfo_ptr points to
+        // .data.rel.ro/.rodata, and next entries point into .text.
+        for sh in &elf.section_headers {
+            let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
+            if name != ".data.rel.ro" { continue; }
+            let sec_addr = sh.sh_addr;
+            let sec_off = sh.sh_offset as usize;
+            let sec_size = sh.sh_size as usize;
+            if sec_off + sec_size > data.len() || sec_size < 24 { continue; }
+
+            // Collect all data section address ranges for typeinfo pointer validation
+            let data_sections: Vec<(u64, u64)> = elf.section_headers.iter()
+                .filter(|s| {
+                    let n = elf.shdr_strtab.get_at(s.sh_name).unwrap_or("");
+                    matches!(n, ".data.rel.ro" | ".rodata" | ".data")
+                })
+                .map(|s| (s.sh_addr, s.sh_addr + s.sh_size))
+                .collect();
+            let in_data = |addr: u64| -> bool {
+                data_sections.iter().any(|(start, end)| addr >= *start && addr < *end)
+            };
+
+            let mut i = 0;
+            while i + 24 <= sec_size {
+                let offset_to_top = i64::from_le_bytes(data[sec_off+i..sec_off+i+8].try_into().unwrap_or([0;8]));
+                let typeinfo_ptr = u64::from_le_bytes(data[sec_off+i+8..sec_off+i+16].try_into().unwrap_or([0;8]));
+                let first_entry = u64::from_le_bytes(data[sec_off+i+16..sec_off+i+24].try_into().unwrap_or([0;8]));
+
+                // Vtable heuristic: offset_to_top is 0 or small, typeinfo points to data,
+                // first entry points to executable code
+                if offset_to_top.unsigned_abs() <= 1024
+                    && in_data(typeinfo_ptr)
+                    && first_entry >= text_addr && first_entry < text_end
+                {
+                    // Walk virtual function entries
+                    let mut j = 16;
+                    while i + j + 8 <= sec_size {
+                        let vfunc = u64::from_le_bytes(data[sec_off+i+j..sec_off+i+j+8].try_into().unwrap_or([0;8]));
+                        if vfunc >= text_addr && vfunc < text_end {
+                            found.insert(vfunc);
+                            j += 8;
+                        } else {
+                            break;
+                        }
+                    }
+                    i += j; // skip past vtable
+                } else {
+                    i += 8;
+                }
+            }
+        }
+
         // 5c. Full data section pointer scan — find ALL 8-byte values pointing into executable code
         // Covers vtables, function pointer arrays, switch jump tables, C++ RTTI
         {
