@@ -61,18 +61,14 @@ jobs:
         run: cargo clippy -p pcode-ir -p rsleigh-api -p rsleigh-decompile -p rsleigh-cli -- -D warnings
         continue-on-error: true  # Don't block on clippy warnings during development
 
-  # Fast compile check without slaspec generation
-  # Catches decompiler/printer/CLI errors without the 30s codegen step
+  # Fast compile check — only pcode-ir (no generated code dependency)
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: Check decompiler compiles
-        run: cargo check -p rsleigh-decompile
-
-      - name: Check CLI compiles
-        run: cargo check -p rsleigh-cli
+      - name: Check pcode-ir (no codegen needed)
+        run: cargo check -p pcode-ir
