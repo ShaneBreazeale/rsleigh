@@ -8889,7 +8889,7 @@ fn resolve_through_vars(id: VarId, ssa: &SsaCfg) -> Expr {
 // ---- Helpers ----
 
 fn is_flag(offset: u64) -> bool {
-    matches!(offset, 512..=523 | 256..=264)  // x86 flags + ARM64 flags
+    matches!(offset, 512..=523 | 256..=264 | 96..=104)  // x86 + ARM64 + ARM32 flags
 }
 
 fn is_zext_artifact(vdef: &VarDef, ssa: &SsaCfg) -> bool {

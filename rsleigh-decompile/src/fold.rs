@@ -5,8 +5,9 @@ use crate::ir::*;
 /// x86: CF=512, F1=513, PF=514, ZF=518, SF=519, DF=521, OF=523
 /// ARM64: NG=256, ZR=257, CY=258, OV=259, tmpNG=263, tmpZR=264, tmpCY=261, tmpOV=262
 const FLAG_OFFSETS: &[u64] = &[
-    512, 513, 514, 518, 519, 521, 523,       // x86
-    256, 257, 258, 259, 261, 262, 263, 264,   // ARM64
+    512, 513, 514, 518, 519, 521, 523,       // x86: CF PF AF ZF SF DF OF
+    256, 257, 258, 259, 261, 262, 263, 264,   // ARM64: NG ZR CY OV shift_carry tmpCY tmpOV tmpNG
+    96, 97, 98, 99, 100, 101, 102, 103, 104,  // ARM32: NG ZR CY OV tmpNG tmpZR tmpCY tmpOV shift_carry
 ];
 
 const RSP_OFFSET: u64 = 32;   // x86-64 RSP
@@ -1649,14 +1650,14 @@ fn classify_jcc_condition(cond_id: VarId, ssa: &SsaCfg) -> Option<(BinOpKind, bo
         }
     }
 
-    // Helper: check ZF (x86=518) or ZR (ARM64=257)
-    let is_zf = |id: VarId| is_flag_ref(id, 518, ssa) || is_flag_ref(id, 257, ssa);
-    // Helper: check CF (x86=512) or CY (ARM64=258)
-    let is_cf = |id: VarId| is_flag_ref(id, 512, ssa) || is_flag_ref(id, 258, ssa);
-    // Helper: check OF (x86=523) or OV (ARM64=259)
-    let is_of = |id: VarId| is_flag_ref(id, 523, ssa) || is_flag_ref(id, 259, ssa);
-    // Helper: check SF (x86=519) or NG (ARM64=256)
-    let is_sf = |id: VarId| is_flag_ref(id, 519, ssa) || is_flag_ref(id, 256, ssa);
+    // Helper: check ZF (x86=518), ZR (ARM64=257), ZR (ARM32=97)
+    let is_zf = |id: VarId| is_flag_ref(id, 518, ssa) || is_flag_ref(id, 257, ssa) || is_flag_ref(id, 97, ssa);
+    // Helper: check CF (x86=512), CY (ARM64=258), CY (ARM32=98)
+    let is_cf = |id: VarId| is_flag_ref(id, 512, ssa) || is_flag_ref(id, 258, ssa) || is_flag_ref(id, 98, ssa);
+    // Helper: check OF (x86=523), OV (ARM64=259), OV (ARM32=99)
+    let is_of = |id: VarId| is_flag_ref(id, 523, ssa) || is_flag_ref(id, 259, ssa) || is_flag_ref(id, 99, ssa);
+    // Helper: check SF (x86=519), NG (ARM64=256), NG (ARM32=96)
+    let is_sf = |id: VarId| is_flag_ref(id, 519, ssa) || is_flag_ref(id, 256, ssa) || is_flag_ref(id, 96, ssa);
 
     match &vdef.expr {
         // ZF/ZR directly → JE/BEQ → a == b
