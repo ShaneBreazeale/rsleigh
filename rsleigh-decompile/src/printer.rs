@@ -1094,6 +1094,116 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         true
     });
 
+    // x86-64 RBP-relative stack access → local variable names.
+    // "RBP + 560" → "local_230" (offset from frame base)
+    // "RBP[0x1f0]" → "local_1f0"
+    // "RBP + 0" → suppress (frame pointer itself)
+    for line in &mut lines {
+        // RBP + decimal_offset
+        while let Some(pos) = line.find("RBP + ") {
+            let after = &line[pos + 6..];
+            let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+            if end > 0 {
+                if let Ok(offset) = after[..end].parse::<u64>() {
+                    if offset == 0 {
+                        // RBP + 0 → just RBP (or skip)
+                        let replacement = "RBP".to_string();
+                        *line = format!("{}{}{}", &line[..pos], replacement, &line[pos + 6 + end..]);
+                    } else {
+                        let replacement = format!("local_{:x}", offset);
+                        *line = format!("{}{}{}", &line[..pos], replacement, &line[pos + 6 + end..]);
+                    }
+                    continue;
+                }
+            }
+            break;
+        }
+        // RBP[0xHHH]
+        while let Some(pos) = line.find("RBP[0x") {
+            let after = &line[pos + 6..];
+            let end = after.find(']').unwrap_or(0);
+            if end > 0 {
+                let hex = &after[..end];
+                if let Ok(offset) = u64::from_str_radix(hex, 16) {
+                    let replacement = format!("local_{:x}", offset);
+                    *line = format!("{}{}{}", &line[..pos], replacement, &line[pos + 7 + end..]);
+                    continue;
+                }
+            }
+            break;
+        }
+        // RBP[N] (decimal index)
+        while let Some(pos) = line.find("RBP[") {
+            if line[pos + 4..].starts_with("0x") { break; } // already handled above
+            let after = &line[pos + 4..];
+            let end = after.find(']').unwrap_or(0);
+            if end > 0 {
+                if let Ok(idx) = after[..end].parse::<u64>() {
+                    let replacement = format!("local_{:x}", idx * 8); // RBP[N] = *(RBP + N*8)
+                    *line = format!("{}{}{}", &line[..pos], replacement, &line[pos + 5 + end..]);
+                    continue;
+                }
+            }
+            break;
+        }
+    }
+
+    // Simplify "param_NNN[RSP ...]" and "N + RSP" patterns.
+    // These are stack-relative accesses. Replace with local variable names.
+    for line in &mut lines {
+        // Pattern: "param_NNN[RSP...]" — replace whole thing with local_XX
+        // Handles: param_56[RSP], param_72[RSP - 8 - 8 - 0x69-8], etc.
+        while let Some(start) = line.find("param_") {
+            if let Some(bracket) = line[start..].find("[RSP") {
+                let abs_bracket = start + bracket;
+                // Find matching ] (handle nested brackets)
+                let mut depth = 1;
+                let mut pos = abs_bracket + 1;
+                let bytes = line.as_bytes();
+                while pos < bytes.len() && depth > 0 {
+                    if bytes[pos] == b'[' { depth += 1; }
+                    if bytes[pos] == b']' { depth -= 1; }
+                    pos += 1;
+                }
+                if depth == 0 {
+                    let abs_close = pos - 1;
+                    // Extract the param index as the local variable identifier
+                    let param_part = &line[start..abs_bracket];
+                    if let Some(idx_str) = param_part.strip_prefix("param_") {
+                        // Use the param index as the local offset
+                        let offset = if let Ok(n) = idx_str.parse::<u64>() { n } else {
+                            u64::from_str_radix(idx_str.trim_start_matches("0x").trim_start_matches('-'), 16).unwrap_or(0)
+                        };
+                        let replacement = if offset > 0 {
+                            format!("local_{:x}", offset)
+                        } else {
+                            format!("local_0")
+                        };
+                        *line = format!("{}{}{}", &line[..start], replacement, &line[abs_close + 1..]);
+                        continue;
+                    }
+                }
+            }
+            break;
+        }
+        // Pattern: "NNN + RSP" → "local_NNN" (decimal offset + RSP)
+        while let Some(pos) = line.find(" + RSP") {
+            // Walk backwards to find the start of the number
+            let before = &line[..pos];
+            let num_start = before.rfind(|c: char| !c.is_ascii_digit()).map(|p| p + 1).unwrap_or(0);
+            if num_start < pos {
+                if let Ok(offset) = line[num_start..pos].parse::<u64>() {
+                    if offset > 0 && offset < 0x10000 {
+                        let replacement = format!("local_{:x}", offset);
+                        *line = format!("{}{}{}", &line[..num_start], replacement, &line[pos + 6..]);
+                        continue;
+                    }
+                }
+            }
+            break;
+        }
+    }
+
     // Remove ARM64 prologue/epilogue boilerplate:
     // - sp[N] = x19/x20/.../x29/x30  (callee-saved register saves)
     // - x29 = sp + N  (frame pointer setup)
