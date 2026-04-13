@@ -4509,10 +4509,64 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
-    // #STRUCT_RECOVERY: Detect field access patterns and emit struct layout comments.
+    // #STRUCT_RECOVERY: Detect field access patterns, match known structs, emit definitions.
     {
-        let mut param_fields: std::collections::HashMap<String, std::collections::BTreeSet<u64>> =
-            std::collections::HashMap::new();
+        // Known Win32/POSIX struct layouts: (struct_name, [(offset, field_name, field_type)])
+        let known_structs: &[(&str, &[(u64, &str, &str)])] = &[
+            ("STARTUPINFOW", &[
+                (0x00, "cb", "DWORD"), (0x08, "lpReserved", "LPWSTR"), (0x10, "lpDesktop", "LPWSTR"),
+                (0x18, "lpTitle", "LPWSTR"), (0x20, "dwX", "DWORD"), (0x24, "dwY", "DWORD"),
+                (0x28, "dwXSize", "DWORD"), (0x2c, "dwYSize", "DWORD"),
+                (0x30, "dwXCountChars", "DWORD"), (0x34, "dwYCountChars", "DWORD"),
+                (0x38, "dwFillAttribute", "DWORD"), (0x3c, "dwFlags", "DWORD"),
+                (0x40, "wShowWindow", "WORD"), (0x48, "hStdInput", "HANDLE"),
+                (0x50, "hStdOutput", "HANDLE"), (0x58, "hStdError", "HANDLE"),
+            ]),
+            ("PROCESS_INFORMATION", &[
+                (0x00, "hProcess", "HANDLE"), (0x08, "hThread", "HANDLE"),
+                (0x10, "dwProcessId", "DWORD"), (0x14, "dwThreadId", "DWORD"),
+            ]),
+            ("SECURITY_ATTRIBUTES", &[
+                (0x00, "nLength", "DWORD"), (0x08, "lpSecurityDescriptor", "LPVOID"),
+                (0x10, "bInheritHandle", "BOOL"),
+            ]),
+            ("WNDCLASSEXW", &[
+                (0x00, "cbSize", "UINT"), (0x04, "style", "UINT"), (0x08, "lpfnWndProc", "WNDPROC"),
+                (0x10, "cbClsExtra", "int"), (0x14, "cbWndExtra", "int"), (0x18, "hInstance", "HINSTANCE"),
+                (0x20, "hIcon", "HICON"), (0x28, "hCursor", "HCURSOR"), (0x30, "hbrBackground", "HBRUSH"),
+                (0x38, "lpszMenuName", "LPCWSTR"), (0x40, "lpszClassName", "LPCWSTR"),
+                (0x48, "hIconSm", "HICON"),
+            ]),
+            ("OSVERSIONINFOW", &[
+                (0x00, "dwOSVersionInfoSize", "DWORD"), (0x04, "dwMajorVersion", "DWORD"),
+                (0x08, "dwMinorVersion", "DWORD"), (0x0c, "dwBuildNumber", "DWORD"),
+                (0x10, "dwPlatformId", "DWORD"), (0x14, "szCSDVersion", "WCHAR[128]"),
+            ]),
+            ("EXCEPTION_RECORD", &[
+                (0x00, "ExceptionCode", "DWORD"), (0x04, "ExceptionFlags", "DWORD"),
+                (0x08, "ExceptionRecord", "void *"), (0x10, "ExceptionAddress", "void *"),
+                (0x18, "NumberParameters", "DWORD"),
+            ]),
+            ("CONTEXT", &[  // x86-64
+                (0x30, "MxCsr", "DWORD"), (0x38, "SegCs", "WORD"), (0x3a, "SegDs", "WORD"),
+                (0x44, "EFlags", "DWORD"), (0x48, "Rax", "uint64_t"), (0x50, "Rcx", "uint64_t"),
+                (0x58, "Rdx", "uint64_t"), (0x60, "Rbx", "uint64_t"), (0x68, "Rsp", "uint64_t"),
+                (0x70, "Rbp", "uint64_t"), (0x78, "Rsi", "uint64_t"), (0x80, "Rdi", "uint64_t"),
+                (0x88, "R8", "uint64_t"), (0x90, "R9", "uint64_t"), (0x98, "Rip", "uint64_t"),
+            ]),
+            ("WIN32_FIND_DATAW", &[
+                (0x00, "dwFileAttributes", "DWORD"), (0x04, "ftCreationTime", "FILETIME"),
+                (0x0c, "ftLastAccessTime", "FILETIME"), (0x14, "ftLastWriteTime", "FILETIME"),
+                (0x1c, "nFileSizeHigh", "DWORD"), (0x20, "nFileSizeLow", "DWORD"),
+                (0x28, "cFileName", "WCHAR[260]"),
+            ]),
+            ("OVERLAPPED", &[
+                (0x00, "Internal", "ULONG_PTR"), (0x08, "InternalHigh", "ULONG_PTR"),
+                (0x10, "Offset", "DWORD"), (0x14, "OffsetHigh", "DWORD"), (0x18, "hEvent", "HANDLE"),
+            ]),
+        ];
+
+        let mut param_fields: HashMap<String, std::collections::BTreeSet<u64>> = HashMap::new();
         for line in &lines {
             let text = line.trim();
             let mut pos = 0;
@@ -4531,7 +4585,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     while hex_end < text.len() && text.as_bytes()[hex_end].is_ascii_hexdigit() { hex_end += 1; }
                     if hex_end > hex_start {
                         if let Ok(offset) = u64::from_str_radix(&text[hex_start..hex_end], 16) {
-                            if base.starts_with("param_") || base.starts_with("lVar") {
+                            if base.starts_with("param_") || base.starts_with("lVar")
+                                || base.starts_with("iVar") || base.starts_with("local_") {
                                 param_fields.entry(base.to_string()).or_default().insert(offset);
                             }
                         }
@@ -4540,24 +4595,142 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 } else { break; }
             }
         }
+
+        // API-based struct identification: when a variable is passed to a known API,
+        // we know its struct type regardless of field count.
+        let api_struct_hints: &[(&str, usize, &str)] = &[
+            // (api_name, param_index, struct_type)
+            ("GetStartupInfoW", 0, "STARTUPINFOW"),
+            ("GetStartupInfoA", 0, "STARTUPINFOW"),
+            ("CreateProcessW", 9, "STARTUPINFOW"),
+            ("CreateProcessA", 9, "STARTUPINFOW"),
+            ("RegisterClassExW", 0, "WNDCLASSEXW"),
+            ("RegisterClassExA", 0, "WNDCLASSEXW"),
+            ("GetVersionExW", 0, "OSVERSIONINFOW"),
+            ("FindFirstFileW", 1, "WIN32_FIND_DATAW"),
+            ("FindNextFileW", 1, "WIN32_FIND_DATAW"),
+        ];
+        let mut api_type_hints: HashMap<String, &str> = HashMap::new();
+        for line in &lines {
+            let t = line.trim();
+            for (api, param_idx, struct_type) in api_struct_hints {
+                if t.contains(api) {
+                    // Extract the Nth argument from the call
+                    if let Some(paren) = t.find(&format!("{}(", api)) {
+                        let args_start = paren + api.len() + 1;
+                        let args = &t[args_start..];
+                        // Simple arg extraction: split by ", " and take the Nth
+                        let arg_parts: Vec<&str> = args.split(", ").collect();
+                        if let Some(arg) = arg_parts.get(*param_idx) {
+                            let clean = arg.trim().trim_end_matches(')').trim_end_matches(';');
+                            let clean = clean.strip_prefix("(void *)").unwrap_or(clean).trim();
+                            if clean.starts_with("param_") || clean.starts_with("local_")
+                                || clean.starts_with("lVar") {
+                                api_type_hints.insert(clean.to_string(), struct_type);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Try to match collected field sets against known struct layouts
+        let mut struct_matches: HashMap<String, &str> = HashMap::new(); // base_var → struct_name
+        let mut field_names: HashMap<(String, u64), (&str, &str)> = HashMap::new(); // (base, offset) → (name, type)
+
+        // First apply API-based hints (high confidence)
+        for (var_name, struct_type) in &api_type_hints {
+            struct_matches.insert(var_name.clone(), struct_type);
+            for (sname, sfields) in known_structs {
+                if sname == struct_type {
+                    for (offset, fname, ftype) in *sfields {
+                        field_names.insert((var_name.clone(), *offset), (fname, ftype));
+                    }
+                }
+            }
+        }
+
+        for (base, fields) in &param_fields {
+            if fields.len() < 3 { continue; }
+            if struct_matches.contains_key(base) { continue; } // already identified by API
+
+            // Try each known struct — score by how many of our fields match
+            let mut best_match: Option<(&str, usize)> = None;
+            for (struct_name, struct_fields) in known_structs {
+                let struct_offsets: std::collections::BTreeSet<u64> = struct_fields.iter().map(|(o, _, _)| *o).collect();
+                let matching = fields.intersection(&struct_offsets).count();
+                // Require at least 3 matching fields and >50% of observed fields match
+                if matching >= 3 && matching * 2 >= fields.len() {
+                    if best_match.map_or(true, |(_, best)| matching > best) {
+                        best_match = Some((struct_name, matching));
+                    }
+                }
+            }
+
+            if let Some((struct_name, _)) = best_match {
+                struct_matches.insert(base.clone(), struct_name);
+                // Populate field name map
+                for (sname, sfields) in known_structs {
+                    if *sname == struct_name {
+                        for (offset, fname, ftype) in *sfields {
+                            field_names.insert((base.clone(), *offset), (fname, ftype));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Emit struct definition comments and rename fields in output
         let mut struct_comments: Vec<String> = Vec::new();
         for (base, fields) in &param_fields {
-            if fields.len() < 4 { continue; }
+            if fields.len() < 3 { continue; }
             let fv: Vec<u64> = fields.iter().copied().collect();
-            let mut def = format!("// struct layout for {} ({}+ fields): ", base, fv.len());
-            for (i, &offset) in fv.iter().enumerate() {
-                let sz = if i + 1 < fv.len() { (fv[i+1] - offset).min(8) } else { 8 };
-                let ty = match sz { 1 => "byte", 2 => "short", 4 => "int", _ => "long" };
-                if i > 0 { def.push_str(", "); }
-                def.push_str(&format!("+0x{:x} {}", offset, ty));
-                if i >= 12 { def.push_str(", ..."); break; }
+
+            if let Some(struct_name) = struct_matches.get(base) {
+                // Known struct match
+                struct_comments.push(format!("// {} is {} *", base, struct_name));
+            } else if fv.len() >= 4 {
+                // Unknown struct — emit layout comment
+                let mut def = format!("// struct layout for {} ({}+ fields): ", base, fv.len());
+                for (i, &offset) in fv.iter().enumerate() {
+                    let sz = if i + 1 < fv.len() { (fv[i+1] - offset).min(8) } else { 8 };
+                    let ty = match sz { 1 => "byte", 2 => "short", 4 => "int", _ => "long" };
+                    if i > 0 { def.push_str(", "); }
+                    def.push_str(&format!("+0x{:x} {}", offset, ty));
+                    if i >= 12 { def.push_str(", ..."); break; }
+                }
+                struct_comments.push(def);
             }
-            struct_comments.push(def);
         }
         if !struct_comments.is_empty() {
+            // Sort so known structs come first
+            struct_comments.sort_by(|a, b| {
+                let a_known = a.contains(" is ");
+                let b_known = b.contains(" is ");
+                b_known.cmp(&a_known).then(a.cmp(b))
+            });
             if let Some(idx) = lines.iter().position(|l| l.trim_end().ends_with('{')) {
                 for (j, comment) in struct_comments.into_iter().enumerate() {
                     lines.insert(idx + 1 + j, format!("    {}", comment));
+                }
+            }
+        }
+
+        // Rename fields for known structs: ->field_XX → ->fieldName
+        if !field_names.is_empty() {
+            for line in &mut lines {
+                for ((base, offset), (fname, _ftype)) in &field_names {
+                    let old = format!("{}->field_{:x}", base, offset);
+                    if line.contains(&old) {
+                        let new = format!("{}->{}", base, fname);
+                        *line = line.replace(&old, &new);
+                    }
+                    // Also match *base->field_X (dereferenced)
+                    let old_deref = format!("*{}->field_{:x}", base, offset);
+                    if line.contains(&old_deref) {
+                        let new_deref = format!("*{}->{}", base, fname);
+                        *line = line.replace(&old_deref, &new_deref);
+                    }
                 }
             }
         }
