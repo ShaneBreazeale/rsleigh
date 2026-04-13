@@ -1020,16 +1020,163 @@ fn discover_elf_functions(
         let text_fo = text.sh_offset as usize;
         let text_end = text_addr + text_size;
 
-        // 5. Exhaustive E8 CALL rel32 scanning in .text
+        // 5. Exhaustive E8 CALL rel32 scanning in .text.
+        // Collect all unique targets first, then validate to reduce false positives
+        // from data bytes that happen to look like E8 XX XX XX XX.
+        let mut e8_targets = std::collections::BTreeSet::new();
         if text_fo + text_size as usize <= data.len() {
             let text_bytes = &data[text_fo..text_fo + text_size as usize];
             for i in 0..text_bytes.len().saturating_sub(5) {
                 if text_bytes[i] == 0xE8 {
-                    // CALL rel32
                     let rel = i32::from_le_bytes(text_bytes[i+1..i+5].try_into().unwrap_or([0; 4]));
                     let target = (text_addr as i64 + i as i64 + 5 + rel as i64) as u64;
                     if target >= text_addr && target < text_end && target != text_addr + i as u64 + 5 {
-                        found.insert(target);
+                        e8_targets.insert(target);
+                    }
+                }
+                // E9 JMP rel32 — only count as function if target is already known
+                // (tail call to a known function). Don't blindly add all JMP targets
+                // as that creates massive false positives from intra-function branches.
+                // We'll do a second pass below after E8 targets are collected.
+            }
+            // Validate E8 targets: accept if called by 2+ different call sites (high confidence),
+            // or if it's the only target at that address (likely real).
+            // Count how many times each target is called.
+            let mut target_counts: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+            for i in 0..text_bytes.len().saturating_sub(5) {
+                if text_bytes[i] == 0xE8 {
+                    let rel = i32::from_le_bytes(text_bytes[i+1..i+5].try_into().unwrap_or([0; 4]));
+                    let target = (text_addr as i64 + i as i64 + 5 + rel as i64) as u64;
+                    if e8_targets.contains(&target) {
+                        *target_counts.entry(target).or_insert(0) += 1;
+                    }
+                }
+            }
+            // Accept E8 targets: 2+ call sites = definite function.
+            // 1 call site = require strong prologue (2-byte pattern check).
+            for &target in &e8_targets {
+                let count = target_counts.get(&target).copied().unwrap_or(0);
+                if count >= 2 {
+                    found.insert(target);
+                } else {
+                    let idx = (target - text_addr) as usize;
+                    if idx + 3 < text_bytes.len() {
+                        let b0 = text_bytes[idx];
+                        let b1 = text_bytes[idx + 1];
+                        let b2 = text_bytes[idx + 2];
+                        let b3 = text_bytes[idx + 3];
+                        // Require strong 2+ byte prologue match
+                        let strong = matches!((b0, b1, b2, b3),
+                            (0x55, 0x48, 0x89, 0xe5) | // push rbp; mov rbp, rsp
+                            (0x55, 0x48, 0x8b, 0xec) | // push rbp; mov rbp, rsp (alt)
+                            (0x55, 0x53, _, _) | (0x53, 0x48, _, _) | // push rbx/rbp chains
+                            (0x53, 0x55, _, _) |
+                            (0x41, 0x54, _, _) | (0x41, 0x55, _, _) | // push r12/r13
+                            (0x41, 0x56, _, _) | (0x41, 0x57, _, _) | // push r14/r15
+                            (0x48, 0x83, 0xEC, _) | // sub rsp, imm8
+                            (0x48, 0x81, 0xEC, _) | // sub rsp, imm32
+                            (0xF3, 0x0F, 0x1E, 0xFA) | // endbr64
+                            (0x55, 0x41, _, _) | // push rbp; push rXX
+                            (0xE9, _, _, _)     // JMP thunk
+                        );
+                        if strong { found.insert(target); }
+                    }
+                }
+            }
+        }
+
+        // 5b. Parse .eh_frame_hdr for function addresses.
+        // The .eh_frame_hdr contains a sorted table of (PC, FDE) pairs — every function
+        // with exception handling or unwind info has an entry here. This is authoritative.
+        for sh in &elf.section_headers {
+            let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
+            if name != ".eh_frame_hdr" { continue; }
+            let fo = sh.sh_offset as usize;
+            let hdr_addr = sh.sh_addr;
+            if fo + 12 > data.len() { break; }
+            let version = data[fo];
+            if version != 1 { break; }
+            let fde_count_enc = data[fo + 2];
+            let table_enc = data[fo + 3];
+            // Read FDE count (offset 8, encoding determines size)
+            let fde_count = match fde_count_enc {
+                0x03 => i32::from_le_bytes(data[fo+8..fo+12].try_into().unwrap_or([0;4])) as usize,
+                _ => u32::from_le_bytes(data[fo+8..fo+12].try_into().unwrap_or([0;4])) as usize,
+            };
+            if fde_count == 0 || fde_count > 100_000 { break; }
+            let table_start = fo + 12;
+            // Table encoding 0x3b = DW_EH_PE_datarel | DW_EH_PE_sdata4 (most common)
+            if table_enc == 0x3b {
+                for i in 0..fde_count {
+                    let entry_off = table_start + i * 8;
+                    if entry_off + 4 > data.len() { break; }
+                    let pc_rel = i32::from_le_bytes(data[entry_off..entry_off+4].try_into().unwrap_or([0;4]));
+                    let pc = (hdr_addr as i64 + pc_rel as i64) as u64;
+                    if pc > 0 && pc < text_end + 0x10000 {
+                        found.insert(pc);
+                    }
+                }
+            }
+        }
+
+        // 5c. Full data section pointer scan — find ALL 8-byte values pointing into executable code
+        // Covers vtables, function pointer arrays, switch jump tables, C++ RTTI
+        {
+            let all_exec_start = elf.section_headers.iter()
+                .filter(|sh| sh.sh_flags & 0x4 != 0 && sh.sh_addr > 0)
+                .map(|sh| sh.sh_addr)
+                .min().unwrap_or(text_addr);
+            let all_exec_end = elf.section_headers.iter()
+                .filter(|sh| sh.sh_flags & 0x4 != 0 && sh.sh_addr > 0)
+                .map(|sh| sh.sh_addr + sh.sh_size)
+                .max().unwrap_or(text_end);
+
+            for sh in &elf.section_headers {
+                let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
+                // Only scan read-only data sections — .rodata has vtables and const fn ptrs,
+                // .data.rel.ro has relocated function pointers (C++ vtables after relocation).
+                // Skip .got, .dynamic, .data — these have too many internal code pointers.
+                if !matches!(name, ".rodata" | ".data.rel.ro") { continue; }
+                let fo = sh.sh_offset as usize;
+                let sz = sh.sh_size as usize;
+                if fo + sz > data.len() || sz < 8 { continue; }
+                for i in (0..sz.saturating_sub(7)).step_by(8) {
+                    let ptr = u64::from_le_bytes(data[fo + i..fo + i + 8].try_into().unwrap_or([0; 8]));
+                    if ptr >= text_addr && ptr < text_end {
+                        // Validate: target should look like a function start (not mid-instruction)
+                        let target_idx = (ptr - text_addr) as usize;
+                        if text_fo + target_idx + 1 < data.len() {
+                            let tb = data[text_fo + target_idx];
+                            let valid = matches!(tb,
+                                0x48 | 0x49 | 0x4C | 0x4D | // REX.W
+                                0x53 | 0x55 | 0x56 | 0x57 | // push
+                                0x41 | 0xF3 | 0x50 | 0x51 | 0x52 |
+                                0xE9 | // JMP (thunk)
+                                0x31 | 0x33 | 0x45 // xor reg,reg (common entry)
+                            );
+                            if valid {
+                                found.insert(ptr);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 5d. E9 JMP rel32 pass — add tail call thunks at function boundaries.
+        // Only add when JMP is preceded by strict terminators (RET/INT3/NOP padding).
+        // Do NOT include 0xFF — it's the last byte of many multi-byte instructions.
+        if text_fo + text_size as usize <= data.len() {
+            let text_bytes = &data[text_fo..text_fo + text_size as usize];
+            for i in 0..text_bytes.len().saturating_sub(5) {
+                if text_bytes[i] == 0xE9 {
+                    let rel = i32::from_le_bytes(text_bytes[i+1..i+5].try_into().unwrap_or([0; 4]));
+                    let target = (text_addr as i64 + i as i64 + 5 + rel as i64) as u64;
+                    if target < text_addr || target >= text_end { continue; }
+                    let at_boundary = i == 0 || matches!(text_bytes[i-1],
+                        0xC3 | 0x90 | 0xCC | 0x00);
+                    if at_boundary {
+                        found.insert(text_addr + i as u64);
                     }
                 }
             }
@@ -1039,8 +1186,7 @@ fn discover_elf_functions(
         if text_fo + text_size as usize <= data.len() {
             let text_bytes = &data[text_fo..text_fo + text_size as usize];
             let is_boundary = |i: usize| -> bool {
-                i == 0 || matches!(text_bytes[i-1], 0xC3 | 0x90 | 0xCC | 0x00 | 0xC2 | 0xCB | 0xCA
-                    | 0xFF /* JMP indirect/tail call */)
+                i == 0 || matches!(text_bytes[i-1], 0xC3 | 0x90 | 0xCC | 0x00 | 0xC2 | 0xCB | 0xCA)
             };
             // Also accept NOP padding sequences (66 66 2e 0f 1f etc.)
             let is_boundary_or_nop = |i: usize| -> bool {
@@ -1096,11 +1242,13 @@ fn discover_elf_functions(
                     found.insert(addr);
                 }
 
-                // endbr64 (f3 0f 1e fa) — CET-enabled function entry
-                // Accept unconditionally: endbr64 is ONLY placed at function entries
-                // and indirect branch targets by the compiler (Intel CET).
+                // endbr64 (f3 0f 1e fa) — CET indirect branch target
+                // Only count as function if preceded by a function terminator or NOP padding.
+                // Switch case targets also have endbr64 but are NOT function entries.
                 if b0 == 0xF3 && b1 == 0x0F && b2 == 0x1E && b3 == 0xFA {
-                    found.insert(addr);
+                    if is_boundary_or_nop(i) {
+                        found.insert(addr);
+                    }
                 }
             }
         }
@@ -1123,25 +1271,69 @@ fn discover_elf_functions(
             }
         }
 
-        // 7. Reference analysis: scan .rodata/.data.rel.ro for function pointers
-        // These are vtables, function pointer arrays, and switch jump tables
-        for sh in &elf.section_headers {
-            let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
-            if !matches!(name, ".rodata" | ".data.rel.ro" | ".data" | ".init_array" | ".fini_array") { continue; }
-            let fo = sh.sh_offset as usize;
-            let sz = sh.sh_size as usize;
-            if fo + sz > data.len() || sz < 8 { continue; }
-            // Scan for 8-byte values that point into .text
-            for i in (0..sz.saturating_sub(7)).step_by(8) {
-                let ptr = u64::from_le_bytes(data[fo + i..fo + i + 8].try_into().unwrap_or([0; 8]));
-                if ptr >= text_addr && ptr < text_end {
-                    found.insert(ptr);
+        // 7. Gap analysis: scan gaps between known functions for valid prologues.
+        if text_fo + text_size as usize <= data.len() {
+            let text_bytes = &data[text_fo..text_fo + text_size as usize];
+            let mut sorted_addrs: Vec<u64> = found.iter()
+                .filter(|a| **a >= text_addr && **a < text_end)
+                .copied().collect();
+            sorted_addrs.sort();
+
+            for window in sorted_addrs.windows(2) {
+                let gap_start = window[0];
+                let gap_end = window[1];
+                let gap_size = gap_end - gap_start;
+                // Only analyze gaps > 16 bytes (room for a real function)
+                if gap_size < 32 || gap_size > 2048 { continue; }
+                // Scan inside the gap for function prologues after terminators
+                let start_idx = (gap_start - text_addr) as usize;
+                let end_idx = (gap_end - text_addr) as usize;
+                if end_idx > text_bytes.len() { continue; }
+                let mut i = start_idx;
+                while i + 4 < end_idx {
+                    let b = text_bytes[i];
+                    // Look for RET (C3) or unconditional JMP (E9/EB/FF) followed by valid code
+                    if matches!(b, 0xC3 | 0xCC) {
+                        // Skip NOP/INT3/alignment padding (require 2+ padding bytes)
+                        let mut j = i + 1;
+                        while j < end_idx && matches!(text_bytes[j], 0x90 | 0xCC | 0x00) { j += 1; }
+                        // Also skip multi-byte NOPs: 66 90, 0f 1f XX, 66 2e 0f 1f
+                        while j + 1 < end_idx && text_bytes[j] == 0x66 && text_bytes[j+1] == 0x90 { j += 2; }
+                        while j + 2 < end_idx && text_bytes[j] == 0x0F && text_bytes[j+1] == 0x1F { j += 3; }
+                        if j < end_idx && j >= i + 2 { // require 2+ padding bytes
+                            let candidate = text_addr + j as u64;
+                            if !found.contains(&candidate) {
+                                // Verify: must start with a strong prologue pattern
+                                let fb = text_bytes[j];
+                                let fb1 = if j + 1 < end_idx { text_bytes[j+1] } else { 0 };
+                                let valid_start = matches!((fb, fb1),
+                                    (0x55, 0x48) | (0x55, 0x53) | (0x55, 0x41) | // push rbp; ...
+                                    (0x53, 0x48) | (0x53, 0x55) |                 // push rbx; ...
+                                    (0x41, 0x54) | (0x41, 0x55) | (0x41, 0x56) | (0x41, 0x57) | // push r12-r15
+                                    (0x48, 0x83) | (0x48, 0x81) |                 // sub rsp
+                                    (0xF3, 0x0F)                                   // endbr64
+                                );
+                                if valid_start {
+                                    found.insert(candidate);
+                                }
+                            }
+                            i = j;
+                            continue;
+                        }
+                    }
+                    i += 1;
                 }
             }
         }
 
-        // 7. Recursive CALL descent from all found entry points
-        let mut queue: std::collections::VecDeque<u64> = found.iter().copied().collect();
+        // 8. Recursive CALL descent from non-.text entry points only (PLT, init, fini).
+        // The exhaustive E8 scan already covers .text; descent adds value for PLT stubs
+        // and init/fini functions that may call into .text.
+        let mut queue: std::collections::VecDeque<u64> = found.iter()
+            .filter(|a| **a < text_addr || **a >= text_end)
+            .copied().collect();
+        // Also add entry point
+        queue.push_back(elf.header.e_entry);
         let mut visited = std::collections::HashSet::new();
         let mut dec = rsleigh_api::Decoder::new(arch);
 
