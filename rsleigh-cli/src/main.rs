@@ -584,8 +584,7 @@ fn discover_pe_functions(
                         // JMP [rip+disp32]: FF 25 xx xx xx xx (import thunks)
                         (off + 6 <= sz && bytes[off] == 0xFF && bytes[off+1] == 0x25)
                         // JMP rel32: E9 xx xx xx xx (C++ virtual thunks, tail calls)
-                        // Only at function boundaries — must be preceded by RET/INT3/NOP
-                        // AND followed by another thunk or function start
+                        // At function boundaries — preceded by RET/INT3/NOP.
                         || (off + 5 <= sz && bytes[off] == 0xE9
                             && off > 0 && matches!(bytes[off - 1], 0xC3 | 0xCC | 0x90));
 
@@ -621,48 +620,61 @@ fn discover_pe_functions(
                     let fo = sec.pointer_to_raw_data as usize;
                     let sz = sec.virtual_size.min(sec.size_of_raw_data) as usize;
                     if fo + sz > data.len() { continue; }
-                    let ptr_size = if pe.is_64 { 8 } else { 4 };
+                    let ptr_size: usize = 8; // PE64 only
 
+                    // Phase 4a: Vtable detection — consecutive function pointer arrays.
+                    // A vtable is 3+ consecutive 8-byte pointers into .text.
+                    // All pointers in a vtable are accepted without prologue check
+                    // (vtable entries include tiny thunks like "mov al, 1; ret").
+                    {
+                        let mut consecutive = 0usize;
+                        let mut vtable_ptrs: Vec<u64> = Vec::new();
+                        let mut off = 0usize;
+                        while off + ptr_size <= sz {
+                            let ptr = u64::from_le_bytes(
+                                data[fo+off..fo+off+8].try_into().unwrap_or([0;8]));
+                            if ptr >= text_start && ptr < text_end {
+                                vtable_ptrs.push(ptr);
+                                consecutive += 1;
+                            } else {
+                                if consecutive >= 3 {
+                                    for &vptr in &vtable_ptrs[vtable_ptrs.len()-consecutive..] {
+                                        found.insert(vptr);
+                                    }
+                                }
+                                consecutive = 0;
+                            }
+                            off += ptr_size;
+                        }
+                        if consecutive >= 3 {
+                            for &vptr in &vtable_ptrs[vtable_ptrs.len()-consecutive..] {
+                                found.insert(vptr);
+                            }
+                        }
+                    }
+
+                    // Phase 4b: Single function pointers with strict prologue verification.
                     let mut off = 0usize;
                     while off + ptr_size <= sz {
-                        let ptr = if pe.is_64 {
-                            u64::from_le_bytes(data[fo+off..fo+off+8].try_into().unwrap_or([0;8]))
-                        } else {
-                            u32::from_le_bytes(data[fo+off..fo+off+4].try_into().unwrap_or([0;4])) as u64
-                        };
+                        let ptr = u64::from_le_bytes(
+                            data[fo+off..fo+off+8].try_into().unwrap_or([0;8]));
 
-                        // Check if pointer targets executable code
                         if ptr >= text_start && ptr < text_end && !found.contains(&ptr) {
-                            // Verify: target should look like the start of a function
-                            // (not the middle of an instruction)
                             let target_fo = segs.iter().find_map(|(va, sz, sfo)| {
                                 if ptr >= *va && ptr < va + sz { Some(sfo + (ptr - va)) } else { None }
                             });
                             if let Some(target_fo) = target_fo {
                                 let tfo = target_fo as usize;
-                                if tfo + 2 <= data.len() {
-                                    let b0 = data[tfo];
-                                    // Accept if it starts with a reasonable instruction
-                                    // Strict: only accept targets that start with known
-                                    // function prologues (not arbitrary instructions)
-                                    let b1 = if tfo + 1 < data.len() { data[tfo + 1] } else { 0 };
-                                    let b2 = if tfo + 2 < data.len() { data[tfo + 2] } else { 0 };
+                                if tfo + 3 <= data.len() {
+                                    let (b0, b1, b2) = (data[tfo], data[tfo+1], data[tfo+2]);
                                     let looks_like_func =
-                                        // sub rsp, imm8 (48 83 EC)
-                                        (b0 == 0x48 && b1 == 0x83 && b2 == 0xEC)
-                                        // sub rsp, imm32 (48 81 EC)
-                                        || (b0 == 0x48 && b1 == 0x81 && b2 == 0xEC)
-                                        // push rbp (55) followed by REX
-                                        || (b0 == 0x55 && (b1 == 0x48 || b1 == 0x57 || b1 == 0x56))
-                                        // push rbx/rsi/rdi at boundary
-                                        || (b0 == 0x53 || b0 == 0x56 || b0 == 0x57)
-                                            && (tfo == 0 || matches!(data[tfo-1], 0xC3 | 0xCC | 0x90))
-                                        // mov [rsp+N], reg (48 89 5C/7C 24)
-                                        || (b0 == 0x48 && b1 == 0x89 && (b2 == 0x5C || b2 == 0x7C))
-                                        // JMP thunks
-                                        || (b0 == 0xFF && b1 == 0x25) || b0 == 0xE9
-                                        // push rbp; mov ebp, esp (32-bit)
-                                        || (b0 == 0x55 && b1 == 0x8B && b2 == 0xEC);
+                                        (b0 == 0x48 && b1 == 0x83 && b2 == 0xEC)     // sub rsp, imm8
+                                        || (b0 == 0x48 && b1 == 0x81 && b2 == 0xEC)   // sub rsp, imm32
+                                        || (b0 == 0x55 && b1 == 0x48)                 // push rbp; REX
+                                        || (b0 == 0x48 && b1 == 0x89 && (b2 == 0x5C || b2 == 0x7C)) // mov [rsp+N]
+                                        || (b0 == 0xFF && b1 == 0x25)                 // JMP [rip+disp]
+                                        || b0 == 0xE9                                 // JMP rel32
+                                        || (b0 == 0x55 && b1 == 0x8B && b2 == 0xEC);  // push ebp; mov
                                     if looks_like_func {
                                         found.insert(ptr);
                                     }
