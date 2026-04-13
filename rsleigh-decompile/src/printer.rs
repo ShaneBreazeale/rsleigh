@@ -4188,6 +4188,21 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #XMM_CLEANUP: Clean up remaining XMM register noise.
+    // 1. "XMM0 = STRING >> 96" → suppress (SSE string init boilerplate)
+    // 2. "XMM0 = 0;" → suppress (SSE zero-init)
+    // 3. "XMM0 = DAT_xxx >> 96" → suppress
+    lines.retain(|line| {
+        let t = line.trim();
+        // XMM zero-init
+        if t.starts_with("XMM") && t.ends_with("= 0;") { return false; }
+        // XMM = value >> 96 (SSE partial load — boilerplate)
+        if t.starts_with("XMM") && t.contains(">> 96") && t.ends_with(';') { return false; }
+        // XMM = value >> 64 (similar SSE partial)
+        if t.starts_with("XMM") && t.contains(">> 64") && t.ends_with(';') { return false; }
+        true
+    });
+
     // #RETURN_NEG1: Display 0xffffffffffffffff and 0xffffffff as -1 in return statements.
     for line in &mut lines {
         let t = line.trim();
