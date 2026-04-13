@@ -4035,35 +4035,153 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
-    // #CRYPTO_CONSTANTS: Detect cryptographic constants and annotate references.
+    // #CRYPTO_CONSTANTS: Detect cryptographic constants in binary data sections
+    // and annotate any DAT_ references to those addresses.
+    // Also detect inline constants in the decompiled output.
+    if let Some(binary) = ctx.binary {
+        // Known crypto signatures: (name, byte_pattern, min_length)
+        // Each pattern is the first N bytes of the known constant table.
+        let crypto_sigs: &[(&str, &[u8])] = &[
+            // AES S-box (256 bytes): 63 7c 77 7b f2 6b 6f c5 30 01 67 2b fe d7 ab 76
+            ("AES S-box", &[0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76]),
+            // AES inverse S-box: 52 09 6a d5 30 36 a5 38 bf 40 a3 9e 81 f3 d7 fb
+            ("AES inverse S-box", &[0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38, 0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3, 0xd7, 0xfb]),
+            // AES Rcon: 01 02 04 08 10 20 40 80 1b 36
+            ("AES Rcon", &[0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00]),
+            // SHA-256 round constants (K): 428a2f98 71374491 b5c0fbcf e9b5dba5
+            ("SHA-256 K table", &[0x98, 0x2f, 0x8a, 0x42, 0x91, 0x44, 0x37, 0x71, 0xcf, 0xfb, 0xc0, 0xb5, 0xa5, 0xdb, 0xb5, 0xe9]),
+            // SHA-256 K big-endian variant
+            ("SHA-256 K table", &[0x42, 0x8a, 0x2f, 0x98, 0x71, 0x37, 0x44, 0x91, 0xb5, 0xc0, 0xfb, 0xcf, 0xe9, 0xb5, 0xdb, 0xa5]),
+            // SHA-256 init hash (H0): 6a09e667 bb67ae85 3c6ef372 a54ff53a
+            ("SHA-256 init vector", &[0x67, 0xe6, 0x09, 0x6a, 0x85, 0xae, 0x67, 0xbb, 0x72, 0xf3, 0x6e, 0x3c, 0x3a, 0xf5, 0x4f, 0xa5]),
+            // SHA-256 init big-endian
+            ("SHA-256 init vector", &[0x6a, 0x09, 0xe6, 0x67, 0xbb, 0x67, 0xae, 0x85, 0x3c, 0x6e, 0xf3, 0x72, 0xa5, 0x4f, 0xf5, 0x3a]),
+            // SHA-1 init: 67452301 efcdab89 98badcfe 10325476 c3d2e1f0
+            ("SHA-1 init vector", &[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10]),
+            // SHA-1 K constants: 5a827999 6ed9eba1 8f1bbcdc ca62c1d6
+            ("SHA-1 K constant", &[0x99, 0x79, 0x82, 0x5a]),
+            // MD5 init: 67452301 efcdab89 98badcfe 10325476
+            ("MD5 init vector", &[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10]),
+            // MD5 T table: d76aa478 e8c7b756 242070db c1bdceee
+            ("MD5 T table", &[0x78, 0xa4, 0x6a, 0xd7, 0x56, 0xb7, 0xc7, 0xe8, 0xdb, 0x70, 0x20, 0x24, 0xee, 0xce, 0xbd, 0xc1]),
+            // MD5 T big-endian
+            ("MD5 T table", &[0xd7, 0x6a, 0xa4, 0x78, 0xe8, 0xc7, 0xb7, 0x56, 0x24, 0x20, 0x70, 0xdb, 0xc1, 0xbd, 0xce, 0xee]),
+            // CRC32 table (IEEE polynomial 0xEDB88320): 00000000 77073096 ee0e612c 990951ba
+            ("CRC32 table", &[0x00, 0x00, 0x00, 0x00, 0x96, 0x30, 0x07, 0x77, 0x2c, 0x61, 0x0e, 0xee, 0xba, 0x51, 0x09, 0x99]),
+            // CRC32 big-endian
+            ("CRC32 table", &[0x00, 0x00, 0x00, 0x00, 0x77, 0x07, 0x30, 0x96, 0xee, 0x0e, 0x61, 0x2c, 0x99, 0x09, 0x51, 0xba]),
+            // Blowfish P-array: 243f6a88 85a308d3 13198a2e 03707344
+            ("Blowfish P-array", &[0x88, 0x6a, 0x3f, 0x24, 0xd3, 0x08, 0xa3, 0x85, 0x2e, 0x8a, 0x19, 0x13, 0x44, 0x73, 0x70, 0x03]),
+            // Blowfish big-endian
+            ("Blowfish P-array", &[0x24, 0x3f, 0x6a, 0x88, 0x85, 0xa3, 0x08, 0xd3, 0x13, 0x19, 0x8a, 0x2e, 0x03, 0x70, 0x73, 0x44]),
+            // ChaCha20/Salsa20 constant: "expand 32-byte k"
+            ("ChaCha20/Salsa20 constant", b"expand 32-byte k"),
+            // "expand 16-byte k"
+            ("ChaCha20/Salsa20 constant", b"expand 16-byte k"),
+            // DES initial permutation table: 58 50 42 34 26 18 10 08
+            ("DES permutation table", &[0x3a, 0x32, 0x2a, 0x22, 0x1a, 0x12, 0x0a, 0x02, 0x3c, 0x34, 0x2c, 0x24, 0x1c, 0x14, 0x0c, 0x04]),
+            // Whirlpool S-box: 18 23 c6 e8 87 b8 01 4f
+            ("Whirlpool S-box", &[0x18, 0x23, 0xc6, 0xe8, 0x87, 0xb8, 0x01, 0x4f, 0x36, 0xa6, 0xd2, 0xf5, 0x79, 0x6f, 0x91, 0x52]),
+            // Twofish MDS matrix magic: 01 ef 5b 5b
+            ("Twofish MDS constant", &[0x01, 0xef, 0x5b, 0x5b, 0xef, 0x01, 0xef, 0x5b]),
+            // CAST5 S-box 1: 30fb40d4 9fa0ff0b 6beccd2f 3f258c7a
+            ("CAST5 S-box", &[0xd4, 0x40, 0xfb, 0x30, 0x0b, 0xff, 0xa0, 0x9f, 0x2f, 0xcd, 0xec, 0x6b, 0x7a, 0x8c, 0x25, 0x3f]),
+        ];
+
+        // Scan data sections for crypto signatures
+        let mut crypto_addrs: HashMap<u64, &str> = HashMap::new();
+        if let Ok(obj) = goblin::Object::parse(binary) {
+            let scan_sections: Vec<(u64, usize, usize)> = match &obj {
+                goblin::Object::PE(pe) => {
+                    let base = pe.image_base as u64;
+                    pe.sections.iter()
+                        .filter(|s| s.characteristics & 0x20000000 == 0) // not executable
+                        .map(|s| (base + s.virtual_address as u64, s.pointer_to_raw_data as usize, s.virtual_size as usize))
+                        .collect()
+                }
+                goblin::Object::Elf(elf) => {
+                    elf.section_headers.iter()
+                        .filter(|s| s.sh_flags & 0x4 == 0 && s.sh_flags & 0x2 != 0 && s.sh_type != 8)
+                        .map(|s| (s.sh_addr, s.sh_offset as usize, s.sh_size as usize))
+                        .collect()
+                }
+                _ => vec![],
+            };
+
+            for (sec_va, sec_fo, sec_size) in &scan_sections {
+                if sec_fo + sec_size > binary.len() { continue; }
+                let sec_data = &binary[*sec_fo..*sec_fo + *sec_size];
+                for (name, pattern) in crypto_sigs {
+                    if pattern.len() > sec_data.len() { continue; }
+                    // Search for the pattern in the section data
+                    for i in 0..sec_data.len() - pattern.len() {
+                        if &sec_data[i..i + pattern.len()] == *pattern {
+                            let va = sec_va + i as u64;
+                            crypto_addrs.insert(va, name);
+                            // Also mark nearby addresses (the table may be referenced at any offset)
+                            break; // one match per section per pattern
+                        }
+                    }
+                }
+            }
+        }
+
+        // Annotate lines referencing crypto table addresses
+        if !crypto_addrs.is_empty() {
+            for line in &mut lines {
+                if line.contains("//") { continue; }
+                for (&addr, &name) in &crypto_addrs {
+                    // Match DAT_XXXXXXXX format
+                    let dat = format!("{:x}", addr);
+                    let dat_upper = format!("{:X}", addr);
+                    if line.contains(&format!("DAT_{}", dat))
+                        || line.contains(&format!("DAT_{}", dat_upper))
+                        || line.contains(&format!("0x{}", dat))
+                        || line.contains(&format!("0x{}", dat_upper))
+                    {
+                        *line = format!("{} // {}", line.trim_end(), name);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Inline constant detection (for constants embedded directly in code)
     for line in &mut lines {
-        // AES S-box first byte
-        if line.contains("0x637c777b") || line.contains("637c777b") {
-            if !line.contains("/*") { *line = format!("{} // AES S-box", line.trim_end()); }
-        }
+        if line.contains("//") { continue; }
+        let t = line.trim();
         // SHA-256 first round constant
-        if line.contains("0x428a2f98") {
-            if !line.contains("/*") { *line = format!("{} // SHA-256 round constant", line.trim_end()); }
-        }
-        // SHA-1 constants
-        if line.contains("0x5a827999") || line.contains("0x6ed9eba1") || line.contains("0x8f1bbcdc") {
-            if !line.contains("/*") { *line = format!("{} // SHA-1 constant", line.trim_end()); }
-        }
-        // MD5 init values
-        if line.contains("0x67452301") && line.contains("0xefcdab89") {
-            if !line.contains("/*") { *line = format!("{} // MD5 init vector", line.trim_end()); }
-        }
-        // RC4 initialization (256-byte identity permutation check)
-        if line.contains("0x03020100") && line.contains("0x07060504") {
-            if !line.contains("/*") { *line = format!("{} // RC4/identity permutation", line.trim_end()); }
-        }
+        if t.contains("0x428a2f98") { *line = format!("{} // SHA-256 round constant", line.trim_end()); }
+        // SHA-1 K constants
+        else if t.contains("0x5a827999") { *line = format!("{} // SHA-1 K constant", line.trim_end()); }
+        else if t.contains("0x6ed9eba1") { *line = format!("{} // SHA-1 K constant", line.trim_end()); }
+        else if t.contains("0x8f1bbcdc") { *line = format!("{} // SHA-1 K constant", line.trim_end()); }
+        else if t.contains("0xca62c1d6") { *line = format!("{} // SHA-1 K constant", line.trim_end()); }
         // CRC32 polynomial
-        if line.contains("0xedb88320") {
-            if !line.contains("/*") { *line = format!("{} // CRC32 polynomial", line.trim_end()); }
+        else if t.contains("0xedb88320") { *line = format!("{} // CRC32 polynomial (IEEE)", line.trim_end()); }
+        else if t.contains("0x04c11db7") { *line = format!("{} // CRC32 polynomial (normal)", line.trim_end()); }
+        // MD5 magic constants
+        else if t.contains("0xd76aa478") { *line = format!("{} // MD5 T[1]", line.trim_end()); }
+        // Blowfish Pi digits
+        else if t.contains("0x243f6a88") { *line = format!("{} // Blowfish P-array / Pi digits", line.trim_end()); }
+        // ChaCha20/Salsa20
+        else if t.contains("0x61707865") { *line = format!("{} // ChaCha20 constant \"expa\"", line.trim_end()); }
+        else if t.contains("0x3320646e") { *line = format!("{} // ChaCha20 constant \"nd 3\"", line.trim_end()); }
+        else if t.contains("0x79622d32") { *line = format!("{} // ChaCha20 constant \"2-by\"", line.trim_end()); }
+        else if t.contains("0x6b206574") { *line = format!("{} // ChaCha20 constant \"te k\"", line.trim_end()); }
+        // TEA/XTEA delta
+        else if t.contains("0x9e3779b9") { *line = format!("{} // TEA/XTEA delta (golden ratio)", line.trim_end()); }
+        // RSA F4 exponent
+        else if t.contains("0x10001") && (t.contains("RSA") || t.contains("exponent") || t.contains("pubkey")) {
+            *line = format!("{} // RSA public exponent (F4=65537)", line.trim_end());
         }
-        // Base64 alphabet reference
-        if line.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/") {
-            if !line.contains("/*") { *line = format!("{} // Base64 alphabet", line.trim_end()); }
+        // Base64 alphabet
+        else if t.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/") {
+            *line = format!("{} // Base64 alphabet", line.trim_end());
+        }
+        else if t.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_") {
+            *line = format!("{} // Base64url alphabet", line.trim_end());
         }
     }
 
