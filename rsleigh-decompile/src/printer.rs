@@ -4261,6 +4261,120 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #CPP_WRAPPER: Detect and inline C++ stream operator wrappers.
+    // Pattern: func_XXX(cout, "string") → cout << "string"
+    //          func_XXX(cout) → cout << endl
+    //          func(func(cout, "A"), "B") → cout << "A" << "B"
+    // Also handles cin >> patterns.
+    {
+        // Phase 1: Detect which func_XXX is the cout << wrapper.
+        // Heuristic: if a function is called 3+ times with cout as first arg, it's operator<<
+        let all_text = lines.join("\n");
+        let mut cout_call_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut cin_call_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+        // Count calls with cout/cin as first arg
+        for line in &lines {
+            let t = line.trim();
+            // func_XXXX(cout, ...) or func_XXXX(cout)
+            if let Some(paren) = t.find("(cout") {
+                let func_end = paren;
+                let func_start = t[..func_end].rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .map(|p| p + 1).unwrap_or(0);
+                let fname = &t[func_start..func_end];
+                if fname.starts_with("func_") {
+                    *cout_call_counts.entry(fname.to_string()).or_insert(0) += 1;
+                }
+            }
+            if let Some(paren) = t.find("(cin") {
+                let func_end = paren;
+                let func_start = t[..func_end].rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .map(|p| p + 1).unwrap_or(0);
+                let fname = &t[func_start..func_end];
+                if fname.starts_with("func_") {
+                    *cin_call_counts.entry(fname.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+
+        // Functions called 3+ times with cout are operator<<
+        let cout_wrappers: Vec<String> = cout_call_counts.into_iter()
+            .filter(|(_, count)| *count >= 3)
+            .map(|(name, _)| name)
+            .collect();
+        let cin_wrappers: Vec<String> = cin_call_counts.into_iter()
+            .filter(|(_, count)| *count >= 2)
+            .map(|(name, _)| name)
+            .collect();
+
+        // Phase 2: Replace wrapper calls with operator syntax.
+        // Process from innermost to outermost for chained calls.
+        for _pass in 0..5 {
+            let mut changed = false;
+            for line in &mut lines {
+                for wrapper in &cout_wrappers {
+                    // func_XXX(cout, "string") → cout << "string"
+                    let pat_with_arg = format!("{}(cout, ", wrapper);
+                    while let Some(start) = line.find(&pat_with_arg) {
+                        // Find the matching closing paren
+                        let inner_start = start + pat_with_arg.len();
+                        let mut depth = 1;
+                        let mut pos = inner_start;
+                        let bytes = line.as_bytes();
+                        while pos < bytes.len() && depth > 0 {
+                            if bytes[pos] == b'(' { depth += 1; }
+                            if bytes[pos] == b')' { depth -= 1; }
+                            pos += 1;
+                        }
+                        if depth == 0 {
+                            let arg = &line[inner_start..pos - 1].to_string();
+                            let old = format!("{}(cout, {})", wrapper, arg);
+                            let new_str = format!("cout << {}", arg);
+                            *line = line.replace(&old, &new_str);
+                            changed = true;
+                            continue;
+                        }
+                        break;
+                    }
+                    // func_XXX(cout) → cout << endl
+                    let pat_no_arg = format!("{}(cout)", wrapper);
+                    if line.contains(&pat_no_arg) {
+                        *line = line.replace(&pat_no_arg, "cout << endl");
+                        changed = true;
+                    }
+                    // func_XXX(cout << "prev", "next") → cout << "prev" << "next"
+                    let pat_chain = format!("{}(cout << ", wrapper);
+                    while let Some(start) = line.find(&pat_chain) {
+                        let inner_start = start + pat_chain.len();
+                        let mut depth = 1;
+                        let mut pos = inner_start;
+                        let bytes = line.as_bytes();
+                        while pos < bytes.len() && depth > 0 {
+                            if bytes[pos] == b'(' { depth += 1; }
+                            if bytes[pos] == b')' { depth -= 1; }
+                            pos += 1;
+                        }
+                        if depth == 0 {
+                            let inner = &line[inner_start..pos - 1].to_string();
+                            // Split inner at the last ", " to separate prev from next arg
+                            if let Some(comma) = inner.rfind(", ") {
+                                let prev = &inner[..comma];
+                                let next = &inner[comma + 2..];
+                                let old = format!("{}(cout << {})", wrapper, inner);
+                                let new_str = format!("cout << {} << {}", prev, next);
+                                *line = line.replace(&old, &new_str);
+                                changed = true;
+                                continue;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            if !changed { break; }
+        }
+    }
+
     // #XMM_CLEANUP: Clean up remaining XMM register noise.
     // 1. "XMM0 = STRING >> 96" → suppress (SSE string init boilerplate)
     // 2. "XMM0 = 0;" → suppress (SSE zero-init)
