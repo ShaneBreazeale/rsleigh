@@ -1473,6 +1473,18 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 }
             }
 
+            // 4b. Clean up carry/borrow flag arithmetic
+            for line in &mut lines {
+                // + (uint8_t)!CY → simplified or removed (borrow in 64-bit sub)
+                *line = line.replace(" + (uint8_t)!CY", "");
+                *line = line.replace(" + (uint8_t)CY", "");
+                *line = line.replace("(uint8_t)!CY", "0 /* borrow */");
+                *line = line.replace("(uint8_t)CY", "0 /* carry */");
+                // Also clean up remaining raw CY/NG/ZR/OV in expressions
+                *line = line.replace("(uint8_t)!NG", "0");
+                *line = line.replace("(uint8_t)NG", "0");
+            }
+
             // 5. Clean remaining ARM-specific artifacts
             lines.retain(|line| {
                 let t = line.trim();

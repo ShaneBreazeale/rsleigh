@@ -1541,6 +1541,38 @@ fn find_cmp_in_block(block_idx: usize, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
                     }
                 }
             }
+            // ARM32: tmpZR at offset 101 (ZR=97 is the stored flag, tmpZR=101 is the computed one)
+            // ARM32 CMP sets tmpNG/tmpZR/tmpCY/tmpOV, then copies to NG/ZR/CY/OV
+            if v.varnode.space == AddressSpaceId::Register
+                && matches!(v.varnode.offset, 97 | 101) // ZR or tmpZR (ARM32)
+            {
+                if let Expr::BinOp(BinOpKind::Eq, result_id, zero_id) = &v.expr {
+                    let zero = &ssa.vars[zero_id.0 as usize];
+                    if matches!(&zero.expr, Expr::Const(0, _)) {
+                        return trace_to_cmp_with_zero(*result_id, ssa, Some(*zero_id));
+                    }
+                }
+            }
+            if v.varnode.space == AddressSpaceId::Register
+                && matches!(v.varnode.offset, 96 | 100) // NG or tmpNG (ARM32)
+            {
+                if let Expr::BinOp(BinOpKind::SLess, result_id, zero_id) = &v.expr {
+                    let zero = &ssa.vars[zero_id.0 as usize];
+                    if matches!(&zero.expr, Expr::Const(0, _)) {
+                        return trace_to_cmp_with_zero(*result_id, ssa, Some(*zero_id));
+                    }
+                }
+            }
+            // ARM32: tmpCY/CY carry flag from CMP
+            if v.varnode.space == AddressSpaceId::Register
+                && matches!(v.varnode.offset, 98 | 99 | 102 | 103) // CY, OV, tmpCY, tmpOV (ARM32)
+            {
+                if let Expr::BinOp(BinOpKind::Carry | BinOpKind::SCarry | BinOpKind::SBorrow
+                    | BinOpKind::Less, left, right) = &v.expr
+                {
+                    return Some((*left, *right));
+                }
+            }
         }
     }
     None
