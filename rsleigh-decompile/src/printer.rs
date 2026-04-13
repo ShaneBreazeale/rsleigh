@@ -1344,6 +1344,176 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // ARM32 comprehensive cleanup: remove flag noise, stack frame ops, rename registers.
+    // Detect ARM32 by presence of mult_addr, shift_carry, or ARM register names.
+    {
+        let all_check = lines.join("");
+        let is_arm32 = all_check.contains("mult_addr") || all_check.contains("shift_carry")
+            || (all_check.contains("r0") && all_check.contains("lr") && !all_check.contains("RSP"));
+
+        if is_arm32 {
+            // 1. Remove flag computation noise — these are ARM CPSR flag updates
+            //    that should be internal to condition evaluation
+            lines.retain(|line| {
+                let t = line.trim();
+                // shift_carry = ... (barrel shifter carry output)
+                if t.starts_with("shift_carry") && t.contains("=") && t.ends_with(';') { return false; }
+                // tmpNG = ... (negative flag)
+                if t.starts_with("tmpNG") && t.contains("=") && t.ends_with(';') { return false; }
+                // tmpZR = ... (zero flag)
+                if t.starts_with("tmpZR") && t.contains("=") && t.ends_with(';') { return false; }
+                // tmpCY = ... (carry flag)
+                if t.starts_with("tmpCY") && t.contains("=") && t.ends_with(';') { return false; }
+                // tmpOV = ... (overflow flag)
+                if t.starts_with("tmpOV") && t.contains("=") && t.ends_with(';') { return false; }
+                // TB = ... (Thumb bit)
+                if t.starts_with("TB") && t.contains("=") && t.ends_with(';') { return false; }
+                // NG = ..., ZR = ..., CY = ..., OV = ... (flag stores)
+                if t.len() < 50 && t.ends_with(';') {
+                    if t.starts_with("NG = ") || t.starts_with("ZR = ") || t.starts_with("CY = ") || t.starts_with("OV = ") {
+                        return false;
+                    }
+                }
+                true
+            });
+
+            // 2. Remove ARM32 prologue/epilogue boilerplate
+            lines.retain(|line| {
+                let t = line.trim();
+                // PUSH: *(uint32_t*)(mult_addr) = rN; mult_addr = mult_addr - 4;
+                if t.starts_with("*(uint32_t*)(mult_addr)") && t.contains("=") && t.ends_with(';') { return false; }
+                if t == "mult_addr = mult_addr - 4;" || t == "mult_addr = mult_addr + 4;" { return false; }
+                // Stack frame setup: mult_addr = sp; or mult_addr = sp - N;
+                if t.starts_with("mult_addr = sp") && t.ends_with(';') { return false; }
+                if t.starts_with("sp = mult_addr") && t.ends_with(';') { return false; }
+                if t.starts_with("mult_addr = ") && t.contains("sp") && t.ends_with(';') { return false; }
+                // POP: rN = *(uint32_t*)(mult_addr); or rN = *(uint32_t*)(sp...
+                // pc = ... (function return via POP {pc})
+                if t.starts_with("pc = ") && t.ends_with(';') { return false; }
+                // lr = *(uint32_t*)(mult_addr) — restore LR
+                if t.starts_with("lr = *(uint32_t*)(mult_addr") && t.ends_with(';') { return false; }
+                // return sp; (common ARM32 epilogue artifact)
+                if t == "return sp;" || t == "return mult_addr;" { return false; }
+                // lr = 0xNNNNN; (return address setup before BL)
+                if t.starts_with("lr = 0x") && t.ends_with(';') && !t.contains("func_") { return false; }
+                // lr = NN; (small constant — return address)
+                if t.starts_with("lr = ") && t.ends_with(';') && !t.contains("func_") && !t.contains("param_") {
+                    let val = t.strip_prefix("lr = ").unwrap_or("").trim_end_matches(';');
+                    if val.chars().all(|c| c.is_ascii_digit() || c == 'x' || c.is_ascii_hexdigit()) { return false; }
+                }
+                true
+            });
+
+            // 3. Clean up mult_addr references in remaining lines
+            for line in &mut lines {
+                // mult_addr->field_N → local_N (it's the frame pointer)
+                if line.contains("mult_addr->field_") {
+                    *line = line.replace("mult_addr->field_", "local_");
+                }
+                if line.contains("mult_addr") {
+                    *line = line.replace("mult_addr", "sp");
+                }
+            }
+
+            // 4. Rename ARM registers to parameter/variable names
+            // ARM calling convention: r0-r3 = params, r4-r11 = callee-saved locals
+            let param_regs = [("r0", "param_0"), ("r1", "param_1"), ("r2", "param_2"), ("r3", "param_3")];
+            let local_regs = [
+                ("r4", "lVar1"), ("r5", "lVar2"), ("r6", "lVar3"), ("r7", "lVar4"),
+                ("r8", "lVar5"), ("r9", "lVar6"), ("r10", "lVar7"), ("r11", "lVar8"),
+                ("r12", "iVar1"),
+            ];
+
+            // Only rename if the register appears as a standalone identifier
+            for line in &mut lines {
+                for (reg, name) in &param_regs {
+                    let t = line.as_str();
+                    // Careful word-boundary replacement: r0 but not r0-r3 in "r0x..." or "cr0"
+                    let mut result = String::new();
+                    let mut remaining = t;
+                    while let Some(pos) = remaining.find(reg) {
+                        let before_ok = pos == 0 || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric();
+                        let after_pos = pos + reg.len();
+                        let after_ok = after_pos >= remaining.len()
+                            || (!remaining.as_bytes()[after_pos].is_ascii_alphanumeric()
+                                && remaining.as_bytes()[after_pos] != b'_');
+                        if before_ok && after_ok {
+                            result.push_str(&remaining[..pos]);
+                            result.push_str(name);
+                            remaining = &remaining[after_pos..];
+                        } else {
+                            result.push_str(&remaining[..after_pos]);
+                            remaining = &remaining[after_pos..];
+                        }
+                    }
+                    result.push_str(remaining);
+                    *line = result;
+                }
+                for (reg, name) in &local_regs {
+                    let mut result = String::new();
+                    let mut remaining = line.as_str();
+                    while let Some(pos) = remaining.find(reg) {
+                        let before_ok = pos == 0 || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric();
+                        let after_pos = pos + reg.len();
+                        let after_ok = after_pos >= remaining.len()
+                            || (!remaining.as_bytes()[after_pos].is_ascii_alphanumeric()
+                                && remaining.as_bytes()[after_pos] != b'_');
+                        if before_ok && after_ok {
+                            result.push_str(&remaining[..pos]);
+                            result.push_str(name);
+                            remaining = &remaining[after_pos..];
+                        } else {
+                            result.push_str(&remaining[..after_pos]);
+                            remaining = &remaining[after_pos..];
+                        }
+                    }
+                    result.push_str(remaining);
+                    *line = result;
+                }
+            }
+
+            // 5. Simplify ARM condition patterns in if-statements
+            // if (ZR) → if (result == 0); if (!ZR) → if (result != 0)
+            // if (CY && !ZR) → if (result > 0) (unsigned greater)
+            for line in &mut lines {
+                let t = line.trim().to_string();
+                if t.starts_with("if (") {
+                    let indent = line.len() - line.trim_start().len();
+                    let pad = " ".repeat(indent);
+                    // Simple flag conditions
+                    if t == "if (ZR) {" { *line = format!("{}if (result == 0) {{", pad); }
+                    else if t == "if (!ZR) {" { *line = format!("{}if (result != 0) {{", pad); }
+                    else if t == "if (CY) {" { *line = format!("{}if (carry) {{", pad); }
+                    else if t == "if (!CY) {" { *line = format!("{}if (!carry) {{", pad); }
+                    else if t == "if (NG) {" { *line = format!("{}if (result < 0) {{", pad); }
+                    else if t == "if (true) {" { *line = format!("{}{{", pad); } // unconditional
+                    // Compound: CY && !ZR = unsigned greater than
+                    else if t == "if (CY && !ZR) {" { *line = format!("{}if (a > b) {{ // unsigned", pad); }
+                    else if t == "if (!CY || ZR) {" { *line = format!("{}if (a <= b) {{ // unsigned", pad); }
+                }
+            }
+
+            // 6. Remove empty blocks left by flag removal
+            let mut i = 0;
+            while i + 1 < lines.len() {
+                let t = lines[i].trim().to_string();
+                let next = lines.get(i + 1).map(|s| s.trim().to_string()).unwrap_or_default();
+                // Empty block: "if (...) {" followed by "}"
+                if t.ends_with('{') && next == "}" {
+                    lines.remove(i + 1);
+                    lines.remove(i);
+                    continue;
+                }
+                // Empty lines
+                if t.is_empty() && next.is_empty() {
+                    lines.remove(i + 1);
+                    continue;
+                }
+                i += 1;
+            }
+        }
+    }
+
     // Remove x86 REP STOS/MOVS boilerplate: "EDI = EDI + N - 8 * DF;" patterns
     // These are string instruction noise (REP STOSD, REP MOVSD).
     lines.retain(|line| {
