@@ -4188,6 +4188,61 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #MSVC_DEMANGLE: Demangle MSVC C++ mangled names in the output.
+    // MSVC names start with '?' and contain '@' delimiters.
+    // Common patterns: ?cout@std@@... → std::cout, ??6... → operator<<
+    {
+        // Collect all MSVC mangled names from the output
+        let all_text = lines.join("\n");
+        let mut replacements: Vec<(String, String)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        // Find ?name@... patterns (MSVC mangled symbols)
+        let mut pos = 0;
+        let bytes = all_text.as_bytes();
+        while pos < bytes.len() {
+            if bytes[pos] == b'?' {
+                // Scan forward to find the end of the mangled name
+                // MSVC names contain: alphanumeric, @, $, ?, _
+                let start = pos;
+                let mut end = pos + 1;
+                while end < bytes.len() {
+                    let b = bytes[end];
+                    if b.is_ascii_alphanumeric() || b == b'@' || b == b'$' || b == b'?' || b == b'_' {
+                        end += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let mangled = &all_text[start..end];
+                // Only try to demangle if it looks like a real MSVC name (has @ and is > 5 chars)
+                if mangled.len() > 5 && mangled.contains('@') && !seen.contains(mangled) {
+                    seen.insert(mangled.to_string());
+                    if let Ok(demangled) = msvc_demangler::demangle(mangled, msvc_demangler::DemangleFlags::llvm()) {
+                        // Simplify the demangled name for readability
+                        let simple = simplify_msvc_name(&demangled);
+                        if simple != mangled && simple.len() < mangled.len() {
+                            replacements.push((mangled.to_string(), simple));
+                        }
+                    }
+                }
+                pos = end;
+            } else {
+                pos += 1;
+            }
+        }
+
+        // Apply replacements (longest first to avoid partial matches)
+        replacements.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        for (mangled, demangled) in &replacements {
+            for line in &mut lines {
+                if line.contains(mangled.as_str()) {
+                    *line = line.replace(mangled.as_str(), demangled.as_str());
+                }
+            }
+        }
+    }
+
     // #XMM_CLEANUP: Clean up remaining XMM register noise.
     // 1. "XMM0 = STRING >> 96" → suppress (SSE string init boilerplate)
     // 2. "XMM0 = 0;" → suppress (SSE zero-init)
@@ -5754,6 +5809,70 @@ fn format_objc_call(selector: &str, args: &[VarId], ssa: &SsaCfg, ctx: &PrintCtx
             format!("[{} {} {}]", receiver, selector.trim_end_matches(':'), args_str)
         }
     }
+}
+
+/// Simplify demangled MSVC C++ names for pseudocode readability.
+fn simplify_msvc_name(name: &str) -> String {
+    let mut s = name.to_string();
+    // Remove parameter types: "operator<<(long)" → "operator<<"
+    if let Some(paren) = s.find('(') {
+        if s[..paren].contains("operator") {
+            s = s[..paren].to_string();
+        } else if !s[..paren].is_empty() {
+            s = s[..paren].to_string();
+        }
+    }
+    // Simplify common std:: template types (various spacing from different demanglers)
+    let basic_ostream_patterns = [
+        "std::basic_ostream<char, std::char_traits<char>>",
+        "std::basic_ostream<char,struct std::char_traits<char> >",
+        "std::basic_ostream<char, struct std::char_traits<char> >",
+        "std::basic_ostream<char,std::char_traits<char> >",
+        "std::basic_ostream<char, std::char_traits<char> >",
+    ];
+    for pat in basic_ostream_patterns {
+        s = s.replace(pat, "std::ostream");
+    }
+    let basic_istream_patterns = [
+        "std::basic_istream<char, std::char_traits<char>>",
+        "std::basic_istream<char,struct std::char_traits<char> >",
+        "std::basic_istream<char, struct std::char_traits<char> >",
+        "std::basic_istream<char,std::char_traits<char> >",
+        "std::basic_istream<char, std::char_traits<char> >",
+    ];
+    for pat in basic_istream_patterns {
+        s = s.replace(pat, "std::istream");
+    }
+    s = s.replace("std::basic_string<char, std::char_traits<char>, std::allocator<char>>", "std::string");
+    s = s.replace("std::basic_string<char,std::char_traits<char>,std::allocator<char> >", "std::string");
+    // Remove "class " and "struct " prefixes
+    s = s.replace("class ", "").replace("struct ", "");
+    // Simplify operator calls
+    if s.contains("std::ostream::operator<<") || s.contains("ostream::operator<<") {
+        return "cout <<".to_string();
+    }
+    if s.contains("std::istream::operator>>") || s.contains("istream::operator>>") {
+        return "cin >>".to_string();
+    }
+    // Simplify global objects
+    if s.contains("std::ostream") && s.contains("cout") { return "cout".to_string(); }
+    if s.contains("std::istream") && s.contains("cin") { return "cin".to_string(); }
+    s = s.replace("std::cout", "cout").replace("std::cin", "cin").replace("std::endl", "endl");
+    // Remove calling convention and access specifiers
+    s = s.replace("public: ", "").replace("private: ", "").replace("protected: ", "");
+    s = s.replace("virtual ", "");
+    s = s.replace("__cdecl ", "").replace("__thiscall ", "").replace("__stdcall ", "");
+    // Remove return type prefix for method calls: "int std::istream::get" → "cin.get"
+    if let Some(last_space) = s.rfind(' ') {
+        let after = &s[last_space + 1..];
+        if after.contains("::") {
+            s = after.to_string();
+        }
+    }
+    // Simplify std::istream::method → cin.method, std::ostream::method → cout.method
+    s = s.replace("std::istream::", "cin.").replace("std::ostream::", "cout.");
+    s = s.trim().to_string();
+    s
 }
 
 /// Format a VarDef's expression, respecting param_name for stack parameters.
