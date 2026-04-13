@@ -1810,7 +1810,12 @@ fn is_comparison(kind: BinOpKind) -> bool {
 // ---- Return Values ----
 
 fn detect_return_values(ssa: &mut SsaCfg) {
-    let ret_reg_offset = RAX_OFFSET; // EAX/RAX = offset 0
+    // Try to detect architecture from register usage:
+    // ARM32 r0 = offset 32 (0x20), x86 RAX = offset 0, AArch64 x0 = offset 0
+    let has_arm32_regs = ssa.vars.iter().any(|v|
+        v.varnode.space == AddressSpaceId::Register && v.varnode.offset == 32 && v.varnode.size == 4
+        && matches!(v.varnode.offset, 32..=92)); // ARM32 r0-r15 range
+    let ret_reg_offset = if has_arm32_regs { 32 } else { RAX_OFFSET }; // ARM32 r0=32, x86 RAX=0
 
     for bi in 0..ssa.blocks.len() {
         if let SsaTerminator::Return(ref ret_val) = ssa.blocks[bi].terminator {

@@ -136,9 +136,29 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                     Terminator::CBranch { cond, taken, fallthrough }
                 }
                 PcodeOp::BranchInd { dest } => {
-                    let dest = *dest;
+                    let dest_vn = *dest;
                     ops.pop();
-                    Terminator::Indirect(dest)
+                    // ARM32: POP {PC} generates BranchInd where dest is loaded from stack.
+                    // Detect this as a Return: if the dest was loaded from SP-relative address
+                    // (the preceding ops include a Load from mult_addr/sp), treat as Return.
+                    let is_stack_return = ops.iter().rev().take(10).any(|(_, op)| {
+                        match op {
+                            PcodeOp::Load { out, .. } => {
+                                // Load dest matches the BranchInd target (POP {PC} pattern)
+                                out.offset == dest_vn.offset && out.space == dest_vn.space
+                            }
+                            _ => false,
+                        }
+                    });
+                    // Also detect BX LR pattern: BranchInd where dest is the LR register
+                    // ARM32 LR = register offset 0x58=88 (r14), AArch64 x30 = 0xF0=240
+                    let is_bx_lr = dest_vn.space == AddressSpaceId::Register
+                        && matches!(dest_vn.offset, 88 | 240);
+                    if is_stack_return || is_bx_lr {
+                        Terminator::Return
+                    } else {
+                        Terminator::Indirect(dest_vn)
+                    }
                 }
                 PcodeOp::Call { dest } => {
                     let target = if dest.space == AddressSpaceId::Ram {
