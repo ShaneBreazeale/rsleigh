@@ -409,10 +409,14 @@ fn parse_binary(obj: &goblin::Object, _data: &[u8]) -> Option<(rsleigh_api::Arch
             Some((arch, segs, syms))
         }
         goblin::Object::PE(pe) => {
-            let arch = if pe.is_64 {
-                rsleigh_api::Architecture::X86_64
-            } else {
-                rsleigh_api::Architecture::X86_32
+            // Detect architecture from PE machine type
+            let arch = match pe.header.coff_header.machine {
+                0xAA64 => rsleigh_api::Architecture::AArch64,  // ARM64
+                0x8664 => rsleigh_api::Architecture::X86_64,   // AMD64
+                0x014C => rsleigh_api::Architecture::X86_32,   // i386
+                0x01C4 => rsleigh_api::Architecture::ARM32,    // ARMv7
+                _ => if pe.is_64 { rsleigh_api::Architecture::X86_64 }
+                     else { rsleigh_api::Architecture::X86_32 },
             };
             let base = pe.image_base as u64;
             let segs = pe.sections.iter()
@@ -533,6 +537,9 @@ fn discover_pe_functions(
         }
     }
 
+    let is_aarch64 = matches!(arch,
+        rsleigh_api::Architecture::AArch64 | rsleigh_api::Architecture::ARM32);
+
     // Phase 2b: Prologue scanning — find functions not reached by direct CALL.
     // Scan executable sections for common function prologues:
     //   55 8B EC       push ebp; mov ebp, esp  (x86-32 standard)
@@ -598,7 +605,6 @@ fn discover_pe_functions(
                         && boundary && off > 0);
 
                 if is_prologue {
-                    // Verify: the byte before should be a RET (C3), INT3 (CC), NOP (90), or start of section
                     let valid_boundary = off == 0 || matches!(bytes[off - 1], 0xC3 | 0xCC | 0x90 | 0x00);
                     if valid_boundary {
                         found.insert(va);
@@ -609,29 +615,105 @@ fn discover_pe_functions(
         }
     }
 
-    // Phase 2c: Exhaustive CALL target scanning — find ALL E8 (CALL rel32) targets in .text.
-    // This catches functions that are called but not reachable by recursive descent
-    // (e.g., C++ adjustment thunks called from code we haven't analyzed yet).
+    // AArch64 prologue scanning (4-byte aligned instructions)
+    if is_aarch64 {
+        for (seg_va, seg_sz, seg_fo) in segs {
+            let fo = *seg_fo as usize;
+            let sz = (*seg_sz as usize).min(data.len().saturating_sub(fo));
+            if fo + sz > data.len() { continue; }
+            let bytes = &data[fo..fo + sz];
+
+            let mut off = 0usize;
+            while off + 4 <= sz {
+                let va = seg_va + off as u64;
+                if !found.contains(&va) {
+                    let insn = u32::from_le_bytes([bytes[off], bytes[off+1], bytes[off+2], bytes[off+3]]);
+
+                    // Check for AArch64 function prologues:
+                    // STP X29, X30, [SP, #-N]! — save FP+LR with pre-index writeback
+                    //   Encoding: x010_1001_00xx_xxxx_x111_01xx_x111_11xx
+                    //   Mask: opc=10, V=0, L=0, Rt=29(11101), Rn=31(11111), Rt2=30(11110)
+                    let is_stp_fp_lr = (insn & 0xFFE00000) == 0xA9800000  // STP pre-index
+                        && (insn & 0x1F) == 29       // Rt = X29 (FP)
+                        && ((insn >> 10) & 0x1F) == 30; // Rt2 = X30 (LR)
+
+                    // SUB SP, SP, #imm — stack frame allocation
+                    //   Encoding: 1101_0001_00xx_xxxx_xxxx_xx11_111x_xxxx
+                    let is_sub_sp = (insn & 0xFF0003E0) == 0xD10003E0  // SUB Xd=SP, Xn=SP
+                        && ((insn >> 5) & 0x1F) == 31;  // Rn = SP
+
+                    // STP with SP base (callee-saved register saves)
+                    let is_stp_sp = (insn & 0x7FC00000) == 0x29000000  // STP signed offset, SP base
+                        && ((insn >> 5) & 0x1F) == 31;  // Rn = SP
+
+                    // Boundary check: previous instruction should be RET (D65F03C0) or 0/padding
+                    let prev_ok = if off >= 4 {
+                        let prev_insn = u32::from_le_bytes([bytes[off-4], bytes[off-3], bytes[off-2], bytes[off-1]]);
+                        prev_insn == 0xD65F03C0  // RET
+                            || prev_insn == 0x00000000  // padding
+                            || prev_insn == 0xD503201F  // NOP
+                            || (prev_insn >> 26) == 0b000101  // B (unconditional branch)
+                    } else {
+                        true // start of section
+                    };
+
+                    if prev_ok && (is_stp_fp_lr || is_sub_sp) {
+                        found.insert(va);
+                    }
+                }
+                off += 4;
+            }
+        }
+    }
+
+    // Phase 2c: Exhaustive CALL target scanning.
+    // Scan all executable sections for CALL instructions and collect targets.
+    // x86: E8 rel32 (5 bytes)
+    // AArch64: BL imm26 (4 bytes, opcode 10010100 + 26-bit signed offset)
     for (seg_va, seg_sz, seg_fo) in segs {
         let fo = *seg_fo as usize;
         let sz = (*seg_sz as usize).min(data.len().saturating_sub(fo));
         if fo + sz > data.len() { continue; }
         let bytes = &data[fo..fo + sz];
 
-        let mut off = 0usize;
-        while off + 5 <= sz {
-            if bytes[off] == 0xE8 { // CALL rel32
-                let disp = i32::from_le_bytes([
-                    bytes[off+1], bytes[off+2], bytes[off+3], bytes[off+4]
-                ]);
-                let target = (seg_va + off as u64 + 5).wrapping_add(disp as i64 as u64);
-                // Only accept targets in executable segments
-                let in_seg = segs.iter().any(|(va, sz, _)| target >= *va && target < va + sz);
-                if in_seg && !found.contains(&target) {
-                    found.insert(target);
+        if is_aarch64 {
+            // AArch64: BL imm26 — instruction format: 1001_01xx_xxxx_xxxx_xxxx_xxxx_xxxx_xxxx
+            // Top 6 bits = 100101, bottom 26 bits = signed offset (in instructions, × 4)
+            let mut off = 0usize;
+            while off + 4 <= sz {
+                let insn = u32::from_le_bytes([bytes[off], bytes[off+1], bytes[off+2], bytes[off+3]]);
+                if (insn >> 26) == 0b100101 { // BL
+                    let imm26 = insn & 0x03FF_FFFF;
+                    // Sign-extend 26-bit to 64-bit, multiply by 4
+                    let offset = if imm26 & 0x0200_0000 != 0 {
+                        ((imm26 | 0xFC00_0000) as i32 as i64) * 4
+                    } else {
+                        (imm26 as i64) * 4
+                    };
+                    let target = (seg_va + off as u64).wrapping_add(offset as u64);
+                    let in_seg = segs.iter().any(|(va, sz, _)| target >= *va && target < va + sz);
+                    if in_seg && !found.contains(&target) {
+                        found.insert(target);
+                    }
                 }
+                off += 4; // AArch64 instructions are 4-byte aligned
             }
-            off += 1;
+        } else {
+            // x86: E8 rel32 (CALL)
+            let mut off = 0usize;
+            while off + 5 <= sz {
+                if bytes[off] == 0xE8 {
+                    let disp = i32::from_le_bytes([
+                        bytes[off+1], bytes[off+2], bytes[off+3], bytes[off+4]
+                    ]);
+                    let target = (seg_va + off as u64 + 5).wrapping_add(disp as i64 as u64);
+                    let in_seg = segs.iter().any(|(va, sz, _)| target >= *va && target < va + sz);
+                    if in_seg && !found.contains(&target) {
+                        found.insert(target);
+                    }
+                }
+                off += 1;
+            }
         }
     }
 
