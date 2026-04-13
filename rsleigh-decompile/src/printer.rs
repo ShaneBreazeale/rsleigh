@@ -2567,7 +2567,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // Match: func_call(...); followed by if (0 == 0), if (0 != 0), if (EAX == 0), etc.
             if lt.ends_with(';') && lt.contains('(') && !lt.contains(" = ")
                 && !lt.starts_with("if ") && !lt.starts_with("while ") && !lt.starts_with("return ")
-                && !lt.starts_with("//") && !lt.starts_with("var_")
+                && !lt.starts_with("//") && !lt.starts_with("var_") && !lt.starts_with("}")
             {
                 // Extract the call expression (remove trailing ;)
                 let call_expr = lt.trim_end_matches(';').trim();
@@ -3396,7 +3396,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // Match: call(...); if (SIMPLE_VAR == 0) or if (SIMPLE_VAR != 0)
             if lt.ends_with(';') && lt.contains('(') && !lt.contains(" = ")
                 && !lt.starts_with("if ") && !lt.starts_with("while ")
-                && !lt.starts_with("return ") && !lt.starts_with("//")
+                && !lt.starts_with("return ") && !lt.starts_with("//") && !lt.starts_with("}")
             {
                 let call_expr = lt.trim_end_matches(';').trim();
                 // Check for: if (var_N == 0), if (var_N != 0), if (param_N == 0)
@@ -5258,6 +5258,93 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         *line = result;
     }
 
+    // #FINAL_PASS: Re-run critical simplifications that earlier passes may have invalidated.
+    // This catches param_N[RSP] patterns created by AUTONAME/DECLARATIONS passes,
+    // RBP+N patterns created by other transformations, and any remaining raw registers.
+    {
+        // Re-run param_N[RSP] → local_XX
+        for line in &mut lines {
+            let mut search_from = 0usize;
+            loop {
+                let remaining = &line[search_from..];
+                let Some(rel_start) = remaining.find("param_") else { break };
+                let start = search_from + rel_start;
+                let after_param = &line[start..];
+                let Some(bracket_rel) = after_param.find("[RSP") else { search_from = start + 6; continue; };
+                let abs_bracket = start + bracket_rel;
+                let idx_str = &line[start + 6..abs_bracket];
+                let Ok(offset) = idx_str.parse::<u64>() else { search_from = start + 6; continue; };
+                if offset < 8 { search_from = start + 6; continue; }
+                let mut depth = 1;
+                let mut pos = abs_bracket + 1;
+                let bytes = line.as_bytes();
+                while pos < bytes.len() && depth > 0 {
+                    if bytes[pos] == b'[' { depth += 1; }
+                    if bytes[pos] == b']' { depth -= 1; }
+                    pos += 1;
+                }
+                if depth != 0 { search_from = start + 6; continue; }
+                let abs_close = pos - 1;
+                let replacement = format!("local_{:x}", offset);
+                *line = format!("{}{}{}", &line[..start], replacement, &line[abs_close + 1..]);
+            }
+        }
+
+        // Re-run RBP + N → local_XX
+        for line in &mut lines {
+            while let Some(pos) = line.find("RBP + ") {
+                let after = &line[pos + 6..];
+                let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+                if end > 0 {
+                    if let Ok(offset) = after[..end].parse::<u64>() {
+                        if offset > 0 {
+                            *line = format!("{}local_{:x}{}", &line[..pos], offset, &line[pos + 6 + end..]);
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+        }
+
+        // Re-run N + RSP → local_XX
+        for line in &mut lines {
+            while let Some(pos) = line.find(" + RSP") {
+                let before = &line[..pos];
+                let num_start = before.rfind(|c: char| !c.is_ascii_digit()).map(|p| p + 1).unwrap_or(0);
+                if num_start < pos {
+                    if let Ok(offset) = line[num_start..pos].parse::<u64>() {
+                        if offset > 0 && offset < 0x10000 {
+                            *line = format!("{}local_{:x}{}", &line[..num_start], offset, &line[pos + 6..]);
+                            continue;
+                        }
+                    }
+                }
+                break;
+            }
+        }
+
+        // Re-run *(param_N) → *param_N
+        for line in &mut lines {
+            for prefix in ["*(param_", "*(lVar", "*(iVar"] {
+                while let Some(start) = line.find(prefix) {
+                    if start > 0 && line.as_bytes()[start - 1] == b'(' { break; }
+                    let inner_start = start + 2;
+                    if let Some(close) = line[inner_start..].find(')') {
+                        let inner = line[inner_start..inner_start + close].to_string();
+                        if !inner.contains(' ') && !inner.contains('(') {
+                            let old = format!("*({})", inner);
+                            let new_str = format!("*{}", inner);
+                            *line = line.replace(&old, &new_str);
+                            continue;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     for line in &lines {
         let is_blank = line.trim().is_empty();
         if is_blank && prev_blank { continue; }
@@ -5966,15 +6053,25 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
         }
         StructuredStmt::DoWhile { cond, negate, body } => {
             let body_filtered = filter_boilerplate(body, ssa);
-            out.push_str(&format!("{}do {{\n", pad));
-            print_stmts(&body_filtered, ssa, ctx, indent + 1, out);
             let cond_expr = format_condition_tracked(*cond, ssa, ctx, tracker);
             let display_cond = if *negate {
                 negate_condition(&cond_expr)
             } else {
                 cond_expr
             };
-            out.push_str(&format!("{}}} while ({});\n", pad, display_cond));
+            // If the condition is always-false (e.g., "1 < 0", "1 > 1"), or the body
+            // unconditionally returns, the loop executes at most once — emit straight-line.
+            let is_always_false = matches!(display_cond.as_str(),
+                "1 < 0" | "1 > 1" | "0 > 0" | "0 != 0" | "1 == 0" | "0 > 1");
+            let body_returns = matches!(body_filtered.last(),
+                Some(StructuredStmt::Return(_)));
+            if is_always_false || body_returns {
+                print_stmts(&body_filtered, ssa, ctx, indent, out);
+            } else {
+                out.push_str(&format!("{}do {{\n", pad));
+                print_stmts(&body_filtered, ssa, ctx, indent + 1, out);
+                out.push_str(&format!("{}}} while ({});\n", pad, display_cond));
+            }
         }
         StructuredStmt::Switch { expr, cases, default } => {
             let expr_str = format_var_tracked(*expr, ssa, ctx, tracker);
@@ -6494,11 +6591,19 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, indent: usize
         }
         StructuredStmt::DoWhile { cond, negate, body } => {
             let body_filtered = filter_boilerplate(body, ssa);
-            out.push_str(&format!("{}do {{\n", pad));
-            print_stmts(&body_filtered, ssa, ctx, indent + 1, out);
             let cond_expr = format_condition(*cond, ssa, ctx);
             let display_cond = if *negate { negate_condition(&cond_expr) } else { cond_expr };
-            out.push_str(&format!("{}}} while ({});\n", pad, display_cond));
+            let is_always_false = matches!(display_cond.as_str(),
+                "1 < 0" | "1 > 1" | "0 > 0" | "0 != 0" | "1 == 0" | "0 > 1");
+            let body_returns = matches!(body_filtered.last(),
+                Some(StructuredStmt::Return(_)));
+            if is_always_false || body_returns {
+                print_stmts(&body_filtered, ssa, ctx, indent, out);
+            } else {
+                out.push_str(&format!("{}do {{\n", pad));
+                print_stmts(&body_filtered, ssa, ctx, indent + 1, out);
+                out.push_str(&format!("{}}} while ({});\n", pad, display_cond));
+            }
         }
         StructuredStmt::Switch { expr, cases, default } => {
             let expr_str = format_var(*expr, ssa, ctx);

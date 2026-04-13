@@ -39,6 +39,18 @@ pub fn recover_structure(ssa: &SsaCfg, cfg: &Cfg) -> Vec<StructuredStmt> {
 /// Prevents stack overflow on deeply nested or pathological CFGs.
 const MAX_STRUCTURE_DEPTH: usize = 256;
 
+/// Check if a statement list unconditionally returns (every path ends with Return).
+/// If so, wrapping it in a do-while is misleading because the condition is dead code.
+fn body_always_returns(stmts: &[StructuredStmt]) -> bool {
+    match stmts.last() {
+        Some(StructuredStmt::Return(_)) => true,
+        Some(StructuredStmt::IfElse { then_body, else_body, .. }) => {
+            body_always_returns(then_body) && body_always_returns(else_body)
+        }
+        _ => false,
+    }
+}
+
 /// Context for loop-aware goto elimination.
 /// Tracks the current loop header address and exit address.
 struct LoopCtx {
@@ -153,11 +165,17 @@ fn emit_region(
 
                                     if exit.0 < emitted.len() { emitted[exit.0] = exit_was_emitted; }
 
-                                    out.push(StructuredStmt::DoWhile {
-                                        cond: *cond,
-                                        negate,
-                                        body,
-                                    });
+                                    // If the body unconditionally returns, the while
+                                    // condition is dead code — emit as straight-line.
+                                    if body_always_returns(&body) {
+                                        out.extend(body);
+                                    } else {
+                                        out.push(StructuredStmt::DoWhile {
+                                            cond: *cond,
+                                            negate,
+                                            body,
+                                        });
+                                    }
                                     current = exit;
                                     continue;
                                 }
@@ -303,11 +321,15 @@ fn emit_region(
 
                                     if exit.0 < emitted.len() { emitted[exit.0] = exit_was_emitted; }
 
-                                    out.push(StructuredStmt::DoWhile {
-                                        cond: *cond,
-                                        negate,
-                                        body,
-                                    });
+                                    if body_always_returns(&body) {
+                                        out.extend(body);
+                                    } else {
+                                        out.push(StructuredStmt::DoWhile {
+                                            cond: *cond,
+                                            negate,
+                                            body,
+                                        });
+                                    }
                                     current = exit;
                                     continue;
                                 }
