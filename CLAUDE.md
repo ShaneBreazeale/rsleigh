@@ -16,7 +16,7 @@ Wired into Spectra as a native analysis backend replacing the Ghidra JVM daemon.
 
 ## Current Status
 
-**Working end-to-end for 6 architectures:**
+**Working end-to-end for 7 architectures:**
 
 | Architecture | Constructors | Extensions |
 |---|---|---|
@@ -26,6 +26,9 @@ Wired into Spectra as a native analysis backend replacing the Ghidra JVM daemon.
 | ARM32 | 1200+ | ARMv7 + Thumb |
 | MIPS32 | 900+ | FPU + DSP + MIPS16 + microMIPS |
 | RISC-V 64 | 500+ | F/D/B/K/P/Q/V/C |
+| WebAssembly | — | WASM module decompilation |
+
+**Supported binary formats:** ELF (32/64), PE (32/64), Mach-O (64), WASM (.wasm), Raw binary (any arch).
 
 **9 test categories, ~6000 assertions:** golden P-code, stress/boundary, functional
 sequences, bug probes, compiled code patterns, Ghidra differential, decompiler
@@ -111,16 +114,26 @@ rsleigh <binary> --all                 # decompile all (two-pass type propagatio
 rsleigh <binary> --disasm <func>       # disassemble with P-code
 rsleigh <binary> --sigs extra.json     # load additional signatures
 rsleigh <binary> --json                # JSON output
+rsleigh <binary> --yara                # generate YARA rules from binary
+rsleigh <binary> --diff <binary2>      # diff decompilation between two binaries
+rsleigh <binary> --taint <func>        # taint analysis on function
+rsleigh --raw <arch> <binary>          # load raw firmware blob (any arch)
 ```
 
-Function discovery (beats Ghidra on 11/13 test binaries):
+Function discovery (beats Ghidra on 15/21 test binaries):
 symbol tables → recursive CALL descent → exhaustive CALL target scan (E8/BL) →
 `.pdata` exception dirs (PE64 x86-64 + ARM64 8-byte entries) →
 `LC_FUNCTION_STARTS` (Mach-O) → `__objc_stubs` + `__stubs` (Mach-O) →
 prologue scanning (x86-32/x86-64/AArch64 STP+SUB+ADRP) →
 JMP thunk detection (FF 25 / E9) → vtable pointer scanning (.rdata) →
-`.rdata` function pointer refs (PE64, strict prologue check).
+`.rdata` function pointer refs (PE64, strict prologue check) →
+ARM32 BL/Thumb BL target scanning.
 PE machine type auto-detection: x86-64 (0x8664), ARM64 (0xAA64), i386 (0x014C).
+
+**Stripped ELF discovery** (12 methods): `.eh_frame` FDE unwinding → RTTI vtable pointer
+scanning → indirect call target resolution → prologue pattern matching (x86-64 push+sub,
+AArch64 STP+SUB+ADRP, ARM32 PUSH+SUB) → CALL target enumeration → `.init_array`/`.fini_array`
+function pointer recovery → PLT stub enumeration → cross-reference analysis.
 
 ---
 
@@ -167,9 +180,11 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - x86-32 RET boilerplate stripping: removes stack pop from P-code ops
 
 **Fold passes (fold.rs):**
-- Standard optimizations: algebraic simplification, single-use temp inlining, copy propagation, dead flag elimination (x86 CF/ZF/SF/OF, ARM64 NG/ZR/CY/OV)
+- Standard optimizations: algebraic simplification, single-use temp inlining, copy propagation, dead flag elimination (x86 CF/ZF/SF/OF, ARM64 NG/ZR/CY/OV, ARM32 NG/ZR/CY/OV at offsets 96-99)
 - Condition recovery: compound Jcc flag patterns → comparisons
   (e.g., BoolAnd(BoolNot(ZF), IntEq(OF,SF)) → `a > b`)
+- **ARM32 condition recovery:** flag register offsets (NG=96, ZR=97, CY=98, OV=99) →
+  CMP operand tracing → comparison operators (==, !=, <, >, <=, >=)
 - Call argument collection (runs BEFORE fold to prevent DCE of arg registers):
   x86-64 SysV, Windows x64 (auto-detected from PE), x86-32 cdecl/thiscall (stack-pushed)
 - Division-by-constant (multiply+shift → `x / 7`) and modulo (`x - (x/D)*D` → `x % D`)
@@ -191,6 +206,11 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
   call-site inference (if callers use result → not void), two-pass propagation
 - **x86-32 stack param modeling:** `Load(EBP+8)` = param value read (not pointer deref);
   `format_vardef_expr` suppresses `*(param_N)` for stack parameters
+- **Taint analysis:** tracks data flow from user inputs (recv, read, fgets) through
+  operations to sensitive sinks (exec, system, SQL queries) with per-function reports
+- **String decryption:** identifies XOR/ADD/SUB loops over byte arrays, recovers plaintext
+- **Crypto detection:** 20+ patterns including AES S-box, DES permutation tables, RC4
+  key scheduling, SHA constants, CRC32 tables, custom XOR ciphers
 
 **Printer (printer.rs):**
 - Ghidra-style output: typed signatures, local var declarations, auto-named registers
@@ -217,6 +237,8 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - **C++ wrapper inlining:** `func_XXX(cout, "text")` → `cout << "text"` (chained `<<` supported)
 - **Global data naming:** `*(0x4326f4)` → `DAT_004326f4` (auto-detected from address range)
 - **ARM64 prologue/epilogue elision:** callee-saved saves, FP/LR setup, ObjC ARC noise removal
+- **ARM32 cleanup pass:** flag register elision (NG/ZR/CY/OV writes removed from output),
+  register renaming (r0-r15 → named registers), carry flag artifact cleanup
 - **Architecture-aware register auto-naming:** x86-32 ESI/EDI → iVar, ARM64 x19-x28 → lVar,
   x86-64 XMM0-15 → dVar, x86-64 param regs (RDI/RSI/RDX/RCX/R8/R9) → lVar in function body
 - **Pointer deref simplification:** `*(param_N)` → `*param_N`, `*(uint64_t*)(lVar)` → `*lVar`
@@ -227,6 +249,8 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - MSVC RTTI: vtable → COL → TypeDescriptor → class name resolution
 - **Malware analysis:** Win32 constant annotation, suspicious API flagging (24 APIs),
   stack cookie detection, dynamic resolve pattern recognition
+- **YARA rule generation:** auto-generates YARA rules from binary patterns and string signatures
+- **Diff decompilation:** side-by-side comparison of two binaries highlighting changed functions
 
 ### Peephole Optimizer (`pcode-ir/src/lib.rs`)
 
@@ -236,6 +260,18 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - Overwrite elimination
 - Output sinking (unique → copy dest)
 - Redundant IntAnd collapse
+
+---
+
+## Key Features
+
+- **String decryption:** identifies XOR/ADD/SUB encryption loops, recovers plaintext strings
+- **Crypto detection:** 20+ patterns (AES S-box, DES tables, RC4 KSA, SHA constants, CRC32, custom XOR)
+- **YARA generation:** `--yara` flag auto-generates YARA rules from binary patterns and strings
+- **Diff decompilation:** `--diff` compares two binaries, highlights changed/added/removed functions
+- **Taint tracking:** `--taint` traces data from inputs (recv, read) to sinks (exec, system, SQL)
+- **Raw firmware loading:** `--raw <arch>` loads raw binary blobs at base address for any supported arch
+- **WebAssembly decompilation:** WASM module parsing, function/type recovery, pseudocode output
 
 ---
 
@@ -255,6 +291,8 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - **x86-32 control flow** — sequential TEST/JNZ patterns sometimes nest incorrectly
 - **Register-indirect calls** — `CALL EDI` where EDI was loaded from IAT earlier
   not resolved to import names (only direct IAT calls resolved)
+- **ARM32 VFP/NEON** — float register tracking missing; VFP/NEON instructions decode
+  but floating-point values not traced through decompiler pipeline
 
 ---
 
@@ -285,8 +323,9 @@ $GHIDRA_HOME/support/analyzeHeadless /tmp/ghidra_proj proj \
   -import <binary> -postScript /tmp/CountFunctions.py -deleteProject
 ```
 
-**Current score: rsleigh 10 — Ghidra 1** on PE/Mach-O binaries (11 compared).
-Stripped ELF: Ghidra leads (55-93% coverage), needs more prologue patterns and reference analysis.
+**Current score: rsleigh 15 — Ghidra 6** on PE/Mach-O/ELF/ARM32 binaries (21 compared).
+Stripped ELF: eh_frame + RTTI vtable + prologue scanning now competitive.
+ARM32 binaries: BL/Thumb scanning + condition recovery tested.
 
 ## License
 
