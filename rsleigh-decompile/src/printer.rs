@@ -6629,6 +6629,33 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #VFP_ANNOTATE: Annotate ARM32 VFP coprocessor instructions as float operations.
+    // When ARM32 VFP instructions are decoded as generic cdp/ldc/mcrr (because the SLEIGH
+    // spec uses coprocessor encoding), annotate them with their float semantics.
+    if matches!(ctx.arch, Architecture::ARM32) {
+        for line in &mut lines {
+            if line.contains("//") { continue; }
+            let has_cdp_p11 = line.contains("cdp") && line.contains("p11");
+            let has_ldcl_p11 = line.contains("ldcl") && line.contains("p11");
+            let has_mcrr_p11 = line.contains("mcrr") && line.contains("p11");
+            let has_mcr_p11 = line.contains("mcr") && line.contains("p11") && !line.contains("mcrr");
+            if has_cdp_p11 {
+                let annotation = if line.contains("0x2") { "VMUL.F64 (float multiply)" }
+                    else if line.contains("0x3") { "VADD.F64 (float add)" }
+                    else if line.contains("0x4") { "VDIV.F64 (float divide)" }
+                    else if line.contains("0x1") { "VNMUL.F64 (float negate-multiply)" }
+                    else { "VFP float op" };
+                *line = format!("{} // {}", line.trim_end(), annotation);
+            } else if has_ldcl_p11 {
+                *line = format!("{} // VLDR (float load)", line.trim_end());
+            } else if has_mcrr_p11 {
+                *line = format!("{} // VMOV (move to float register)", line.trim_end());
+            } else if has_mcr_p11 {
+                *line = format!("{} // VMOV (float register move)", line.trim_end());
+            }
+        }
+    }
+
     // #CONST_CASTS: Add type casts to large hex constants in comparisons and assignments.
     for line in &mut lines {
         if line.contains("//") { continue; }
