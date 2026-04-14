@@ -43,6 +43,45 @@ pub fn print_c(
         .filter_map(|v| v.param_name.as_ref().cloned())
         .collect();
     post_process(&mut out, &all_aliases, &param_names, struct_fields, &ctx);
+
+    // Detect empty thunk functions: if body is empty after post-processing,
+    // check SSA for a Branch/Indirect terminator that jumps to another function.
+    // Show as tail call: "return target_func();" or "// thunk → FUN_XXXX"
+    let body_lines: Vec<&str> = out.lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim().starts_with("//") && !l.contains('{'))
+        .filter(|l| {
+            let t = l.trim();
+            // Skip variable declarations
+            !t.starts_with("int ") && !t.starts_with("long ") && !t.starts_with("uint")
+                && !t.starts_with("char ") && !t.starts_with("float ") && !t.starts_with("double ")
+                && !t.starts_with("bool ")
+        })
+        .collect();
+    if body_lines.is_empty() {
+        // For empty thunks: check if any SSA block has an Indirect terminator
+        // with a known target address. Also check Branch to blocks outside the function.
+        let func_addr = func_name.strip_prefix("func_")
+            .and_then(|hex| u64::from_str_radix(hex, 16).ok());
+        for block in &ssa.blocks {
+            match &block.terminator {
+                SsaTerminator::Branch(bid) | SsaTerminator::Fallthrough(bid) => {
+                    if let Some(target_block) = ssa.blocks.get(bid.0) {
+                        let addr = target_block.addr;
+                        // Skip if target is within the function (internal block)
+                        if addr != 0 && func_addr.map_or(true, |fa| addr != fa) {
+                            let target_name = imports.get(&addr)
+                                .cloned()
+                                .unwrap_or_else(|| format!("func_{:x}", addr));
+                            out.push_str(&format!("    return {}(); // thunk\n", target_name));
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     // Close the function body brace (opened in generate_function_signature)
     if out.starts_with("void ") || out.starts_with("int ") || out.starts_with("long ")
         || out.starts_with("float ") || out.starts_with("double ")
