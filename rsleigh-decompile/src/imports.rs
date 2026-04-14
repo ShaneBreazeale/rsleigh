@@ -33,7 +33,7 @@ fn resolve_ordinal(dll_name: &str, ordinal: u16) -> String {
     name.to_string()
 }
 
-/// Demangle a C++ symbol name if applicable, returning a simplified form.
+/// Demangle a C++ or Swift symbol name if applicable, returning a simplified form.
 fn demangle_name(name: &str) -> String {
     // Strip @@ version suffix first
     let clean = name.split("@@").next().unwrap_or(name);
@@ -42,6 +42,15 @@ fn demangle_name(name: &str) -> String {
         &clean[2..clean.len()-4]
     } else { clean };
     let clean = clean.to_string();
+
+    // Try Swift demangling first ($s prefix or _$s prefix)
+    let swift_name = name.strip_prefix('_').unwrap_or(name);
+    if swift_name.starts_with("$s") || swift_name.starts_with("$S") {
+        if let Some(demangled) = demangle_swift(swift_name) {
+            return demangled;
+        }
+    }
+
     // Try C++ demangling
     if let Ok(sym) = cpp_demangle::Symbol::new(name.as_bytes()) {
         let Ok(demangled) = sym.demangle() else { return clean; };
@@ -63,6 +72,119 @@ fn demangle_name(name: &str) -> String {
     } else {
         clean
     }
+}
+
+/// Demangle Swift symbols. Swift mangling scheme:
+/// $s<module_len><module><entity_len><entity><suffix>
+///
+/// Common suffixes:
+///   F = function, C = class, V = struct, O = enum
+///   fC = constructor, fd = deinit, fD = deallocator
+///   vg = getter, vs = setter, vM = modify coroutine
+///   Ma = metadata accessor, MF = field descriptor
+///   Tj = dispatch thunk
+///
+/// Types: S = String, Si = Int, Sb = Bool, Sd = Double, SS = String (again)
+///        S2i = (Int, Int), Say = Array
+fn demangle_swift(name: &str) -> Option<String> {
+    let s = name.strip_prefix("$s").or_else(|| name.strip_prefix("$S"))?;
+
+    // Parse module name: <length><name>
+    let (module, rest) = parse_swift_identifier(s)?;
+
+    // Parse entity name and suffix
+    // Common patterns:
+    //   <len><class>C<len><method><suffix>  - class method
+    //   <len><func><suffix>                  - free function
+    //   <len><class>C<len><prop>v<g|s|M>    - property accessor
+    //   <len><class>CACycfC                  - constructor
+    //   <len><class>Cfd                      - deinit
+    //   <len><class>CMa                      - metadata accessor
+
+    // Try: class + method/property
+    if let Some((class_name, after_class)) = parse_swift_identifier(rest) {
+        if after_class.starts_with('C') {
+            let after_c = &after_class[1..];
+
+            // Constructor: ACycfC or ACycfc
+            if after_c.starts_with("ACycfC") || after_c.starts_with("ACycfc") {
+                return Some(format!("{}.init", class_name));
+            }
+            // Deinit: fd
+            if after_c == "fd" {
+                return Some(format!("{}.deinit", class_name));
+            }
+            // Deallocator: fD
+            if after_c == "fD" {
+                return Some(format!("{}.deinit", class_name));
+            }
+            // Metadata accessor: Ma
+            if after_c == "Ma" {
+                return Some(format!("{}.__metadata", class_name));
+            }
+            // Field descriptor: MF
+            if after_c == "MF" {
+                return Some(format!("{}.__fields", class_name));
+            }
+
+            // Property: <len><name><type>v<g|s|M>
+            if let Some((prop_name, after_prop)) = parse_swift_identifier(after_c) {
+                // Property getter/setter/modify
+                if after_prop.contains("vg") {
+                    return Some(format!("{}.{}.getter", class_name, prop_name));
+                }
+                if after_prop.contains("vs") {
+                    return Some(format!("{}.{}.setter", class_name, prop_name));
+                }
+                if after_prop.contains("vM") {
+                    return Some(format!("{}.{}.modify", class_name, prop_name));
+                }
+                // Method: <len><name><type_sig>F
+                if after_prop.ends_with('F') || after_prop.contains("Tq") || after_prop.contains("Tj") {
+                    return Some(format!("{}.{}", class_name, prop_name));
+                }
+                // Field descriptor
+                if after_prop.contains("Wvd") {
+                    return Some(format!("{}.{}.descriptor", class_name, prop_name));
+                }
+                // Generic method — just use the name
+                return Some(format!("{}.{}", class_name, prop_name));
+            }
+
+            // Fallback for class-level entities
+            return Some(class_name.to_string());
+        }
+
+        // Free function or struct method (no C suffix)
+        // e.g., $s16test_swift_arm649fibonacciyS2iF → fibonacci
+        // The entity_name is the function name, after_class has type sig
+        if after_class.ends_with('F') || after_class.contains("yS") || after_class.contains("ySb")
+            || after_class.contains("ySi") || after_class.contains("ySS") || after_class.contains("ySd")
+        {
+            return Some(class_name.to_string());
+        }
+    }
+
+    // stdlib: $ss prefix (Swift standard library)
+    if module == "s" {
+        if let Some((entity, _)) = parse_swift_identifier(rest) {
+            return Some(format!("Swift.{}", entity));
+        }
+    }
+
+    None
+}
+
+/// Parse a Swift mangled identifier: <decimal_length><name>
+fn parse_swift_identifier(s: &str) -> Option<(&str, &str)> {
+    let mut len_end = 0;
+    while len_end < s.len() && s.as_bytes()[len_end].is_ascii_digit() {
+        len_end += 1;
+    }
+    if len_end == 0 { return None; }
+    let len: usize = s[..len_end].parse().ok()?;
+    if len_end + len > s.len() { return None; }
+    Some((&s[len_end..len_end + len], &s[len_end + len..]))
 }
 
 /// Simplify demangled C++ names for readability.

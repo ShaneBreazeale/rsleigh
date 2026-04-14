@@ -12,6 +12,62 @@ mod wasm;
 
 use std::path::Path;
 
+/// Demangle a Swift symbol name to a human-readable form.
+/// Returns None if not a Swift symbol.
+fn demangle_swift_symbol(name: &str) -> Option<String> {
+    let s = name.strip_prefix("$s").or_else(|| name.strip_prefix("$S"))?;
+
+    // Parse module name: <length><name>
+    let (module, rest) = parse_swift_id(s)?;
+
+    // Try class + method/property
+    if let Some((class_name, after_class)) = parse_swift_id(rest) {
+        if after_class.starts_with('C') {
+            let after_c = &after_class[1..];
+            if after_c.starts_with("ACycfC") || after_c.starts_with("ACycfc") {
+                return Some(format!("{}.init", class_name));
+            }
+            if after_c == "fd" || after_c == "fD" { return Some(format!("{}.deinit", class_name)); }
+            if after_c == "Ma" { return Some(format!("{}.__metadata", class_name)); }
+            if after_c == "MF" { return Some(format!("{}.__fields", class_name)); }
+            if after_c == "Mm" || after_c == "Mf" || after_c == "N" {
+                return Some(format!("{}.__metadata", class_name));
+            }
+
+            if let Some((prop_name, after_prop)) = parse_swift_id(after_c) {
+                if after_prop.contains("vg") { return Some(format!("{}.{}.getter", class_name, prop_name)); }
+                if after_prop.contains("vs") { return Some(format!("{}.{}.setter", class_name, prop_name)); }
+                if after_prop.contains("vM") { return Some(format!("{}.{}.modify", class_name, prop_name)); }
+                if after_prop.contains("Wvd") { return Some(format!("{}.{}", class_name, prop_name)); }
+                return Some(format!("{}.{}", class_name, prop_name));
+            }
+            return Some(class_name.to_string());
+        }
+        // Free function
+        if after_class.ends_with('F') || after_class.contains("yS") {
+            return Some(class_name.to_string());
+        }
+    }
+
+    // stdlib ($ss prefix)
+    if module == "s" {
+        if let Some((entity, _)) = parse_swift_id(rest) {
+            return Some(format!("Swift.{}", entity));
+        }
+    }
+
+    None
+}
+
+fn parse_swift_id(s: &str) -> Option<(&str, &str)> {
+    let mut len_end = 0;
+    while len_end < s.len() && s.as_bytes()[len_end].is_ascii_digit() { len_end += 1; }
+    if len_end == 0 { return None; }
+    let len: usize = s[..len_end].parse().ok()?;
+    if len_end + len > s.len() { return None; }
+    Some((&s[len_end..len_end + len], &s[len_end + len..]))
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
@@ -2221,7 +2277,9 @@ fn parse_binary(obj: &goblin::Object, _data: &[u8]) -> Option<(rsleigh_api::Arch
                 for s in st.iter() {
                     if let Ok((name, nlist)) = s {
                         if nlist.n_type & 0xe == 0xe && nlist.n_value != 0 {
-                            syms.push((nlist.n_value, name.strip_prefix('_').unwrap_or(name).to_string()));
+                            let clean = name.strip_prefix('_').unwrap_or(name);
+                            let display = demangle_swift_symbol(clean).unwrap_or_else(|| clean.to_string());
+                            syms.push((nlist.n_value, display));
                         }
                     }
                 }

@@ -1307,6 +1307,13 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         if t.starts_with("objc_autoreleasePoolPush(") { return false; }
         if t.starts_with("objc_autoreleasePoolPop(") { return false; }
         if t.starts_with("objc_autoreleaseReturnValue(") { return false; }
+        // Swift ARC noise
+        if t.starts_with("swift_retain(") && t.ends_with(");") { return false; }
+        if t.starts_with("swift_release(") && t.ends_with(");") { return false; }
+        if t.starts_with("swift_bridgeObjectRetain(") && t.ends_with(");") { return false; }
+        if t.starts_with("swift_bridgeObjectRelease(") && t.ends_with(");") { return false; }
+        if t.starts_with("swift_unknownObjectRetain(") && t.ends_with(");") { return false; }
+        if t.starts_with("swift_unknownObjectRelease(") && t.ends_with(");") { return false; }
         // x30 = address (link register setup for calls — noise)
         if t.starts_with("x30 = 0x") && t.ends_with(';') { return false; }
         if t.starts_with("x30 = ") && t.contains(" + ") && t.ends_with(';') && !t.contains("func_") { return false; }
