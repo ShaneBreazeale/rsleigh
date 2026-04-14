@@ -80,7 +80,8 @@ rsleigh/
 │       ├── signatures_win32.rs ← 128 hand-tuned Win32 signatures (HKEY, HWND, etc.)
 │       ├── ssa.rs              ← SSA construction with Phi insertion
 │       ├── structure.rs        ← if/else, while/do-while loop recovery from dominators
-│       └── analysis.rs         ← FunctionMeta, VulnFinding, CallGraphEntry (serde::Serialize)
+│       ├── analysis.rs         ← FunctionMeta, VulnFinding, CallGraphEntry (serde::Serialize)
+│       └── cpp_class.rs        ← C++ class/vtable/hierarchy recovery (MSVC + GCC RTTI)
 ├── rsleigh-cli/                ← CLI: decompile any binary to C pseudocode
 ├── scripts/
 │   └── extract-ghidra-sigs.py  ← extract signatures from Ghidra .gdt archives
@@ -125,6 +126,8 @@ rsleigh <binary> --diff <binary2>      # diff decompilation between two binaries
 rsleigh <binary> --taint <func>        # taint analysis on function
 rsleigh <binary> --vulnscan            # vulnerability scan (27 patterns, color-coded severity)
 rsleigh <binary> --callgraph           # call graph export (JSON with behavioral tags)
+rsleigh <binary> --classes             # recover C++ class hierarchies (MSVC + GCC RTTI)
+rsleigh <binary> --classes --json      # class hierarchy as structured JSON
 rsleigh <binary> --compact             # strip declarations, 2-space indent (24% smaller)
 rsleigh <binary> --brief               # calls + control flow only (35% smaller)
 rsleigh <binary> --min-complexity N    # skip functions with complexity below N
@@ -263,7 +266,8 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - Control flow recovery: for-loops, **do-while** (back-edge post-test), switch/case, else-if
 - Simplifications: dead stores, unreachable returns, phi artifact cleanup, increment shorthand,
   constant folding, ESP/RSP stack noise elimination, pointer deref simplification
-- MSVC RTTI: vtable → COL → TypeDescriptor → class name resolution
+- MSVC RTTI: vtable → CompleteObjectLocator → TypeDescriptor → ClassHierarchyDescriptor → BaseClassArray; resolves class names, inheritance chains, and virtual method tables
+- GCC RTTI: `_ZTV` (vtable) + `_ZTI` (typeinfo) symbol parsing with template demangling; multi-level inheritance from typeinfo base class lists
 - **Malware analysis:** Win32 constant annotation, suspicious API flagging (24 APIs),
   stack cookie detection, dynamic resolve pattern recognition
 - **YARA rule generation:** auto-generates YARA rules from binary patterns and string signatures
@@ -295,6 +299,7 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - **Analysis API:** `FunctionMeta`, `VulnFinding`, `CallGraphEntry` structs with `serde::Serialize` for Spectra integration and tool pipelines
 - **Token-efficient output:** `--compact` (24% reduction), `--brief` (35%), `--min-complexity N` (skip trivial functions); combined `--brief --min-complexity 5` = 40% token reduction for LLM-assisted analysis
 - **ARM32 VFP/NEON float instructions:** vmul.f64, vldr, vmov decoded via ARM7_le.slaspec (not ARM7_le_base); full VFP/NEON constructor support
+- **C++ class/vtable/hierarchy recovery:** `CppClass` (name, base classes, vtable address, virtual methods, fields), `VirtualMethod` (name, vtable slot index, address), `ClassField` (offset, size, inferred type) structs. MSVC RTTI chain: CompleteObjectLocator → TypeDescriptor → ClassHierarchyDescriptor → BaseClassArray for multi-level inheritance. GCC RTTI: `_ZTV` vtable symbols + `_ZTI` typeinfo symbols with template demangling (`std::vector<int, std::allocator<int>>`). Field inference from decompiled output (offset gaps, typed API arguments). `--classes` and `--classes --json` CLI output.
 
 ---
 

@@ -31,6 +31,8 @@ rsleigh --raw --arch arm32 fw.bin      # load raw firmware blob
 rsleigh ./binary --taint main          # taint analysis
 rsleigh ./binary --vulnscan            # scan all functions for vulnerabilities
 rsleigh ./binary --callgraph           # export call graph as JSON
+rsleigh ./binary --classes             # recover C++ class hierarchies
+rsleigh ./binary --classes --json      # class hierarchy as JSON
 ```
 
 ```
@@ -222,6 +224,62 @@ phttp::Shutdown();
 ```
 
 Tested against 30+ CTF binaries from CSAW, HSCTF, DiceCTF, Google CTF, hkcert, Crypto-Cat, fbctf, and Phoenix. Tested on Sysinternals PE64 tools (PsExec, strings64, whois64), tinyssh, phttp, and real malware samples from theZoo (WannaCry, Stuxnet/Duqu, Dyre, Emotet, Wildfire).
+
+## C++ Class Recovery
+
+```bash
+rsleigh ./binary --classes             # recover class hierarchies
+rsleigh ./binary --classes --json      # structured JSON output
+```
+
+Recovers C++ class hierarchies from MSVC RTTI (CompleteObjectLocator, TypeDescriptor, ClassHierarchyDescriptor) and GCC RTTI (`_ZTV`/`_ZTI` symbols). Handles template demangling (`std::vector<int, std::allocator<int>>`) and multi-level inheritance chains.
+
+```
+$ rsleigh ./PsExec.exe --classes
+class CSvcBase
+  vtable @ 0x14001c280
+  virtual ~CSvcBase()
+  virtual Start()
+  virtual Stop()
+
+class CSvc : public CSvcBase
+  vtable @ 0x14001c2b0
+  virtual ~CSvc()
+  virtual Start()
+  virtual Stop()
+  virtual Install()
+
+class CService : public CSvc
+  vtable @ 0x14001c2e0
+  virtual ~CService()
+  virtual Start()
+  virtual Stop()
+  virtual Run()
+  fields:
+    +0x08: HANDLE hThread
+    +0x10: DWORD dwStatus
+
+$ rsleigh ./apt-cache --classes
+class pkgCache::Header
+  vtable @ 0x4a2c80
+
+class APT::CacheFilter::Matcher
+  vtable @ 0x4a2e60
+  virtual ~Matcher()
+  virtual operator()(pkgCache::GrpIterator const&)
+
+class APT::CacheFilter::PackageMatcher : public APT::CacheFilter::Matcher
+  vtable @ 0x4a2ea0
+  virtual ~PackageMatcher()
+  virtual operator()(pkgCache::PkgIterator const&)
+
+class APT::CacheFilter::Regex<std::basic_regex<char, std::regex_traits<char>>> : public APT::CacheFilter::PackageMatcher
+  vtable @ 0x4a2f20
+  virtual ~Regex()
+  virtual operator()(pkgCache::PkgIterator const&)
+```
+
+9 classes recovered from PsExec (MSVC RTTI), 4 classes with template types from apt-cache (GCC RTTI).
 
 ## Architectures
 
