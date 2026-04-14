@@ -27,6 +27,8 @@ fn main() {
         eprintln!("  rsleigh <binary> --yara             Generate YARA detection rule");
         eprintln!("  rsleigh old.bin --diff new.bin      Diff decompilation (show changes)");
         eprintln!("  rsleigh <binary> --taint            Taint analysis (trace user input to sinks)");
+        eprintln!("  rsleigh <binary> --summary          AI summary (one-line per function)");
+        eprintln!("  rsleigh <binary> --xrefs <func>     Cross-references (callers + callees)");
         eprintln!("  rsleigh <binary> --raw <arch>       Load raw binary (mips32/arm32/x86-64/...)");
         std::process::exit(1);
     }
@@ -36,6 +38,8 @@ fn main() {
     let all_mode = args.iter().any(|a| a == "--all");
     let disasm_mode = args.iter().any(|a| a == "--disasm");
     let yara_mode = args.iter().any(|a| a == "--yara");
+    let summary_mode = args.iter().any(|a| a == "--summary");
+    let xrefs_mode = args.iter().any(|a| a == "--xrefs");
 
     if yara_mode {
         let data = match std::fs::read(binary_path) {
@@ -43,6 +47,33 @@ fn main() {
             Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
         };
         generate_yara_rule(binary_path, &data);
+        return;
+    }
+
+    // Summary/Xrefs modes: analyze binary structure
+    if summary_mode || xrefs_mode {
+        let data = match std::fs::read(binary_path) {
+            Ok(d) => d,
+            Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
+        };
+        let bp = binary_path.clone();
+        let args_clone = args.clone();
+        let t = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                if summary_mode {
+                    run_summary(&bp, &data);
+                } else {
+                    let target = args_clone.iter()
+                        .position(|a| a == "--xrefs")
+                        .and_then(|i| args_clone.get(i + 1))
+                        .cloned()
+                        .unwrap_or_default();
+                    run_xrefs(&bp, &data, &target);
+                }
+            })
+            .unwrap();
+        if let Err(e) = t.join() { eprintln!("Panic: {:?}", e); }
         return;
     }
 
@@ -622,6 +653,331 @@ fn build_import_map(obj: &goblin::Object, data: &[u8]) -> std::collections::Hash
         _ => {}
     }
     map
+}
+
+/// Generate a one-line summary per function for AI-assisted triage.
+/// Shows: function name, calls made, strings referenced, patterns detected.
+fn run_summary(binary_path: &str, data: &[u8]) {
+    let obj = match goblin::Object::parse(data) {
+        Ok(o) => o,
+        Err(e) => { eprintln!("Error: {}", e); return; }
+    };
+    let (arch, segs, mut symbols) = match parse_binary(&obj, data) {
+        Some(r) => r,
+        None => { eprintln!("Unsupported format"); return; }
+    };
+    // Discover functions for stripped binaries
+    if symbols.is_empty() {
+        if let goblin::Object::PE(pe) = &obj {
+            let base = pe.image_base as u64;
+            let entry = base + pe.header.optional_header.unwrap().standard_fields.address_of_entry_point as u64;
+            symbols = discover_pe_functions(entry, &segs, data, arch);
+        }
+    }
+    let is_elf_stripped = if let goblin::Object::Elf(elf) = &obj { elf.syms.len() == 0 } else { false };
+    if is_elf_stripped {
+        if let goblin::Object::Elf(elf) = &obj {
+            let discovered = discover_elf_functions(elf, &segs, data, arch);
+            let existing: std::collections::BTreeSet<u64> = symbols.iter().map(|(a, _)| *a).collect();
+            for (addr, name) in discovered {
+                if !existing.contains(&addr) { symbols.push((addr, name)); }
+            }
+        }
+    }
+
+    let path = std::path::Path::new(binary_path);
+    let import_map = build_import_map(&obj, data);
+    let mut dec = rsleigh_api::Decoder::new(arch);
+
+    eprintln!("{} functions in {}", symbols.len(), binary_path);
+    println!("{:<14} {:<25} {:<40} {}", "Address", "Name", "Calls", "Strings/Patterns");
+    println!("{}", "-".repeat(100));
+
+    for (func_addr, func_name) in &symbols {
+        let off = segs.iter().find_map(|(va, sz, fo)| {
+            if *func_addr >= *va && *func_addr < va + sz { Some(fo + (func_addr - va)) } else { None }
+        });
+        let Some(off) = off else { continue };
+        let max = 4096.min(data.len().saturating_sub(off as usize));
+        if max < 2 { continue; }
+        let bytes = &data[off as usize..off as usize + max];
+
+        let next_func = symbols.iter()
+            .filter(|(a, _)| *a > *func_addr)
+            .map(|(a, _)| *a)
+            .min()
+            .unwrap_or(func_addr + max as u64);
+        let decode_max = ((next_func - func_addr) as usize).min(max);
+
+        let mut insts = Vec::new();
+        let mut pos = 0;
+        while pos < decode_max {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                dec.decode(&bytes[pos..], func_addr + pos as u64)
+            })) {
+                Ok(Ok(inst)) => { let l = inst.len as usize; if l == 0 { pos += 1; continue; } insts.push((func_addr + pos as u64, inst)); pos += l; }
+                _ => { pos += 1; }
+            }
+        }
+
+        if insts.is_empty() { continue; }
+
+        // Decompile and extract metadata
+        let output = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            rsleigh_decompile::decompile_with_binary(arch, &insts, Some(data), Some(path))
+        }));
+        let output = match output { Ok(o) => o, Err(_) => continue };
+
+        // Extract calls
+        let mut calls = Vec::new();
+        for line in output.lines() {
+            let t = line.trim();
+            if t.contains('(') && t.contains(')') && !t.starts_with("//") && !t.starts_with("if ")
+                && !t.starts_with("while ") && !t.starts_with("for ") && !t.contains(" = ") {
+                // Standalone call: func_name(args);
+                if let Some(paren) = t.find('(') {
+                    let callee = t[..paren].trim().trim_start_matches("return ");
+                    if !callee.is_empty() && !callee.contains(' ') && callee.len() < 40 {
+                        calls.push(callee.to_string());
+                    }
+                }
+            }
+            // Also extract from assignments: var = func(args);
+            if let Some(eq) = t.find(" = ") {
+                let rhs = &t[eq + 3..];
+                if let Some(paren) = rhs.find('(') {
+                    let callee = rhs[..paren].trim();
+                    if !callee.is_empty() && !callee.starts_with('*') && !callee.starts_with('(')
+                        && !callee.contains(' ') && callee.len() < 40 {
+                        if !calls.contains(&callee.to_string()) {
+                            calls.push(callee.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Extract strings
+        let mut strings = Vec::new();
+        for line in output.lines() {
+            let t = line.trim();
+            if let Some(q1) = t.find('"') {
+                if let Some(q2) = t[q1+1..].find('"') {
+                    let s = &t[q1+1..q1+1+q2];
+                    if s.len() >= 3 && s.len() <= 40 && !strings.contains(&s.to_string()) {
+                        strings.push(s.to_string());
+                    }
+                }
+            }
+        }
+
+        // Detect patterns
+        let mut patterns = Vec::new();
+        if output.contains("XOR") || output.contains("^ 0x") { patterns.push("xor"); }
+        if output.contains("AES") || output.contains("SHA") || output.contains("CRC32") { patterns.push("crypto"); }
+        if output.contains("TAINT") { patterns.push("taint"); }
+        if output.contains("stack cookie") { patterns.push("canary"); }
+        if output.contains("VirtualAlloc") || output.contains("mmap") { patterns.push("alloc"); }
+        if output.contains("recv") || output.contains("send") || output.contains("socket") { patterns.push("network"); }
+        if output.contains("RegSetValue") || output.contains("RegCreateKey") { patterns.push("registry"); }
+        if output.contains("CreateFile") || output.contains("fopen") { patterns.push("file"); }
+        if output.contains("system(") || output.contains("exec(") || output.contains("popen(") { patterns.push("exec"); }
+
+        // Format output
+        let calls_str = if calls.len() > 3 {
+            format!("{}, +{} more", calls[..3].join(", "), calls.len() - 3)
+        } else {
+            calls.join(", ")
+        };
+
+        let mut info_parts = Vec::new();
+        if !strings.is_empty() {
+            let s = if strings.len() > 2 {
+                format!("\"{}\" +{}", strings[0], strings.len() - 1)
+            } else {
+                strings.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(" ")
+            };
+            info_parts.push(s);
+        }
+        if !patterns.is_empty() {
+            info_parts.push(format!("[{}]", patterns.join(",")));
+        }
+
+        println!("0x{:012x} {:<25} {:<40} {}",
+            func_addr, func_name, calls_str, info_parts.join(" "));
+    }
+}
+
+/// Show cross-references for a function: callers, callees, strings, data refs.
+fn run_xrefs(binary_path: &str, data: &[u8], target_name: &str) {
+    if target_name.is_empty() {
+        eprintln!("Usage: rsleigh <binary> --xrefs <func_name>");
+        return;
+    }
+
+    let obj = match goblin::Object::parse(data) {
+        Ok(o) => o,
+        Err(e) => { eprintln!("Error: {}", e); return; }
+    };
+    let (arch, segs, mut symbols) = match parse_binary(&obj, data) {
+        Some(r) => r,
+        None => { eprintln!("Unsupported format"); return; }
+    };
+    if symbols.is_empty() {
+        if let goblin::Object::PE(pe) = &obj {
+            let base = pe.image_base as u64;
+            let entry = base + pe.header.optional_header.unwrap().standard_fields.address_of_entry_point as u64;
+            symbols = discover_pe_functions(entry, &segs, data, arch);
+        }
+    }
+    let is_elf_stripped = if let goblin::Object::Elf(elf) = &obj { elf.syms.len() == 0 } else { false };
+    if is_elf_stripped {
+        if let goblin::Object::Elf(elf) = &obj {
+            let discovered = discover_elf_functions(elf, &segs, data, arch);
+            let existing: std::collections::BTreeSet<u64> = symbols.iter().map(|(a, _)| *a).collect();
+            for (addr, name) in discovered {
+                if !existing.contains(&addr) { symbols.push((addr, name)); }
+            }
+        }
+    }
+
+    // Find the target function
+    let target_addr = if let Some(hex) = target_name.strip_prefix("0x") {
+        u64::from_str_radix(hex, 16).ok()
+    } else {
+        symbols.iter().find(|(_, n)| n == target_name).map(|(a, _)| *a)
+    };
+    let Some(target_addr) = target_addr else {
+        eprintln!("Function '{}' not found", target_name);
+        return;
+    };
+    let target_display = symbols.iter().find(|(a, _)| *a == target_addr)
+        .map(|(_, n)| n.as_str()).unwrap_or(target_name);
+
+    let path = std::path::Path::new(binary_path);
+    let mut dec = rsleigh_api::Decoder::new(arch);
+
+    // Phase 1: Decompile target function to find its callees and strings
+    let mut callees = Vec::new();
+    let mut strings_in_target = Vec::new();
+    let mut target_output = String::new();
+    {
+        let off = segs.iter().find_map(|(va, sz, fo)| {
+            if target_addr >= *va && target_addr < va + sz { Some(fo + (target_addr - va)) } else { None }
+        });
+        if let Some(off) = off {
+            let max = 8192.min(data.len().saturating_sub(off as usize));
+            let bytes = &data[off as usize..off as usize + max];
+            let next_func = symbols.iter().filter(|(a, _)| *a > target_addr).map(|(a, _)| *a).min().unwrap_or(target_addr + max as u64);
+            let decode_max = ((next_func - target_addr) as usize).min(max);
+            let mut insts = Vec::new();
+            let mut pos = 0;
+            while pos < decode_max {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dec.decode(&bytes[pos..], target_addr + pos as u64))) {
+                    Ok(Ok(inst)) => { let l = inst.len as usize; if l == 0 { pos += 1; continue; } insts.push((target_addr + pos as u64, inst)); pos += l; }
+                    _ => { pos += 1; }
+                }
+            }
+            if !insts.is_empty() {
+                target_output = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    rsleigh_decompile::decompile_with_binary(arch, &insts, Some(data), Some(path))
+                })).unwrap_or_default();
+            }
+        }
+        // Extract callees and strings from decompiled output
+        for line in target_output.lines() {
+            let t = line.trim();
+            // Extract function calls
+            if t.contains('(') && !t.starts_with("//") {
+                if let Some(paren) = t.find('(') {
+                    let before = if let Some(eq) = t.find(" = ") {
+                        &t[eq+3..paren]
+                    } else { &t[..paren] };
+                    let callee = before.trim().trim_start_matches("return ");
+                    if !callee.is_empty() && !callee.contains(' ') && !callee.starts_with('*')
+                        && !callee.starts_with('(') && !callee.starts_with("if")
+                        && !callee.starts_with("while") && callee.len() < 50
+                        && !callees.contains(&callee.to_string()) {
+                        callees.push(callee.to_string());
+                    }
+                }
+            }
+            // Extract strings
+            if let Some(q1) = t.find('"') {
+                if let Some(q2) = t[q1+1..].find('"') {
+                    let s = &t[q1+1..q1+1+q2];
+                    if s.len() >= 2 && s.len() <= 60 { strings_in_target.push(s.to_string()); }
+                }
+            }
+        }
+    }
+
+    // Phase 2: Scan ALL functions to find callers (functions that call target)
+    let mut callers = Vec::new();
+    for (func_addr, func_name) in &symbols {
+        if *func_addr == target_addr { continue; }
+        let off = segs.iter().find_map(|(va, sz, fo)| {
+            if *func_addr >= *va && *func_addr < va + sz { Some(fo + (func_addr - va)) } else { None }
+        });
+        let Some(off) = off else { continue };
+        let max = 4096.min(data.len().saturating_sub(off as usize));
+        if max < 2 { continue; }
+        let bytes = &data[off as usize..off as usize + max];
+        let next_func = symbols.iter().filter(|(a, _)| *a > *func_addr).map(|(a, _)| *a).min().unwrap_or(func_addr + max as u64);
+        let decode_max = ((next_func - func_addr) as usize).min(max);
+        let mut insts = Vec::new();
+        let mut pos = 0;
+        while pos < decode_max {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dec.decode(&bytes[pos..], func_addr + pos as u64))) {
+                Ok(Ok(inst)) => {
+                    let l = inst.len as usize;
+                    if l == 0 { pos += 1; continue; }
+                    // Check if this instruction calls the target
+                    let dis = &inst.disassembly;
+                    if dis.starts_with("CALL ") || dis.starts_with("BL ") {
+                        if let Some(target_str) = dis.split_whitespace().nth(1) {
+                            if let Some(hex) = target_str.strip_prefix("0x") {
+                                if let Ok(addr) = u64::from_str_radix(hex, 16) {
+                                    if addr == target_addr {
+                                        callers.push((func_addr.clone(), func_name.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    insts.push((func_addr + pos as u64, inst));
+                    pos += l;
+                }
+                _ => { pos += 1; }
+            }
+        }
+    }
+
+    // Output
+    println!("=== Cross-references for {} (0x{:x}) ===", target_display, target_addr);
+    println!();
+    println!("Called by ({} callers):", callers.len());
+    if callers.is_empty() {
+        println!("  (none found — may be called indirectly or is entry point)");
+    }
+    for (addr, name) in &callers {
+        println!("  0x{:012x}  {}", addr, name);
+    }
+    println!();
+    println!("Calls ({} callees):", callees.len());
+    for callee in &callees {
+        println!("  {}", callee);
+    }
+    println!();
+    if !strings_in_target.is_empty() {
+        println!("Strings ({}):", strings_in_target.len());
+        for s in &strings_in_target {
+            println!("  \"{}\"", s);
+        }
+        println!();
+    }
+    println!("Decompiled output:");
+    println!("{}", target_output);
 }
 
 fn generate_yara_rule(binary_path: &str, data: &[u8]) {
