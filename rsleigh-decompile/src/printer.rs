@@ -1492,8 +1492,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 if t.ends_with(';') && !t.contains("func_") && !t.contains("param_") {
                     // lr = expr; (return address setup — noise)
                     if t.starts_with("lr = ") || t.starts_with("lr =") { return false; }
-                    // return sp; or return sp + N;
+                    // return sp; or return sp + N; or return ((sp+4)+4)...
                     if t.starts_with("return sp") { return false; }
+                    if t.starts_with("return ((") && t.contains("sp") { return false; }
+                    if t.starts_with("return *(sp") || t.starts_with("return sp[") { return false; }
+                    if t.starts_with("return *(uint32_t*)(sp") { return false; }
                     // Remaining flag patterns: NG = ..., ZR = ..., etc in middle of lines
                     for flag in ["NG = ", "ZR = ", "CY = ", "OV = ", "tmpNG ", "tmpZR ", "tmpCY ", "tmpOV "] {
                         if t.starts_with(flag) { return false; }
@@ -1548,23 +1551,50 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
 
                     // Replace flag-based conditions with readable ones
                     let new_cond = match cond {
+                        // ARM condition code → C comparison
+                        // EQ: ZR set
                         "ZR" => "result == 0",
+                        // NE: ZR clear
                         "!ZR" | "!(ZR)" => "result != 0",
-                        "CY" => "result < 0 /* unsigned */",
-                        "!CY" | "!(CY)" => "result >= 0 /* unsigned */",
+                        // CS/HS: CY set (unsigned >=)
+                        "CY" => "result >= 0 /* unsigned */",
+                        // CC/LO: CY clear (unsigned <)
+                        "!CY" | "!(CY)" => "result < 0 /* unsigned */",
+                        // MI: NG set (negative)
                         "NG" => "result < 0",
+                        // PL: NG clear (positive or zero)
                         "!NG" | "!(NG)" => "result >= 0",
-                        "true" => "true",
+                        // VS: OV set
+                        "OV" => "overflow",
+                        // VC: OV clear
+                        "!OV" | "!(OV)" => "!overflow",
+                        // HI: CY && !ZR (unsigned >)
                         "CY && !ZR" | "!ZR && CY" => "result > 0 /* unsigned */",
+                        "!CY && !ZR" => "result > 0 /* unsigned */",
+                        // LS: !CY || ZR (unsigned <=)
                         "!CY || ZR" | "ZR || !CY" => "result <= 0 /* unsigned */",
+                        "CY || ZR" | "ZR || CY" => "result <= 0 /* unsigned */",
+                        "!!CY || ZR" => "result <= 0 /* unsigned */",
+                        // Also match with parens
+                        "!(CY && !ZR)" => "result <= 0 /* unsigned */",
+                        // GE: NG == OV (signed >=) — already handled by fold, but catch remainders
+                        // LT: NG != OV (signed <)
+                        // GT: !ZR && NG == OV (signed >)
+                        "!ZR && result >= 0" => "result > 0 /* signed */",
+                        // LE: ZR || NG != OV (signed <=)
+                        "ZR || result < 0" => "result <= 0 /* signed */",
+                        "true" => "true",
                         _ => {
-                            // Try to clean up remaining flag references in conditions
+                            // Try to clean up remaining flag references
                             if cond.contains("CY") || cond.contains("ZR") || cond.contains("NG") || cond.contains("OV") {
-                                // Complex flag condition — simplify common patterns
                                 let cleaned = cond
                                     .replace("!NG == OV", "result >= 0")
                                     .replace("NG == OV", "result >= 0")
-                                    .replace("NG != OV", "result < 0");
+                                    .replace("NG != OV", "result < 0")
+                                    .replace("!!CY", "CY")
+                                    .replace("!CY && !ZR", "result > 0 /* unsigned */")
+                                    .replace("CY || ZR", "result <= 0 /* unsigned */")
+                                    .replace("!CY || ZR", "result <= 0 /* unsigned */");
                                 if cleaned != cond {
                                     *line = format!("{}{}{}{}", pad, prefix, cleaned, suffix);
                                 }
