@@ -25,6 +25,7 @@ fn main() {
         eprintln!("  rsleigh <binary> --disasm <func>   Disassemble with P-code");
         eprintln!("  rsleigh <binary> --sigs <file.json> Load extra signatures");
         eprintln!("  rsleigh <binary> --yara             Generate YARA detection rule");
+        eprintln!("  rsleigh old.bin --diff new.bin      Diff decompilation (show changes)");
         eprintln!("  rsleigh <binary> --raw <arch>       Load raw binary (mips32/arm32/x86-64/...)");
         std::process::exit(1);
     }
@@ -41,6 +42,27 @@ fn main() {
             Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
         };
         generate_yara_rule(binary_path, &data);
+        return;
+    }
+
+    // Diff mode: compare two binaries
+    if let Some(diff_idx) = args.iter().position(|a| a == "--diff") {
+        let new_path = args.get(diff_idx + 1).cloned().unwrap_or_else(|| {
+            eprintln!("Usage: rsleigh old.bin --diff new.bin [func_name]");
+            std::process::exit(1);
+        });
+        // Optional: specific function to diff
+        let func_filter: Vec<String> = args.iter()
+            .enumerate()
+            .filter(|(i, a)| *i >= 2 && !a.starts_with("--") && a.as_str() != new_path && a.as_str() != binary_path)
+            .map(|(_, a)| a.clone())
+            .collect();
+        let old_path = binary_path.clone();
+        let t = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || diff_binaries(&old_path, &new_path, &func_filter))
+            .unwrap();
+        if let Err(e) = t.join() { eprintln!("Panic: {:?}", e); }
         return;
     }
 
@@ -378,6 +400,229 @@ fn decompile_func(
 
 /// Generate a YARA detection rule from binary analysis.
 /// Extracts unique strings, imports, hex patterns, and crypto signatures.
+/// Diff two binaries: decompile both, match functions, show unified diff of changes.
+fn diff_binaries(old_path: &str, new_path: &str, func_filter: &[String]) {
+    use std::collections::BTreeMap;
+
+    eprintln!("Comparing: {} vs {}", old_path, new_path);
+
+    // Helper: decompile all functions in a binary, return map of name → pseudocode
+    let decompile_all = |path: &str| -> BTreeMap<String, String> {
+        let data = match std::fs::read(path) {
+            Ok(d) => d,
+            Err(e) => { eprintln!("Error reading {}: {}", path, e); return BTreeMap::new(); }
+        };
+        let obj = match goblin::Object::parse(&data) {
+            Ok(o) => o,
+            Err(e) => { eprintln!("Error parsing {}: {}", path, e); return BTreeMap::new(); }
+        };
+        let (arch, segs, mut symbols) = match parse_binary(&obj, &data) {
+            Some(r) => r,
+            None => { eprintln!("Unsupported format: {}", path); return BTreeMap::new(); }
+        };
+
+        // Discover functions for stripped binaries
+        if symbols.is_empty() {
+            if let goblin::Object::PE(pe) = &obj {
+                let base = pe.image_base as u64;
+                let entry = base + pe.header.optional_header.unwrap().standard_fields.address_of_entry_point as u64;
+                symbols = discover_pe_functions(entry, &segs, &data, arch);
+            }
+        }
+        let is_elf_stripped = if let goblin::Object::Elf(elf) = &obj {
+            elf.syms.len() == 0
+        } else { false };
+        if is_elf_stripped {
+            if let goblin::Object::Elf(elf) = &obj {
+                let discovered = discover_elf_functions(elf, &segs, &data, arch);
+                let existing: std::collections::BTreeSet<u64> = symbols.iter().map(|(a, _)| *a).collect();
+                for (addr, name) in discovered {
+                    if !existing.contains(&addr) { symbols.push((addr, name)); }
+                }
+            }
+        }
+
+        let p = std::path::Path::new(path);
+        let import_map = build_import_map(&obj, &data);
+        let mut dec = rsleigh_api::Decoder::new(arch);
+        let mut result = BTreeMap::new();
+
+        for (func_addr, func_name) in &symbols {
+            let off = segs.iter().find_map(|(va, sz, fo)| {
+                if *func_addr >= *va && *func_addr < va + sz { Some(fo + (func_addr - va)) } else { None }
+            });
+            let Some(off) = off else { continue };
+            let max = 8192.min(data.len().saturating_sub(off as usize));
+            if max < 2 { continue; }
+            let bytes = &data[off as usize..off as usize + max];
+
+            let next_func = symbols.iter()
+                .filter(|(a, _)| *a > *func_addr)
+                .map(|(a, _)| *a)
+                .min()
+                .unwrap_or(func_addr + max as u64);
+            let decode_max = ((next_func - func_addr) as usize).min(max);
+
+            let mut insts = Vec::new();
+            let mut pos = 0;
+            while pos < decode_max {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    dec.decode(&bytes[pos..], func_addr + pos as u64)
+                })) {
+                    Ok(Ok(inst)) => {
+                        let l = inst.len as usize;
+                        if l == 0 { pos += 1; continue; }
+                        insts.push((func_addr + pos as u64, inst));
+                        pos += l;
+                    }
+                    _ => { pos += 1; }
+                }
+            }
+
+            if !insts.is_empty() {
+                let output = rsleigh_decompile::decompile_with_binary(
+                    arch, &insts, Some(&data), Some(p));
+                if !output.trim().is_empty() {
+                    result.insert(func_name.clone(), output);
+                }
+            }
+        }
+        eprintln!("  {}: {} functions decompiled", path, result.len());
+        result
+    };
+
+    let old_funcs = decompile_all(old_path);
+    let new_funcs = decompile_all(new_path);
+
+    // Match functions and compute diffs
+    let mut all_names: std::collections::BTreeSet<&String> = std::collections::BTreeSet::new();
+    for k in old_funcs.keys() { all_names.insert(k); }
+    for k in new_funcs.keys() { all_names.insert(k); }
+
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    let mut changed = 0usize;
+    let mut unchanged = 0usize;
+
+    for name in &all_names {
+        // Filter if specific functions requested
+        if !func_filter.is_empty() && !func_filter.iter().any(|f| f.as_str() == name.as_str()) { continue; }
+
+        let old_code = old_funcs.get(*name);
+        let new_code = new_funcs.get(*name);
+
+        match (old_code, new_code) {
+            (None, Some(new)) => {
+                added += 1;
+                println!("=== ADDED: {} ===", name);
+                for line in new.lines() {
+                    println!("\x1b[32m+ {}\x1b[0m", line); // green
+                }
+                println!();
+            }
+            (Some(old), None) => {
+                removed += 1;
+                println!("=== REMOVED: {} ===", name);
+                for line in old.lines() {
+                    println!("\x1b[31m- {}\x1b[0m", line); // red
+                }
+                println!();
+            }
+            (Some(old), Some(new)) => {
+                if old == new {
+                    unchanged += 1;
+                    continue;
+                }
+                changed += 1;
+                println!("=== CHANGED: {} ===", name);
+                // Simple line-by-line diff
+                let old_lines: Vec<&str> = old.lines().collect();
+                let new_lines: Vec<&str> = new.lines().collect();
+                // Use longest common subsequence for basic diff
+                let diff = simple_diff(&old_lines, &new_lines);
+                for (tag, line) in &diff {
+                    match tag {
+                        '-' => println!("\x1b[31m- {}\x1b[0m", line),
+                        '+' => println!("\x1b[32m+ {}\x1b[0m", line),
+                        ' ' => println!("  {}", line),
+                        _ => {}
+                    }
+                }
+                println!();
+            }
+            (None, None) => {}
+        }
+    }
+
+    println!("--- Summary ---");
+    println!("Unchanged: {}", unchanged);
+    println!("Changed:   {}", changed);
+    println!("Added:     {}", added);
+    println!("Removed:   {}", removed);
+}
+
+/// Simple line diff using LCS (longest common subsequence).
+fn simple_diff<'a>(old: &[&'a str], new: &[&'a str]) -> Vec<(char, &'a str)> {
+    // Build LCS table
+    let m = old.len();
+    let n = new.len();
+    let mut dp = vec![vec![0u32; n + 1]; m + 1];
+    for i in 1..=m {
+        for j in 1..=n {
+            if old[i-1] == new[j-1] {
+                dp[i][j] = dp[i-1][j-1] + 1;
+            } else {
+                dp[i][j] = dp[i-1][j].max(dp[i][j-1]);
+            }
+        }
+    }
+
+    // Backtrack to produce diff
+    let mut result = Vec::new();
+    let mut i = m;
+    let mut j = n;
+    while i > 0 || j > 0 {
+        if i > 0 && j > 0 && old[i-1] == new[j-1] {
+            result.push((' ', old[i-1]));
+            i -= 1;
+            j -= 1;
+        } else if j > 0 && (i == 0 || dp[i][j-1] >= dp[i-1][j]) {
+            result.push(('+', new[j-1]));
+            j -= 1;
+        } else {
+            result.push(('-', old[i-1]));
+            i -= 1;
+        }
+    }
+    result.reverse();
+    result
+}
+
+/// Build import map from binary for decompilation.
+fn build_import_map(obj: &goblin::Object, data: &[u8]) -> std::collections::HashMap<u64, String> {
+    let mut map = std::collections::HashMap::new();
+    match obj {
+        goblin::Object::PE(pe) => {
+            for imp in &pe.imports {
+                if imp.rva != 0 {
+                    map.insert(pe.image_base as u64 + imp.rva as u64, imp.name.to_string());
+                }
+            }
+        }
+        goblin::Object::Elf(elf) => {
+            for sym in elf.dynsyms.iter() {
+                if sym.st_value != 0 {
+                    if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
+                        if !name.is_empty() { map.insert(sym.st_value, name.to_string()); }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    map
+}
+
 fn generate_yara_rule(binary_path: &str, data: &[u8]) {
     use std::collections::{BTreeSet, BTreeMap};
 
