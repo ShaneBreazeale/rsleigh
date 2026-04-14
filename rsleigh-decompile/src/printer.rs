@@ -6403,6 +6403,36 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #INDENT_FIX: Normalize indentation for misaligned else/else-if blocks.
+    // Post-processing passes can shift lines, causing } else if to be at wrong indent.
+    {
+        let mut i = 0;
+        while i < lines.len() {
+            let t = lines[i].trim().to_string();
+            if t.starts_with("} else if (") || t == "} else {" {
+                let current_indent = lines[i].len() - lines[i].trim_start().len();
+                // Find the matching opening { by walking backwards
+                let mut depth = 0i32;
+                let mut open_indent = current_indent;
+                for j in (0..i).rev() {
+                    let lt = lines[j].trim();
+                    if lt == "}" || lt.starts_with("} else") { depth += 1; }
+                    if lt.ends_with('{') && !lt.starts_with("} else") { depth -= 1; }
+                    if depth < 0 {
+                        open_indent = lines[j].len() - lines[j].trim_start().len();
+                        break;
+                    }
+                }
+                // If the else/else-if is at wrong indent, fix it
+                if current_indent != open_indent && open_indent < current_indent + 20 {
+                    let pad = " ".repeat(open_indent);
+                    lines[i] = format!("{}{}", pad, t);
+                }
+            }
+            i += 1;
+        }
+    }
+
     // #FINAL_PASS: Re-run critical simplifications that earlier passes may have invalidated.
     // This catches param_N[RSP] patterns created by AUTONAME/DECLARATIONS passes,
     // RBP+N patterns created by other transformations, and any remaining raw registers.
