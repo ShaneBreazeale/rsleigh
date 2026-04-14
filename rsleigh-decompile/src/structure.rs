@@ -29,6 +29,10 @@ pub fn recover_structure(ssa: &SsaCfg, cfg: &Cfg) -> Vec<StructuredStmt> {
     // Post-pass: convert if-else chains on the same variable into switch/case
     collapse_if_else_to_switch(&mut result, ssa);
 
+    // Post-pass: flatten if-return patterns to reduce nesting
+    // if (cond) { ...; return X; } else { REST } → if (cond) { ...; return X; } REST
+    flatten_if_return(&mut result);
+
     // Post-pass: convert gotos to break/continue where possible
     eliminate_gotos(&mut result, ssa, cfg);
 
@@ -514,6 +518,51 @@ fn same_test_var(a: VarId, b: VarId, ssa: &SsaCfg) -> bool {
         return true;
     }
     false
+}
+
+/// Flatten if-return patterns to reduce nesting depth.
+/// When an if-block ends with return/break/goto and has an else-block,
+/// move the else-block contents out to the parent level.
+fn flatten_if_return(stmts: &mut Vec<StructuredStmt>) {
+    let mut i = 0;
+    while i < stmts.len() {
+        // Recurse first into nested bodies
+        match &mut stmts[i] {
+            StructuredStmt::IfElse { then_body, else_body, .. } => {
+                flatten_if_return(then_body);
+                flatten_if_return(else_body);
+            }
+            StructuredStmt::While { body, .. } | StructuredStmt::DoWhile { body, .. } => {
+                flatten_if_return(body);
+            }
+            StructuredStmt::Switch { cases, default, .. } => {
+                for (_, body) in cases.iter_mut() { flatten_if_return(body); }
+                flatten_if_return(default);
+            }
+            _ => {}
+        }
+
+        // Check: if (cond) { ...; return; } else { BODY }
+        // → if (cond) { ...; return; } BODY
+        if let StructuredStmt::IfElse { then_body, else_body, .. } = &stmts[i] {
+            let then_ends_with_exit = matches!(then_body.last(),
+                Some(StructuredStmt::Return(_)) | Some(StructuredStmt::Break)
+                | Some(StructuredStmt::Continue) | Some(StructuredStmt::Goto(_)));
+            if then_ends_with_exit && !else_body.is_empty() {
+                // Move else_body contents after the if
+                let else_stmts = else_body.clone();
+                // Clear the else body
+                if let StructuredStmt::IfElse { else_body, .. } = &mut stmts[i] {
+                    else_body.clear();
+                }
+                // Insert else stmts after the if
+                for (j, s) in else_stmts.into_iter().enumerate() {
+                    stmts.insert(i + 1 + j, s);
+                }
+            }
+        }
+        i += 1;
+    }
 }
 
 /// Collapse if-else chains testing the same variable into switch/case.
