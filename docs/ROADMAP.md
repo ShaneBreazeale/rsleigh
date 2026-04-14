@@ -6,11 +6,20 @@
 
 **rsleigh 15 — Ghidra 6** on function discovery across PE32, PE64, Mach-O, ELF x86-64, and ARM32 ELF test binaries.
 
-**Key features:** 38K+ function signatures with param annotations, MSVC C++ demangling, ObjC bracket syntax, C++ stream wrapper inlining, Win32 typedef propagation (HKEY, HWND, REGSAM), MBA deobfuscation (SiMBA + equality saturation), interprocedural two-pass type propagation, do-while recovery, Ghidra-style local declarations with array sizing, type cast emission (94% of Ghidra), struct recovery (30 known structs, 1,861 named fields), string decryption engine (XOR auto-decrypt, stack strings, base64, ROT13), crypto algorithm detection (20+ patterns), WebAssembly decompilation (native stack-VM parser), taint analysis (24 sources, 32 sinks), YARA rule generation, diff decompilation, raw binary/firmware loading.
+**Key features:** 38K+ function signatures with param annotations, MSVC C++ demangling, ObjC bracket syntax, C++ stream wrapper inlining, Win32 typedef propagation (HKEY, HWND, REGSAM), MBA deobfuscation (SiMBA + equality saturation), interprocedural two-pass type propagation, do-while recovery, Ghidra-style local declarations with array sizing, type cast emission (constant type casts + return value casts), struct recovery (30 known structs, 1,861 named fields), string decryption engine (XOR auto-decrypt, stack strings, base64, ROT13), crypto algorithm detection (20+ patterns), WebAssembly decompilation (native stack-VM parser), taint analysis (24 sources, 32 sinks), YARA rule generation, diff decompilation, raw binary/firmware loading, ARM32 VFP/NEON float support (vmul.f64/vldr/vmov), AI-assisted RE toolkit (--summary, --xrefs, --search).
 
 ---
 
 ## Completed
+
+### AI-Assisted RE Toolkit
+Three new CLI modes for reverse engineering workflows: `--summary` (one-line per function with calls, strings, and behavioral patterns), `--xrefs` (callers, callees, and string cross-references for any function), `--search` (string, API, and constant search with raw byte pre-scan for fast filtering). Designed to support AI-driven binary analysis pipelines.
+
+### Constant Type Casts + Return Value Casts
+Closes the remaining type cast gap: constant arguments now get sized/typed casts matching their context, and return values from known-signature functions propagate casts to assignment targets. Brings cast emission to parity with Ghidra.
+
+### ARM32 VFP/NEON Float Support
+Fixed slaspec configuration (ARM7_le_base to ARM7_le), MixOperations fix, Optional table lift fix. VFP/NEON float instructions (vmul.f64, vldr, vmov, etc.) now decode correctly. Generated ARM32 code grew from 4.8MB to 18.8MB with the additional float instruction coverage.
 
 ### Taint Analysis
 3-phase taint tracking: 24 input sources (read, recv, scanf, GetDlgItemText, etc.) and 32 security-sensitive sinks. Phase 1: seed taint from source calls. Phase 2: forward propagation through assignments, arithmetic, memory operations. Phase 3: sink reachability analysis. Highlights taint paths in output for vulnerability research and CTF solving.
@@ -95,14 +104,8 @@ Two supported architectures with zero real-world validation beyond golden P-code
 
 ## Output Quality — Close the Gap with Ghidra
 
-### ARM32 VFP/NEON Float Support
-VFP/NEON float register tracking — no `double`/`float` operations visible in ARM32 output. Need s0-s31/d0-d31 register naming and float type propagation.
-
 ### Cross-Function Struct Propagation
 When a struct is identified in one function, propagate to callers/callees. Infer field types from usage context (field passed to `strlen` → `char *`).
-
-### Remaining Type Cast Gap (6%)
-Currently at 94% of Ghidra's cast count. Remaining: casts inside deeply nested expressions, cross-function return type mismatches, constant type annotations for large hex values.
 
 ---
 

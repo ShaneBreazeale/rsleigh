@@ -23,7 +23,7 @@ Wired into Spectra as a native analysis backend replacing the Ghidra JVM daemon.
 | x86-64 | 5700+ | full |
 | x86-32 | 4200+ | SSE/AVX, PE32 import resolution |
 | AArch64 | 3500+ | NEON + SVE |
-| ARM32 | 1200+ | ARMv7 + Thumb |
+| ARM32 | 1200+ | ARMv7 + Thumb + VFP/NEON floats |
 | MIPS32 | 900+ | FPU + DSP + MIPS16 + microMIPS |
 | RISC-V 64 | 500+ | F/D/B/K/P/Q/V/C |
 | WebAssembly | — | WASM module decompilation |
@@ -114,6 +114,11 @@ rsleigh <binary> --all                 # decompile all (two-pass type propagatio
 rsleigh <binary> --disasm <func>       # disassemble with P-code
 rsleigh <binary> --sigs extra.json     # load additional signatures
 rsleigh <binary> --json                # JSON output
+rsleigh <binary> --search <query>       # find functions by string/pattern
+rsleigh <binary> --search --api <name> # find functions calling specific API
+rsleigh <binary> --search --const <hex> # find functions with constant value
+rsleigh <binary> --summary             # AI summary (one-line per function)
+rsleigh <binary> --xrefs <func>        # cross-references (callers + callees)
 rsleigh <binary> --yara                # generate YARA rules from binary
 rsleigh <binary> --diff <binary2>      # diff decompilation between two binaries
 rsleigh <binary> --taint <func>        # taint analysis on function
@@ -163,6 +168,12 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
   (simm8, simm16) to the appropriate signed type before widening to i128
 - **Const-space references:** `export *[const]:4 simm8` resolved directly to
   `Varnode::constant()` instead of emitting a Load
+- **MixOperations fix:** mixed AND/OR pattern blocks (common in VFP/NEON constructors
+  like `(ARM_pattern | Thumb_pattern) & operands`) default to AND instead of erroring,
+  treating OR-connected elements as subpatterns
+- **Optional table lift fix:** OR-pattern subtables that produce optional table fields
+  are lifted via `.as_ref().unwrap()` instead of direct call, preventing type errors
+  when a subtable may not be present in all pattern alternatives
 
 ### Decompiler (`rsleigh-decompile/`)
 
@@ -272,6 +283,8 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - **Taint tracking:** `--taint` traces data from inputs (recv, read) to sinks (exec, system, SQL)
 - **Raw firmware loading:** `--raw <arch>` loads raw binary blobs at base address for any supported arch
 - **WebAssembly decompilation:** WASM module parsing, function/type recovery, pseudocode output
+- **AI-assisted RE toolkit:** `--summary` (one-line per function), `--xrefs` (callers + callees), `--search` (find functions by string, API call, or constant)
+- **ARM32 VFP/NEON float instructions:** vmul.f64, vldr, vmov decoded via ARM7_le.slaspec (not ARM7_le_base); full VFP/NEON constructor support
 
 ---
 
@@ -291,8 +304,8 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - **x86-32 control flow** — sequential TEST/JNZ patterns sometimes nest incorrectly
 - **Register-indirect calls** — `CALL EDI` where EDI was loaded from IAT earlier
   not resolved to import names (only direct IAT calls resolved)
-- **ARM32 VFP/NEON** — float register tracking missing; VFP/NEON instructions decode
-  but floating-point values not traced through decompiler pipeline
+- **ARM32 VFP/NEON decompiler** — VFP/NEON instructions decode correctly (vmul.f64, vldr, vmov);
+  floating-point register values not yet fully traced through decompiler expression folding
 
 ---
 

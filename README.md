@@ -22,6 +22,13 @@ rsleigh ./binary --all                 # decompile everything (two-pass type pro
 rsleigh ./binary main --json           # JSON output for tool integration
 rsleigh ./binary --disasm main         # disassembly with P-code
 rsleigh ./binary --sigs extra.json     # load additional signatures from JSON
+rsleigh ./binary --summary             # AI triage (one-line per function)
+rsleigh ./binary --xrefs main          # cross-references (callers + callees)
+rsleigh ./binary --search "recv"       # find functions by string/API/constant
+rsleigh ./binary --yara main           # generate YARA detection rule
+rsleigh ./binary --diff ./binary_v2    # compare two binary versions
+rsleigh --raw --arch arm32 fw.bin      # load raw firmware blob
+rsleigh ./binary --taint main          # taint analysis
 ```
 
 ```
@@ -40,6 +47,27 @@ if (stage1() == 0) {
         }
     }
 }
+```
+
+## AI-Assisted Reverse Engineering
+
+```bash
+# One-line triage of every function
+$ rsleigh ./malware --summary
+main              — unpacks payload, resolves APIs dynamically, spawns thread
+decrypt_config    — RC4 decrypts embedded C2 config at 0x404000
+phone_home        — HTTP POST to C2, sends host fingerprint
+install_persist   — writes Run key, copies self to %APPDATA%
+
+# Cross-reference map
+$ rsleigh ./binary --xrefs main
+main
+  calls: init, parse_input, process, cleanup
+  called by: _start, __libc_start_main
+
+# Search across all functions
+$ rsleigh ./binary --search "CreateRemoteThread"
+inject_code (0x401200) — calls CreateRemoteThread, VirtualAllocEx, WriteProcessMemory
 ```
 
 ## Decompiler output
@@ -140,11 +168,12 @@ Tested against 30+ CTF binaries from CSAW, HSCTF, DiceCTF, Google CTF, hkcert, C
 | x86-64 | 5700+ | Full instruction set, Windows x64 + SysV calling conventions |
 | x86-32 | 4200+ | SSE/AVX, PE32 IAT, cdecl/thiscall, ELF32 PIE string resolution |
 | AArch64 | 3500+ | NEON + SVE |
-| ARM32 | 1200+ | ARMv7 + Thumb |
+| ARM32 | 1200+ | ARMv7 + Thumb, VFP/NEON |
 | MIPS32 | 900+ | FPU, DSP, MIPS16, microMIPS |
 | RISC-V 64 | 500+ | RV64GC + F/D/B/K/P/Q/V/C |
+| WebAssembly | — | Stack VM, native parser (no SLEIGH) |
 
-**Binary formats:** ELF (32/64), Mach-O (x86-64, AArch64), PE (32/64, including ARM64 Windows) — auto-detected from headers. **Beats Ghidra on function discovery** on 11 of 13 test binaries across PE32, PE64, Mach-O, and ARM64. 10-phase discovery: symbol tables → recursive CALL descent → exhaustive CALL/BL target scanning → `.pdata` exception directories (x86-64 12-byte + ARM64 8-byte) → `LC_FUNCTION_STARTS` (Mach-O) → `__objc_stubs`/`__stubs` (Mach-O) → prologue pattern matching (x86-32/x86-64/AArch64) → JMP thunk detection → vtable pointer scanning → `.rdata` cross-references. PE machine type auto-detection (x86-64, ARM64, i386, ARM32). Fallback manual PE parser handles malformed binaries (Stuxnet, packed malware).
+**Binary formats:** ELF (32/64), Mach-O (x86-64, AArch64), PE (32/64, including ARM64 Windows), WASM (.wasm), Raw binary (firmware) — auto-detected from headers. **Beats Ghidra on function discovery** on 15 of 21 test binaries across PE32, PE64, Mach-O, and ARM64. 12-phase discovery: symbol tables → recursive CALL descent → exhaustive CALL/BL target scanning (including ARM32 BL/Thumb) → `.pdata` exception directories (x86-64 12-byte + ARM64 8-byte) → `LC_FUNCTION_STARTS` (Mach-O) → `__objc_stubs`/`__stubs` (Mach-O) → prologue pattern matching (x86-32/x86-64/AArch64) → JMP thunk detection → vtable pointer scanning → `.rdata` cross-references → stripped ELF `eh_frame` unwinding → RTTI type info scanning. PE machine type auto-detection (x86-64, ARM64, i386, ARM32). Fallback manual PE parser handles malformed binaries (Stuxnet, packed malware).
 
 **38K+ function signatures** auto-loaded — C stdlib, POSIX, Linux (syscall, ptrace, epoll, io_uring), macOS (GCD, ObjC runtime, CoreFoundation, IOKit, Mach, Security, CommonCrypto), Android, Win32/64 (with fine-grained typedefs: HKEY, HWND, REGSAM, LSTATUS), OpenSSL, zlib. Signatures propagate parameter names (`/* param_name */` at call sites) and Win32 typedef types through interprocedural two-pass analysis.
 
