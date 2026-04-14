@@ -6244,6 +6244,165 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         *line = result;
     }
 
+    // #SWITCH_COLLAPSE: Convert if/else-if chains on the same variable to switch/case.
+    // Pattern: if (X == A) { ... } else if (X == B) { ... } else if (X == C) { ... }
+    {
+        let mut i = 0;
+        while i + 2 < lines.len() {
+            let t = lines[i].trim().to_string();
+            // Match: if (EXPR == VALUE) {
+            if let Some((var_name, first_val)) = extract_if_eq_const(&t) {
+                let indent = lines[i].len() - lines[i].trim_start().len();
+                let pad = " ".repeat(indent);
+                let else_if_pad = format!("{}}} else if (", pad);
+
+                // Collect cases from the chain
+                let mut cases: Vec<(String, Vec<String>)> = Vec::new(); // (value, body_lines)
+                let mut default_lines: Vec<String> = Vec::new();
+                let mut j = i;
+                let mut current_val = first_val;
+                let mut success = false;
+
+                loop {
+                    // Collect body lines until we hit "} else if (same_var == val)" or "} else {" or "}"
+                    j += 1;
+                    let mut body = Vec::new();
+                    let mut depth = 1i32;
+                    while j < lines.len() {
+                        let lt = lines[j].trim();
+                        if lt.ends_with('{') { depth += 1; }
+                        if lt == "}" || lt.starts_with("} ") { depth -= 1; }
+                        if depth == 0 {
+                            // Found closing of this case
+                            let line_text = lines[j].trim().to_string();
+                            if let Some(rest) = line_text.strip_prefix("} else if (") {
+                                if let Some(cond) = rest.strip_suffix(") {") {
+                                    // Check if it's the same variable
+                                    if let Some((next_var, next_val)) = parse_eq_const(cond) {
+                                        if next_var == var_name {
+                                            cases.push((current_val.clone(), body));
+                                            current_val = next_val;
+                                            break; // continue to next case
+                                        }
+                                    }
+                                }
+                            }
+                            if line_text == "} else {" {
+                                cases.push((current_val.clone(), body));
+                                // Collect default body
+                                j += 1;
+                                let mut def_depth = 1i32;
+                                while j < lines.len() {
+                                    let dlt = lines[j].trim();
+                                    if dlt.ends_with('{') { def_depth += 1; }
+                                    if dlt == "}" { def_depth -= 1; }
+                                    if def_depth == 0 { break; }
+                                    default_lines.push(lines[j].clone());
+                                    j += 1;
+                                }
+                                success = true;
+                                break;
+                            }
+                            if line_text == "}" {
+                                cases.push((current_val.clone(), body));
+                                success = true;
+                                break;
+                            }
+                            // Unknown closing — abort
+                            break;
+                        }
+                        body.push(lines[j].clone());
+                        j += 1;
+                    }
+                    if j >= lines.len() || !success && depth != 0 { break; }
+                    if success { break; }
+                }
+
+                // Only convert if we collected 3+ cases
+                if success && cases.len() >= 3 {
+                    // Replace lines[i..=j] with switch/case
+                    let end = j;
+                    let mut new_lines = Vec::new();
+                    new_lines.push(format!("{}switch ({}) {{", pad, var_name));
+                    for (val, body) in &cases {
+                        new_lines.push(format!("{}    case {}:", pad, val));
+                        for bl in body {
+                            new_lines.push(format!("    {}", bl));
+                        }
+                        // Add break if body doesn't end with return
+                        let has_return = body.iter().any(|l| l.trim().starts_with("return "));
+                        if !has_return {
+                            new_lines.push(format!("{}        break;", pad));
+                        }
+                    }
+                    if !default_lines.is_empty() {
+                        new_lines.push(format!("{}    default:", pad));
+                        for dl in &default_lines {
+                            new_lines.push(format!("    {}", dl));
+                        }
+                    }
+                    new_lines.push(format!("{}}}", pad));
+
+                    // Replace the range
+                    let remove_count = end - i + 1;
+                    for _ in 0..remove_count { lines.remove(i); }
+                    for (k, nl) in new_lines.into_iter().enumerate() {
+                        lines.insert(i + k, nl);
+                    }
+                    continue; // don't increment i
+                }
+            }
+            i += 1;
+        }
+    }
+
+    // #EARLY_RETURN: Flatten else blocks when the if-block ends with return.
+    // Pattern: if (...) { ...; return X; } else { BODY } → if (...) { ...; return X; } BODY
+    {
+        let mut i = 0;
+        while i + 2 < lines.len() {
+            let t = lines[i].trim().to_string();
+            if t == "} else {" {
+                // Check: does the preceding block end with return?
+                let mut has_return = false;
+                for j in (0..i).rev() {
+                    let lt = lines[j].trim();
+                    if lt.starts_with("return ") { has_return = true; break; }
+                    if lt == "}" || lt.starts_with("if ") || lt.starts_with("while ") { break; }
+                }
+                if has_return {
+                    // Find the matching closing }
+                    let indent = lines[i].len() - lines[i].trim_start().len();
+                    let mut depth = 1i32;
+                    let mut end = i + 1;
+                    while end < lines.len() {
+                        let lt = lines[end].trim();
+                        if lt.ends_with('{') { depth += 1; }
+                        if lt == "}" { depth -= 1; }
+                        if depth == 0 { break; }
+                        end += 1;
+                    }
+                    if end < lines.len() && depth == 0 {
+                        // Remove "} else {" and the closing "}"
+                        lines.remove(end); // remove closing }
+                        lines.remove(i);   // remove } else {
+                        // Dedent the body lines
+                        for j in i..end - 1 {
+                            if j < lines.len() {
+                                let line = &lines[j];
+                                if line.starts_with("    ") {
+                                    lines[j] = line[4..].to_string();
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
     // #FINAL_PASS: Re-run critical simplifications that earlier passes may have invalidated.
     // This catches param_N[RSP] patterns created by AUTONAME/DECLARATIONS passes,
     // RBP+N patterns created by other transformations, and any remaining raw registers.
@@ -9147,5 +9306,30 @@ fn unaryop_str(kind: UnaryOpKind) -> &'static str {
         UnaryOpKind::Trunc => "TRUNC", UnaryOpKind::FloatCeil => "CEIL",
         UnaryOpKind::FloatFloor => "FLOOR", UnaryOpKind::FloatRound => "ROUND",
         UnaryOpKind::Popcount => "POPCOUNT", UnaryOpKind::Lzcount => "LZCOUNT",
+    }
+}
+
+/// Extract variable name and constant from "if (VAR == CONST) {" pattern.
+fn extract_if_eq_const(line: &str) -> Option<(String, String)> {
+    let cond = line.strip_prefix("if (")?.strip_suffix(") {")?;
+    parse_eq_const(cond)
+}
+
+/// Parse "EXPR == CONST" or "EXPR == 'c'" from a condition string.
+fn parse_eq_const(cond: &str) -> Option<(String, String)> {
+    // Split on " == "
+    let parts: Vec<&str> = cond.splitn(2, " == ").collect();
+    if parts.len() != 2 { return None; }
+    let var = parts[0].trim();
+    let val = parts[1].trim();
+    // Validate: var should be a variable-like expression, val should be a constant
+    if var.is_empty() || val.is_empty() { return None; }
+    let val_is_const = val.starts_with("0x") || val.starts_with('\'') || val.starts_with('-')
+        || val.chars().next().map_or(false, |c| c.is_ascii_digit())
+        || val == "NULL";
+    if val_is_const {
+        Some((var.to_string(), val.to_string()))
+    } else {
+        None
     }
 }
