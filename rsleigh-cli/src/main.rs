@@ -79,6 +79,30 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
         return;
     }
 
+    // Raw binary mode: --raw <arch> [--base <addr>]
+    let raw_arch_idx = args.iter().position(|a| a == "--raw");
+    if let Some(idx) = raw_arch_idx {
+        let arch_str = args.get(idx + 1).map(|s| s.as_str()).unwrap_or("mips32");
+        let base_idx = args.iter().position(|a| a == "--base");
+        let base = base_idx.and_then(|i| args.get(i + 1))
+            .and_then(|s| {
+                if let Some(hex) = s.strip_prefix("0x") { u64::from_str_radix(hex, 16).ok() }
+                else { s.parse::<u64>().ok() }
+            })
+            .unwrap_or(0);
+        let arch = match arch_str {
+            "x86-64" | "x86_64" | "x64" => rsleigh_api::Architecture::X86_64,
+            "x86-32" | "x86" | "i386" => rsleigh_api::Architecture::X86_32,
+            "arm32" | "arm" | "ARM32" => rsleigh_api::Architecture::ARM32,
+            "aarch64" | "arm64" | "AArch64" => rsleigh_api::Architecture::AArch64,
+            "mips32" | "mips" | "MIPS32" => rsleigh_api::Architecture::MIPS32,
+            "riscv64" | "riscv" | "RISCV64" => rsleigh_api::Architecture::RiscV64,
+            _ => { eprintln!("Unknown arch: {}. Use: x86-64, x86-32, arm32, aarch64, mips32, riscv64", arch_str); std::process::exit(1); }
+        };
+        run_raw(&data, arch, base, args, all_mode);
+        return;
+    }
+
     let path = Path::new(binary_path);
     let obj = match goblin::Object::parse(&data) {
         Ok(o) => o,
@@ -338,6 +362,148 @@ fn decompile_func(
     let insts = decode_func(fa, symbols, segs, data, dec);
     if insts.is_empty() { return "// no instructions\n".to_string(); }
     rsleigh_decompile::decompile_with_binary(arch, &insts, Some(data), Some(path))
+}
+
+fn run_raw(data: &[u8], arch: rsleigh_api::Architecture, base: u64, args: &[String], all_mode: bool) {
+    eprintln!("Architecture: {:?} (raw binary, base=0x{:x}, size={})", arch, base, data.len());
+
+    // Treat entire file as one code segment
+    let segs = vec![(base, data.len() as u64, 0u64)];
+
+    // Discover functions via CALL scanning
+    let mut found = std::collections::BTreeSet::new();
+    found.insert(base); // entry at base
+
+    let mut dec = rsleigh_api::Decoder::new(arch);
+    let code_end = base + data.len() as u64;
+
+    // Architecture-specific CALL scanning
+    match arch {
+        rsleigh_api::Architecture::MIPS32 => {
+            // MIPS JAL: 000011 imm26 → opcode 0x0C000000
+            for i in (0..data.len().saturating_sub(3)).step_by(4) {
+                let word = u32::from_be_bytes(data[i..i+4].try_into().unwrap_or([0;4]));
+                if (word >> 26) == 3 { // JAL
+                    let target = ((base + i as u64) & 0xF0000000) | ((word & 0x03FFFFFF) as u64) << 2;
+                    if target >= base && target < code_end {
+                        found.insert(target);
+                    }
+                }
+            }
+            // Also try little-endian MIPS
+            let mut found_le = std::collections::BTreeSet::new();
+            for i in (0..data.len().saturating_sub(3)).step_by(4) {
+                let word = u32::from_le_bytes(data[i..i+4].try_into().unwrap_or([0;4]));
+                if (word >> 26) == 3 {
+                    let target = ((base + i as u64) & 0xF0000000) | ((word & 0x03FFFFFF) as u64) << 2;
+                    if target >= base && target < code_end {
+                        found_le.insert(target);
+                    }
+                }
+            }
+            // Use whichever endianness found more targets
+            if found_le.len() > found.len() * 2 {
+                found = found_le;
+                found.insert(base);
+                eprintln!("Detected: MIPS little-endian ({} JAL targets)", found.len());
+            } else {
+                eprintln!("Detected: MIPS big-endian ({} JAL targets)", found.len());
+            }
+        }
+        rsleigh_api::Architecture::ARM32 => {
+            for i in (0..data.len().saturating_sub(3)).step_by(4) {
+                let word = u32::from_le_bytes(data[i..i+4].try_into().unwrap_or([0;4]));
+                if (word & 0x0F000000) == 0x0B000000 { // BL
+                    let imm24 = word & 0x00FFFFFF;
+                    let offset = if imm24 & 0x800000 != 0 {
+                        ((imm24 | 0xFF000000) as i32) << 2
+                    } else {
+                        (imm24 as i32) << 2
+                    };
+                    let target = (base as i64 + i as i64 + 8 + offset as i64) as u64;
+                    if target >= base && target < code_end {
+                        found.insert(target);
+                    }
+                }
+            }
+        }
+        rsleigh_api::Architecture::X86_64 | rsleigh_api::Architecture::X86_32 => {
+            for i in 0..data.len().saturating_sub(5) {
+                if data[i] == 0xE8 {
+                    let rel = i32::from_le_bytes(data[i+1..i+5].try_into().unwrap_or([0;4]));
+                    let target = (base as i64 + i as i64 + 5 + rel as i64) as u64;
+                    if target >= base && target < code_end {
+                        found.insert(target);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    let symbols: Vec<(u64, String)> = found.into_iter()
+        .map(|addr| (addr, format!("FUN_{:08x}", addr)))
+        .collect();
+
+    // Which functions to process? Skip --raw/--base and their values.
+    let skip_values: std::collections::HashSet<usize> = {
+        let mut s = std::collections::HashSet::new();
+        for (i, a) in args.iter().enumerate() {
+            if a == "--raw" || a == "--base" { s.insert(i); s.insert(i + 1); }
+            if a == "--all" || a == "--json" || a == "--disasm" || a == "--sigs" { s.insert(i); }
+        }
+        s
+    };
+    let func_args: Vec<&str> = args.iter().enumerate()
+        .filter(|(i, a)| *i >= 2 && !a.starts_with("--") && !skip_values.contains(i))
+        .map(|(_, a)| a.as_str())
+        .collect();
+
+    if func_args.is_empty() && !all_mode {
+        eprintln!("{} functions:", symbols.len());
+        for (addr, name) in &symbols {
+            println!("  0x{:08x}  {}", addr, name);
+        }
+    } else {
+        let to_decompile: Vec<&(u64, String)> = if all_mode {
+            symbols.iter().collect()
+        } else {
+            symbols.iter().filter(|(_, n)| func_args.iter().any(|a| n == a)).collect()
+        };
+        let path = std::path::Path::new("raw.bin");
+        for (addr, name) in to_decompile {
+            let off = (*addr - base) as usize;
+            let max = 4096.min(data.len().saturating_sub(off));
+            if max < 4 { continue; }
+            let bytes = &data[off..off + max];
+            let mut pos = 0;
+            let mut insts = Vec::new();
+            let next_func = symbols.iter()
+                .filter(|(a, _)| *a > *addr).map(|(a, _)| *a).min()
+                .unwrap_or(*addr + max as u64);
+            let decode_max = ((next_func - *addr) as usize).min(max);
+            while pos < decode_max {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    dec.decode(&bytes[pos..], *addr + pos as u64)
+                })) {
+                    Ok(Ok(inst)) => {
+                        let l = inst.len as usize;
+                        if l == 0 { pos += 4; continue; }
+                        insts.push((*addr + pos as u64, inst));
+                        pos += l;
+                    }
+                    Ok(Err(_)) | Err(_) => { pos += 4; }
+                }
+            }
+            if !insts.is_empty() {
+                let output = rsleigh_decompile::decompile_with_binary(arch, &insts, Some(data), Some(path));
+                if !output.trim().is_empty() {
+                    println!("// {}", name);
+                    println!("{}", output);
+                }
+            }
+        }
+    }
 }
 
 fn run_wasm(data: &[u8], args: &[String], all_mode: bool) {
