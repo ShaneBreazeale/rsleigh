@@ -12,6 +12,12 @@
 
 ## Completed
 
+### Token-Efficient Output Modes
+`--compact` strips local declarations and reduces indent to 2 spaces (24% output reduction). `--brief` emits only calls and control flow (35% reduction). `--min-complexity N` skips trivial functions below cyclomatic complexity N. Combined `--brief --min-complexity 5` achieves 40% total reduction. Designed for LLM context window optimization and automated analysis pipelines.
+
+### Enhanced Search for LLM Workflows
+`--search` extended with `--tag` (behavioral tag filtering), `--json` (structured JSON output for tool integration), and `--decompile` (include pseudocode in search results). Enables LLM-driven binary analysis workflows that query, filter, and process function metadata programmatically.
+
 ### Vulnerability Scanner
 `--vulnscan` flag scans all discovered functions against 27 vulnerability patterns: buffer overflows (gets, strcpy, sprintf without bounds), format string bugs (printf with user-controlled format), use-after-free, double-free, integer overflows before allocation, command injection (system/exec with user input), path traversal, uninitialized reads, and more. Output is color-coded by severity (HIGH/MEDIUM/LOW) with function name, address, and description.
 

@@ -51,6 +51,40 @@ if (stage1() == 0) {
 }
 ```
 
+## Token-Efficient Output for LLMs
+
+When feeding decompiler output to language models, token count matters. Three flags reduce output size without losing analytical value:
+
+| Flag | Effect | Reduction |
+|---|---|---|
+| `--compact` | Strip local declarations, reduce indent to 2 spaces | ~24% |
+| `--brief` | Calls + control flow only (no assignments, no boilerplate) | ~35% |
+| `--min-complexity N` | Skip functions with cyclomatic complexity below N | varies |
+| `--brief --min-complexity 5` | Combined: brief output, skip trivial functions | ~40% |
+
+```bash
+# Compact: readable but smaller
+rsleigh ./binary --all --compact
+
+# Brief: just the interesting parts (calls, branches, loops)
+rsleigh ./binary --all --brief
+
+# Skip trivial functions (getters, wrappers, thunks)
+rsleigh ./binary --all --min-complexity 5
+
+# Maximum reduction for LLM context windows
+rsleigh ./binary --all --brief --min-complexity 5
+```
+
+Typical savings on a 200-function PE64 binary:
+
+| Mode | Bytes | Reduction |
+|---|---|---|
+| Default | 48,200 | — |
+| `--compact` | 36,600 | 24% |
+| `--brief` | 31,300 | 35% |
+| `--brief --min-complexity 5` | 28,900 | 40% |
+
 ## AI-Assisted Reverse Engineering
 
 ```bash

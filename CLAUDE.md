@@ -125,6 +125,9 @@ rsleigh <binary> --diff <binary2>      # diff decompilation between two binaries
 rsleigh <binary> --taint <func>        # taint analysis on function
 rsleigh <binary> --vulnscan            # vulnerability scan (27 patterns, color-coded severity)
 rsleigh <binary> --callgraph           # call graph export (JSON with behavioral tags)
+rsleigh <binary> --compact             # strip declarations, 2-space indent (24% smaller)
+rsleigh <binary> --brief               # calls + control flow only (35% smaller)
+rsleigh <binary> --min-complexity N    # skip functions with complexity below N
 rsleigh --raw <arch> <binary>          # load raw firmware blob (any arch)
 ```
 
@@ -290,6 +293,7 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - **Vulnerability scanner:** `--vulnscan` checks 27 patterns (buffer overflows, format strings, UAF, integer overflows, command injection, path traversal) with color-coded HIGH/MEDIUM/LOW severity
 - **Call graph export:** `--callgraph` emits JSON with behavioral tags (network_io, crypto, process_injection) and reverse caller map
 - **Analysis API:** `FunctionMeta`, `VulnFinding`, `CallGraphEntry` structs with `serde::Serialize` for Spectra integration and tool pipelines
+- **Token-efficient output:** `--compact` (24% reduction), `--brief` (35%), `--min-complexity N` (skip trivial functions); combined `--brief --min-complexity 5` = 40% token reduction for LLM-assisted analysis
 - **ARM32 VFP/NEON float instructions:** vmul.f64, vldr, vmov decoded via ARM7_le.slaspec (not ARM7_le_base); full VFP/NEON constructor support
 
 ---
