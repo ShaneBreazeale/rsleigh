@@ -6,11 +6,23 @@
 
 **rsleigh 15 — Ghidra 6** on function discovery across PE32, PE64, Mach-O, ELF x86-64, and ARM32 ELF test binaries.
 
-**Key features:** 38K+ function signatures with param annotations, MSVC C++ demangling, ObjC bracket syntax, C++ stream wrapper inlining, Win32 typedef propagation (HKEY, HWND, REGSAM), MBA deobfuscation (SiMBA + equality saturation), interprocedural two-pass type propagation, do-while recovery, Ghidra-style local declarations with array sizing, type cast emission (constant type casts + return value casts), struct recovery (30 known structs, 1,861 named fields), string decryption engine (XOR auto-decrypt, stack strings, base64, ROT13), crypto algorithm detection (20+ patterns), WebAssembly decompilation (native stack-VM parser), taint analysis (24 sources, 32 sinks), YARA rule generation, diff decompilation, raw binary/firmware loading, ARM32 VFP/NEON float support (vmul.f64/vldr/vmov), AI-assisted RE toolkit (--summary, --xrefs, --search).
+**Key features:** 38K+ function signatures with param annotations, MSVC C++ demangling, ObjC bracket syntax, C++ stream wrapper inlining, Win32 typedef propagation (HKEY, HWND, REGSAM), MBA deobfuscation (SiMBA + equality saturation), interprocedural two-pass type propagation, do-while recovery, Ghidra-style local declarations with array sizing, type cast emission (constant type casts + return value casts), struct recovery (30 known structs, 1,861 named fields), string decryption engine (XOR auto-decrypt, stack strings, base64, ROT13), crypto algorithm detection (20+ patterns), WebAssembly decompilation (native stack-VM parser), taint analysis (24 sources, 32 sinks), YARA rule generation, diff decompilation, raw binary/firmware loading, ARM32 VFP/NEON float support (vmul.f64/vldr/vmov), AI-assisted RE toolkit (--summary, --xrefs, --search), vulnerability scanner (--vulnscan, 27 patterns), call graph export (--callgraph, JSON with behavioral tags), analysis API (FunctionMeta/VulnFinding/CallGraphEntry with Serialize).
 
 ---
 
 ## Completed
+
+### Vulnerability Scanner
+`--vulnscan` flag scans all discovered functions against 27 vulnerability patterns: buffer overflows (gets, strcpy, sprintf without bounds), format string bugs (printf with user-controlled format), use-after-free, double-free, integer overflows before allocation, command injection (system/exec with user input), path traversal, uninitialized reads, and more. Output is color-coded by severity (HIGH/MEDIUM/LOW) with function name, address, and description.
+
+### Call Graph Export
+`--callgraph` flag exports a JSON call graph with nodes (functions), edges (call relationships), behavioral tags per function (network_io, crypto, file_system, process_injection, registry, anti_debug), and a reverse caller map showing which functions call each API. Designed for automated triage pipelines and Spectra's graph visualization.
+
+### Analysis API for Spectra
+New `rsleigh_decompile::analysis` module exposing `extract_function_meta()` and `scan_vulns()`. Three core structs -- `FunctionMeta` (name, address, calls, strings, complexity, pseudocode), `VulnFinding` (severity, pattern, function, address, description), `CallGraphEntry` (caller, callee, tags) -- all derive `serde::Serialize` for direct JSON serialization. Powers Spectra's vulnerability panel and call graph view.
+
+### Rich JSON Output
+`--json` flag now emits structured per-function metadata: calls list, string literals, cyclomatic complexity score, and full pseudocode. Combined with `--all` for whole-binary JSON export suitable for LLM-assisted analysis pipelines and CI integration.
 
 ### AI-Assisted RE Toolkit
 Three new CLI modes for reverse engineering workflows: `--summary` (one-line per function with calls, strings, and behavioral patterns), `--xrefs` (callers, callees, and string cross-references for any function), `--search` (string, API, and constant search with raw byte pre-scan for fast filtering). Designed to support AI-driven binary analysis pipelines.

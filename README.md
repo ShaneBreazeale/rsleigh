@@ -29,6 +29,8 @@ rsleigh ./binary --yara main           # generate YARA detection rule
 rsleigh ./binary --diff ./binary_v2    # compare two binary versions
 rsleigh --raw --arch arm32 fw.bin      # load raw firmware blob
 rsleigh ./binary --taint main          # taint analysis
+rsleigh ./binary --vulnscan            # scan all functions for vulnerabilities
+rsleigh ./binary --callgraph           # export call graph as JSON
 ```
 
 ```
@@ -68,7 +70,33 @@ main
 # Search across all functions
 $ rsleigh ./binary --search "CreateRemoteThread"
 inject_code (0x401200) — calls CreateRemoteThread, VirtualAllocEx, WriteProcessMemory
+
+# Vulnerability scan with severity-coded output
+$ rsleigh ./binary --vulnscan
+[HIGH]   buffer_overflow in read_input (0x401080) — gets() with no bounds check
+[MEDIUM] format_string in log_message (0x4012a0) — printf(user_input) without format
+[LOW]    info_leak in dump_state (0x401400) — writes stack contents to network socket
+
+# Call graph with behavioral tags and reverse caller map
+$ rsleigh ./binary --callgraph > callgraph.json
+# { "nodes": [...], "edges": [...], "tags": {"inject_code": ["process_injection"]}, "callers": {"VirtualAllocEx": ["inject_code"]} }
 ```
+
+## Security Analysis
+
+```
+$ rsleigh ./vuln_server --vulnscan
+[HIGH]   stack_overflow in handle_request (0x401200) — strcpy() from network input, no length check
+[HIGH]   use_after_free in process_msg (0x401580) — free() then dereference at +0x14
+[MEDIUM] format_string in log_error (0x4018a0) — printf(user_controlled) without format specifier
+[MEDIUM] integer_overflow in alloc_buffer (0x401c40) — unchecked multiply before malloc()
+[LOW]    uninitialized_read in parse_header (0x401e00) — local buffer read before write
+27 vulnerability patterns checked across all functions.
+```
+
+The `--vulnscan` flag checks all discovered functions against 27 vulnerability patterns (buffer overflows, format strings, use-after-free, integer overflows, command injection, path traversal, etc.) and reports findings with color-coded severity levels (HIGH/MEDIUM/LOW).
+
+The `--callgraph` flag exports a JSON call graph with behavioral tags (e.g., `network_io`, `crypto`, `process_injection`, `file_system`) and a reverse caller map showing which functions call each API.
 
 ## Decompiler output
 
@@ -208,6 +236,29 @@ let binary = std::fs::read("my_binary").unwrap();
 let pseudocode = rsleigh_decompile::decompile_with_binary(
     Architecture::X86_64, &instructions, Some(&binary), Some(path));
 ```
+
+### Analysis API
+
+```rust
+use rsleigh_decompile::analysis::{extract_function_meta, scan_vulns};
+
+// Extract structured metadata (calls, strings, complexity) from a function
+let meta: FunctionMeta = extract_function_meta(&func_result);
+println!("{}: {} calls, {} strings, complexity {}",
+    meta.name, meta.calls.len(), meta.strings.len(), meta.complexity);
+
+// Scan for vulnerabilities across all decompiled functions
+let findings: Vec<VulnFinding> = scan_vulns(&all_results);
+for f in &findings {
+    println!("[{}] {} in {} (0x{:x}) — {}",
+        f.severity, f.pattern, f.function, f.address, f.description);
+}
+
+// All structs implement serde::Serialize for JSON integration
+let json = serde_json::to_string_pretty(&meta).unwrap();
+```
+
+`FunctionMeta`, `VulnFinding`, and `CallGraphEntry` all derive `Serialize` for direct use in tool integrations and the Spectra UI.
 
 ## Quick start
 

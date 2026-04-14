@@ -79,7 +79,8 @@ rsleigh/
 │       ├── signatures_libc.rs  ← 176 hand-tuned libc/POSIX signatures
 │       ├── signatures_win32.rs ← 128 hand-tuned Win32 signatures (HKEY, HWND, etc.)
 │       ├── ssa.rs              ← SSA construction with Phi insertion
-│       └── structure.rs        ← if/else, while/do-while loop recovery from dominators
+│       ├── structure.rs        ← if/else, while/do-while loop recovery from dominators
+│       └── analysis.rs         ← FunctionMeta, VulnFinding, CallGraphEntry (serde::Serialize)
 ├── rsleigh-cli/                ← CLI: decompile any binary to C pseudocode
 ├── scripts/
 │   └── extract-ghidra-sigs.py  ← extract signatures from Ghidra .gdt archives
@@ -122,6 +123,8 @@ rsleigh <binary> --xrefs <func>        # cross-references (callers + callees)
 rsleigh <binary> --yara                # generate YARA rules from binary
 rsleigh <binary> --diff <binary2>      # diff decompilation between two binaries
 rsleigh <binary> --taint <func>        # taint analysis on function
+rsleigh <binary> --vulnscan            # vulnerability scan (27 patterns, color-coded severity)
+rsleigh <binary> --callgraph           # call graph export (JSON with behavioral tags)
 rsleigh --raw <arch> <binary>          # load raw firmware blob (any arch)
 ```
 
@@ -284,6 +287,9 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - **Raw firmware loading:** `--raw <arch>` loads raw binary blobs at base address for any supported arch
 - **WebAssembly decompilation:** WASM module parsing, function/type recovery, pseudocode output
 - **AI-assisted RE toolkit:** `--summary` (one-line per function), `--xrefs` (callers + callees), `--search` (find functions by string, API call, or constant)
+- **Vulnerability scanner:** `--vulnscan` checks 27 patterns (buffer overflows, format strings, UAF, integer overflows, command injection, path traversal) with color-coded HIGH/MEDIUM/LOW severity
+- **Call graph export:** `--callgraph` emits JSON with behavioral tags (network_io, crypto, process_injection) and reverse caller map
+- **Analysis API:** `FunctionMeta`, `VulnFinding`, `CallGraphEntry` structs with `serde::Serialize` for Spectra integration and tool pipelines
 - **ARM32 VFP/NEON float instructions:** vmul.f64, vldr, vmov decoded via ARM7_le.slaspec (not ARM7_le_base); full VFP/NEON constructor support
 
 ---
@@ -319,6 +325,8 @@ Wired into Spectra via `rsleigh-api` + `rsleigh-decompile`:
 - Code view: decompiled pseudocode with syntax highlighting
   (registers blue, variables amber, functions clickable, dangerous APIs red)
 - All decode runs on 32MB stack threads (x86 pattern recursion depth)
+- Analysis API: `extract_function_meta()` and `scan_vulns()` provide structured metadata
+  (FunctionMeta, VulnFinding, CallGraphEntry) with serde::Serialize for JSON transport
 
 ## Ghidra Comparison Setup
 
