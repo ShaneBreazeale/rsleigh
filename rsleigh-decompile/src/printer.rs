@@ -1568,11 +1568,23 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             }
 
             // 5c. Simplify ARM condition patterns in if-statements
-            for line in &mut lines {
-                let t = line.trim().to_string();
+            for line_idx in 0..lines.len() {
+                let t = lines[line_idx].trim().to_string();
                 if t.starts_with("if (") || t.starts_with("} else if (") || t.starts_with("while (") {
-                    let indent = line.len() - line.trim_start().len();
+                    let indent = lines[line_idx].len() - lines[line_idx].trim_start().len();
                     let pad = " ".repeat(indent);
+                    // Look backwards for the most recent variable assignment (for "result" substitution)
+                    let recent_var = (0..line_idx).rev().find_map(|j| {
+                        let lt = lines[j].trim();
+                        if lt.ends_with(';') && lt.contains(" = ") && !lt.starts_with("if ") {
+                            let var_name = lt.split(" = ").next().unwrap_or("").trim();
+                            if var_name.starts_with("param_") || var_name.starts_with("lVar")
+                                || var_name.starts_with("iVar") || var_name.starts_with("local_") {
+                                return Some(var_name.to_string());
+                            }
+                        }
+                        None
+                    }).unwrap_or_else(|| "result".to_string());
                     // Extract the condition and surrounding syntax
                     let (prefix, cond, suffix) = if let Some(rest) = t.strip_prefix("if (") {
                         if let Some(cond) = rest.strip_suffix(") {") {
@@ -1589,39 +1601,25 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     } else { continue; };
 
                     // Replace flag-based conditions with readable ones
+                    let rv = &recent_var;
+                    let new_cond_owned: String;
                     let new_cond = match cond {
-                        // ARM condition code → C comparison
-                        // EQ: ZR set
-                        "ZR" => "result == 0",
-                        // NE: ZR clear
-                        "!ZR" | "!(ZR)" => "result != 0",
-                        // CS/HS: CY set (unsigned >=)
-                        "CY" => "result >= 0 /* unsigned */",
-                        // CC/LO: CY clear (unsigned <)
-                        "!CY" | "!(CY)" => "result < 0 /* unsigned */",
-                        // MI: NG set (negative)
-                        "NG" => "result < 0",
-                        // PL: NG clear (positive or zero)
-                        "!NG" | "!(NG)" => "result >= 0",
-                        // VS: OV set
+                        "ZR" => { new_cond_owned = format!("{} == 0", rv); &new_cond_owned }
+                        "!ZR" | "!(ZR)" => { new_cond_owned = format!("{} != 0", rv); &new_cond_owned }
+                        "CY" => { new_cond_owned = format!("(uint){} >= 0", rv); &new_cond_owned }
+                        "!CY" | "!(CY)" => { new_cond_owned = format!("(uint){} < 0", rv); &new_cond_owned }
+                        "NG" => { new_cond_owned = format!("{} < 0", rv); &new_cond_owned }
+                        "!NG" | "!(NG)" => { new_cond_owned = format!("{} >= 0", rv); &new_cond_owned }
                         "OV" => "overflow",
-                        // VC: OV clear
                         "!OV" | "!(OV)" => "!overflow",
-                        // HI: CY && !ZR (unsigned >)
-                        "CY && !ZR" | "!ZR && CY" => "result > 0 /* unsigned */",
-                        "!CY && !ZR" => "result > 0 /* unsigned */",
-                        // LS: !CY || ZR (unsigned <=)
-                        "!CY || ZR" | "ZR || !CY" => "result <= 0 /* unsigned */",
-                        "CY || ZR" | "ZR || CY" => "result <= 0 /* unsigned */",
-                        "!!CY || ZR" => "result <= 0 /* unsigned */",
-                        // Also match with parens
-                        "!(CY && !ZR)" => "result <= 0 /* unsigned */",
-                        // GE: NG == OV (signed >=) — already handled by fold, but catch remainders
-                        // LT: NG != OV (signed <)
-                        // GT: !ZR && NG == OV (signed >)
-                        "!ZR && result >= 0" => "result > 0 /* signed */",
-                        // LE: ZR || NG != OV (signed <=)
-                        "ZR || result < 0" => "result <= 0 /* signed */",
+                        "CY && !ZR" | "!ZR && CY" => { new_cond_owned = format!("(uint){} > 0", rv); &new_cond_owned }
+                        "!CY && !ZR" => { new_cond_owned = format!("(uint){} > 0", rv); &new_cond_owned }
+                        "!CY || ZR" | "ZR || !CY" => { new_cond_owned = format!("(uint){} <= 0", rv); &new_cond_owned }
+                        "CY || ZR" | "ZR || CY" => { new_cond_owned = format!("(uint){} <= 0", rv); &new_cond_owned }
+                        "!!CY || ZR" => { new_cond_owned = format!("(uint){} <= 0", rv); &new_cond_owned }
+                        "!(CY && !ZR)" => { new_cond_owned = format!("(uint){} <= 0", rv); &new_cond_owned }
+                        "!ZR && result >= 0" => { new_cond_owned = format!("{} > 0", rv); &new_cond_owned }
+                        "ZR || result < 0" => { new_cond_owned = format!("{} <= 0", rv); &new_cond_owned }
                         "true" => "true",
                         _ => {
                             // Try to clean up remaining flag references
@@ -1635,13 +1633,13 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                                     .replace("CY || ZR", "result <= 0 /* unsigned */")
                                     .replace("!CY || ZR", "result <= 0 /* unsigned */");
                                 if cleaned != cond {
-                                    *line = format!("{}{}{}{}", pad, prefix, cleaned, suffix);
+                                    lines[line_idx] = format!("{}{}{}{}", pad, prefix, cleaned, suffix);
                                 }
                             }
                             continue;
                         }
                     };
-                    *line = format!("{}{}{}{}", pad, prefix, new_cond, suffix);
+                    lines[line_idx] = format!("{}{}{}{}", pad, prefix, new_cond, suffix);
                 }
             }
 
