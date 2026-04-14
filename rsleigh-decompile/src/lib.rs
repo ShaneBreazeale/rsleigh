@@ -10,6 +10,7 @@ pub mod dwarf;
 pub mod pdb_info;
 pub mod signatures;
 pub mod eqsat;
+pub mod analysis;
 mod signatures_libc;
 mod signatures_win32;
 
