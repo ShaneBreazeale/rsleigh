@@ -888,6 +888,44 @@ fn mba_simplify_expr(var_idx: usize, vars: &[VarDef]) -> Option<Expr> {
             }
             None
         }
+        // CDQ+IDIV simplification: SDiv of 64-bit sign-extended 32-bit value
+        // Pattern: SDiv(Or(Lsl(Zext(Asr(x, 31)), 32), Zext(x)), Zext(divisor)) → SDiv(x, divisor)
+        // Also handles: SDiv(Or(Lsl(Sext(sign), 32), Zext(val)), Zext(divisor))
+        //   where sign = Asr(val, 31) (CDQ pattern)
+        Expr::BinOp(BinOpKind::SDiv, left, right) => {
+            // Check if left is Or(Lsl(..., 32), Zext(x)) — the CDQ concatenation
+            if let Expr::BinOp(BinOpKind::Or, or_left, or_right) = &vars[left.0 as usize].expr {
+                // or_left should be Lsl(Zext/Sext(sign), 32), or_right should be Zext(val)
+                let val_from_or = extract_cdq_value(*or_left, *or_right, vars)
+                    .or_else(|| extract_cdq_value(*or_right, *or_left, vars));
+                if let Some(val_id) = val_from_or {
+                    // Right operand: strip Zext wrapper if present
+                    let div_id = if let Expr::UnaryOp(UnaryOpKind::Zext, inner) = &vars[right.0 as usize].expr {
+                        *inner
+                    } else {
+                        *right
+                    };
+                    return Some(Expr::BinOp(BinOpKind::SDiv, val_id, div_id));
+                }
+            }
+            // Also handle SRem with same pattern
+            None
+        }
+        Expr::BinOp(BinOpKind::SRem, left, right) => {
+            if let Expr::BinOp(BinOpKind::Or, or_left, or_right) = &vars[left.0 as usize].expr {
+                let val_from_or = extract_cdq_value(*or_left, *or_right, vars)
+                    .or_else(|| extract_cdq_value(*or_right, *or_left, vars));
+                if let Some(val_id) = val_from_or {
+                    let div_id = if let Expr::UnaryOp(UnaryOpKind::Zext, inner) = &vars[right.0 as usize].expr {
+                        *inner
+                    } else {
+                        *right
+                    };
+                    return Some(Expr::BinOp(BinOpKind::SRem, val_id, div_id));
+                }
+            }
+            None
+        }
         // Mult by 0 after inlining
         Expr::BinOp(BinOpKind::Mult, left, right) => {
             if is_const_zero(*left, vars) || is_const_zero(*right, vars) {
@@ -978,6 +1016,95 @@ fn simplify_expr(expr: Expr, vars: &[VarDef]) -> Expr {
 
         _ => expr,
     }
+}
+
+/// Extract the original 32-bit value from a 64-bit concatenation pattern used for division.
+///
+/// Recognizes the x86 CDQ+IDIV pattern where a 32-bit value is widened to 64 bits
+/// for signed division. The concatenation takes two forms:
+///
+/// 1. CDQ via Asr: Or(Lsl(Zext(Asr(val, 31)), 32), Zext(val))
+/// 2. CDQ via Subpiece: Or(Lsl(Zext(val_copy), 32), Zext(val))
+///    where val_copy is the same register/varnode as val
+///
+/// In both cases, the 64-bit value is just the sign-extension of the 32-bit value,
+/// so the division can be simplified to a 32-bit operation.
+///
+/// `high_part` should be the Lsl(..., 32) side, `low_part` the Zext(val) side.
+fn extract_cdq_value(high_part: VarId, low_part: VarId, vars: &[VarDef]) -> Option<VarId> {
+    // low_part must be Zext(val)
+    let val_id = match &vars[low_part.0 as usize].expr {
+        Expr::UnaryOp(UnaryOpKind::Zext, inner) => *inner,
+        _ => return None,
+    };
+
+    // high_part must be Lsl(something, 32)
+    let (shift_input, shift_amount) = match &vars[high_part.0 as usize].expr {
+        Expr::BinOp(BinOpKind::Lsl, left, right) => (*left, *right),
+        _ => return None,
+    };
+
+    // shift_amount must be 32
+    match &vars[shift_amount.0 as usize].expr {
+        Expr::Const(32, _) => {}
+        _ => return None,
+    }
+
+    // shift_input should be Zext/Sext of something derived from val
+    let inner_of_shift = match &vars[shift_input.0 as usize].expr {
+        Expr::UnaryOp(UnaryOpKind::Zext | UnaryOpKind::Sext, inner) => *inner,
+        _ => return None,
+    };
+
+    // The inner value should be derived from the same source as val_id.
+    // Case 1: Asr(val, 31) — classic CDQ sign extension
+    if let Expr::BinOp(BinOpKind::Asr, asr_val, asr_amount) = &vars[inner_of_shift.0 as usize].expr {
+        if let Expr::Const(31, _) = &vars[asr_amount.0 as usize].expr {
+            if same_varnode(*asr_val, val_id, vars) || asr_val == &val_id {
+                return Some(val_id);
+            }
+        }
+    }
+
+    // Case 2: Same register/varnode as val — the CDQ Subpiece(Sext(EAX), 0) bug
+    // produces EDX = EAX, so high = Zext(EDX) = Zext(EAX) = Zext(val)
+    if same_varnode(inner_of_shift, val_id, vars) || inner_of_shift == val_id {
+        return Some(val_id);
+    }
+
+    // Case 3: The inner is a Var pointing to the same source
+    if let Expr::Var(src) = &vars[inner_of_shift.0 as usize].expr {
+        if same_varnode(*src, val_id, vars) || *src == val_id {
+            return Some(val_id);
+        }
+    }
+
+    // Case 4: The inner is Sext(val) — direct sign extension (CDQ produces this
+    // via Subpiece(Sext(EAX), 0) → EDX, which after copy propagation becomes
+    // Sext(val) in the high half)
+    if let Expr::UnaryOp(UnaryOpKind::Sext, sext_inner) = &vars[inner_of_shift.0 as usize].expr {
+        if same_varnode(*sext_inner, val_id, vars) || *sext_inner == val_id {
+            return Some(val_id);
+        }
+    }
+
+    // Case 5: Follow through Var indirection on the inner
+    let resolved = match &vars[inner_of_shift.0 as usize].expr {
+        Expr::Var(v) => *v,
+        _ => inner_of_shift,
+    };
+    if resolved != inner_of_shift {
+        if let Expr::UnaryOp(UnaryOpKind::Sext, sext_inner) = &vars[resolved.0 as usize].expr {
+            if same_varnode(*sext_inner, val_id, vars) || *sext_inner == val_id {
+                return Some(val_id);
+            }
+        }
+        if same_varnode(resolved, val_id, vars) || resolved == val_id {
+            return Some(val_id);
+        }
+    }
+
+    None
 }
 
 /// Constant folding: evaluate BinOp(Const, Const) → Const.

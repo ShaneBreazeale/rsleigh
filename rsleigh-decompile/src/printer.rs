@@ -8179,6 +8179,18 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
     match expr {
         Expr::Var(id) => format_var_tracked(*id, ssa, ctx, tracker),
         Expr::BinOp(kind, left, right) => {
+            // CDQ+IDIV simplification: SDiv/SRem of 64-bit concatenation → 32-bit division
+            // Pattern: SDiv(Or(Lsl(x, 32), Zext(val)), Sext/Zext(divisor)) → val / divisor
+            if matches!(kind, BinOpKind::SDiv | BinOpKind::SRem | BinOpKind::Div | BinOpKind::Rem) {
+                if let Some(val_id) = extract_concat_low_half(*left, ssa) {
+                    let divisor_id = unwrap_ext(*right, ssa);
+                    let l = format_var_tracked(val_id, ssa, ctx, tracker);
+                    let r = format_var_tracked(divisor_id, ssa, ctx, tracker);
+                    let op = binop_str(*kind);
+                    return format!("{} {} {}", l, op, r);
+                }
+            }
+
             let mut l = format_var_tracked(*left, ssa, ctx, tracker);
             let mut r = format_var_tracked(*right, ssa, ctx, tracker);
             let op = binop_str(*kind);
@@ -9721,5 +9733,51 @@ fn parse_eq_const(cond: &str) -> Option<(String, String)> {
         Some((var.to_string(), val.to_string()))
     } else {
         None
+    }
+}
+
+/// Extract the low-half value from a 64-bit concatenation pattern.
+/// Recognizes: Or(Lsl(x, 32), Zext(val)) → val
+/// This is the x86 CDQ+IDIV pattern where EDX:EAX is built from two 32-bit halves.
+fn extract_concat_low_half(id: VarId, ssa: &SsaCfg) -> Option<VarId> {
+    let vdef = ssa.var(id);
+    let (or_left, or_right) = match &vdef.expr {
+        Expr::BinOp(BinOpKind::Or, l, r) => (*l, *r),
+        _ => return None,
+    };
+
+    // One side should be Lsl(x, 32), the other Zext(val)
+    let low_half = try_extract_low_from_or(or_left, or_right, ssa)
+        .or_else(|| try_extract_low_from_or(or_right, or_left, ssa))?;
+    Some(low_half)
+}
+
+/// Check if `high` is Lsl(x, 32) and `low` is Zext(val), return val.
+fn try_extract_low_from_or(high: VarId, low: VarId, ssa: &SsaCfg) -> Option<VarId> {
+    // high must be Lsl(something, 32)
+    let high_def = ssa.var(high);
+    match &high_def.expr {
+        Expr::BinOp(BinOpKind::Lsl, _, shift_amt) => {
+            match &ssa.var(*shift_amt).expr {
+                Expr::Const(32, _) => {}
+                _ => return None,
+            }
+        }
+        _ => return None,
+    }
+
+    // low must be Zext(val)
+    let low_def = ssa.var(low);
+    match &low_def.expr {
+        Expr::UnaryOp(UnaryOpKind::Zext, inner) => Some(*inner),
+        _ => None,
+    }
+}
+
+/// Unwrap Zext/Sext wrappers to get the inner value.
+fn unwrap_ext(id: VarId, ssa: &SsaCfg) -> VarId {
+    match &ssa.var(id).expr {
+        Expr::UnaryOp(UnaryOpKind::Zext | UnaryOpKind::Sext, inner) => *inner,
+        _ => id,
     }
 }
