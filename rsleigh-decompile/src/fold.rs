@@ -118,16 +118,22 @@ fn fold_once(ssa: &mut SsaCfg) {
     // Equality saturation: explore all equivalent MBA forms, extract cheapest.
     // Only run on expressions deep enough to benefit (depth ≥ 5).
     // Wrapped in catch_unwind because egg can panic on pathological inputs.
-    for v in 0..ssa.vars.len() {
-        let depth = expr_depth(&ssa.vars[v].expr, &ssa.vars, 0);
-        if depth >= 5 {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                crate::eqsat::simplify_expr(v, &mut ssa.vars)
-            }));
-            if let Ok(Some(simplified)) = result {
-                ssa.vars[v].expr = simplified;
+    // Suppress panic messages during eqsat to avoid noisy stderr output.
+    {
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| { /* silence egg panics */ }));
+        for v in 0..ssa.vars.len() {
+            let depth = expr_depth(&ssa.vars[v].expr, &ssa.vars, 0);
+            if depth >= 5 {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    crate::eqsat::simplify_expr(v, &mut ssa.vars)
+                }));
+                if let Ok(Some(simplified)) = result {
+                    ssa.vars[v].expr = simplified;
+                }
             }
         }
+        std::panic::set_hook(prev_hook);
     }
 
     // Pass 3: Inline single-use Unique vars and all constants

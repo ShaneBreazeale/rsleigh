@@ -372,26 +372,29 @@ pub fn simplify_expr(
     // Convert SSA → egg (max depth 15 to avoid huge expressions)
     let (egg_expr, var_map) = ssa_to_egg(var_idx, vars, 15)?;
 
+    let expr_len = egg_expr.as_ref().len();
+
     // Skip tiny expressions (not worth the overhead)
-    if egg_expr.as_ref().len() < 5 { return None; }
+    if expr_len < 5 { return None; }
+
+    // Skip very large expressions — egg's union-find can panic on pathological
+    // inputs with deep expression trees and commutativity rules
+    if expr_len > 500 { return None; }
 
     let original_cost = {
-        let _cost_fn = MbaCost;
-        let root = Id::from(egg_expr.as_ref().len() - 1);
-        egg::Extractor::new(&{
-            let mut r = egg::EGraph::<Mba, ()>::default();
-            r.add_expr(&egg_expr);
-            r
-        }, MbaCost).find_best(root).0
+        let root = Id::from(expr_len - 1);
+        let mut egraph = egg::EGraph::<Mba, ()>::default();
+        egraph.add_expr(&egg_expr);
+        egg::Extractor::new(&egraph, MbaCost).find_best(root).0
     };
 
-    // Run equality saturation
+    // Run equality saturation with conservative limits
     let rules = mba_rules();
     let runner = Runner::<Mba, (), ()>::default()
         .with_expr(&egg_expr)
-        .with_iter_limit(30)       // limit iterations
-        .with_node_limit(10_000)   // limit e-graph size
-        .with_time_limit(std::time::Duration::from_millis(50)) // 50ms timeout per expression
+        .with_iter_limit(20)       // limit iterations (reduced from 30)
+        .with_node_limit(5_000)    // limit e-graph size (reduced from 10K)
+        .with_time_limit(std::time::Duration::from_millis(50))
         .run(&rules);
 
     // Extract the cheapest equivalent expression
@@ -401,7 +404,7 @@ pub fn simplify_expr(
 
     // Only accept if it's actually simpler
     if best_cost >= original_cost { return None; }
-    if best_expr.as_ref().len() >= egg_expr.as_ref().len() { return None; }
+    if best_expr.as_ref().len() >= expr_len { return None; }
 
     // Convert egg → SSA
     egg_to_ssa(&best_expr, &var_map, vars, sz)

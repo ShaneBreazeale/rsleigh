@@ -500,10 +500,11 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
     }
 
     // Decompile mode — two-pass for interprocedural type propagation
-    // Pass 1: quick decompile all targets to learn parameter/return types
+    // Pass 1: quick decompile all targets to learn parameter/return types + struct params
     if all_mode && targets.len() > 1 {
         let mut learned: Vec<rsleigh_decompile::LearnedFuncType> = Vec::new();
         let mut callsite_returns: Vec<(u64, &'static str)> = Vec::new();
+        let mut learned_structs: Vec<rsleigh_decompile::LearnedStructParam> = Vec::new();
 
         for name in &targets {
             let func_addr = if let Some(hex) = name.strip_prefix("0x").or_else(|| name.strip_prefix("0X")) {
@@ -521,6 +522,11 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                     // Infer callee return types from how this function uses call results
                     let returns = rsleigh_decompile::infer_returns_from_callsites(arch, &insts, Some(&data));
                     callsite_returns.extend(returns);
+
+                    // Extract struct param identifications from decompiled output
+                    let output = rsleigh_decompile::decompile_with_binary(arch, &insts, Some(&data), Some(path));
+                    let structs = rsleigh_decompile::extract_learned_structs(func_addr, &output);
+                    learned_structs.extend(structs);
                 }
             }
         }
@@ -541,6 +547,9 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
 
         if !learned.is_empty() {
             rsleigh_decompile::signatures::register_learned_types(&learned);
+        }
+        if !learned_structs.is_empty() {
+            rsleigh_decompile::signatures::register_learned_structs(&learned_structs);
         }
     }
 
@@ -2831,6 +2840,51 @@ fn discover_elf_functions(
 
     let mut found = BTreeSet::new();
 
+    // Detect endianness and pointer size from ELF header
+    let is_big_endian = elf.header.endianness().unwrap_or(goblin::container::Endian::Little)
+        == goblin::container::Endian::Big;
+    let is_32bit = elf.header.e_machine == 0x08 // MIPS
+        || elf.header.e_machine == 0x28          // ARM
+        || (elf.header.e_machine == 0x03 && elf.header.e_ident[4] == 1); // x86 32-bit
+    let ptr_size: usize = if is_32bit { 4 } else { 8 };
+
+    // Endian-aware pointer reading helpers
+    let read_u32_elf = |bytes: &[u8]| -> u32 {
+        if is_big_endian {
+            u32::from_be_bytes(bytes[..4].try_into().unwrap_or([0; 4]))
+        } else {
+            u32::from_le_bytes(bytes[..4].try_into().unwrap_or([0; 4]))
+        }
+    };
+    let read_u64_elf = |bytes: &[u8]| -> u64 {
+        if is_big_endian {
+            u64::from_be_bytes(bytes[..8].try_into().unwrap_or([0; 8]))
+        } else {
+            u64::from_le_bytes(bytes[..8].try_into().unwrap_or([0; 8]))
+        }
+    };
+    let read_i32_elf = |bytes: &[u8]| -> i32 {
+        if is_big_endian {
+            i32::from_be_bytes(bytes[..4].try_into().unwrap_or([0; 4]))
+        } else {
+            i32::from_le_bytes(bytes[..4].try_into().unwrap_or([0; 4]))
+        }
+    };
+    let read_ptr_elf = |bytes: &[u8]| -> u64 {
+        if is_32bit {
+            read_u32_elf(bytes) as u64
+        } else {
+            read_u64_elf(bytes)
+        }
+    };
+    let read_i64_elf = |bytes: &[u8]| -> i64 {
+        if is_big_endian {
+            i64::from_be_bytes(bytes[..8].try_into().unwrap_or([0; 8]))
+        } else {
+            i64::from_le_bytes(bytes[..8].try_into().unwrap_or([0; 8]))
+        }
+    };
+
     // 1. Entry point
     let entry = elf.header.e_entry;
     if entry != 0 { found.insert(entry); }
@@ -2844,11 +2898,11 @@ fn discover_elf_functions(
         // .init_array / .fini_array contain function pointers
         if (name == ".init_array" || name == ".fini_array") && sh.sh_size > 0 {
             let fo = sh.sh_offset as usize;
-            let count = (sh.sh_size / 8) as usize;
+            let count = (sh.sh_size as usize) / ptr_size;
             for i in 0..count {
-                if fo + i * 8 + 8 <= data.len() {
-                    let ptr = u64::from_le_bytes(data[fo + i * 8..fo + i * 8 + 8].try_into().unwrap_or([0; 8]));
-                    if ptr != 0 && ptr != u64::MAX {
+                if fo + i * ptr_size + ptr_size <= data.len() {
+                    let ptr = read_ptr_elf(&data[fo + i * ptr_size..]);
+                    if ptr != 0 && ptr != u64::MAX && ptr != 0xFFFFFFFF {
                         found.insert(ptr);
                     }
                 }
@@ -2996,6 +3050,40 @@ fn discover_elf_functions(
                     }
                 }
             }
+
+            if matches!(arch, rsleigh_api::Architecture::MIPS32) {
+                // MIPS JAL (Jump And Link): opcode 000011 imm26
+                // Big-endian: (word >> 26) == 3
+                // Target: (PC & 0xF0000000) | (imm26 << 2)
+                for i in (0..text_bytes.len().saturating_sub(3)).step_by(4) {
+                    let word = u32::from_be_bytes(text_bytes[i..i+4].try_into().unwrap_or([0;4]));
+                    if (word >> 26) == 3 { // JAL opcode
+                        let imm26 = word & 0x03FFFFFF;
+                        let target = ((text_addr + i as u64) & 0xF0000000) | ((imm26 as u64) << 2);
+                        if target >= text_addr && target < text_end && target % 4 == 0 {
+                            found.insert(target);
+                        }
+                    }
+                }
+
+                // Also scan for BAL (Branch And Link): opcode=000001 rs=00000 rt=10001 imm16
+                // Big-endian: 0x0411xxxx
+                // And BGEZAL: opcode=000001 rt=10001 — same encoding
+                for i in (0..text_bytes.len().saturating_sub(3)).step_by(4) {
+                    let word = u32::from_be_bytes(text_bytes[i..i+4].try_into().unwrap_or([0;4]));
+                    let opcode = word >> 26;
+                    let rt = (word >> 16) & 0x1F;
+                    if opcode == 1 && rt == 17 { // BGEZAL/BAL
+                        let imm16 = (word & 0xFFFF) as i16;
+                        let offset = (imm16 as i64) << 2;
+                        let pc = text_addr + i as u64 + 4; // delay slot: PC+4
+                        let target = (pc as i64 + offset) as u64;
+                        if target >= text_addr && target < text_end && target % 4 == 0 {
+                            found.insert(target);
+                        }
+                    }
+                }
+            }
         }
 
         // 5. Decoder-based CALL target discovery with indirect call resolution.
@@ -3006,13 +3094,13 @@ fn discover_elf_functions(
             let mut new_targets = BTreeSet::new();
             let max_seeds = 2000;
 
-            // Helper: read a 64-bit pointer from a virtual address in the binary
+            // Helper: read a pointer from a virtual address in the binary
             let read_ptr = |va: u64| -> Option<u64> {
                 let off = segs.iter().find_map(|(sva, sz, fo)| {
                     if va >= *sva && va < sva + sz { Some((fo + (va - sva)) as usize) } else { None }
                 })?;
-                if off + 8 <= data.len() {
-                    Some(u64::from_le_bytes(data[off..off+8].try_into().ok()?))
+                if off + ptr_size <= data.len() {
+                    Some(read_ptr_elf(&data[off..]))
                 } else { None }
             };
 
@@ -3139,6 +3227,30 @@ fn discover_elf_functions(
                                 }
                             }
 
+                            // MIPS: collect JAL targets from decoded instructions
+                            // MIPS JAL disassembles as "jal 0xNNNNNNNN"
+                            if dis.starts_with("jal ") {
+                                let target_part = &dis[4..];
+                                if let Some(hex) = target_part.trim().strip_prefix("0x") {
+                                    if let Ok(target) = u64::from_str_radix(hex, 16) {
+                                        if target >= text_addr && target < text_end {
+                                            new_targets.insert(target);
+                                        }
+                                    }
+                                }
+                            }
+                            // MIPS: "bal 0xNNNN" (branch and link)
+                            if dis.starts_with("bal ") || dis.starts_with("bgezal ") || dis.starts_with("bltzal ") {
+                                let target_part = dis.split_whitespace().last().unwrap_or("");
+                                if let Some(hex) = target_part.strip_prefix("0x") {
+                                    if let Ok(target) = u64::from_str_radix(hex, 16) {
+                                        if target >= text_addr && target < text_end {
+                                            new_targets.insert(target);
+                                        }
+                                    }
+                                }
+                            }
+
                             // Invalidate destination register on any other write
                             // (simplistic: CALL clobbers RAX, other writes clobber dest)
                             if dis.starts_with("CALL ") {
@@ -3153,7 +3265,9 @@ fn discover_elf_functions(
                                 reg_vals.remove("R11");
                             }
 
-                            if dis.starts_with("RET") || dis.starts_with("HLT") { break; }
+                            // Terminators: x86 RET/HLT, MIPS JR RA (jr ra)
+                            if dis.starts_with("RET") || dis.starts_with("HLT")
+                                || dis == "jr ra" { break; }
                             pos += sz;
                         } else {
                             break;
@@ -3181,8 +3295,8 @@ fn discover_elf_functions(
             let table_enc = data[fo + 3];
             // Read FDE count (offset 8, encoding determines size)
             let fde_count = match fde_count_enc {
-                0x03 => i32::from_le_bytes(data[fo+8..fo+12].try_into().unwrap_or([0;4])) as usize,
-                _ => u32::from_le_bytes(data[fo+8..fo+12].try_into().unwrap_or([0;4])) as usize,
+                0x03 => read_i32_elf(&data[fo+8..]) as usize,
+                _ => read_u32_elf(&data[fo+8..]) as usize,
             };
             if fde_count == 0 || fde_count > 100_000 { break; }
             let table_start = fo + 12;
@@ -3191,7 +3305,7 @@ fn discover_elf_functions(
                 for i in 0..fde_count {
                     let entry_off = table_start + i * 8;
                     if entry_off + 4 > data.len() { break; }
-                    let pc_rel = i32::from_le_bytes(data[entry_off..entry_off+4].try_into().unwrap_or([0;4]));
+                    let pc_rel = read_i32_elf(&data[entry_off..]);
                     let pc = (hdr_addr as i64 + pc_rel as i64) as u64;
                     if pc > 0 && pc < text_end + 0x10000 {
                         found.insert(pc);
@@ -3214,18 +3328,18 @@ fn discover_elf_functions(
             let mut pos = 0;
             while pos + 8 < ef_size {
                 let fo = ef_off + pos;
-                let length = u32::from_le_bytes(data[fo..fo+4].try_into().unwrap_or([0;4])) as usize;
+                let length = read_u32_elf(&data[fo..]) as usize;
                 if length == 0 { break; } // terminator
                 if length > ef_size - pos { break; } // corrupt
                 let record_start = pos + 4;
-                let cie_id = u32::from_le_bytes(data[fo+4..fo+8].try_into().unwrap_or([0;4]));
+                let cie_id = read_u32_elf(&data[fo+4..]);
 
                 if cie_id != 0 {
                     // FDE: initial_location is at offset 8 from record start,
-                    // encoded as sdata4 PC-relative (most common for x86-64 gcc/clang)
+                    // encoded as sdata4 PC-relative (most common for gcc/clang)
                     let iloc_off = fo + 8;
                     if iloc_off + 4 <= data.len() {
-                        let iloc_rel = i32::from_le_bytes(data[iloc_off..iloc_off+4].try_into().unwrap_or([0;4]));
+                        let iloc_rel = read_i32_elf(&data[iloc_off..]);
                         let iloc = (ef_addr as i64 + (iloc_off - ef_off) as i64 + iloc_rel as i64) as u64;
                         if iloc > 0 && iloc < text_end + 0x10000 {
                             found.insert(iloc);
@@ -3261,10 +3375,14 @@ fn discover_elf_functions(
             };
 
             let mut i = 0;
-            while i + 24 <= sec_size {
-                let offset_to_top = i64::from_le_bytes(data[sec_off+i..sec_off+i+8].try_into().unwrap_or([0;8]));
-                let typeinfo_ptr = u64::from_le_bytes(data[sec_off+i+8..sec_off+i+16].try_into().unwrap_or([0;8]));
-                let first_entry = u64::from_le_bytes(data[sec_off+i+16..sec_off+i+24].try_into().unwrap_or([0;8]));
+            while i + 3 * ptr_size <= sec_size {
+                let offset_to_top = if is_32bit {
+                    read_i32_elf(&data[sec_off+i..]) as i64
+                } else {
+                    read_i64_elf(&data[sec_off+i..])
+                };
+                let typeinfo_ptr = read_ptr_elf(&data[sec_off+i+ptr_size..]);
+                let first_entry = read_ptr_elf(&data[sec_off+i+2*ptr_size..]);
 
                 // Vtable heuristic: offset_to_top is 0 or small, typeinfo points to data,
                 // first entry points to executable code
@@ -3273,19 +3391,19 @@ fn discover_elf_functions(
                     && first_entry >= text_addr && first_entry < text_end
                 {
                     // Walk virtual function entries
-                    let mut j = 16;
-                    while i + j + 8 <= sec_size {
-                        let vfunc = u64::from_le_bytes(data[sec_off+i+j..sec_off+i+j+8].try_into().unwrap_or([0;8]));
+                    let mut j = 2 * ptr_size;
+                    while i + j + ptr_size <= sec_size {
+                        let vfunc = read_ptr_elf(&data[sec_off+i+j..]);
                         if vfunc >= text_addr && vfunc < text_end {
                             found.insert(vfunc);
-                            j += 8;
+                            j += ptr_size;
                         } else {
                             break;
                         }
                     }
                     i += j; // skip past vtable
                 } else {
-                    i += 8;
+                    i += ptr_size;
                 }
             }
         }
@@ -3307,18 +3425,40 @@ fn discover_elf_functions(
                 if !matches!(name, ".rodata" | ".data.rel.ro") { continue; }
                 let fo = sh.sh_offset as usize;
                 let sz = sh.sh_size as usize;
-                if fo + sz > data.len() || sz < 8 { continue; }
+                if fo + sz > data.len() || sz < ptr_size { continue; }
                 let is_vtable_section = name == ".data.rel.ro";
-                for i in (0..sz.saturating_sub(7)).step_by(8) {
-                    let ptr = u64::from_le_bytes(data[fo + i..fo + i + 8].try_into().unwrap_or([0; 8]));
+                let ps = ptr_size; // local alias
+                for i in (0..sz.saturating_sub(ps - 1)).step_by(ps) {
+                    let ptr = read_ptr_elf(&data[fo + i..]);
                     if ptr >= text_addr && ptr < text_end {
                         if is_vtable_section {
                             // .data.rel.ro: vtable entries are always function pointers
                             found.insert(ptr);
+                        } else if matches!(arch, rsleigh_api::Architecture::MIPS32) {
+                            // MIPS: validate with prologue check
+                            let target_idx = (ptr - text_addr) as usize;
+                            if text_fo + target_idx + 4 < data.len() {
+                                let word = u32::from_be_bytes(data[text_fo + target_idx..text_fo + target_idx + 4].try_into().unwrap_or([0;4]));
+                                let strong = (word & 0xFFFF0000) == 0x27BD0000  // addiu sp, sp, -N
+                                    || (word & 0xFFFF0000) == 0x3C1C0000         // lui gp, N
+                                    || (word & 0xFFFF0000) == 0xAFBF0000;        // sw ra, N(sp)
+                                if strong {
+                                    found.insert(ptr);
+                                } else {
+                                    let mut run = 0;
+                                    let psi = ps as i64;
+                                    for k in [-psi, psi, 2 * psi].iter() {
+                                        let neighbor = i as i64 + k;
+                                        if neighbor >= 0 && (neighbor as usize) + ps <= sz {
+                                            let np = read_ptr_elf(&data[fo + neighbor as usize..]);
+                                            if np >= text_addr && np < text_end { run += 1; }
+                                        }
+                                    }
+                                    if run >= 2 { found.insert(ptr); }
+                                }
+                            }
                         } else {
-                            // .rodata: could be switch tables or data. Validate that the
-                            // target is part of a consecutive run of 3+ code pointers
-                            // (vtable pattern) or starts with a strong prologue.
+                            // x86/ARM: existing prologue checks
                             let target_idx = (ptr - text_addr) as usize;
                             if text_fo + target_idx + 4 < data.len() {
                                 let b0 = data[text_fo + target_idx];
@@ -3331,18 +3471,16 @@ fn discover_elf_functions(
                                 if strong {
                                     found.insert(ptr);
                                 } else {
-                                    // Check: is this part of a consecutive pointer run (vtable)?
                                     let mut run = 0;
-                                    for k in [-8i64, 8, 16].iter() {
+                                    let psi = ps as i64;
+                                    for k in [-psi, psi, 2 * psi].iter() {
                                         let neighbor = i as i64 + k;
-                                        if neighbor >= 0 && (neighbor as usize) + 8 <= sz {
-                                            let np = u64::from_le_bytes(data[fo + neighbor as usize..fo + neighbor as usize + 8].try_into().unwrap_or([0;8]));
+                                        if neighbor >= 0 && (neighbor as usize) + ps <= sz {
+                                            let np = read_ptr_elf(&data[fo + neighbor as usize..]);
                                             if np >= text_addr && np < text_end { run += 1; }
                                         }
                                     }
-                                    if run >= 2 { // 2+ neighbors also point to .text → vtable
-                                        found.insert(ptr);
-                                    }
+                                    if run >= 2 { found.insert(ptr); }
                                 }
                             }
                         }
@@ -3441,6 +3579,72 @@ fn discover_elf_functions(
             }
         }
 
+        // 6a. MIPS prologue pattern scanning in .text
+        if matches!(arch, rsleigh_api::Architecture::MIPS32) {
+            if text_fo + text_size as usize <= data.len() {
+                let text_bytes = &data[text_fo..text_fo + text_size as usize];
+
+                // MIPS function boundary detection: JR RA (0x03E00008) or
+                // JR RA in delay slot pair (JR RA + NOP = 03E00008 00000000)
+                let is_mips_boundary = |i: usize| -> bool {
+                    if i == 0 { return true; }
+                    // Check if previous instruction is JR RA (return)
+                    if i >= 8 {
+                        // JR RA = 0x03E00008, typically followed by NOP (delay slot)
+                        let prev2 = u32::from_be_bytes(text_bytes[i-8..i-4].try_into().unwrap_or([0;4]));
+                        let prev1 = u32::from_be_bytes(text_bytes[i-4..i].try_into().unwrap_or([0;4]));
+                        if prev2 == 0x03E00008 { return true; } // JR RA (prev was delay slot)
+                        if prev1 == 0x03E00008 { return true; } // JR RA right before
+                    }
+                    if i >= 4 {
+                        let prev = u32::from_be_bytes(text_bytes[i-4..i].try_into().unwrap_or([0;4]));
+                        if prev == 0x00000000 { return true; } // NOP padding
+                        if prev == 0x03E00008 { return true; } // JR RA
+                    }
+                    false
+                };
+
+                for i in (0..text_bytes.len().saturating_sub(7)).step_by(4) {
+                    let addr = text_addr + i as u64;
+                    if found.contains(&addr) { continue; }
+
+                    let word = u32::from_be_bytes(text_bytes[i..i+4].try_into().unwrap_or([0;4]));
+                    let next_word = u32::from_be_bytes(text_bytes[i+4..i+8].try_into().unwrap_or([0;4]));
+
+                    // Pattern 1: addiu sp, sp, -N (0x27BDxxxx where xxxx is negative = high bit set)
+                    // This is the most common MIPS function prologue
+                    let is_addiu_sp = (word & 0xFFFF0000) == 0x27BD0000 && (word & 0x8000) != 0;
+
+                    if is_addiu_sp {
+                        // Strong: addiu sp followed by sw ra (save return address)
+                        let next_is_sw_ra = (next_word & 0xFFFF0000) == 0xAFBF0000;
+                        // Also strong: addiu sp followed by sw s8/fp
+                        let next_is_sw_fp = (next_word & 0xFFFF0000) == 0xAFBE0000;
+                        // Also accept: addiu sp followed by lui gp (PIC prologue)
+                        let next_is_lui_gp = (next_word & 0xFFFF0000) == 0x3C1C0000;
+
+                        if next_is_sw_ra || next_is_sw_fp || next_is_lui_gp {
+                            // Strong prologue — always add
+                            found.insert(addr);
+                        } else if is_mips_boundary(i) {
+                            // Weaker prologue but at a function boundary
+                            found.insert(addr);
+                        }
+                    }
+
+                    // Pattern 2: lui gp, N followed by addiu gp (PIC code, GP setup)
+                    // Some functions start with GP setup before stack allocation
+                    let is_lui_gp = (word & 0xFFFF0000) == 0x3C1C0000;
+                    if is_lui_gp && is_mips_boundary(i) {
+                        let next_is_addiu_gp = (next_word & 0xFFFF0000) == 0x279C0000;
+                        if next_is_addiu_gp {
+                            found.insert(addr);
+                        }
+                    }
+                }
+            }
+        }
+
         // 6b. Scan for endbr64 in all executable sections (not just .text)
         // This catches .plt.sec and .plt.got entries
         for sh in &elf.section_headers {
@@ -3510,6 +3714,55 @@ fn discover_elf_functions(
                         }
                     }
                     i += 1;
+                }
+            }
+        }
+
+        // 7b. MIPS gap analysis: scan gaps between known functions for prologues after JR RA.
+        if matches!(arch, rsleigh_api::Architecture::MIPS32) {
+            if text_fo + text_size as usize <= data.len() {
+                let text_bytes = &data[text_fo..text_fo + text_size as usize];
+                let mut sorted_addrs: Vec<u64> = found.iter()
+                    .filter(|a| **a >= text_addr && **a < text_end)
+                    .copied().collect();
+                sorted_addrs.sort();
+
+                for window in sorted_addrs.windows(2) {
+                    let gap_start = window[0];
+                    let gap_end = window[1];
+                    let gap_size = gap_end - gap_start;
+                    if gap_size < 16 || gap_size > 4096 { continue; }
+                    let start_idx = (gap_start - text_addr) as usize;
+                    let end_idx = (gap_end - text_addr) as usize;
+                    if end_idx + 4 > text_bytes.len() { continue; }
+
+                    // Scan for JR RA (0x03E00008) + delay slot, then prologue
+                    let mut i = start_idx;
+                    while i + 12 <= end_idx {
+                        let word = u32::from_be_bytes(text_bytes[i..i+4].try_into().unwrap_or([0;4]));
+                        if word == 0x03E00008 { // JR RA
+                            // Skip delay slot + any NOP padding
+                            let mut j = i + 8; // past JR RA + delay slot
+                            while j + 4 <= end_idx {
+                                let w = u32::from_be_bytes(text_bytes[j..j+4].try_into().unwrap_or([0;4]));
+                                if w == 0x00000000 { j += 4; } else { break; }
+                            }
+                            if j + 8 <= end_idx && j % 4 == 0 {
+                                let candidate_word = u32::from_be_bytes(text_bytes[j..j+4].try_into().unwrap_or([0;4]));
+                                let is_prologue = (candidate_word & 0xFFFF0000) == 0x27BD0000 && (candidate_word & 0x8000) != 0
+                                    || (candidate_word & 0xFFFF0000) == 0x3C1C0000;
+                                if is_prologue {
+                                    let candidate_addr = text_addr + j as u64;
+                                    if !found.contains(&candidate_addr) {
+                                        found.insert(candidate_addr);
+                                    }
+                                }
+                            }
+                            i = j;
+                        } else {
+                            i += 4;
+                        }
+                    }
                 }
             }
         }
