@@ -1,38 +1,58 @@
 {
+  "4RMMaster.exe": {
+    "functions": 3618,
+    "time": 0.027598142623901367
+  },
   "ChocolateFactory.exe": {
     "functions": 603,
-    "time": 0.005873918533325195
+    "time": 0.004951953887939453
   },
   "FLRSCRNSVR.SCR": {
     "functions": 93,
-    "time": 0.0031156539916992188
+    "time": 0.0032129287719726562
   },
   "FrhedPortable_2017.11.paf.exe": {
     "functions": 144,
-    "time": 0.01924300193786621
+    "time": 0.018177032470703125
+  },
+  "KritaPortable_5.2.16.paf.exe": {
+    "functions": 141,
+    "time": 0.08486104011535645
+  },
+  "TRYCRACKME.EXE": {
+    "functions": 105,
+    "time": 0.009833097457885742
   },
   "cb_baristas_secret_x64.exe": {
     "functions": 133,
-    "time": 0.013644218444824219
+    "time": 0.01256704330444336
   },
   "crackme_bobgambling.exe": {
     "functions": 80,
-    "time": 0.003676891326904297
+    "time": 0.002810955047607422
   },
   "crackme_shroud.exe": {
     "functions": 3327,
-    "time": 0.15536880493164062
+    "time": 0.13751602172851562
+  },
+  "elf-Linux-x64-bash": {
+    "functions": 1242,
+    "time": 0.0031270980834960938
   },
   "main.exe": {
     "functions": 2737,
-    "time": 0.016136884689331055
+    "time": 0.014262199401855469
+  },
+  "masoncrackmev2.exe": {
+    "functions": 12,
+    "time": 0.010177135467529297
   },
   "rust-crackme-easy.exe": {
     "functions": 487,
-    "time": 0.0058248043060302734
+    "time": 0.004827022552490234
   },
   "vm-final.exe": {
     "functions": 235,
-    "time": 0.0037751197814941406
+    "time": 0.003226041793823242
   }
 }
