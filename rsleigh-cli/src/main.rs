@@ -87,6 +87,9 @@ fn main() {
                     let search_idx = args_clone.iter().position(|a| a == "--search").unwrap();
                     let api_mode = args_clone.iter().any(|a| a == "--api");
                     let const_mode = args_clone.iter().any(|a| a == "--const");
+                    let tag_mode = args_clone.iter().any(|a| a == "--tag");
+                    let decompile_results = args_clone.iter().any(|a| a == "--decompile");
+                    let json_output = args_clone.iter().any(|a| a == "--json");
                     let query = args_clone.iter()
                         .skip(search_idx + 1)
                         .find(|a| !a.starts_with("--"))
@@ -96,9 +99,12 @@ fn main() {
                         eprintln!("Usage: rsleigh <binary> --search <query>");
                         eprintln!("       rsleigh <binary> --search --api <func_name>");
                         eprintln!("       rsleigh <binary> --search --const <hex_value>");
+                        eprintln!("       rsleigh <binary> --search --tag network,crypto");
+                        eprintln!("       rsleigh <binary> --search <query> --json");
+                        eprintln!("       rsleigh <binary> --search <query> --decompile");
                         return;
                     }
-                    run_search(&bp, &data, &query, api_mode, const_mode);
+                    run_search(&bp, &data, &query, api_mode, const_mode, tag_mode, decompile_results, json_output);
                 }
             })
             .unwrap();
@@ -1116,7 +1122,7 @@ fn run_xrefs(binary_path: &str, data: &[u8], target_name: &str) {
 }
 
 /// Search for functions matching a query: string, API call, or hex constant.
-fn run_search(binary_path: &str, data: &[u8], query: &str, api_mode: bool, const_mode: bool) {
+fn run_search(binary_path: &str, data: &[u8], query: &str, api_mode: bool, const_mode: bool, tag_mode: bool, decompile_results: bool, json_output: bool) {
     let obj = match goblin::Object::parse(data) {
         Ok(o) => o,
         Err(e) => { eprintln!("Error: {}", e); return; }
@@ -1147,16 +1153,45 @@ fn run_search(binary_path: &str, data: &[u8], query: &str, api_mode: bool, const
     let mut dec = rsleigh_api::Decoder::new(arch);
     let query_lower = query.to_lowercase();
 
-    eprintln!("Searching {} functions for '{}'{}...",
-        symbols.len(), query,
-        if api_mode { " (API mode)" } else if const_mode { " (constant mode)" } else { "" });
+    let mode_str = if api_mode { " (API)" } else if const_mode { " (const)" }
+        else if tag_mode { " (tag)" } else { "" };
+    eprintln!("Searching {} functions for '{}'{}...", symbols.len(), query, mode_str);
 
-    let mut matches = Vec::new();
+    // matches: (addr, name, reason, context, pseudocode)
+    let mut matches: Vec<(u64, String, String, String, String)> = Vec::new();
+
+    // Tag-based search: decompile all, extract tags, filter
+    if tag_mode {
+        let search_tags: Vec<&str> = query.split(',').map(|s| s.trim()).collect();
+        for (func_addr, func_name) in &symbols {
+            let insts = decode_func(*func_addr, &symbols, &segs, data, &mut dec);
+            if insts.is_empty() { continue; }
+            let output = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                rsleigh_decompile::decompile_with_binary(arch, &insts, Some(data), Some(path))
+            })) { Ok(o) => o, Err(_) => continue };
+
+            let meta = rsleigh_decompile::analysis::extract_function_meta(func_name, *func_addr, &output);
+            let has_tag = search_tags.iter().any(|t| meta.tags.iter().any(|mt| mt == t));
+            if has_tag {
+                let matched_tags: Vec<&str> = meta.tags.iter()
+                    .filter(|t| search_tags.contains(&t.as_str()))
+                    .map(|t| t.as_str()).collect();
+                let calls_str = if meta.calls.len() > 3 {
+                    format!("{}, +{}", meta.calls[..3].join(", "), meta.calls.len() - 3)
+                } else { meta.calls.join(", ") };
+                matches.push((*func_addr, func_name.clone(),
+                    format!("tags: [{}]", matched_tags.join(",")),
+                    calls_str, output));
+            }
+        }
+        // Skip the rest of the function and go to output
+        return output_search_results(&matches, query, json_output, decompile_results);
+    }
 
     for (func_addr, func_name) in &symbols {
         // Quick pre-filter: check function name first
         if !api_mode && !const_mode && func_name.to_lowercase().contains(&query_lower) {
-            matches.push((func_addr.clone(), func_name.clone(), "name match".to_string(), String::new()));
+            matches.push((func_addr.clone(), func_name.clone(), "name match".to_string(), String::new(), String::new()));
             continue;
         }
 
@@ -1196,7 +1231,7 @@ fn run_search(binary_path: &str, data: &[u8], query: &str, api_mode: bool, const
                     .find(|l| l.contains(&call_pattern) && !l.trim().starts_with("//"))
                     .unwrap_or("").trim().to_string();
                 let context = if context_line.len() > 80 { format!("{}...", &context_line[..80]) } else { context_line };
-                matches.push((*func_addr, func_name.clone(), format!("calls {}", query), context));
+                matches.push((*func_addr, func_name.clone(), format!("calls {}", query), context, output));
             }
             continue;
         }
@@ -1220,7 +1255,7 @@ fn run_search(binary_path: &str, data: &[u8], query: &str, api_mode: bool, const
                 };
                 if found {
                     matches.push((*func_addr, func_name.clone(),
-                        format!("contains 0x{:x}", val), String::new()));
+                        format!("contains 0x{:x}", val), String::new(), String::new()));
                 }
             }
             continue;
@@ -1249,21 +1284,22 @@ fn run_search(binary_path: &str, data: &[u8], query: &str, api_mode: bool, const
                     _ => { pos += 1; }
                 }
             }
-            let context = if !insts.is_empty() {
+            let (context, full_output) = if !insts.is_empty() {
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     rsleigh_decompile::decompile_with_binary(arch, &insts, Some(data), Some(path))
                 })) {
                     Ok(output) => {
-                        output.lines()
+                        let ctx = output.lines()
                             .find(|l| l.to_lowercase().contains(&query_lower))
-                            .unwrap_or("").trim().to_string()
+                            .unwrap_or("").trim().to_string();
+                        (ctx, output)
                     }
-                    Err(_) => String::new(),
+                    Err(_) => (String::new(), String::new()),
                 }
-            } else { String::new() };
+            } else { (String::new(), String::new()) };
             let context = if context.len() > 80 { format!("{}...", &context[..80]) } else { context };
             let match_type = if has_wide_match && !has_raw_match { "wide string" } else { "string" };
-            matches.push((*func_addr, func_name.clone(), match_type.to_string(), context));
+            matches.push((*func_addr, func_name.clone(), match_type.to_string(), context, full_output));
             continue;
         }
 
@@ -1290,20 +1326,53 @@ fn run_search(binary_path: &str, data: &[u8], query: &str, api_mode: bool, const
                             .find(|l| l.to_lowercase().contains(&query_lower))
                             .unwrap_or("").trim().to_string();
                         let context = if context.len() > 80 { format!("{}...", &context[..80]) } else { context };
-                        matches.push((*func_addr, func_name.clone(), "pseudocode match".to_string(), context));
+                        matches.push((*func_addr, func_name.clone(), "pseudocode match".to_string(), context, output.clone()));
                     }
                 }
             }
         }
     }
 
-    // Output results
-    println!("{} matches for '{}':", matches.len(), query);
-    println!();
-    for (addr, name, reason, context) in &matches {
-        println!("  0x{:012x}  {:<25} {}", addr, name, reason);
-        if !context.is_empty() {
-            println!("                  {}", context);
+    output_search_results(&matches, query, json_output, decompile_results);
+}
+
+/// Format and display search results.
+fn output_search_results(matches: &[(u64, String, String, String, String)], query: &str, json_output: bool, decompile_results: bool) {
+    if json_output {
+        let entries: Vec<serde_json::Value> = matches.iter().map(|(addr, name, reason, context, pseudocode)| {
+            let mut entry = serde_json::json!({
+                "address": format!("0x{:x}", addr),
+                "name": name,
+                "match_type": reason,
+            });
+            if !context.is_empty() {
+                entry.as_object_mut().unwrap().insert("context".to_string(), serde_json::json!(context));
+            }
+            if decompile_results && !pseudocode.is_empty() {
+                entry.as_object_mut().unwrap().insert("pseudocode".to_string(), serde_json::json!(pseudocode));
+            }
+            entry
+        }).collect();
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "query": query,
+            "match_count": matches.len(),
+            "results": entries,
+        })).unwrap());
+    } else {
+        println!("{} matches for '{}':", matches.len(), query);
+        println!();
+        for (addr, name, reason, context, pseudocode) in matches {
+            println!("  0x{:012x}  {:<25} {}", addr, name, reason);
+            if !context.is_empty() {
+                println!("                  {}", context);
+            }
+            if decompile_results && !pseudocode.is_empty() {
+                println!();
+                for line in pseudocode.lines() {
+                    println!("    {}", line);
+                }
+                println!();
+            }
         }
     }
 }
