@@ -29,6 +29,9 @@ fn main() {
         eprintln!("  rsleigh <binary> --taint            Taint analysis (trace user input to sinks)");
         eprintln!("  rsleigh <binary> --summary          AI summary (one-line per function)");
         eprintln!("  rsleigh <binary> --xrefs <func>     Cross-references (callers + callees)");
+        eprintln!("  rsleigh <binary> --search <query>   Find functions by string/pattern");
+        eprintln!("  rsleigh <binary> --search --api <name>  Find functions calling API");
+        eprintln!("  rsleigh <binary> --search --const <hex> Find functions with constant");
         eprintln!("  rsleigh <binary> --raw <arch>       Load raw binary (mips32/arm32/x86-64/...)");
         std::process::exit(1);
     }
@@ -40,6 +43,7 @@ fn main() {
     let yara_mode = args.iter().any(|a| a == "--yara");
     let summary_mode = args.iter().any(|a| a == "--summary");
     let xrefs_mode = args.iter().any(|a| a == "--xrefs");
+    let search_mode = args.iter().any(|a| a == "--search");
 
     if yara_mode {
         let data = match std::fs::read(binary_path) {
@@ -50,8 +54,8 @@ fn main() {
         return;
     }
 
-    // Summary/Xrefs modes: analyze binary structure
-    if summary_mode || xrefs_mode {
+    // Summary/Xrefs/Search modes: analyze binary structure
+    if summary_mode || xrefs_mode || search_mode {
         let data = match std::fs::read(binary_path) {
             Ok(d) => d,
             Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
@@ -63,13 +67,30 @@ fn main() {
             .spawn(move || {
                 if summary_mode {
                     run_summary(&bp, &data);
-                } else {
+                } else if xrefs_mode {
                     let target = args_clone.iter()
                         .position(|a| a == "--xrefs")
                         .and_then(|i| args_clone.get(i + 1))
                         .cloned()
                         .unwrap_or_default();
                     run_xrefs(&bp, &data, &target);
+                } else {
+                    // Search mode
+                    let search_idx = args_clone.iter().position(|a| a == "--search").unwrap();
+                    let api_mode = args_clone.iter().any(|a| a == "--api");
+                    let const_mode = args_clone.iter().any(|a| a == "--const");
+                    let query = args_clone.iter()
+                        .skip(search_idx + 1)
+                        .find(|a| !a.starts_with("--"))
+                        .cloned()
+                        .unwrap_or_default();
+                    if query.is_empty() {
+                        eprintln!("Usage: rsleigh <binary> --search <query>");
+                        eprintln!("       rsleigh <binary> --search --api <func_name>");
+                        eprintln!("       rsleigh <binary> --search --const <hex_value>");
+                        return;
+                    }
+                    run_search(&bp, &data, &query, api_mode, const_mode);
                 }
             })
             .unwrap();
@@ -978,6 +999,199 @@ fn run_xrefs(binary_path: &str, data: &[u8], target_name: &str) {
     }
     println!("Decompiled output:");
     println!("{}", target_output);
+}
+
+/// Search for functions matching a query: string, API call, or hex constant.
+fn run_search(binary_path: &str, data: &[u8], query: &str, api_mode: bool, const_mode: bool) {
+    let obj = match goblin::Object::parse(data) {
+        Ok(o) => o,
+        Err(e) => { eprintln!("Error: {}", e); return; }
+    };
+    let (arch, segs, mut symbols) = match parse_binary(&obj, data) {
+        Some(r) => r,
+        None => { eprintln!("Unsupported format"); return; }
+    };
+    if symbols.is_empty() {
+        if let goblin::Object::PE(pe) = &obj {
+            let base = pe.image_base as u64;
+            let entry = base + pe.header.optional_header.unwrap().standard_fields.address_of_entry_point as u64;
+            symbols = discover_pe_functions(entry, &segs, data, arch);
+        }
+    }
+    let is_elf_stripped = if let goblin::Object::Elf(elf) = &obj { elf.syms.len() == 0 } else { false };
+    if is_elf_stripped {
+        if let goblin::Object::Elf(elf) = &obj {
+            let discovered = discover_elf_functions(elf, &segs, data, arch);
+            let existing: std::collections::BTreeSet<u64> = symbols.iter().map(|(a, _)| *a).collect();
+            for (addr, name) in discovered {
+                if !existing.contains(&addr) { symbols.push((addr, name)); }
+            }
+        }
+    }
+
+    let path = std::path::Path::new(binary_path);
+    let mut dec = rsleigh_api::Decoder::new(arch);
+    let query_lower = query.to_lowercase();
+
+    eprintln!("Searching {} functions for '{}'{}...",
+        symbols.len(), query,
+        if api_mode { " (API mode)" } else if const_mode { " (constant mode)" } else { "" });
+
+    let mut matches = Vec::new();
+
+    for (func_addr, func_name) in &symbols {
+        // Quick pre-filter: check function name first
+        if !api_mode && !const_mode && func_name.to_lowercase().contains(&query_lower) {
+            matches.push((func_addr.clone(), func_name.clone(), "name match".to_string(), String::new()));
+            continue;
+        }
+
+        let off = segs.iter().find_map(|(va, sz, fo)| {
+            if *func_addr >= *va && *func_addr < va + sz { Some(fo + (func_addr - va)) } else { None }
+        });
+        let Some(off) = off else { continue };
+        let max = 4096.min(data.len().saturating_sub(off as usize));
+        if max < 2 { continue; }
+        let bytes = &data[off as usize..off as usize + max];
+
+        let next_func = symbols.iter()
+            .filter(|(a, _)| *a > *func_addr).map(|(a, _)| *a).min()
+            .unwrap_or(func_addr + max as u64);
+        let decode_max = ((next_func - func_addr) as usize).min(max);
+
+        // For API mode: decompile and search for function call pattern "api_name("
+        if api_mode {
+            let mut insts = Vec::new();
+            let mut pos = 0;
+            while pos < decode_max {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    dec.decode(&bytes[pos..], func_addr + pos as u64)
+                })) {
+                    Ok(Ok(inst)) => { let l = inst.len as usize; if l == 0 { pos += 1; continue; } insts.push((func_addr + pos as u64, inst)); pos += l; }
+                    _ => { pos += 1; }
+                }
+            }
+            if insts.is_empty() { continue; }
+            let output = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                rsleigh_decompile::decompile_with_binary(arch, &insts, Some(data), Some(path))
+            })) { Ok(o) => o, Err(_) => continue };
+            // Search for "api_name(" pattern — must be a call, not just a substring
+            let call_pattern = format!("{}(", query);
+            if output.contains(&call_pattern) {
+                let context_line = output.lines()
+                    .find(|l| l.contains(&call_pattern) && !l.trim().starts_with("//"))
+                    .unwrap_or("").trim().to_string();
+                let context = if context_line.len() > 80 { format!("{}...", &context_line[..80]) } else { context_line };
+                matches.push((*func_addr, func_name.clone(), format!("calls {}", query), context));
+            }
+            continue;
+        }
+
+        // For const mode: search for the hex constant in instruction bytes
+        if const_mode {
+            let const_val = if let Some(hex) = query.strip_prefix("0x") {
+                u64::from_str_radix(hex, 16).ok()
+            } else {
+                query.parse::<u64>().ok()
+            };
+            if let Some(val) = const_val {
+                // Search for the constant in instruction immediates
+                let val_le4 = (val as u32).to_le_bytes();
+                let val_le8 = val.to_le_bytes();
+                let val_be4 = (val as u32).to_be_bytes();
+                let found = if val <= 0xFFFFFFFF {
+                    bytes[..decode_max].windows(4).any(|w| w == val_le4 || w == val_be4)
+                } else {
+                    bytes[..decode_max].windows(8).any(|w| w == val_le8)
+                };
+                if found {
+                    matches.push((*func_addr, func_name.clone(),
+                        format!("contains 0x{:x}", val), String::new()));
+                }
+            }
+            continue;
+        }
+
+        // Default string search: first check raw bytes for the query string
+        // (much faster than decompiling). If found, decompile for context.
+        let query_bytes = query.as_bytes();
+        let has_raw_match = bytes[..decode_max].windows(query_bytes.len())
+            .any(|w| w.eq_ignore_ascii_case(query_bytes));
+        // Also check for wide string (UTF-16LE)
+        let wide_query: Vec<u8> = query.bytes().flat_map(|b| [b, 0]).collect();
+        let has_wide_match = if wide_query.len() <= decode_max {
+            bytes[..decode_max].windows(wide_query.len()).any(|w| w == wide_query.as_slice())
+        } else { false };
+
+        if has_raw_match || has_wide_match {
+            // Quick match from raw bytes — decompile for context
+            let mut insts = Vec::new();
+            let mut pos = 0;
+            while pos < decode_max {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    dec.decode(&bytes[pos..], func_addr + pos as u64)
+                })) {
+                    Ok(Ok(inst)) => { let l = inst.len as usize; if l == 0 { pos += 1; continue; } insts.push((func_addr + pos as u64, inst)); pos += l; }
+                    _ => { pos += 1; }
+                }
+            }
+            let context = if !insts.is_empty() {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    rsleigh_decompile::decompile_with_binary(arch, &insts, Some(data), Some(path))
+                })) {
+                    Ok(output) => {
+                        output.lines()
+                            .find(|l| l.to_lowercase().contains(&query_lower))
+                            .unwrap_or("").trim().to_string()
+                    }
+                    Err(_) => String::new(),
+                }
+            } else { String::new() };
+            let context = if context.len() > 80 { format!("{}...", &context[..80]) } else { context };
+            let match_type = if has_wide_match && !has_raw_match { "wide string" } else { "string" };
+            matches.push((*func_addr, func_name.clone(), match_type.to_string(), context));
+            continue;
+        }
+
+        // Fallback: also search by decompiling if no raw match
+        // (catches computed strings, API names from import resolution, etc.)
+        // Only do this for short queries that might be API names
+        if query.len() >= 4 && query.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            let mut insts = Vec::new();
+            let mut pos = 0;
+            while pos < decode_max {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    dec.decode(&bytes[pos..], func_addr + pos as u64)
+                })) {
+                    Ok(Ok(inst)) => { let l = inst.len as usize; if l == 0 { pos += 1; continue; } insts.push((func_addr + pos as u64, inst)); pos += l; }
+                    _ => { pos += 1; }
+                }
+            }
+            if !insts.is_empty() {
+                if let Ok(output) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    rsleigh_decompile::decompile_with_binary(arch, &insts, Some(data), Some(path))
+                })) {
+                    if output.to_lowercase().contains(&query_lower) {
+                        let context = output.lines()
+                            .find(|l| l.to_lowercase().contains(&query_lower))
+                            .unwrap_or("").trim().to_string();
+                        let context = if context.len() > 80 { format!("{}...", &context[..80]) } else { context };
+                        matches.push((*func_addr, func_name.clone(), "pseudocode match".to_string(), context));
+                    }
+                }
+            }
+        }
+    }
+
+    // Output results
+    println!("{} matches for '{}':", matches.len(), query);
+    println!();
+    for (addr, name, reason, context) in &matches {
+        println!("  0x{:012x}  {:<25} {}", addr, name, reason);
+        if !context.is_empty() {
+            println!("                  {}", context);
+        }
+    }
 }
 
 fn generate_yara_rule(binary_path: &str, data: &[u8]) {
