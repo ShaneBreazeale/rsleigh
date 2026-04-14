@@ -4817,6 +4817,202 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #TAINT_ANALYSIS: Track user input from sources to security-sensitive sinks.
+    // Identifies taint sources (scanf, gets, read, recv, etc.), propagates through
+    // variable assignments, and flags when tainted data reaches dangerous sinks.
+    {
+        // Input sources: (function_name, taint_arg_index)
+        // -1 = return value is tainted, 0+ = that argument is the output buffer
+        let taint_sources: &[(&str, i32)] = &[
+            ("scanf", 1),      // scanf(format, &buffer) — buffer at arg 1+
+            ("sscanf", 2),     // sscanf(str, format, &buffer)
+            ("fscanf", 2),     // fscanf(file, format, &buffer)
+            ("gets", 0),       // gets(buffer)
+            ("fgets", 0),      // fgets(buffer, size, stream)
+            ("fread", 0),      // fread(buffer, size, count, stream)
+            ("read", 1),       // read(fd, buffer, count)
+            ("getline", 0),    // getline(&buffer, &size, stream)
+            ("recv", 1),       // recv(sock, buffer, len, flags)
+            ("recvfrom", 1),   // recvfrom(sock, buffer, ...)
+            ("getenv", -1),    // return value is tainted
+            ("getchar", -1),   // return value
+            ("fgetc", -1),     // return value
+            ("ReadFile", 1),   // ReadFile(handle, buffer, ...)
+            ("GetDlgItemText", 2),  // GetDlgItemText(dlg, id, buffer, ...)
+            ("GetDlgItemTextW", 2),
+            ("GetWindowText", 1),   // GetWindowText(hwnd, buffer, count)
+            ("GetWindowTextW", 1),
+            ("InternetReadFile", 1),
+            ("RegQueryValueEx", 4), // ..., data, ...
+            ("RegQueryValueExW", 4),
+            ("GetCommandLine", -1),
+            ("CommandLineToArgvW", -1),
+            ("accept", -1),
+        ];
+
+        // Dangerous sinks: functions where tainted data causes vulnerabilities
+        let taint_sinks: &[(&str, &str)] = &[
+            ("system", "command injection"),
+            ("exec", "command execution"),
+            ("execve", "command execution"),
+            ("execvp", "command execution"),
+            ("popen", "command injection"),
+            ("ShellExecute", "command execution"),
+            ("ShellExecuteW", "command execution"),
+            ("WinExec", "command execution"),
+            ("CreateProcess", "process creation"),
+            ("CreateProcessW", "process creation"),
+            ("strcpy", "buffer overflow"),
+            ("strncpy", "buffer overflow"),
+            ("strcat", "buffer overflow"),
+            ("sprintf", "format string / buffer overflow"),
+            ("vsprintf", "format string / buffer overflow"),
+            ("memcpy", "buffer overflow"),
+            ("memmove", "buffer overflow"),
+            ("gets", "buffer overflow (unbounded read)"),
+            ("printf", "format string"),
+            ("fprintf", "format string"),
+            ("syslog", "format string"),
+            ("send", "data exfiltration"),
+            ("sendto", "data exfiltration"),
+            ("write", "data write"),
+            ("WriteFile", "data write"),
+            ("fwrite", "data write"),
+            ("eval", "code injection"),
+            ("sqlite3_exec", "SQL injection"),
+            ("mysql_query", "SQL injection"),
+            ("LoadLibrary", "DLL injection"),
+            ("LoadLibraryA", "DLL injection"),
+            ("LoadLibraryW", "DLL injection"),
+            ("VirtualProtect", "DEP bypass"),
+        ];
+
+        // Phase 1: Find taint sources and the variables they write to
+        let mut tainted_vars: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut source_info: Vec<(usize, String, String)> = Vec::new(); // (line_idx, var_name, source_func)
+
+        for (i, line) in lines.iter().enumerate() {
+            let t = line.trim();
+            // Skip function declarations and comments
+            if t.starts_with("//") || t.starts_with("void ") || t.starts_with("int ")
+                || t.starts_with("long ") || t.starts_with("char ") || t.starts_with("size_t ") {
+                if t.contains("(void)") || t.contains("(int ") || t.contains("(long ") {
+                    continue; // function declaration, not a call
+                }
+            }
+            for &(source, taint_arg_idx) in taint_sources {
+                let pattern = format!("{}(", source);
+                if !t.contains(&pattern) { continue; }
+                // Verify word boundary: char before source must not be alphanumeric
+                if let Some(pos) = t.find(&pattern) {
+                    if pos > 0 && t.as_bytes()[pos - 1].is_ascii_alphanumeric() { continue; }
+                }
+                // Verify it's a call, not a declaration: must have ; or be inside another expr
+                if !t.ends_with(';') && !t.ends_with('{') && !t.contains("if ") { continue; }
+
+                if taint_arg_idx < 0 {
+                    // Return value is tainted: var = source(...)
+                    if let Some(eq_pos) = t.find(" = ") {
+                        if t[eq_pos..].contains(&pattern) {
+                            let var = t[..eq_pos].trim();
+                            if var.starts_with("param_") || var.starts_with("local_")
+                                || var.starts_with("lVar") || var.starts_with("iVar") {
+                                tainted_vars.insert(var.to_string());
+                                source_info.push((i, var.to_string(), source.to_string()));
+                            }
+                        }
+                    }
+                } else {
+                    // Specific argument is the output buffer
+                    if let Some(paren) = t.find(&pattern) {
+                        let args_start = paren + source.len() + 1;
+                        if args_start < t.len() {
+                            // Split args by comma, get the nth one
+                            let args_str = &t[args_start..];
+                            let args: Vec<&str> = args_str.split(',').collect();
+                            if let Some(arg) = args.get(taint_arg_idx as usize) {
+                                let clean = arg.trim().trim_end_matches(')').trim_end_matches(';').trim();
+                                // Strip /*annotation*/ prefixes
+                                let clean = if clean.contains("*/") {
+                                    clean.split("*/").last().unwrap_or(clean).trim()
+                                } else {
+                                    clean
+                                };
+                                // Strip type casts: (type)var → var
+                                let clean = if clean.starts_with('(') {
+                                    clean.split(')').last().unwrap_or(clean).trim()
+                                } else {
+                                    clean
+                                };
+                                if clean.starts_with("param_") || clean.starts_with("local_")
+                                    || clean.starts_with("lVar") || clean.starts_with("iVar")
+                                    || clean.starts_with("buf") {
+                                    tainted_vars.insert(clean.to_string());
+                                    source_info.push((i, clean.to_string(), source.to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Phase 2: Propagate taint through variable assignments
+        // "var2 = tainted_var" or "var2 = func(tainted_var)"
+        let mut changed = true;
+        for _round in 0..5 {
+            if !changed { break; }
+            changed = false;
+            for line in lines.iter() {
+                let t = line.trim();
+                if let Some(eq_pos) = t.find(" = ") {
+                    let lhs = t[..eq_pos].trim();
+                    let rhs = &t[eq_pos + 3..];
+                    // Check if RHS references any tainted variable
+                    let rhs_tainted = tainted_vars.iter().any(|tv| rhs.contains(tv.as_str()));
+                    if rhs_tainted && !tainted_vars.contains(lhs) {
+                        if lhs.starts_with("param_") || lhs.starts_with("local_")
+                            || lhs.starts_with("lVar") || lhs.starts_with("iVar") {
+                            tainted_vars.insert(lhs.to_string());
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Phase 3: Check if tainted variables reach sinks
+        if !tainted_vars.is_empty() {
+            for (i, line) in lines.iter_mut().enumerate() {
+                if line.contains("//") { continue; }
+                let t = line.trim().to_string();
+                for &(sink, vuln_type) in taint_sinks {
+                    if t.contains(sink) && t.contains('(') {
+                        // Check if any tainted variable appears in the call arguments
+                        let args_part = t.split('(').nth(1).unwrap_or("");
+                        let has_tainted_arg = tainted_vars.iter()
+                            .any(|tv| args_part.contains(tv.as_str()));
+                        if has_tainted_arg {
+                            let source_func = source_info.first()
+                                .map(|(_, _, s)| s.as_str())
+                                .unwrap_or("input");
+                            *line = format!("{} // ⚠ TAINT: user input from {}() → {} ({})",
+                                line.trim_end(), source_func, sink, vuln_type);
+                        }
+                    }
+                }
+            }
+
+            // Annotate taint sources
+            for (i, var, source) in &source_info {
+                if *i < lines.len() && !lines[*i].contains("// ⚠ TAINT") {
+                    lines[*i] = format!("{} // ⚠ TAINT SOURCE: {}() → {}",
+                        lines[*i].trim_end(), source, var);
+                }
+            }
+        }
+    }
+
     // #GLOBAL_NAMES: Name repeated hex addresses as DAT_xxx (global variables).
     // When a hex address 0x1400NNNNN appears 2+ times, it's likely a global variable.
     {

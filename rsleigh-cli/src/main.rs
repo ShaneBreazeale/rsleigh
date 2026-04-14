@@ -26,6 +26,7 @@ fn main() {
         eprintln!("  rsleigh <binary> --sigs <file.json> Load extra signatures");
         eprintln!("  rsleigh <binary> --yara             Generate YARA detection rule");
         eprintln!("  rsleigh old.bin --diff new.bin      Diff decompilation (show changes)");
+        eprintln!("  rsleigh <binary> --taint            Taint analysis (trace user input to sinks)");
         eprintln!("  rsleigh <binary> --raw <arch>       Load raw binary (mips32/arm32/x86-64/...)");
         std::process::exit(1);
     }
