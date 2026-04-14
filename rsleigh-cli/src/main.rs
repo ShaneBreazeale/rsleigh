@@ -33,6 +33,9 @@ fn main() {
         eprintln!("  rsleigh <binary> --search --api <name>  Find functions calling API");
         eprintln!("  rsleigh <binary> --search --const <hex> Find functions with constant");
         eprintln!("  rsleigh <binary> --vulnscan          Scan for vulnerability patterns");
+        eprintln!("  rsleigh <binary> --all --compact     Token-efficient output (no decls/blanks)");
+        eprintln!("  rsleigh <binary> --all --brief       Calls + strings only (minimal tokens)");
+        eprintln!("  rsleigh <binary> --all --min-complexity 10  Skip trivial functions");
         eprintln!("  rsleigh <binary> --callgraph         Export call graph as JSON");
         eprintln!("  rsleigh <binary> --raw <arch>       Load raw binary (mips32/arm32/x86-64/...)");
         std::process::exit(1);
@@ -47,6 +50,12 @@ fn main() {
     let xrefs_mode = args.iter().any(|a| a == "--xrefs");
     let search_mode = args.iter().any(|a| a == "--search");
     let vulnscan_mode = args.iter().any(|a| a == "--vulnscan");
+    let compact_mode = args.iter().any(|a| a == "--compact");
+    let brief_mode = args.iter().any(|a| a == "--brief");
+    let min_complexity: usize = args.iter().position(|a| a == "--min-complexity")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     let callgraph_mode = args.iter().any(|a| a == "--callgraph");
 
     if yara_mode {
@@ -167,6 +176,70 @@ const HIDDEN: &[&str] = &[
     "__do_global_dtors_aux", "__libc_csu_init", "__libc_csu_fini",
     "_dl_relocate_static_pie", "__do_global_ctors_aux",
 ];
+
+/// Compact pseudocode for token efficiency: strip declarations, blank lines, reduce indent.
+fn compact_output(output: &str) -> String {
+    output.lines()
+        .filter(|l| {
+            let t = l.trim();
+            // Skip empty lines
+            if t.is_empty() { return false; }
+            // Skip variable declarations (type varN;)
+            if t.ends_with(';') && !t.contains('=') && !t.contains('(')
+                && (t.starts_with("int ") || t.starts_with("long ") || t.starts_with("uint")
+                    || t.starts_with("char ") || t.starts_with("float ") || t.starts_with("double ")
+                    || t.starts_with("bool ")) {
+                return false;
+            }
+            true
+        })
+        .map(|l| {
+            // Reduce indent: 4 spaces → 2 spaces
+            let indent = l.len() - l.trim_start().len();
+            let new_indent = indent / 2;
+            format!("{}{}", " ".repeat(new_indent), l.trim())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Brief mode: show only calls, comparisons, strings, returns — skip assignments.
+fn brief_output(output: &str) -> String {
+    let mut result = Vec::new();
+    for line in output.lines() {
+        let t = line.trim();
+        // Keep function signature
+        if t.contains("func_") && t.contains('(') && t.ends_with('{') { result.push(line.to_string()); continue; }
+        // Keep closing brace
+        if t == "}" { result.push(line.to_string()); continue; }
+        // Keep calls (lines with function_name() pattern)
+        if t.contains('(') && t.contains(')') && !t.starts_with("//")
+            && (t.ends_with(';') || t.ends_with('{')) {
+            // Skip pure assignments: var = expr; (no function call)
+            if t.contains(" = ") {
+                let rhs = &t[t.find(" = ").unwrap() + 3..];
+                if !rhs.contains('(') { continue; } // pure assignment
+            }
+            result.push(line.to_string());
+            continue;
+        }
+        // Keep control flow
+        if t.starts_with("if (") || t.starts_with("} else") || t.starts_with("while (")
+            || t.starts_with("for (") || t.starts_with("switch (")
+            || t.starts_with("return ") || t.starts_with("break") || t.starts_with("case ") {
+            result.push(line.to_string());
+            continue;
+        }
+        // Keep string references
+        if t.contains('"') { result.push(line.to_string()); continue; }
+        // Keep comments (annotations, crypto, taint)
+        if t.starts_with("//") && (t.contains("TAINT") || t.contains("XOR") || t.contains("stack string")
+            || t.contains("AES") || t.contains("SHA")) {
+            result.push(line.to_string());
+        }
+    }
+    result.join("\n")
+}
 
 fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disasm_mode: bool) {
     let data = match std::fs::read(binary_path) {
@@ -508,13 +581,35 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                     "pseudocode": output.trim(),
                 }));
             } else {
-                println!("// {}", name);
-                for line in output.lines() {
-                    if !line.trim().is_empty() {
-                        println!("{}", line);
+                // Apply token-efficiency modes
+                let is_compact = args.iter().any(|a| a == "--compact");
+                let is_brief = args.iter().any(|a| a == "--brief");
+                let min_comp: usize = args.iter().position(|a| a == "--min-complexity")
+                    .and_then(|i| args.get(i + 1))
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+
+                // Skip trivial functions
+                let line_count = output.lines().filter(|l| !l.trim().is_empty() && !l.trim().starts_with("//")).count();
+                if min_comp > 0 && line_count < min_comp { continue; }
+
+                let display = if is_brief {
+                    brief_output(&output)
+                } else if is_compact {
+                    compact_output(&output)
+                } else {
+                    output.clone()
+                };
+
+                if !display.trim().is_empty() {
+                    println!("// {}", name);
+                    for line in display.lines() {
+                        if !line.trim().is_empty() {
+                            println!("{}", line);
+                        }
                     }
+                    println!();
                 }
-                println!();
             }
         } else {
             eprintln!("Function '{}' not found", name);
