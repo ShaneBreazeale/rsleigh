@@ -37,6 +37,7 @@ fn main() {
         eprintln!("  rsleigh <binary> --all --brief       Calls + strings only (minimal tokens)");
         eprintln!("  rsleigh <binary> --all --min-complexity 10  Skip trivial functions");
         eprintln!("  rsleigh <binary> --callgraph         Export call graph as JSON");
+        eprintln!("  rsleigh <binary> --classes           Recover C++ classes from RTTI");
         eprintln!("  rsleigh <binary> --raw <arch>       Load raw binary (mips32/arm32/x86-64/...)");
         std::process::exit(1);
     }
@@ -50,6 +51,7 @@ fn main() {
     let xrefs_mode = args.iter().any(|a| a == "--xrefs");
     let search_mode = args.iter().any(|a| a == "--search");
     let vulnscan_mode = args.iter().any(|a| a == "--vulnscan");
+    let classes_mode = args.iter().any(|a| a == "--classes");
     let compact_mode = args.iter().any(|a| a == "--compact");
     let brief_mode = args.iter().any(|a| a == "--brief");
     let min_complexity: usize = args.iter().position(|a| a == "--min-complexity")
@@ -64,6 +66,26 @@ fn main() {
             Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
         };
         generate_yara_rule(binary_path, &data);
+        return;
+    }
+
+    // C++ class recovery
+    if classes_mode {
+        let data = match std::fs::read(binary_path) {
+            Ok(d) => d,
+            Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
+        };
+        let classes = rsleigh_decompile::cpp_class::recover_msvc_classes(&data);
+        if classes.is_empty() {
+            eprintln!("No C++ RTTI classes found (binary may not have RTTI, or is not MSVC-compiled)");
+        } else {
+            eprintln!("{} C++ classes recovered from RTTI", classes.len());
+            if json_mode {
+                println!("{}", serde_json::to_string_pretty(&classes).unwrap());
+            } else {
+                print!("{}", rsleigh_decompile::cpp_class::format_classes(&classes));
+            }
+        }
         return;
     }
 

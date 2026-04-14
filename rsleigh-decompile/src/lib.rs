@@ -11,6 +11,7 @@ pub mod pdb_info;
 pub mod signatures;
 pub mod eqsat;
 pub mod analysis;
+pub mod cpp_class;
 mod signatures_libc;
 mod signatures_win32;
 
