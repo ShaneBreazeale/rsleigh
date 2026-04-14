@@ -6629,6 +6629,64 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #CONST_CASTS: Add type casts to large hex constants in comparisons and assignments.
+    for line in &mut lines {
+        if line.contains("//") { continue; }
+        let t = line.trim();
+        // Cast large 64-bit hex constants as (long) — these are addresses or large values
+        // Pattern: == 0xNNNNNNNNNNNNNNNN or != 0x... (16+ hex digits)
+        for op in [" == ", " != ", " > ", " < ", " >= ", " <= "] {
+            if let Some(pos) = t.find(op) {
+                let after = &t[pos + op.len()..];
+                if after.starts_with("0x") {
+                    let hex_end = after[2..].find(|c: char| !c.is_ascii_hexdigit())
+                        .map(|e| e + 2).unwrap_or(after.len());
+                    let hex_len = hex_end - 2;
+                    if hex_len >= 9 && !after[..hex_end].starts_with("0x0") {
+                        // 64-bit constant: add (long) cast
+                        let old = format!("{}{}", op, &after[..hex_end]);
+                        let new = format!("{}(long){}", op, &after[..hex_end]);
+                        if !line.contains(&new) {
+                            *line = line.replace(&old, &new);
+                        }
+                        break;
+                    }
+                    if hex_len >= 5 && hex_len <= 8 && !after[..hex_end].starts_with("0x0") {
+                        // 32-bit constant: add (DWORD) cast for common patterns
+                        let val_str = &after[..hex_end];
+                        // Only cast known magic values or large constants
+                        if val_str.starts_with("0x8000") || val_str.starts_with("0xC000")
+                            || val_str.starts_with("0xe") || val_str.starts_with("0xF")
+                            || hex_len >= 7
+                        {
+                            let old = format!("{}{}", op, val_str);
+                            let new = format!("{}(uint){}", op, val_str);
+                            if !line.contains(&new) {
+                                *line = line.replace(&old, &new);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // #RETURN_CASTS: Add casts to return values when size differs from function return type.
+    // Pattern: return func_XXXX(...); → return (int)func_XXXX(...);
+    // When the calling function returns int (4 bytes) but the call returns long (8 bytes).
+    for line in &mut lines {
+        let t = line.trim();
+        if t.starts_with("return ") && t.ends_with(';') && t.contains("func_") && !t.contains('(') {
+            // return lVar; — if lVar is a long but function is int, cast
+            // Simple heuristic: if the return expression is a long variable, add (int) cast
+            let expr = &t[7..t.len()-1]; // strip "return " and ";"
+            if expr.starts_with("lVar") && !expr.contains('(') {
+                *line = line.replace(&format!("return {};", expr), &format!("return (int){};", expr));
+            }
+        }
+    }
+
     // #FINAL_PASS: Re-run critical simplifications that earlier passes may have invalidated.
     // This catches param_N[RSP] patterns created by AUTONAME/DECLARATIONS passes,
     // RBP+N patterns created by other transformations, and any remaining raw registers.
