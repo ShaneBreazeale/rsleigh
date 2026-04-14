@@ -4307,6 +4307,420 @@ int main(int argc, char** argv) {
         // Unknown offset returns None
         assert_eq!(Architecture::X86_64.register_name(99999, 8), None);
     }
+
+    // ---- Spectra / rsleigh integration tests ----
+    // These test the API contract that Spectra depends on:
+    // 1. Decoder API — decode instructions for all architectures
+    // 2. Decompile API — produce pseudocode from instructions
+    // 3. Analysis API — extract metadata, scan for vulns (serde::Serialize)
+    // 4. Multi-arch support — all 6 architectures decode without panic
+
+    #[test]
+    fn spectra_decoder_api() {
+        let t = std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(run_spectra_decoder_tests)
+            .unwrap();
+        t.join().unwrap();
+    }
+
+    fn run_spectra_decoder_tests() {
+        use rsleigh_api::{Architecture, Decoder};
+
+        // Test: Decoder::new() for all architectures
+        for arch in [
+            Architecture::X86_64, Architecture::X86_32,
+            Architecture::AArch64, Architecture::ARM32,
+            Architecture::MIPS32, Architecture::RiscV64,
+        ] {
+            let dec = Decoder::new(arch);
+            assert_eq!(dec.architecture(), arch);
+        }
+
+        // Test: x86-64 decode produces correct disassembly + P-code
+        {
+            let mut dec = Decoder::new(Architecture::X86_64);
+            // MOV RAX, RBX (48 89 d8)
+            let inst = dec.decode(&[0x48, 0x89, 0xd8], 0x1000).unwrap();
+            assert_eq!(inst.len, 3);
+            assert!(inst.disassembly.contains("MOV"), "Expected MOV, got: {}", inst.disassembly);
+            assert!(!inst.ops.is_empty(), "P-code ops should not be empty");
+
+            // RET (c3)
+            let inst = dec.decode(&[0xc3], 0x1003).unwrap();
+            assert_eq!(inst.len, 1);
+            assert!(inst.disassembly.contains("RET"), "Expected RET, got: {}", inst.disassembly);
+
+            // NOP (90)
+            let inst = dec.decode(&[0x90], 0x1004).unwrap();
+            assert_eq!(inst.len, 1);
+
+            // CALL rel32 (e8 XX XX XX XX)
+            let inst = dec.decode(&[0xe8, 0x10, 0x00, 0x00, 0x00], 0x1005).unwrap();
+            assert_eq!(inst.len, 5);
+            assert!(inst.disassembly.contains("CALL"), "Expected CALL, got: {}", inst.disassembly);
+            // CALL must produce a Call P-code op
+            assert!(inst.ops.iter().any(|op| matches!(op, PcodeOp::Call { .. })),
+                "CALL instruction should produce Call P-code op");
+        }
+
+        // Test: AArch64 decode
+        {
+            let mut dec = Decoder::new(Architecture::AArch64);
+            // RET (d65f03c0)
+            let inst = dec.decode(&[0xc0, 0x03, 0x5f, 0xd6], 0x1000).unwrap();
+            assert_eq!(inst.len, 4);
+            // NOP (d503201f)
+            let inst = dec.decode(&[0x1f, 0x20, 0x03, 0xd5], 0x1004).unwrap();
+            assert_eq!(inst.len, 4);
+        }
+
+        // Test: ARM32 decode
+        {
+            let mut dec = Decoder::new(Architecture::ARM32);
+            // BX LR (e12fff1e)
+            let inst = dec.decode(&[0x1e, 0xff, 0x2f, 0xe1], 0x1000).unwrap();
+            assert_eq!(inst.len, 4);
+        }
+
+        // Test: MIPS32 decode (big-endian)
+        {
+            let mut dec = Decoder::new(Architecture::MIPS32);
+            // JR RA (03e00008)
+            let inst = dec.decode(&[0x03, 0xe0, 0x00, 0x08], 0x1000).unwrap();
+            assert_eq!(inst.len, 4);
+            // NOP (00000000)
+            let inst = dec.decode(&[0x00, 0x00, 0x00, 0x00], 0x1004).unwrap();
+            assert_eq!(inst.len, 4);
+        }
+
+        // Test: RISC-V 64 decode
+        {
+            let mut dec = Decoder::new(Architecture::RiscV64);
+            // RET = JALR x0, x1, 0 (00008067)
+            let inst = dec.decode(&[0x67, 0x80, 0x00, 0x00], 0x1000).unwrap();
+            assert_eq!(inst.len, 4);
+        }
+
+        // Test: invalid instruction returns Err
+        {
+            let mut dec = Decoder::new(Architecture::X86_64);
+            // 0x06 is invalid in x86-64 long mode
+            let result = dec.decode(&[0x06], 0x1000);
+            // May or may not decode — just must not panic
+            let _ = result;
+        }
+
+        // Test: empty input returns Err
+        {
+            let mut dec = Decoder::new(Architecture::X86_64);
+            assert!(dec.decode(&[], 0x1000).is_err());
+        }
+
+        // Test: addr_size returns correct values
+        assert_eq!(Architecture::X86_64.addr_size(), 8);
+        assert_eq!(Architecture::X86_32.addr_size(), 4);
+        assert_eq!(Architecture::AArch64.addr_size(), 8);
+        assert_eq!(Architecture::ARM32.addr_size(), 4);
+        assert_eq!(Architecture::MIPS32.addr_size(), 4);
+        assert_eq!(Architecture::RiscV64.addr_size(), 8);
+
+        eprintln!("  spectra_decoder_api: all decoder tests passed");
+    }
+
+    #[test]
+    fn spectra_decompile_api() {
+        let t = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(run_spectra_decompile_tests)
+            .unwrap();
+        t.join().unwrap();
+    }
+
+    fn run_spectra_decompile_tests() {
+        use rsleigh_api::{Architecture, Decoder};
+
+        // Test: decompile a minimal x86-64 function (add two params, return)
+        // MOV EAX, EDI; ADD EAX, ESI; RET
+        {
+            let mut dec = Decoder::new(Architecture::X86_64);
+            let bytes: &[u8] = &[
+                0x89, 0xf8,       // MOV EAX, EDI
+                0x01, 0xf0,       // ADD EAX, ESI
+                0xc3,             // RET
+            ];
+            let mut insts = Vec::new();
+            let mut offset = 0usize;
+            while offset < bytes.len() {
+                let addr = 0x1000u64 + offset as u64;
+                match dec.decode(&bytes[offset..], addr) {
+                    Ok(inst) => {
+                        let len = inst.len as usize;
+                        if len == 0 { break; }
+                        insts.push((addr, inst));
+                        offset += len;
+                    }
+                    Err(_) => break,
+                }
+            }
+            assert!(!insts.is_empty(), "Should decode at least one instruction");
+
+            let output = rsleigh_decompile::decompile(Architecture::X86_64, &insts);
+            assert!(!output.is_empty(), "Decompiled output should not be empty");
+            // Should contain a function definition
+            assert!(output.contains("func_") || output.contains("("),
+                "Output should contain function signature: {}", output);
+            eprintln!("  decompile minimal function: ok");
+        }
+
+        // Test: decompile with binary context (using compiled test binary if available)
+        {
+            let src = r#"
+int add(int a, int b) { return a + b; }
+"#;
+            let src_path = "/tmp/test_spectra_integration.c";
+            let bin_path = "/tmp/test_spectra_integration";
+            std::fs::write(src_path, src).unwrap();
+            let compile = std::process::Command::new("cc")
+                .args(["-arch", "x86_64", "-O0", "-o", bin_path, src_path])
+                .output();
+
+            if let Ok(out) = compile {
+                if out.status.success() {
+                    let data = std::fs::read(bin_path).unwrap();
+                    let path = std::path::Path::new(bin_path);
+
+                    if let Ok(goblin::Object::Mach(goblin::mach::Mach::Binary(m))) =
+                        goblin::Object::parse(&data)
+                    {
+                        let mut dec = Decoder::new(Architecture::X86_64);
+                        // Find _add symbol
+                        let add_addr = m.symbols().flatten()
+                            .find(|(name, _)| *name == "_add")
+                            .map(|(_, nlist)| nlist.n_value);
+
+                        if let Some(func_addr) = add_addr {
+                            // Find text section offset
+                            let text_seg = m.segments.iter()
+                                .find(|s| std::str::from_utf8(&s.segname).unwrap_or("")
+                                    .trim_end_matches('\0') == "__TEXT");
+
+                            if let Some(seg) = text_seg {
+                                let fo = seg.fileoff as u64;
+                                let va = seg.vmaddr;
+                                let off = (func_addr - va + fo) as usize;
+
+                                let mut insts = Vec::new();
+                                let mut io = 0;
+                                while io < 64 {
+                                    if off + io >= data.len() { break; }
+                                    match dec.decode(&data[off + io..], func_addr + io as u64) {
+                                        Ok(inst) => {
+                                            let len = inst.len as usize;
+                                            if len == 0 { break; }
+                                            let dis = inst.disassembly.clone();
+                                            insts.push((func_addr + io as u64, inst));
+                                            if dis.starts_with("RET") { break; }
+                                            io += len;
+                                        }
+                                        Err(_) => break,
+                                    }
+                                }
+
+                                let output = rsleigh_decompile::decompile_with_binary(
+                                    Architecture::X86_64, &insts, Some(&data), Some(path),
+                                );
+                                assert!(!output.is_empty());
+                                // Should produce valid C-like output
+                                assert!(output.contains('{'), "Should contain opening brace");
+                                assert!(output.contains('}'), "Should contain closing brace");
+                                assert!(output.contains("return") || output.contains("param"),
+                                    "add() should reference params or return: {}", output);
+                                eprintln!("  decompile_with_binary (compiled add()): ok");
+                                eprintln!("    output: {}", output.lines().next().unwrap_or(""));
+                            }
+                        }
+                    }
+                } else {
+                    eprintln!("  skipping compiled binary test (cc failed)");
+                }
+            } else {
+                eprintln!("  skipping compiled binary test (no cc)");
+            }
+        }
+
+        // Test: decompile with empty instructions returns something
+        {
+            let output = rsleigh_decompile::decompile(Architecture::X86_64, &[]);
+            // Should not panic, may return empty or minimal output
+            let _ = output;
+            eprintln!("  decompile empty input: ok (no panic)");
+        }
+
+        eprintln!("  spectra_decompile_api: all decompile tests passed");
+    }
+
+    #[test]
+    fn spectra_analysis_api() {
+        let t = std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(run_spectra_analysis_tests)
+            .unwrap();
+        t.join().unwrap();
+    }
+
+    fn run_spectra_analysis_tests() {
+        // Test: extract_function_meta from pseudocode
+        {
+            let pseudocode = r#"int main(int param_0, char **param_1) {
+    printf("hello %s\n", param_1[1]);
+    malloc(256);
+    recv(fd, buf, 256, 0);
+    system(buf);
+    return 0;
+}
+"#;
+            let meta = rsleigh_decompile::analysis::extract_function_meta("main", 0x1000, pseudocode);
+            assert_eq!(meta.name, "main");
+            assert_eq!(meta.address, 0x1000);
+            assert!(meta.calls.contains(&"printf".to_string()), "Should detect printf call");
+            assert!(meta.calls.contains(&"malloc".to_string()), "Should detect malloc call");
+            assert!(meta.strings.iter().any(|s| s.contains("hello")), "Should extract string literal");
+            assert!(meta.complexity > 0, "Should have non-zero complexity");
+
+            // Behavioral tags
+            assert!(meta.tags.contains(&"network".to_string()) || meta.tags.contains(&"input".to_string()),
+                "recv() should tag as network/input: {:?}", meta.tags);
+            assert!(meta.tags.contains(&"exec".to_string()),
+                "system() should tag as exec: {:?}", meta.tags);
+
+            // Serialization — Spectra needs JSON transport
+            let json = serde_json::to_string(&meta).expect("FunctionMeta must serialize");
+            assert!(json.contains("\"name\":\"main\""));
+            assert!(json.contains("\"address\":4096"));
+            eprintln!("  extract_function_meta: ok ({} calls, {} tags)", meta.calls.len(), meta.tags.len());
+        }
+
+        // Test: scan_vulns detects known vulnerability patterns
+        {
+            let pseudocode = r#"void vulnerable(char *input) {
+    char buf[64];
+    strcpy(buf, input);
+    gets(buf);
+    sprintf(buf, input);
+    system(input);
+    return;
+}
+"#;
+            let vulns = rsleigh_decompile::analysis::scan_vulns("vulnerable", 0x2000, pseudocode);
+            // Should detect at least one of: strcpy buffer overflow, gets, sprintf format string, command injection
+            assert!(!vulns.is_empty(), "Should detect vulnerabilities in unsafe code");
+
+            // Check severity levels exist
+            for vuln in &vulns {
+                assert!(!vuln.severity.is_empty(), "Severity should not be empty");
+                assert!(!vuln.description.is_empty(), "Description should not be empty");
+                assert_eq!(vuln.function, "vulnerable");
+                assert_eq!(vuln.address, 0x2000);
+            }
+
+            // Serialization
+            let json = serde_json::to_string(&vulns).expect("VulnFinding must serialize");
+            assert!(json.contains("\"function\":\"vulnerable\""));
+            eprintln!("  scan_vulns: ok ({} findings)", vulns.len());
+
+            // Severity should include some actual high/medium findings
+            let high_count = vulns.iter().filter(|v| v.severity == "HIGH" || v.severity == "CRIT").count();
+            assert!(high_count > 0, "strcpy/gets/system should produce HIGH/CRIT findings, got: {:?}",
+                vulns.iter().map(|v| format!("{}: {}", v.severity, v.description)).collect::<Vec<_>>());
+            eprintln!("    {} HIGH/CRIT, {} total", high_count, vulns.len());
+        }
+
+        // Test: scan_vulns on safe code returns fewer/no findings
+        {
+            let safe_code = r#"int safe_add(int a, int b) {
+    return a + b;
+}
+"#;
+            let vulns = rsleigh_decompile::analysis::scan_vulns("safe_add", 0x3000, safe_code);
+            let crit_high = vulns.iter().filter(|v| v.severity == "CRIT" || v.severity == "HIGH").count();
+            assert_eq!(crit_high, 0, "Safe code should not have CRIT/HIGH vulns: {:?}",
+                vulns.iter().map(|v| format!("{}: {}", v.severity, v.description)).collect::<Vec<_>>());
+            eprintln!("  scan_vulns on safe code: ok (0 CRIT/HIGH)");
+        }
+
+        // Test: CallGraphEntry serialization
+        {
+            let entry = rsleigh_decompile::analysis::CallGraphEntry {
+                address: 0x1000,
+                calls: vec!["printf".to_string(), "malloc".to_string()],
+                called_by: vec!["main".to_string()],
+                return_type: "int".to_string(),
+                tags: vec!["output".to_string()],
+            };
+            let json = serde_json::to_string(&entry).expect("CallGraphEntry must serialize");
+            assert!(json.contains("\"address\":4096"));
+            assert!(json.contains("printf"));
+            eprintln!("  CallGraphEntry serialization: ok");
+        }
+
+        eprintln!("  spectra_analysis_api: all analysis tests passed");
+    }
+
+    #[test]
+    fn spectra_multi_arch_decode() {
+        let t = std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(run_spectra_multi_arch_tests)
+            .unwrap();
+        t.join().unwrap();
+    }
+
+    fn run_spectra_multi_arch_tests() {
+        use rsleigh_api::{Architecture, Decoder};
+
+        // For each architecture, decode a simple sequence and decompile it
+        let test_cases: &[(Architecture, &[u8], &str)] = &[
+            // x86-64: push rbp; mov rbp, rsp; xor eax, eax; pop rbp; ret
+            (Architecture::X86_64, &[0x55, 0x48, 0x89, 0xe5, 0x31, 0xc0, 0x5d, 0xc3], "x86-64"),
+            // x86-32: push ebp; mov ebp, esp; xor eax, eax; pop ebp; ret
+            (Architecture::X86_32, &[0x55, 0x89, 0xe5, 0x31, 0xc0, 0x5d, 0xc3], "x86-32"),
+            // AArch64: mov w0, #0; ret (52800000 d65f03c0)
+            (Architecture::AArch64, &[0x00, 0x00, 0x80, 0x52, 0xc0, 0x03, 0x5f, 0xd6], "AArch64"),
+            // ARM32: mov r0, #0; bx lr (e3a00000 e12fff1e)
+            (Architecture::ARM32, &[0x00, 0x00, 0xa0, 0xe3, 0x1e, 0xff, 0x2f, 0xe1], "ARM32"),
+            // MIPS32 BE: li v0, 0; jr ra; nop (24020000 03e00008 00000000)
+            (Architecture::MIPS32, &[0x24, 0x02, 0x00, 0x00, 0x03, 0xe0, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00], "MIPS32"),
+            // RISC-V 64: li a0, 0; ret (00050513 00008067)
+            (Architecture::RiscV64, &[0x13, 0x05, 0x05, 0x00, 0x67, 0x80, 0x00, 0x00], "RV64"),
+        ];
+
+        for (arch, bytes, name) in test_cases {
+            let mut dec = Decoder::new(*arch);
+            let mut insts = Vec::new();
+            let mut offset = 0usize;
+            while offset < bytes.len() {
+                let addr = 0x1000u64 + offset as u64;
+                match dec.decode(&bytes[offset..], addr) {
+                    Ok(inst) => {
+                        let len = inst.len as usize;
+                        if len == 0 { break; }
+                        insts.push((addr, inst));
+                        offset += len;
+                    }
+                    Err(_) => break,
+                }
+            }
+            assert!(!insts.is_empty(), "{}: should decode at least 1 instruction", name);
+
+            // Decompile should not panic
+            let output = rsleigh_decompile::decompile(*arch, &insts);
+            assert!(!output.is_empty(), "{}: decompiled output should not be empty", name);
+            eprintln!("  {}: decoded {} insts, decompiled {} chars", name, insts.len(), output.len());
+        }
+
+        eprintln!("  spectra_multi_arch_decode: all architectures passed");
+    }
 }
 
 /// Validate structural properties of a P-code op.
