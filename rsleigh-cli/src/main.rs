@@ -32,6 +32,8 @@ fn main() {
         eprintln!("  rsleigh <binary> --search <query>   Find functions by string/pattern");
         eprintln!("  rsleigh <binary> --search --api <name>  Find functions calling API");
         eprintln!("  rsleigh <binary> --search --const <hex> Find functions with constant");
+        eprintln!("  rsleigh <binary> --vulnscan          Scan for vulnerability patterns");
+        eprintln!("  rsleigh <binary> --callgraph         Export call graph as JSON");
         eprintln!("  rsleigh <binary> --raw <arch>       Load raw binary (mips32/arm32/x86-64/...)");
         std::process::exit(1);
     }
@@ -44,6 +46,8 @@ fn main() {
     let summary_mode = args.iter().any(|a| a == "--summary");
     let xrefs_mode = args.iter().any(|a| a == "--xrefs");
     let search_mode = args.iter().any(|a| a == "--search");
+    let vulnscan_mode = args.iter().any(|a| a == "--vulnscan");
+    let callgraph_mode = args.iter().any(|a| a == "--callgraph");
 
     if yara_mode {
         let data = match std::fs::read(binary_path) {
@@ -54,8 +58,8 @@ fn main() {
         return;
     }
 
-    // Summary/Xrefs/Search modes: analyze binary structure
-    if summary_mode || xrefs_mode || search_mode {
+    // Summary/Xrefs/Search/Vulnscan/Callgraph modes
+    if summary_mode || xrefs_mode || search_mode || vulnscan_mode || callgraph_mode {
         let data = match std::fs::read(binary_path) {
             Ok(d) => d,
             Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
@@ -74,6 +78,10 @@ fn main() {
                         .cloned()
                         .unwrap_or_default();
                     run_xrefs(&bp, &data, &target);
+                } else if vulnscan_mode {
+                    run_vulnscan(&bp, &data);
+                } else if callgraph_mode {
+                    run_callgraph(&bp, &data);
                 } else {
                     // Search mode
                     let search_idx = args_clone.iter().position(|a| a == "--search").unwrap();
@@ -1298,6 +1306,240 @@ fn run_search(binary_path: &str, data: &[u8], query: &str, api_mode: bool, const
             println!("                  {}", context);
         }
     }
+}
+
+/// Scan for common vulnerability patterns in decompiled output.
+fn run_vulnscan(binary_path: &str, data: &[u8]) {
+    let obj = match goblin::Object::parse(data) { Ok(o) => o, Err(e) => { eprintln!("Error: {}", e); return; } };
+    let (arch, segs, mut symbols) = match parse_binary(&obj, data) { Some(r) => r, None => { eprintln!("Unsupported"); return; } };
+    if symbols.is_empty() {
+        if let goblin::Object::PE(pe) = &obj {
+            let base = pe.image_base as u64;
+            let entry = base + pe.header.optional_header.unwrap().standard_fields.address_of_entry_point as u64;
+            symbols = discover_pe_functions(entry, &segs, data, arch);
+        }
+    }
+    let is_elf_stripped = if let goblin::Object::Elf(elf) = &obj { elf.syms.len() == 0 } else { false };
+    if is_elf_stripped {
+        if let goblin::Object::Elf(elf) = &obj {
+            let discovered = discover_elf_functions(elf, &segs, data, arch);
+            let existing: std::collections::BTreeSet<u64> = symbols.iter().map(|(a, _)| *a).collect();
+            for (addr, name) in discovered { if !existing.contains(&addr) { symbols.push((addr, name)); } }
+        }
+    }
+
+    let path = std::path::Path::new(binary_path);
+    let mut dec = rsleigh_api::Decoder::new(arch);
+
+    // Vulnerability patterns: (pattern_in_pseudocode, severity, description)
+    let vuln_patterns: &[(&str, &str, &str)] = &[
+        // Buffer overflows
+        ("gets(", "HIGH", "buffer overflow: gets() has no bounds check"),
+        ("strcpy(", "MED", "buffer overflow: strcpy() has no bounds check"),
+        ("strcat(", "MED", "buffer overflow: strcat() has no bounds check"),
+        ("sprintf(", "MED", "buffer overflow/format string: sprintf() no bounds check"),
+        ("vsprintf(", "MED", "buffer overflow/format string: vsprintf()"),
+        // Format strings
+        ("printf(param_", "HIGH", "format string: printf() with user-controlled format"),
+        ("printf(local_", "HIGH", "format string: printf() with stack variable format"),
+        ("fprintf(param_", "HIGH", "format string: fprintf() with user-controlled format"),
+        ("syslog(param_", "MED", "format string: syslog() with user-controlled format"),
+        // Command injection
+        ("system(param_", "CRIT", "command injection: system() with user-controlled argument"),
+        ("system(local_", "HIGH", "command injection: system() with stack variable"),
+        ("popen(param_", "CRIT", "command injection: popen() with user-controlled argument"),
+        ("exec(param_", "CRIT", "command execution: exec() with user-controlled argument"),
+        ("ShellExecute", "MED", "command execution: ShellExecute()"),
+        ("WinExec(", "MED", "command execution: WinExec()"),
+        ("CreateProcess", "MED", "process creation: CreateProcess()"),
+        // Memory issues
+        ("free(", "LOW", "potential use-after-free: check if pointer used after free()"),
+        ("VirtualAlloc(", "LOW", "executable memory allocation"),
+        ("VirtualProtect(", "MED", "memory protection change (DEP bypass)"),
+        ("mmap(", "LOW", "memory mapping"),
+        // Integer issues
+        ("malloc(param_", "MED", "unchecked allocation: malloc() with user-controlled size"),
+        ("realloc(param_", "MED", "unchecked reallocation with user-controlled size"),
+        // Crypto issues
+        ("rand()", "LOW", "weak randomness: rand() is not cryptographically secure"),
+        ("srand(", "LOW", "weak randomness: srand() seed"),
+        // Info disclosure
+        ("GetProcAddress(", "LOW", "dynamic API resolution (anti-analysis)"),
+        ("LoadLibrary", "LOW", "dynamic library loading"),
+        // SQL injection
+        ("sqlite3_exec(", "MED", "potential SQL injection if query contains user input"),
+        ("mysql_query(", "MED", "potential SQL injection"),
+    ];
+
+    eprintln!("Scanning {} functions for vulnerability patterns...", symbols.len());
+    let mut findings: Vec<(String, u64, String, String, String)> = Vec::new(); // (severity, addr, name, vuln, context)
+
+    for (func_addr, func_name) in &symbols {
+        let off = segs.iter().find_map(|(va, sz, fo)| {
+            if *func_addr >= *va && *func_addr < va + sz { Some(fo + (func_addr - va)) } else { None }
+        });
+        let Some(off) = off else { continue };
+        let max = 4096.min(data.len().saturating_sub(off as usize));
+        if max < 2 { continue; }
+
+        let insts = decode_func(*func_addr, &symbols, &segs, data, &mut dec);
+        if insts.is_empty() { continue; }
+
+        let output = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            rsleigh_decompile::decompile_with_binary(arch, &insts, Some(data), Some(path))
+        })) { Ok(o) => o, Err(_) => continue };
+
+        for &(pattern, severity, description) in vuln_patterns {
+            if output.contains(pattern) {
+                let context = output.lines()
+                    .find(|l| l.contains(pattern))
+                    .unwrap_or("").trim().to_string();
+                let context = if context.len() > 70 { format!("{}...", &context[..70]) } else { context };
+                findings.push((severity.to_string(), *func_addr, func_name.clone(), description.to_string(), context));
+            }
+        }
+
+        // Special: check for missing stack cookie in large functions
+        let has_cookie = output.contains("stack cookie") || output.contains("__security_check_cookie")
+            || output.contains("__stack_chk_fail");
+        let line_count = output.lines().filter(|l| !l.trim().is_empty()).count();
+        if line_count > 20 && !has_cookie {
+            findings.push(("INFO".to_string(), *func_addr, func_name.clone(),
+                "missing stack cookie in large function".to_string(), String::new()));
+        }
+    }
+
+    // Sort by severity
+    let severity_order = |s: &str| match s { "CRIT" => 0, "HIGH" => 1, "MED" => 2, "LOW" => 3, _ => 4 };
+    findings.sort_by(|a, b| severity_order(&a.0).cmp(&severity_order(&b.0)));
+
+    // Output
+    println!("=== Vulnerability Scan: {} ({} functions) ===", binary_path, symbols.len());
+    println!();
+    let crit = findings.iter().filter(|f| f.0 == "CRIT").count();
+    let high = findings.iter().filter(|f| f.0 == "HIGH").count();
+    let med = findings.iter().filter(|f| f.0 == "MED").count();
+    let low = findings.iter().filter(|f| f.0 == "LOW").count();
+    println!("Summary: {} CRIT, {} HIGH, {} MED, {} LOW ({} total findings)",
+        crit, high, med, low, findings.len());
+    println!();
+    for (severity, addr, name, vuln, context) in &findings {
+        let color = match severity.as_str() {
+            "CRIT" => "\x1b[91m", "HIGH" => "\x1b[31m", "MED" => "\x1b[33m", "LOW" => "\x1b[36m", _ => "\x1b[37m"
+        };
+        println!("  {}{:<4}\x1b[0m  0x{:012x}  {:<25} {}", color, severity, addr, name, vuln);
+        if !context.is_empty() {
+            println!("        {}", context);
+        }
+    }
+}
+
+/// Export full call graph as JSON.
+fn run_callgraph(binary_path: &str, data: &[u8]) {
+    let obj = match goblin::Object::parse(data) { Ok(o) => o, Err(e) => { eprintln!("Error: {}", e); return; } };
+    let (arch, segs, mut symbols) = match parse_binary(&obj, data) { Some(r) => r, None => { eprintln!("Unsupported"); return; } };
+    if symbols.is_empty() {
+        if let goblin::Object::PE(pe) = &obj {
+            let base = pe.image_base as u64;
+            let entry = base + pe.header.optional_header.unwrap().standard_fields.address_of_entry_point as u64;
+            symbols = discover_pe_functions(entry, &segs, data, arch);
+        }
+    }
+    let is_elf_stripped = if let goblin::Object::Elf(elf) = &obj { elf.syms.len() == 0 } else { false };
+    if is_elf_stripped {
+        if let goblin::Object::Elf(elf) = &obj {
+            let discovered = discover_elf_functions(elf, &segs, data, arch);
+            let existing: std::collections::BTreeSet<u64> = symbols.iter().map(|(a, _)| *a).collect();
+            for (addr, name) in discovered { if !existing.contains(&addr) { symbols.push((addr, name)); } }
+        }
+    }
+
+    let path = std::path::Path::new(binary_path);
+    let mut dec = rsleigh_api::Decoder::new(arch);
+    let mut graph: std::collections::BTreeMap<String, serde_json::Value> = std::collections::BTreeMap::new();
+
+    eprintln!("Building call graph for {} functions...", symbols.len());
+
+    for (func_addr, func_name) in &symbols {
+        let insts = decode_func(*func_addr, &symbols, &segs, data, &mut dec);
+        if insts.is_empty() { continue; }
+
+        let output = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            rsleigh_decompile::decompile_with_binary(arch, &insts, Some(data), Some(path))
+        })) { Ok(o) => o, Err(_) => continue };
+
+        // Extract callees from pseudocode
+        let mut calls = Vec::new();
+        for line in output.lines() {
+            let t = line.trim();
+            if t.contains('(') && !t.starts_with("//") {
+                let check = if let Some(eq) = t.find(" = ") { &t[eq+3..] } else { t };
+                if let Some(p) = check.find('(') {
+                    let callee = check[..p].trim().trim_start_matches("return ");
+                    if !callee.is_empty() && !callee.contains(' ') && !callee.starts_with('*')
+                        && !callee.starts_with('(') && !callee.starts_with("if")
+                        && !callee.starts_with("while") && !callee.starts_with("switch")
+                        && !callee.starts_with("for") && callee.len() < 50
+                        && !calls.contains(&callee.to_string()) {
+                        calls.push(callee.to_string());
+                    }
+                }
+            }
+        }
+
+        // Classify function behavior
+        let mut tags = Vec::new();
+        if calls.iter().any(|c| ["recv","send","socket","connect","accept","bind","listen"].contains(&c.as_str())) { tags.push("network"); }
+        if calls.iter().any(|c| ["CreateFile","fopen","ReadFile","WriteFile","fread","fwrite","open","read","write"].contains(&c.as_str())) { tags.push("file_io"); }
+        if calls.iter().any(|c| c.contains("Reg") || c.contains("Registry")) { tags.push("registry"); }
+        if calls.iter().any(|c| ["system","exec","execve","popen","ShellExecute","WinExec","CreateProcess"].contains(&c.as_str())) { tags.push("exec"); }
+        if calls.iter().any(|c| ["malloc","free","realloc","VirtualAlloc","mmap","HeapAlloc"].contains(&c.as_str())) { tags.push("memory"); }
+        if output.contains("AES") || output.contains("SHA") || output.contains("CRC") || output.contains("^ 0x") { tags.push("crypto"); }
+        if calls.iter().any(|c| ["printf","puts","fprintf","sprintf","snprintf"].contains(&c.as_str())) { tags.push("output"); }
+        if calls.iter().any(|c| ["scanf","gets","fgets","getenv","getchar"].contains(&c.as_str())) { tags.push("input"); }
+
+        let return_type = output.lines().next()
+            .and_then(|l| l.split_whitespace().next()).unwrap_or("void");
+
+        graph.insert(func_name.clone(), serde_json::json!({
+            "address": format!("0x{:x}", func_addr),
+            "calls": calls,
+            "return_type": return_type,
+            "tags": tags,
+        }));
+    }
+
+    // Build called_by reverse map
+    let mut called_by: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    for (func_name, info) in &graph {
+        if let Some(calls) = info.get("calls").and_then(|c| c.as_array()) {
+            for callee in calls {
+                if let Some(callee_name) = callee.as_str() {
+                    called_by.entry(callee_name.to_string())
+                        .or_default()
+                        .push(func_name.clone());
+                }
+            }
+        }
+    }
+
+    // Merge called_by into graph
+    let mut final_graph = serde_json::Map::new();
+    for (name, info) in &graph {
+        let mut entry = info.clone();
+        if let Some(callers) = called_by.get(name) {
+            entry.as_object_mut().unwrap().insert("called_by".to_string(),
+                serde_json::json!(callers));
+        }
+        final_graph.insert(name.clone(), entry);
+    }
+
+    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+        "binary": binary_path,
+        "arch": format!("{:?}", arch),
+        "function_count": graph.len(),
+        "callgraph": final_graph,
+    })).unwrap());
 }
 
 fn generate_yara_rule(binary_path: &str, data: &[u8]) {
