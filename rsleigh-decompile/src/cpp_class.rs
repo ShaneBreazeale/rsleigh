@@ -246,6 +246,239 @@ pub fn recover_msvc_classes(binary: &[u8]) -> Vec<CppClass> {
     classes
 }
 
+/// Recover C++ classes from an ELF binary using GCC/Itanium ABI RTTI.
+/// GCC RTTI uses _ZTI* (typeinfo), _ZTV* (vtable), _ZTS* (typeinfo name) symbols.
+pub fn recover_gcc_classes(binary: &[u8]) -> Vec<CppClass> {
+    let Ok(obj) = goblin::Object::parse(binary) else { return vec![] };
+    let goblin::Object::Elf(elf) = &obj else { return vec![] };
+
+    let mut classes = Vec::new();
+
+    // Find _ZTV* (vtable) and _ZTI* (typeinfo) symbols
+    let all_syms: Vec<_> = elf.syms.iter().chain(elf.dynsyms.iter()).collect();
+    let strtab = |sym: &goblin::elf::Sym| -> Option<&str> {
+        elf.strtab.get_at(sym.st_name)
+            .or_else(|| elf.dynstrtab.get_at(sym.st_name))
+    };
+
+    for sym in &all_syms {
+        let Some(name) = strtab(sym) else { continue };
+        if !name.starts_with("_ZTV") { continue; } // vtable symbol
+        if sym.st_value == 0 { continue; }
+
+        // Demangle the vtable name: _ZTV + mangled_class_name
+        let mangled_class = &name[4..]; // skip "_ZTV"
+        let class_name = demangle_itanium(mangled_class);
+        if class_name.is_empty() { continue; }
+
+        let vtable_addr = sym.st_value;
+        let vtable_size = sym.st_size as usize;
+
+        // Read vtable entries: [offset_to_top, typeinfo_ptr, vfunc0, vfunc1, ...]
+        let mut virtual_methods = Vec::new();
+        let ptr_size = 8usize; // ELF64
+
+        // Find file offset for vtable
+        let vtable_fo = elf.section_headers.iter().find_map(|sh| {
+            if vtable_addr >= sh.sh_addr && vtable_addr < sh.sh_addr + sh.sh_size {
+                Some((sh.sh_offset + (vtable_addr - sh.sh_addr)) as usize)
+            } else { None }
+        });
+
+        if let Some(fo) = vtable_fo {
+            // Skip offset_to_top (8 bytes) and typeinfo_ptr (8 bytes)
+            let start = fo + ptr_size * 2;
+            let max_entries = if vtable_size > ptr_size * 2 { (vtable_size - ptr_size * 2) / ptr_size } else { 20 };
+
+            // Find .text bounds for validation
+            let text_bounds: Vec<(u64, u64)> = elf.section_headers.iter()
+                .filter(|sh| sh.sh_flags & 0x4 != 0)
+                .map(|sh| (sh.sh_addr, sh.sh_addr + sh.sh_size))
+                .collect();
+            let in_text = |addr: u64| text_bounds.iter().any(|(s, e)| addr >= *s && addr < *e);
+
+            for idx in 0..max_entries.min(50) {
+                let entry_off = start + idx * ptr_size;
+                if entry_off + ptr_size > binary.len() { break; }
+                let method_addr = u64::from_le_bytes(
+                    binary[entry_off..entry_off+8].try_into().unwrap_or([0;8]));
+                if method_addr == 0 || !in_text(method_addr) { break; }
+
+                // Try to find a symbol name for this method
+                let method_name = all_syms.iter()
+                    .find(|s| s.st_value == method_addr && s.st_type() == goblin::elf::sym::STT_FUNC)
+                    .and_then(|s| strtab(s))
+                    .map(|n| {
+                        // Try to demangle
+                        if n.starts_with("_Z") {
+                            cpp_demangle::Symbol::new(n.as_bytes())
+                                .ok()
+                                .and_then(|s| s.demangle().ok())
+                                .unwrap_or_else(|| n.to_string())
+                        } else { n.to_string() }
+                    })
+                    .unwrap_or_else(|| format!("vmethod_{}", idx));
+
+                virtual_methods.push(VirtualMethod {
+                    index: idx,
+                    address: method_addr,
+                    name: method_name,
+                });
+            }
+        }
+
+        // Find base classes from _ZTI* typeinfo
+        let mut base_classes = Vec::new();
+        let ti_name = format!("_ZTI{}", mangled_class);
+        if let Some(ti_sym) = all_syms.iter().find(|s| strtab(s) == Some(&ti_name)) {
+            if ti_sym.st_value != 0 {
+                let ti_fo = elf.section_headers.iter().find_map(|sh| {
+                    if ti_sym.st_value >= sh.sh_addr && ti_sym.st_value < sh.sh_addr + sh.sh_size {
+                        Some((sh.sh_offset + (ti_sym.st_value - sh.sh_addr)) as usize)
+                    } else { None }
+                });
+                if let Some(fo) = ti_fo {
+                    // Itanium typeinfo layout:
+                    // __si_class_type_info: [vtable_ptr(8), name_ptr(8), base_type_ptr(8)]
+                    // __vmi_class_type_info: [vtable_ptr(8), name_ptr(8), flags(4), base_count(4), bases...]
+                    if fo + 24 <= binary.len() {
+                        let base_ti_ptr = u64::from_le_bytes(
+                            binary[fo+16..fo+24].try_into().unwrap_or([0;8]));
+                        // Find the symbol for this typeinfo to get the base class name
+                        if let Some(base_sym) = all_syms.iter().find(|s| s.st_value == base_ti_ptr) {
+                            if let Some(base_name) = strtab(base_sym) {
+                                if base_name.starts_with("_ZTI") {
+                                    let base_class = demangle_itanium(&base_name[4..]);
+                                    if !base_class.is_empty() {
+                                        base_classes.push(base_class);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        classes.push(CppClass {
+            name: class_name,
+            vtable_addr,
+            base_classes,
+            virtual_methods,
+            fields: Vec::new(),
+            size_estimate: 0,
+        });
+    }
+
+    classes.sort_by(|a, b| a.name.cmp(&b.name));
+    classes.dedup_by(|a, b| a.name == b.name);
+    classes
+}
+
+/// Demangle Itanium ABI mangled name (simplified).
+fn demangle_itanium(mangled: &str) -> String {
+    // Try cpp_demangle first
+    let full = format!("_Z{}", mangled);
+    if let Ok(sym) = cpp_demangle::Symbol::new(full.as_bytes()) {
+        if let Ok(demangled) = sym.demangle() {
+            return demangled;
+        }
+    }
+    // Simple fallback: N<len><name>... pattern
+    // E.g., "N3std6vectorIiEE" → "std::vector<int>"
+    if mangled.starts_with('N') {
+        let mut result = Vec::new();
+        let chars: Vec<char> = mangled[1..].chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == 'E' { break; }
+            if chars[i].is_ascii_digit() {
+                let mut len_str = String::new();
+                while i < chars.len() && chars[i].is_ascii_digit() {
+                    len_str.push(chars[i]);
+                    i += 1;
+                }
+                let len: usize = len_str.parse().unwrap_or(0);
+                let name: String = chars[i..i+len.min(chars.len()-i)].iter().collect();
+                result.push(name);
+                i += len;
+            } else {
+                i += 1;
+            }
+        }
+        return result.join("::");
+    }
+    // Simple name: <len><name>
+    if let Some(first) = mangled.chars().next() {
+        if first.is_ascii_digit() {
+            let len_end = mangled.find(|c: char| !c.is_ascii_digit()).unwrap_or(mangled.len());
+            let len: usize = mangled[..len_end].parse().unwrap_or(0);
+            return mangled[len_end..len_end+len.min(mangled.len()-len_end)].to_string();
+        }
+    }
+    mangled.to_string()
+}
+
+/// Enrich class definitions with field layout from decompiled pseudocode.
+/// Scans pseudocode for `this->field_XX` patterns and infers field types.
+pub fn enrich_with_fields(classes: &mut [CppClass], pseudocode_map: &BTreeMap<u64, String>) {
+    for class in classes.iter_mut() {
+        let mut fields: BTreeMap<u64, (u32, String)> = BTreeMap::new(); // offset → (size, type)
+
+        // Scan pseudocode of all virtual methods for field accesses
+        for vm in &class.virtual_methods {
+            if let Some(code) = pseudocode_map.get(&vm.address) {
+                for line in code.lines() {
+                    let t = line.trim();
+                    // Match: param_0->field_XX or this->field_XX
+                    if let Some(pos) = t.find("->field_") {
+                        let hex_start = pos + 8;
+                        let hex_end = t[hex_start..].find(|c: char| !c.is_ascii_hexdigit())
+                            .map(|e| hex_start + e).unwrap_or(t.len());
+                        if hex_end > hex_start {
+                            if let Ok(offset) = u64::from_str_radix(&t[hex_start..hex_end], 16) {
+                                // Infer type from context
+                                let inferred = if t.contains("strcmp") || t.contains("strlen") || t.contains("printf") {
+                                    "char *"
+                                } else if t.contains("*(uint32_t*)") || t.contains("(int)") {
+                                    "int"
+                                } else if t.contains("*(uint64_t*)") || t.contains("(long)") {
+                                    "long"
+                                } else if t.contains("*(uint8_t*)") {
+                                    "uint8_t"
+                                } else {
+                                    "void *"
+                                };
+                                fields.entry(offset).or_insert((8, inferred.to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Convert to ClassField list
+        let field_list: Vec<u64> = fields.keys().copied().collect();
+        for (i, &offset) in field_list.iter().enumerate() {
+            let (_, ref inferred_type) = fields[&offset];
+            let size = if i + 1 < field_list.len() {
+                (field_list[i+1] - offset).min(8) as u32
+            } else { 8 };
+            class.fields.push(ClassField {
+                offset,
+                size,
+                name: format!("field_{:x}", offset),
+                inferred_type: inferred_type.clone(),
+            });
+        }
+
+        // Update size estimate
+        if let Some(last) = class.fields.last() {
+            class.size_estimate = last.offset + last.size as u64;
+        }
+    }
+}
+
 /// Format recovered classes as C++ header output.
 pub fn format_classes(classes: &[CppClass]) -> String {
     let mut out = String::new();

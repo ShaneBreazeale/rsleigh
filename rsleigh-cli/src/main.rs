@@ -75,9 +75,13 @@ fn main() {
             Ok(d) => d,
             Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
         };
-        let classes = rsleigh_decompile::cpp_class::recover_msvc_classes(&data);
+        // Try MSVC RTTI first, then GCC RTTI
+        let mut classes = rsleigh_decompile::cpp_class::recover_msvc_classes(&data);
         if classes.is_empty() {
-            eprintln!("No C++ RTTI classes found (binary may not have RTTI, or is not MSVC-compiled)");
+            classes = rsleigh_decompile::cpp_class::recover_gcc_classes(&data);
+        }
+        if classes.is_empty() {
+            eprintln!("No C++ RTTI classes found (binary may not have RTTI, or is stripped)");
         } else {
             eprintln!("{} C++ classes recovered from RTTI", classes.len());
             if json_mode {
