@@ -252,12 +252,80 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
             .collect();
 
         if json_mode {
+            // Rich JSON: decompile each function and extract metadata
+            let path = std::path::Path::new(binary_path);
+            let mut dec = rsleigh_api::Decoder::new(arch);
             let entries: Vec<serde_json::Value> = funcs.iter()
-                .map(|(name, addr)| serde_json::json!({"name": name, "address": format!("0x{:x}", addr)}))
+                .map(|(name, addr)| {
+                    let insts = decode_func(*addr, &symbols, &segs, &data, &mut dec);
+                    if insts.is_empty() {
+                        return serde_json::json!({
+                            "name": name, "address": format!("0x{:x}", addr),
+                            "size": 0, "calls": [], "strings": [], "return_type": "void"
+                        });
+                    }
+                    let output = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        rsleigh_decompile::decompile_with_binary(arch, &insts, Some(&data), Some(path))
+                    })).unwrap_or_default();
+
+                    // Extract metadata from decompiled output
+                    let mut calls = Vec::new();
+                    let mut strings = Vec::new();
+                    let mut line_count = 0;
+                    for line in output.lines() {
+                        let t = line.trim();
+                        if t.is_empty() || t.starts_with("//") { continue; }
+                        line_count += 1;
+                        // Extract calls
+                        if t.contains('(') {
+                            let check = if let Some(eq) = t.find(" = ") { &t[eq+3..] } else { t };
+                            if let Some(p) = check.find('(') {
+                                let callee = check[..p].trim().trim_start_matches("return ");
+                                if !callee.is_empty() && !callee.contains(' ') && !callee.starts_with('*')
+                                    && !callee.starts_with('(') && !callee.starts_with("if")
+                                    && !callee.starts_with("while") && !callee.starts_with("switch")
+                                    && callee.len() < 50 && !calls.contains(&callee.to_string()) {
+                                    calls.push(callee.to_string());
+                                }
+                            }
+                        }
+                        // Extract strings
+                        if let Some(q1) = t.find('"') {
+                            if let Some(q2) = t[q1+1..].find('"') {
+                                let s = &t[q1+1..q1+1+q2];
+                                if s.len() >= 2 && s.len() <= 80 && !strings.contains(&s.to_string()) {
+                                    strings.push(s.to_string());
+                                }
+                            }
+                        }
+                    }
+                    // Extract return type from first line
+                    let return_type = output.lines().next()
+                        .and_then(|l| l.split_whitespace().next())
+                        .unwrap_or("void");
+                    // Extract param count from signature
+                    let params = output.lines().next()
+                        .map(|l| l.matches("param_").count())
+                        .unwrap_or(0);
+                    let size = insts.last().map(|(a, i)| (*a + i.len - addr) as u64).unwrap_or(0);
+
+                    serde_json::json!({
+                        "name": name,
+                        "address": format!("0x{:x}", addr),
+                        "size": size,
+                        "params": params,
+                        "return_type": return_type,
+                        "calls": calls,
+                        "strings": strings,
+                        "complexity": line_count,
+                        "pseudocode": output,
+                    })
+                })
                 .collect();
             println!("{}", serde_json::to_string_pretty(&serde_json::json!({
                 "binary": binary_path,
                 "arch": format!("{:?}", arch),
+                "function_count": entries.len(),
                 "functions": entries,
             })).unwrap());
         } else {
@@ -382,9 +450,47 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
             };
 
             if json_mode {
+                // Extract rich metadata from pseudocode
+                let mut calls = Vec::new();
+                let mut strings = Vec::new();
+                let mut line_count = 0;
+                for line in output.lines() {
+                    let t = line.trim();
+                    if t.is_empty() || t.starts_with("//") { continue; }
+                    line_count += 1;
+                    if t.contains('(') {
+                        let check = if let Some(eq) = t.find(" = ") { &t[eq+3..] } else { t };
+                        if let Some(p) = check.find('(') {
+                            let callee = check[..p].trim().trim_start_matches("return ");
+                            if !callee.is_empty() && !callee.contains(' ') && !callee.starts_with('*')
+                                && !callee.starts_with('(') && !callee.starts_with("if")
+                                && !callee.starts_with("while") && !callee.starts_with("switch")
+                                && callee.len() < 50 && !calls.contains(&callee.to_string()) {
+                                calls.push(callee.to_string());
+                            }
+                        }
+                    }
+                    if let Some(q1) = t.find('"') {
+                        if let Some(q2) = t[q1+1..].find('"') {
+                            let s = &t[q1+1..q1+1+q2];
+                            if s.len() >= 2 && s.len() <= 80 && !strings.contains(&s.to_string()) {
+                                strings.push(s.to_string());
+                            }
+                        }
+                    }
+                }
+                let return_type = output.lines().next()
+                    .and_then(|l| l.split_whitespace().next()).unwrap_or("void");
+                let params = output.lines().next()
+                    .map(|l| l.matches("param_").count()).unwrap_or(0);
                 results.push(serde_json::json!({
-                    "function": name,
+                    "name": name,
                     "address": format!("0x{:x}", func_addr),
+                    "params": params,
+                    "return_type": return_type,
+                    "calls": calls,
+                    "strings": strings,
+                    "complexity": line_count,
                     "pseudocode": output.trim(),
                 }));
             } else {
