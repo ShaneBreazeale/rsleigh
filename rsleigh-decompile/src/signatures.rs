@@ -456,6 +456,44 @@ fn c_str_to_sigtype(s: &str) -> SigType {
     }
 }
 
+/// Learned struct parameter store for cross-function struct propagation.
+/// Maps (func_addr, param_index) → struct_name.
+static LEARNED_STRUCTS: std::sync::OnceLock<std::sync::Mutex<HashMap<(u64, u32), String>>> = std::sync::OnceLock::new();
+
+/// Register learned struct parameters from the first decompilation pass.
+/// These are used by the second pass to propagate struct types to callers/callees.
+pub fn register_learned_structs(structs: &[crate::LearnedStructParam]) {
+    let store = LEARNED_STRUCTS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut map = store.lock().unwrap();
+    for sp in structs {
+        map.insert((sp.func_addr, sp.param_index), sp.struct_name.clone());
+    }
+}
+
+/// Look up a learned struct type for a function parameter.
+/// Returns the struct name if the parameter was identified as a struct pointer.
+pub fn lookup_struct_param(func_addr: u64, param_index: u32) -> Option<String> {
+    let store = LEARNED_STRUCTS.get()?;
+    let map = store.lock().ok()?;
+    map.get(&(func_addr, param_index)).cloned()
+}
+
+/// Get all learned struct params for a given function address.
+pub fn lookup_all_struct_params(func_addr: u64) -> Vec<(u32, String)> {
+    let store = match LEARNED_STRUCTS.get() {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let map = match store.lock() {
+        Ok(m) => m,
+        Err(_) => return Vec::new(),
+    };
+    map.iter()
+        .filter(|((addr, _), _)| *addr == func_addr)
+        .map(|((_, idx), name)| (*idx, name.clone()))
+        .collect()
+}
+
 /// Load additional signatures from a Ghidra-exported JSON file.
 ///
 /// The JSON format is an array of objects:

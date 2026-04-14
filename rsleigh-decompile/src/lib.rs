@@ -316,6 +316,48 @@ pub fn extract_learned_types(
     }
 }
 
+/// Learned struct parameter: records that a function's parameter was identified as a struct pointer.
+/// Used for cross-function struct propagation in two-pass decompilation.
+#[derive(Debug, Clone)]
+pub struct LearnedStructParam {
+    pub func_addr: u64,
+    pub param_index: u32,
+    pub struct_name: String,
+}
+
+/// Extract struct parameter identifications from decompiled output.
+/// Parses "// param_N is STRUCT_NAME *" comments emitted by the printer's struct identification.
+/// Also parses call sites to learn which arguments are struct pointers, enabling
+/// propagation to callees.
+pub fn extract_learned_structs(
+    func_addr: u64,
+    output: &str,
+) -> Vec<LearnedStructParam> {
+    let mut results = Vec::new();
+
+    for line in output.lines() {
+        let t = line.trim();
+        // Match: "// param_N is STRUCT_NAME *"
+        if let Some(rest) = t.strip_prefix("// param_") {
+            if let Some(is_pos) = rest.find(" is ") {
+                if let Ok(idx) = rest[..is_pos].parse::<u32>() {
+                    let struct_part = &rest[is_pos + 4..];
+                    let struct_name = struct_part.trim().trim_end_matches('*').trim();
+                    if !struct_name.is_empty() {
+                        results.push(LearnedStructParam {
+                            func_addr,
+                            param_index: idx,
+                            struct_name: struct_name.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    results
+}
+
 /// Analyze call sites in a function's SSA to infer which callees return non-void.
 /// Returns a list of (callee_addr, inferred_return_type) pairs.
 ///

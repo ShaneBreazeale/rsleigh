@@ -5441,11 +5441,57 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         // Simple arg extraction: split by ", " and take the Nth
                         let arg_parts: Vec<&str> = args.split(", ").collect();
                         if let Some(arg) = arg_parts.get(*param_idx) {
-                            let clean = arg.trim().trim_end_matches(')').trim_end_matches(';');
+                            let clean = arg.trim()
+                                .trim_end_matches(|c: char| c == ')' || c == ';' || c == ',')
+                                .trim();
                             let clean = clean.strip_prefix("(void *)").unwrap_or(clean).trim();
+                            let clean = clean.trim_start_matches('(').trim_end_matches(')');
                             if clean.starts_with("param_") || clean.starts_with("local_")
                                 || clean.starts_with("lVar") {
                                 api_type_hints.insert(clean.to_string(), struct_type);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Cross-function struct propagation: when this function calls an internal function
+        // whose parameters were identified as struct pointers in Pass 1, apply the struct
+        // type to the argument variable in this function.
+        for line in &lines {
+            let t = line.trim();
+            // Match: "func_HEXADDR(arg0, arg1, ...)"
+            if let Some(func_start) = t.find("func_") {
+                let hex_start = func_start + 5;
+                let mut hex_end = hex_start;
+                while hex_end < t.len() && t.as_bytes()[hex_end].is_ascii_hexdigit() { hex_end += 1; }
+                if hex_end > hex_start && hex_end < t.len() && t.as_bytes()[hex_end] == b'(' {
+                    if let Ok(callee_addr) = u64::from_str_radix(&t[hex_start..hex_end], 16) {
+                        let callee_structs = crate::signatures::lookup_all_struct_params(callee_addr);
+                        if !callee_structs.is_empty() {
+                            let args_str = &t[hex_end + 1..];
+                            let arg_parts: Vec<&str> = args_str.split(", ").collect();
+                            for (param_idx, struct_name) in &callee_structs {
+                                if let Some(arg) = arg_parts.get(*param_idx as usize) {
+                                    let clean = arg.trim()
+                                        .trim_end_matches(|c: char| c == ')' || c == ';' || c == ',')
+                                        .trim();
+                                    let clean = clean.strip_prefix("(void *)").unwrap_or(clean).trim();
+                                    // Extract just the base variable name (before any ->field_ or [])
+                                    let base = clean.split("->").next().unwrap_or(clean)
+                                        .split('[').next().unwrap_or(clean)
+                                        .trim_start_matches('*').trim_start_matches('&');
+                                    // Validate: must be a clean variable name (alphanumeric + underscore only)
+                                    let is_valid_var = !base.is_empty()
+                                        && base.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                                        && (base.starts_with("param_") || base.starts_with("local_")
+                                            || base.starts_with("lVar") || base.starts_with("iVar"));
+                                    if is_valid_var && !api_type_hints.contains_key(base) {
+                                        let leaked: &'static str = Box::leak(struct_name.clone().into_boxed_str());
+                                        api_type_hints.insert(base.to_string(), leaked);
+                                    }
+                                }
                             }
                         }
                     }
@@ -5514,8 +5560,25 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             }
         }
 
+        // Also apply cross-function struct hints to variables that don't have enough
+        // field accesses for offset-matching but were identified via callee propagation
+        for (var_name, struct_type) in &api_type_hints {
+            if !struct_matches.contains_key(var_name) {
+                struct_matches.insert(var_name.clone(), struct_type);
+                // Also populate field_names so any field accesses in this function get renamed
+                for (sname, sfields) in known_structs {
+                    if *sname == *struct_type {
+                        for (offset, fname, ftype) in *sfields {
+                            field_names.insert((var_name.clone(), *offset), (fname, ftype));
+                        }
+                    }
+                }
+            }
+        }
+
         // Emit struct definition comments and rename fields in output
         let mut struct_comments: Vec<String> = Vec::new();
+        // Comments for variables with field accesses
         for (base, fields) in &param_fields {
             if fields.len() < 3 { continue; }
             let fv: Vec<u64> = fields.iter().copied().collect();
@@ -5534,6 +5597,15 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     if i >= 12 { def.push_str(", ..."); break; }
                 }
                 struct_comments.push(def);
+            }
+        }
+        // Comments for cross-function propagated structs (variables without field accesses)
+        for (var_name, struct_type) in &struct_matches {
+            if !param_fields.contains_key(var_name) || param_fields[var_name].len() < 3 {
+                let already_commented = struct_comments.iter().any(|c| c.contains(&format!("{} is", var_name)));
+                if !already_commented {
+                    struct_comments.push(format!("// {} is {} * (from callee)", var_name, struct_type));
+                }
             }
         }
         if !struct_comments.is_empty() {
