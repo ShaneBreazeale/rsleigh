@@ -24,6 +24,8 @@ fn main() {
         eprintln!("  rsleigh <binary> <func> --json     Decompile as JSON");
         eprintln!("  rsleigh <binary> --disasm <func>   Disassemble with P-code");
         eprintln!("  rsleigh <binary> --sigs <file.json> Load extra signatures");
+        eprintln!("  rsleigh <binary> --yara             Generate YARA detection rule");
+        eprintln!("  rsleigh <binary> --raw <arch>       Load raw binary (mips32/arm32/x86-64/...)");
         std::process::exit(1);
     }
 
@@ -31,6 +33,16 @@ fn main() {
     let json_mode = args.iter().any(|a| a == "--json");
     let all_mode = args.iter().any(|a| a == "--all");
     let disasm_mode = args.iter().any(|a| a == "--disasm");
+    let yara_mode = args.iter().any(|a| a == "--yara");
+
+    if yara_mode {
+        let data = match std::fs::read(binary_path) {
+            Ok(d) => d,
+            Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
+        };
+        generate_yara_rule(binary_path, &data);
+        return;
+    }
 
     // Load external signature database if --sigs provided
     if let Some(pos) = args.iter().position(|a| a == "--sigs") {
@@ -362,6 +374,279 @@ fn decompile_func(
     let insts = decode_func(fa, symbols, segs, data, dec);
     if insts.is_empty() { return "// no instructions\n".to_string(); }
     rsleigh_decompile::decompile_with_binary(arch, &insts, Some(data), Some(path))
+}
+
+/// Generate a YARA detection rule from binary analysis.
+/// Extracts unique strings, imports, hex patterns, and crypto signatures.
+fn generate_yara_rule(binary_path: &str, data: &[u8]) {
+    use std::collections::{BTreeSet, BTreeMap};
+
+    let filename = std::path::Path::new(binary_path)
+        .file_stem().unwrap_or_default().to_string_lossy()
+        .replace(|c: char| !c.is_ascii_alphanumeric() && c != '_', "_");
+    let rule_name = format!("rsleigh_{}", filename);
+
+    let mut strings: BTreeSet<String> = BTreeSet::new();
+    let mut wide_strings: BTreeSet<String> = BTreeSet::new();
+    let mut hex_patterns: Vec<(String, String)> = Vec::new(); // (name, hex)
+    let mut imports: BTreeSet<String> = BTreeSet::new();
+    let mut meta: BTreeMap<String, String> = BTreeMap::new();
+
+    // Meta information
+    meta.insert("tool".into(), "rsleigh".into());
+    meta.insert("date".into(), chrono_date());
+    let file_size = data.len();
+    meta.insert("filesize".into(), format!("{}", file_size));
+
+    // Detect format
+    let is_pe = data.len() > 2 && &data[0..2] == b"MZ";
+    let is_elf = data.len() > 4 && &data[0..4] == b"\x7fELF";
+    if is_pe { meta.insert("filetype".into(), "PE".into()); }
+    if is_elf { meta.insert("filetype".into(), "ELF".into()); }
+
+    // 1. Extract ASCII strings (6+ chars, printable, not too common)
+    {
+        let mut pos = 0;
+        while pos < data.len() {
+            if data[pos] >= 0x20 && data[pos] < 0x7f {
+                let start = pos;
+                while pos < data.len() && data[pos] >= 0x20 && data[pos] < 0x7f { pos += 1; }
+                let len = pos - start;
+                if len >= 6 && len <= 200 {
+                    if let Ok(s) = std::str::from_utf8(&data[start..pos]) {
+                        let s = s.trim();
+                        // Filter out common/generic strings
+                        let is_charset = s.contains("ABCDEFGHIJ") && s.contains("abcdefghij");
+                        let is_sequential = s.bytes().zip(s.bytes().skip(1))
+                            .filter(|(a, b)| *b == a + 1).count() > s.len() / 2;
+                        if s.len() >= 6
+                            && !is_charset && !is_sequential
+                            && !s.chars().all(|c| c == ' ' || c == '.' || c == '-' || c == '0')
+                            && !s.starts_with("GCC:")
+                            && !s.starts_with("GNU ")
+                            && !s.starts_with("!This program")
+                            && !s.contains("Copyright")
+                            && !s.contains("GLIBC")
+                            && !s.starts_with(".debug")
+                            && !s.starts_with(".note")
+                            && !s.starts_with(".symtab")
+                            && !s.starts_with(".strtab")
+                            && !s.starts_with('`') // MSVC demangled names (generic)
+                            && !s.contains("Descriptor")
+                            && !s.contains("constructor")
+                            && !s.contains("destructor")
+                            && !s.starts_with("AppPolicy") // CRT internal
+                            && !s.contains("template-parameter")
+                            && !s.contains("Hierarchy")
+                        {
+                            strings.insert(s.to_string());
+                        }
+                    }
+                }
+            } else {
+                pos += 1;
+            }
+        }
+    }
+
+    // 2. Extract wide strings (UTF-16LE, for PE binaries)
+    if is_pe {
+        let mut pos = 0;
+        while pos + 1 < data.len() {
+            if data[pos] >= 0x20 && data[pos] < 0x7f && data[pos + 1] == 0 {
+                let start = pos;
+                while pos + 1 < data.len() && data[pos] >= 0x20 && data[pos] < 0x7f && data[pos + 1] == 0 {
+                    pos += 2;
+                }
+                let char_count = (pos - start) / 2;
+                if char_count >= 6 && char_count <= 100 {
+                    let chars: String = data[start..pos].chunks(2)
+                        .filter_map(|c| if c.len() == 2 { Some(c[0] as char) } else { None })
+                        .collect();
+                    if !strings.contains(&chars) { // don't duplicate ASCII
+                        wide_strings.insert(chars);
+                    }
+                }
+            } else {
+                pos += 1;
+            }
+        }
+    }
+
+    // 3. Extract imports (PE + ELF)
+    if let Ok(obj) = goblin::Object::parse(data) {
+        match &obj {
+            goblin::Object::PE(pe) => {
+                for imp in &pe.imports {
+                    imports.insert(imp.name.to_string());
+                }
+                if let Some(name) = pe.name {
+                    meta.insert("original_name".into(), name.to_string());
+                }
+            }
+            goblin::Object::Elf(elf) => {
+                for sym in elf.dynsyms.iter() {
+                    if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
+                        if !name.is_empty() && name.len() > 3 {
+                            imports.insert(name.to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // 4. Detect crypto constants
+    let crypto_sigs: &[(&str, &[u8])] = &[
+        ("aes_sbox", &[0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5]),
+        ("sha256_k", &[0x98, 0x2f, 0x8a, 0x42, 0x91, 0x44, 0x37, 0x71]),
+        ("sha256_k_be", &[0x42, 0x8a, 0x2f, 0x98, 0x71, 0x37, 0x44, 0x91]),
+        ("md5_t", &[0x78, 0xa4, 0x6a, 0xd7, 0x56, 0xb7, 0xc7, 0xe8]),
+        ("crc32_table", &[0x00, 0x00, 0x00, 0x00, 0x96, 0x30, 0x07, 0x77]),
+        ("chacha20", b"expand 32-byte k"),
+        ("blowfish_p", &[0x24, 0x3f, 0x6a, 0x88, 0x85, 0xa3, 0x08, 0xd3]),
+    ];
+    for (name, pattern) in crypto_sigs {
+        if data.windows(pattern.len()).any(|w| w == *pattern) {
+            let hex = pattern.iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(" ");
+            hex_patterns.push((format!("crypto_{}", name), hex));
+        }
+    }
+
+    // 5. Extract unique byte patterns from entry point / first function
+    if let Ok(obj) = goblin::Object::parse(data) {
+        let entry_bytes = match &obj {
+            goblin::Object::PE(pe) => {
+                let entry_rva = pe.header.optional_header.map(|h| h.standard_fields.address_of_entry_point as usize).unwrap_or(0);
+                pe.sections.iter().find_map(|s| {
+                    let sr = s.virtual_address as usize;
+                    if entry_rva >= sr && entry_rva < sr + s.virtual_size as usize {
+                        let fo = s.pointer_to_raw_data as usize + (entry_rva - sr);
+                        if fo + 32 <= data.len() { Some(&data[fo..fo + 32]) } else { None }
+                    } else { None }
+                })
+            }
+            goblin::Object::Elf(elf) => {
+                let entry = elf.header.e_entry as usize;
+                elf.section_headers.iter().find_map(|sh| {
+                    if entry >= sh.sh_addr as usize && entry < (sh.sh_addr + sh.sh_size) as usize {
+                        let fo = sh.sh_offset as usize + (entry - sh.sh_addr as usize);
+                        if fo + 32 <= data.len() { Some(&data[fo..fo + 32]) } else { None }
+                    } else { None }
+                })
+            }
+            _ => None,
+        };
+        if let Some(bytes) = entry_bytes {
+            let hex = bytes.iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(" ");
+            hex_patterns.push(("entry_point".into(), hex));
+        }
+    }
+
+    // 6. Select best strings for the rule (most unique, not too long)
+    // Score strings: prefer longer, with special chars, not common words
+    let mut scored_strings: Vec<(i32, &String)> = strings.iter()
+        .map(|s| {
+            let mut score = s.len() as i32;
+            if s.contains('/') || s.contains('\\') { score += 5; } // paths
+            if s.contains("http") || s.contains("://") { score += 10; } // URLs
+            if s.contains(".dll") || s.contains(".exe") || s.contains(".sys") { score += 10; }
+            if s.contains("password") || s.contains("secret") || s.contains("key") { score += 15; }
+            if s.contains("cmd") || s.contains("shell") || s.contains("exec") { score += 10; }
+            if s.starts_with("Error") || s.starts_with("Warning") { score -= 5; }
+            // Penalize very common strings
+            if s.len() > 50 { score -= 10; }
+            (score, s)
+        })
+        .collect();
+    scored_strings.sort_by(|a, b| b.0.cmp(&a.0));
+
+    // Select top 20 strings
+    let selected_strings: Vec<&String> = scored_strings.iter()
+        .take(20)
+        .map(|(_, s)| *s)
+        .collect();
+
+    // Select top 5 wide strings
+    let selected_wide: Vec<&String> = wide_strings.iter().take(5).collect();
+
+    // Select suspicious imports
+    let suspicious_imports: Vec<&String> = imports.iter()
+        .filter(|i| {
+            let il = i.to_lowercase();
+            il.contains("virtualalloc") || il.contains("writeprocessmemory")
+                || il.contains("createremotethread") || il.contains("ntcreatethreadex")
+                || il.contains("loadlibrary") || il.contains("getprocaddress")
+                || il.contains("cryptencrypt") || il.contains("internetopen")
+                || il.contains("urldownload") || il.contains("shellexecute")
+                || il.contains("regsetvalue") || il.contains("createservice")
+                || il.contains("socket") || il.contains("connect")
+                || il.contains("recv") || il.contains("send")
+                || il.contains("exec") || il.contains("system")
+                || il.contains("popen") || il.contains("fork")
+        })
+        .take(10)
+        .collect();
+
+    // Output YARA rule
+    println!("rule {} {{", rule_name);
+    println!("    meta:");
+    for (k, v) in &meta {
+        println!("        {} = \"{}\"", k, v);
+    }
+    println!("        description = \"Auto-generated by rsleigh decompiler\"");
+    println!();
+
+    println!("    strings:");
+    let mut str_idx = 0;
+    for s in &selected_strings {
+        let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+        println!("        $s{} = \"{}\"", str_idx, escaped);
+        str_idx += 1;
+    }
+    for s in &selected_wide {
+        let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+        println!("        $w{} = \"{}\" wide", str_idx, escaped);
+        str_idx += 1;
+    }
+    for (name, hex) in &hex_patterns {
+        println!("        $h_{} = {{ {} }}", name, hex);
+    }
+    for (i, imp) in suspicious_imports.iter().enumerate() {
+        println!("        $imp{} = \"{}\"", i, imp);
+    }
+    println!();
+
+    // Condition: require several strings + optional hex patterns
+    let total_str_count = selected_strings.len() + selected_wide.len();
+    let min_match = (total_str_count / 3).max(3).min(total_str_count);
+    println!("    condition:");
+    let mut conditions = Vec::new();
+    if is_pe {
+        conditions.push("uint16(0) == 0x5A4D".to_string()); // MZ header
+    } else if is_elf {
+        conditions.push("uint32(0) == 0x464C457F".to_string()); // \x7fELF
+    }
+    if total_str_count > 0 {
+        conditions.push(format!("{} of ($s*, $w*)", min_match));
+    }
+    if !hex_patterns.is_empty() {
+        conditions.push("any of ($h_*)".to_string());
+    }
+    if !suspicious_imports.is_empty() {
+        conditions.push(format!("{} of ($imp*)", suspicious_imports.len().min(3)));
+    }
+    if conditions.is_empty() {
+        conditions.push("true".to_string());
+    }
+    println!("        {}", conditions.join(" and\n        "));
+    println!("}}");
+}
+
+fn chrono_date() -> String {
+    // Simple date without chrono dependency
+    "2026-04-13".to_string()
 }
 
 fn run_raw(data: &[u8], arch: rsleigh_api::Architecture, base: u64, args: &[String], all_mode: bool) {
