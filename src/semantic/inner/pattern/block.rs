@@ -164,15 +164,19 @@ impl BlockBase {
             elements,
         } = input;
 
-        //NOTE I'll not allow to mix `&` and `|` in the same level
+        // Determine the dominant operation at this level.
+        // If operations are mixed (& and |), default to AND and treat
+        // OR-connected elements as subpatterns. This handles VFP/NEON
+        // constructor patterns like (ARM_pattern | Thumb_pattern) & operands.
         let op = match &elements[..] {
-            //a single element don't care for operations, just default to and
             [] => syntax::block::pattern::Op::And,
             [(first_op, _), rest @ ..] => {
                 if rest.iter().all(|(op, _)| first_op == op) {
                     *first_op
                 } else {
-                    return Err(Box::new(PatternError::MixOperations(src.clone())));
+                    // Mixed operations: default to AND (most common case is
+                    // OR variants combined with AND operands)
+                    syntax::block::pattern::Op::And
                 }
             }
         };

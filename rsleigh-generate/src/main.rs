@@ -42,7 +42,7 @@ fn main() {
             ),
             "arm32" | "arm" => generate_arch(
                 "arm32",
-                Path::new("slaspec/ARM/ARM7_le_base.slaspec"),
+                Path::new("slaspec/ARM/ARM7_le.slaspec"),
                 "arm32",
                 200,
                 2,

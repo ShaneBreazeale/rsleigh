@@ -264,13 +264,26 @@ impl<'a> ExecutionGenerator<'a> {
         // collide. Each subtable gets its unique varnodes shifted by (idx+1) * 0x10000.
         let subtable_cache: TokenStream = self.constructor.table_fields.iter()
             .enumerate()
-            .map(|(idx, (_, field))| {
+            .map(|(idx, (table_id, field))| {
                 let cache_ops = format_ident!("{}_ops", field);
                 let cache_exp = format_ident!("{}_exp", field);
                 let cache_ref = format_ident!("{}_ref", field);
                 let offset = ((idx as u64) + 1) * 0x10000;
+                // Check if this table field is Optional (from OR patterns)
+                let is_optional = self.disassembler.sleigh
+                    .table(self.constructor.table_id)
+                    .constructor(self.constructor.constructor_id)
+                    .pattern.produced_tables()
+                    .find(|pt| pt.table == *table_id)
+                    .map(|pt| !pt.always)
+                    .unwrap_or(false);
+                let lift_expr = if is_optional {
+                    quote! { self.#field.as_ref().unwrap().lift(#inst_start, #inst_next) }
+                } else {
+                    quote! { self.#field.lift(#inst_start, #inst_next) }
+                };
                 quote! {
-                    let (mut #cache_ops, mut #cache_exp, mut #cache_ref) = self.#field.lift(#inst_start, #inst_next);
+                    let (mut #cache_ops, mut #cache_exp, mut #cache_ref) = #lift_expr;
                     // Remap unique offsets to avoid collision with other subtables
                     for op in #cache_ops.iter_mut() {
                         pcode_ir::offset_unique_varnodes(op, #offset);
