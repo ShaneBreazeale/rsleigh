@@ -110,8 +110,33 @@ fn collect_store_aliases(stmts: &[StructuredStmt], ssa: &SsaCfg, ctx: &PrintCtx,
         if let StructuredStmt::Store { addr, val } = stmt {
             if let Some(stack_name) = try_stack_var_name(*addr, ssa) {
                 let val_vdef = ssa.var(*val);
-                // For parameter saves (prologue stores), use the param name if available
-                let val_expr = if let Some(ref name) = val_vdef.param_name {
+                // For prologue stores, detect parameter registers and use param names.
+                // The SSA may have contaminated param register VarIds with loop values
+                // (e.g., RDI gets a Phi that merges entry param with loop's LEA).
+                // Check param_name on the VarId, its Var/Phi chain, and by register offset.
+                let param = val_vdef.param_name.clone()
+                    .or_else(|| match &val_vdef.expr {
+                        Expr::Var(src) => ssa.var(*src).param_name.clone(),
+                        Expr::Phi(inputs) => inputs.iter().find_map(|i| ssa.var(*i).param_name.clone()),
+                        _ => None,
+                    })
+                    .or_else(|| {
+                        // Fallback: if this register is at a known arg offset and has
+                        // Unknown or Phi expression, it's a function parameter.
+                        // SysV: RDI=56, RSI=48, RDX=16, RCX=8, R8=128, R9=136
+                        // Win64: RCX=8, RDX=16, R8=128, R9=136
+                        if val_vdef.varnode.space == AddressSpaceId::Register {
+                            let arg_offsets: &[u64] = &[56, 48, 16, 8, 128, 136];
+                            if let Some(idx) = arg_offsets.iter().position(|o| *o == val_vdef.varnode.offset) {
+                                // Check that no earlier param has this index
+                                // (avoid duplicates from different-sized references)
+                                return Some(format!("param_{}", idx));
+                            }
+                        }
+                        None
+                    });
+
+                let val_expr = if let Some(ref name) = param {
                     name.clone()
                 } else {
                     format_var_tracked(*val, ssa, ctx, tracker)
@@ -7564,8 +7589,25 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
             let type_name = typed_name(size, vdef.inferred_type);
 
             if let Some(stack_name) = try_stack_var_name(*addr, ssa) {
-                // Track this stack variable's value for later resolution
-                tracker.stack_alias.insert(stack_name.clone(), val_expr.clone());
+                // Track this stack variable's value for later resolution.
+                // But don't overwrite prologue param aliases — the pre-scan set these
+                // correctly and the runtime tracker may have contaminated values.
+                let existing = tracker.stack_alias.get(&stack_name);
+                let is_param_alias = existing.map_or(false, |v| v.starts_with("param_"));
+                if !is_param_alias {
+                    tracker.stack_alias.insert(stack_name.clone(), val_expr.clone());
+                } else {
+                    // Keep the param alias but use it as val_expr for display purposes
+                    let val_expr_ref = existing.unwrap().clone();
+                    // Override val_expr for the checks below
+                    let val_expr = val_expr_ref;
+
+                    // Same skip checks as below but with the param alias
+                    if val_expr == stack_name { return; }
+                    let is_param = val_expr.starts_with("param_");
+                    if is_param { return; } // Hide param store
+                    return; // Don't print — the param alias is sufficient
+                }
 
                 // Skip redundant stores:
                 // - Self-assign (var_8 = var_8)
@@ -7624,7 +7666,32 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
             } else {
                 // Normal C function call
                 let call_sig = crate::signatures::lookup(&target_name);
-                let args_str: Vec<String> = args.iter().enumerate()
+
+                // Trim excess args based on function signature.
+                // The arg collector may pick up stale register writes that aren't real args.
+                let effective_args: &[VarId] = if let Some(sig) = call_sig {
+                    if sig.variadic && !args.is_empty() {
+                        // For variadic functions (printf, sprintf, etc.), determine arg count
+                        // from format string specifiers. The first fixed param is typically
+                        // the format string.
+                        let fmt_arg = format_vardef_expr(ssa.var(args[0]), ssa, ctx, tracker);
+                        let n_specifiers = count_format_specifiers(&fmt_arg);
+                        let total = sig.params.len() + n_specifiers;
+                        if args.len() > total && total > 0 {
+                            &args[..total]
+                        } else {
+                            args
+                        }
+                    } else if !sig.variadic && !sig.params.is_empty() && args.len() > sig.params.len() {
+                        &args[..sig.params.len()]
+                    } else {
+                        args
+                    }
+                } else {
+                    args
+                };
+
+                let args_str: Vec<String> = effective_args.iter().enumerate()
                     .map(|(i, a)| {
                         let vdef = ssa.var(*a);
                         let mut expr_str = format_vardef_expr(vdef, ssa, ctx, tracker);
@@ -8832,6 +8899,51 @@ fn is_valid_array_base(s: &str) -> bool {
     // For named variables: accept if the name is longer than 3 chars (likely a real variable)
     // Short names like "low", "mid", "i", "j" are likely loop counters, not pointers
     s.len() > 3
+}
+
+/// Count printf-style format specifiers in a string expression.
+/// Handles: %d, %s, %x, %p, %u, %f, %c, %lx, %ld, %llu, etc.
+/// Returns 0 if the string doesn't look like a format string.
+fn count_format_specifiers(expr: &str) -> usize {
+    // Extract the string literal content from quoted expressions
+    let s = if let Some(start) = expr.find('"') {
+        if let Some(end) = expr[start + 1..].rfind('"') {
+            &expr[start + 1..start + 1 + end]
+        } else {
+            return 0;
+        }
+    } else {
+        return 0;
+    };
+
+    let mut count = 0;
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            i += 1;
+            if i >= bytes.len() { break; }
+            // Skip %% (literal percent)
+            if bytes[i] == b'%' { i += 1; continue; }
+            // Skip flags, width, precision: [-+ 0#]*[0-9]*[.][0-9]*
+            while i < bytes.len() && matches!(bytes[i], b'-' | b'+' | b' ' | b'0' | b'#') { i += 1; }
+            while i < bytes.len() && bytes[i].is_ascii_digit() { i += 1; }
+            if i < bytes.len() && bytes[i] == b'.' { i += 1; }
+            while i < bytes.len() && bytes[i].is_ascii_digit() { i += 1; }
+            // Skip length modifiers: h, hh, l, ll, L, z, j, t, q
+            while i < bytes.len() && matches!(bytes[i], b'h' | b'l' | b'L' | b'z' | b'j' | b't' | b'q') { i += 1; }
+            // The conversion specifier
+            if i < bytes.len() && matches!(bytes[i], b'd' | b'i' | b'u' | b'x' | b'X' | b'o'
+                | b's' | b'c' | b'p' | b'f' | b'e' | b'E' | b'g' | b'G' | b'n' | b'a' | b'A')
+            {
+                count += 1;
+            }
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+    count
 }
 
 fn find_matching_paren(s: &str, pos: usize) -> Option<usize> {

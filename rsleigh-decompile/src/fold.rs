@@ -2094,7 +2094,7 @@ fn collect_call_arguments(ssa: &mut SsaCfg) {
 
         if let Some((target, fallthrough)) = call_info {
             let n_stmts = ssa.blocks[bi].stmts.len();
-            let args = if is_x86_32 {
+            let mut args = if is_x86_32 {
                 let (args, consumed) = collect_stack_args_from_block(&ssa.blocks[bi].stmts, &ssa.vars, n_stmts);
                 if !args.is_empty() { all_consumed.extend(consumed); }
                 args
@@ -2119,7 +2119,7 @@ fn collect_call_arguments(ssa: &mut SsaCfg) {
             .collect();
 
         for &si in call_indices.iter().rev() {
-            let args = if is_x86_32 {
+            let mut args = if is_x86_32 {
                 let (args, consumed) = collect_stack_args_from_block(&ssa.blocks[bi].stmts, &ssa.vars, si);
                 if !args.is_empty() { all_consumed.extend(consumed); }
                 args
@@ -2160,6 +2160,20 @@ fn collect_reg_args_from_block(stmts: &[Stmt], vars: &[VarDef], up_to: usize) ->
             {
                 if !args.iter().any(|(off, _)| *off == vdef.varnode.offset) {
                     args.push((vdef.varnode.offset, *var_id));
+                }
+            }
+            // Also check if this Assign wraps a sub-register that maps to an arg register.
+            // x86-64: EAX(offset=0,size=4) should match RAX(offset=0,size=8) for arg purposes,
+            // but only for registers in the arg list.
+            // More importantly: check all register sizes at the same offset
+            if vdef.varnode.space == AddressSpaceId::Register
+                && !arg_offsets.contains(&vdef.varnode.offset)
+            {
+                // Check if a different-sized register at this offset is an arg register
+                for &arg_off in arg_offsets {
+                    if arg_off == vdef.varnode.offset && !args.iter().any(|(off, _)| *off == arg_off) {
+                        args.push((arg_off, *var_id));
+                    }
                 }
             }
         }
