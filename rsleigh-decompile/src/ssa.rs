@@ -29,6 +29,8 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
 
     // Per-block: stack slot values at block exit (Phase 1 collection).
     let mut block_exit_stack: Vec<StackMap> = vec![HashMap::new(); cfg.blocks.len()];
+    // Track which blocks have STORES (not inherited) for each slot key.
+    let mut slot_store_blocks: HashMap<SlotKey, Vec<usize>> = HashMap::new();
 
     // Iterative dataflow: re-process blocks until exit vars stabilize (max 4 passes)
     for iteration in 0..4u32 {
@@ -152,8 +154,10 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
                             let val_var = resolve_input(&mut ssa, &mut current, &val);
                             // Track stack stores for intra-block forwarding
                             let val_size = ssa.vars[val_var.0 as usize].size;
-                            if let Some(key) = get_slot_key(addr_var, val_size, &ssa) {
+                            let key = get_slot_key(addr_var, val_size, &ssa);
+                            if let Some(key) = key {
                                 local_stack.insert(key, val_var);
+                                slot_store_blocks.entry(key).or_default().push(block.id.0);
                             }
                             stmts.push(Stmt::Store { addr: addr_var, val: val_var });
                         }
@@ -284,6 +288,8 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
     //           Expr::Var(resolved_value) when the stack slot is known.
     {
         let mut block_entry_stack: Vec<StackMap> = vec![HashMap::new(); cfg.blocks.len()];
+        // Effective exit stacks for Phase 2 (entry values + Phase 1 stores)
+        let mut effective_exit: Vec<StackMap> = vec![HashMap::new(); cfg.blocks.len()];
         // Memory Phis created: (block_id, slot_key) → phi VarId
         let mut mem_phis: HashMap<(usize, SlotKey), VarId> = HashMap::new();
 
@@ -302,24 +308,21 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
 
             if block_preds_list.is_empty() {
                 // Entry block: no predecessors, entry stack is empty
-                // (stores in entry block create exit_stack entries)
             } else if block_preds_list.len() == 1 {
-                // Single predecessor: inherit directly
-                new_entry = block_exit_stack[block_preds_list[0].0].clone();
+                // Single predecessor: inherit from effective exit
+                new_entry = effective_exit[block_preds_list[0].0].clone();
             } else {
                 // Multiple predecessors: merge with Phi insertion
-                // Collect all slot keys across all predecessors
                 let mut all_keys: HashSet<SlotKey> = HashSet::new();
                 for &pred_id in block_preds_list {
-                    for key in block_exit_stack[pred_id.0].keys() {
+                    for key in effective_exit[pred_id.0].keys() {
                         all_keys.insert(*key);
                     }
                 }
 
                 for key in &all_keys {
-                    // Collect values from each predecessor (None = missing/unknown)
                     let pred_values: Vec<Option<VarId>> = block_preds_list.iter()
-                        .map(|pred| block_exit_stack[pred.0].get(key).copied())
+                        .map(|pred| effective_exit[pred.0].get(key).copied())
                         .collect();
 
                     // If ANY predecessor is missing this slot, don't forward (fail closed)
@@ -364,26 +367,15 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
             visited[bid] = true;
             block_entry_stack[bid] = new_entry.clone();
 
-            // Recompute exit stack: entry + local stores in this block
-            let mut recomputed_exit = new_entry;
-            let mut has_unknown_store = false;
-            for stmt in &ssa.blocks[bid].stmts {
-                if let Stmt::Store { addr, val } = stmt {
-                    let val_size = ssa.vars[val.0 as usize].size;
-                    if let Some(key) = get_slot_key(*addr, val_size, &ssa) {
-                        recomputed_exit.insert(key, *val);
-                    } else {
-                        // Unknown store address — conservatively kill all tracked slots
-                        has_unknown_store = true;
-                    }
-                }
-            }
-            if has_unknown_store {
-                recomputed_exit.clear();
+            // Compute effective exit: entry values + Phase 1 local stores.
+            let mut new_effective_exit = new_entry.clone();
+            for (key, var_id) in &block_exit_stack[bid] {
+                // Phase 1 local stores override inherited values
+                new_effective_exit.insert(*key, *var_id);
             }
 
-            if block_exit_stack[bid] != recomputed_exit {
-                block_exit_stack[bid] = recomputed_exit;
+            if effective_exit[bid] != new_effective_exit {
+                effective_exit[bid] = new_effective_exit;
                 // Schedule successors for re-processing
                 for succ in cfg.successors(BlockId(bid)) {
                     if !worklist.contains(&succ.0) {
@@ -396,6 +388,7 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
         // Phase 2b: Resolve cross-block Loads using computed entry stack
         for bid in 0..ssa.blocks.len() {
             let mut running_stack = block_entry_stack[bid].clone();
+            let mut local_stack_keys: HashSet<SlotKey> = HashSet::new();
 
             for stmt in &ssa.blocks[bid].stmts {
                 match stmt {
@@ -403,6 +396,7 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
                         let val_size = ssa.vars[val.0 as usize].size;
                         if let Some(key) = get_slot_key(*addr, val_size, &ssa) {
                             running_stack.insert(key, *val);
+                            local_stack_keys.insert(key);
                         }
                     }
                     Stmt::Assign(var_id) => {
@@ -411,8 +405,18 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
                             let load_size = vdef.size;
                             if let Some(key) = get_slot_key(*ptr, load_size, &ssa) {
                                 if let Some(&stored_var) = running_stack.get(&key) {
-                                    // Resolve: replace Load with the stored value
-                                    ssa.vars[var_id.0 as usize].expr = Expr::Var(stored_var);
+                                    // Only resolve when safe:
+                                    // - Phi: properly merged value at join point
+                                    // - Local: same-block store→load (always safe)
+                                    // - Readonly: slot only written in entry block (never changes)
+                                    let is_phi = matches!(&ssa.vars[stored_var.0 as usize].expr, Expr::Phi(_));
+                                    let is_local = local_stack_keys.contains(&key);
+                                    // Check if this slot is only stored in the entry block
+                                    let is_readonly = slot_store_blocks.get(&key)
+                                        .map_or(false, |blocks| blocks.iter().all(|b| *b == 0));
+                                    if is_phi || is_local || is_readonly {
+                                        ssa.vars[var_id.0 as usize].expr = Expr::Var(stored_var);
+                                    }
                                 }
                             }
                         }
