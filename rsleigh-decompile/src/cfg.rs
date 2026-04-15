@@ -357,7 +357,7 @@ fn resolve_gp_relative_addr(ops: &[(u64, PcodeOp)], ptr: &pcode_ir::Varnode, _fu
 
                 // The register should be GP — trace its value
                 if reg.space == AddressSpaceId::Register {
-                    if let Some(gp_val) = trace_register_value(all_ops, reg) {
+                    if let Some(gp_val) = trace_register_value(all_ops, reg, _func_addr) {
                         // Handle negative offsets (sign-extend 32-bit)
                         let got_addr = if offset > 0x7FFFFFFF {
                             gp_val.wrapping_add(offset as u64 | 0xFFFFFFFF00000000)
@@ -376,7 +376,7 @@ fn resolve_gp_relative_addr(ops: &[(u64, PcodeOp)], ptr: &pcode_ir::Varnode, _fu
 
 /// Trace a register's constant value by scanning backwards through P-code ops.
 /// Handles MIPS GP setup patterns like: Copy(GP, const) or IntAdd(GP, GP, const).
-fn trace_register_value(ops: &[(u64, PcodeOp)], reg: &pcode_ir::Varnode) -> Option<u64> {
+fn trace_register_value(ops: &[(u64, PcodeOp)], reg: &pcode_ir::Varnode, func_addr: u64) -> Option<u64> {
     let mut value: Option<u64> = None;
 
     // Scan FORWARD to build up the register value (handles multi-instruction setup)
@@ -397,6 +397,29 @@ fn trace_register_value(ops: &[(u64, PcodeOp)], reg: &pcode_ir::Varnode) -> Opti
             {
                 if let Some(prev) = value {
                     value = Some((prev as i64 + right.offset as i64) as u64);
+                }
+            }
+            // IntAdd with another register: reg = reg + other_reg (addu gp, gp, t9)
+            // In MIPS PIC, t9 holds the function address at entry.
+            PcodeOp::IntAdd { out, left, right }
+                if out.offset == reg.offset && out.space == reg.space
+                    && left.offset == reg.offset && left.space == reg.space
+                    && right.space == AddressSpaceId::Register =>
+            {
+                if let Some(prev) = value {
+                    // The other register is likely t9 (func entry address)
+                    // Use func_addr as the value of t9 at function entry
+                    value = Some(prev.wrapping_add(func_addr));
+                }
+            }
+            // Also: reg = other_reg + reg (commuted form)
+            PcodeOp::IntAdd { out, left, right }
+                if out.offset == reg.offset && out.space == reg.space
+                    && right.offset == reg.offset && right.space == reg.space
+                    && left.space == AddressSpaceId::Register =>
+            {
+                if let Some(prev) = value {
+                    value = Some(prev.wrapping_add(func_addr));
                 }
             }
             // IntAdd where result is in a DIFFERENT output but same logical register
