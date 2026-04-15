@@ -61,6 +61,10 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
     collect_call_arguments(ssa);
     recount_uses(ssa);
 
+    // Name parameters FIRST so propagate_register_constants won't
+    // overwrite param VarIds with constants from other code paths.
+    name_parameters(ssa);
+
     for _round in 0..8 {
         let before = count_live_stmts(ssa);
         fold_once(ssa);
@@ -73,7 +77,7 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
         recover_conditions(ssa);
         detect_return_values(ssa);
         recount_uses(ssa);
-        name_parameters(ssa);
+        name_parameters(ssa); // Re-run to catch params exposed by folding
         let after = count_live_stmts(ssa);
         if before == after { break; }
     }
