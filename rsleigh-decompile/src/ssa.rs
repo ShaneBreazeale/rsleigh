@@ -53,21 +53,80 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
 
             let mut stmts = Vec::new();
 
-            for (_addr, op) in &block.ops {
-                match op.clone() {
-                    PcodeOp::Store { ptr, val, .. } => {
-                        let addr_var = resolve_input(&mut ssa, &mut current, &ptr);
-                        let val_var = resolve_input(&mut ssa, &mut current, &val);
-                        stmts.push(Stmt::Store { addr: addr_var, val: val_var });
-                    }
-                    ref op => {
-                        if let Some(out_vn) = get_output(op) {
-                            let expr = build_expr(&mut ssa, &mut current, op);
-                            let var_id = ssa.new_var(out_vn, expr, out_vn.size);
-                            current.insert(out_vn, var_id);
-                            stmts.push(Stmt::Assign(var_id));
+            // Group P-code ops by instruction address for correct intra-instruction
+            // register handling. x86-64 generates IntZext(EAX→RAX) before address
+            // calculations that read RAX — the Zext must be deferred until after all
+            // reads from the same instruction are resolved.
+            let mut ops_iter = block.ops.iter().peekable();
+            while ops_iter.peek().is_some() {
+                // Collect all ops from the same instruction (same address)
+                let inst_addr = ops_iter.peek().unwrap().0;
+                let mut inst_ops: Vec<&PcodeOp> = Vec::new();
+                while ops_iter.peek().map_or(false, |(a, _)| *a == inst_addr) {
+                    inst_ops.push(&ops_iter.next().unwrap().1);
+                }
+
+                // Check for the sub-register Zext clobber pattern:
+                // IntZext{out=(R,off,big), input=(R,off,small)} appears before
+                // other ops that read (R,off,big).
+                // If found, snapshot the pre-Zext value and defer the Zext write.
+                let mut deferred_zext: Vec<(Varnode, VarId)> = Vec::new();
+
+                // Find Zext ops that write to a register that is also read by later ops
+                for (i, op) in inst_ops.iter().enumerate() {
+                    if let PcodeOp::IntZext { out, input } = op {
+                        if out.space == AddressSpaceId::Register
+                            && input.space == AddressSpaceId::Register
+                            && out.offset == input.offset
+                            && out.size > input.size
+                        {
+                            // Check if any later op in this instruction reads the output register
+                            let reads_later = inst_ops[i+1..].iter().any(|later_op| {
+                                pcode_ir::reads_varnode(later_op, out)
+                            });
+                            if reads_later {
+                                // Snapshot the current value of the super-register
+                                // Process the Zext to get its VarId, but don't update current yet
+                                let input_var = resolve_input(&mut ssa, &mut current, input);
+                                let expr = Expr::UnaryOp(UnaryOpKind::Zext, input_var);
+                                let var_id = ssa.new_var(*out, expr, out.size);
+                                stmts.push(Stmt::Assign(var_id));
+                                deferred_zext.push((*out, var_id));
+                                continue;
+                            }
                         }
                     }
+                }
+
+                // Process remaining ops normally
+                for op in &inst_ops {
+                    // Skip ops we already handled as deferred Zext
+                    if let PcodeOp::IntZext { out, input } = op {
+                        if deferred_zext.iter().any(|(vn, _)| vn == out) {
+                            continue;
+                        }
+                    }
+
+                    match (*op).clone() {
+                        PcodeOp::Store { ptr, val, .. } => {
+                            let addr_var = resolve_input(&mut ssa, &mut current, &ptr);
+                            let val_var = resolve_input(&mut ssa, &mut current, &val);
+                            stmts.push(Stmt::Store { addr: addr_var, val: val_var });
+                        }
+                        ref op => {
+                            if let Some(out_vn) = get_output(op) {
+                                let expr = build_expr(&mut ssa, &mut current, op);
+                                let var_id = ssa.new_var(out_vn, expr, out_vn.size);
+                                current.insert(out_vn, var_id);
+                                stmts.push(Stmt::Assign(var_id));
+                            }
+                        }
+                    }
+                }
+
+                // Now apply deferred Zext writes
+                for (vn, var_id) in deferred_zext {
+                    current.insert(vn, var_id);
                 }
             }
 

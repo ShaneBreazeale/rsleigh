@@ -596,6 +596,11 @@ pub fn writes_to(op: &PcodeOp, target: &Varnode) -> bool {
     }
 }
 
+/// Check if a P-code op reads from a specific varnode.
+pub fn reads_varnode(op: &PcodeOp, target: &Varnode) -> bool {
+    count_reads(op, target) > 0
+}
+
 pub fn count_reads(op: &PcodeOp, target: &Varnode) -> usize {
     let mut n = 0;
     visit_reads(op, &mut |v| {
