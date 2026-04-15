@@ -2165,7 +2165,14 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let expr = lt[eq_pos + 3..].trim_end_matches(';');
                     let is_return_var = next == format!("return {};", var_name);
                     let is_return_bare = next == "return;";
-                    if (is_return_bare || is_return_var) && !expr.is_empty() {
+                    // Don't fold if the variable is used elsewhere in the function
+                    // (e.g., ptr = malloc(...); ... printf("...", ptr); return ptr;)
+                    let var_used_elsewhere = is_return_var && lines.iter().enumerate().any(|(j, l)| {
+                        j != i && j != i + 1
+                            && l.contains(var_name)
+                            && !l.trim().starts_with("//")
+                    });
+                    if (is_return_bare || is_return_var) && !expr.is_empty() && !var_used_elsewhere {
                         let indent = lines[i].len() - lines[i].trim_start().len();
                         let pad = " ".repeat(indent);
                         lines[i] = format!("{}return {};", pad, expr);
@@ -2211,7 +2218,14 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 if let Some(eq_pos) = lt.find(" = ") {
                     let var_name = lt[..eq_pos].to_string();
                     let expr = lt[eq_pos + 3..lt.len() - 1].to_string();
-                    // Search forward for "return var_name;" at top level
+                    // Search forward for "return var_name;" at top level.
+                    // But don't fold if var_name is used elsewhere (e.g., ptr used in
+                    // printf/free after malloc assignment).
+                    let var_used_elsewhere = lines.iter().enumerate().any(|(j, l)| {
+                        j != i && l.contains(&var_name) && !l.trim().starts_with("//")
+                            && l.trim() != format!("return {};", var_name)
+                    });
+                    if var_used_elsewhere { i += 1; continue; }
                     let mut found = false;
                     for j in (i + 1)..lines.len() {
                         let j_indent = lines[j].len() - lines[j].trim_start().len();
@@ -2505,6 +2519,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Add after NESTED by searching for marker... actually let me just add before DEDUP
     // #DEDUP: Remove duplicate call lines within the same scope.
     // The nested-call unwinding can create the same call line multiple times.
     // Remove non-consecutive duplicates of function calls at the same indent level.
@@ -7872,14 +7887,25 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                         || target_name == "strdup";
                     if is_alloc {
                         out.push_str(&format!("{}ptr = {};\n", pad, call_expr));
+                        // Replace the call_return with "ptr" so subsequent uses
+                        // (including the Store to stack) show "ptr" instead of
+                        // re-inlining the full malloc(...) expression.
+                        tracker.set_call_return(0, 8, "ptr".to_string());
+                        tracker.set_call_return(0, 4, "ptr".to_string());
                     } else {
+                        // For non-alloc calls: if the result is stored to stack,
+                        // use the call as a named result for the stack var
                         out.push_str(&format!("{}{};\n", pad, call_expr));
                     }
                 }
 
                 // If the result is stored to stack, invalidate the call_return tracker
-                // so the stack variable name is used for subsequent references
-                if next_stores_to_stack {
+                // AFTER the store is printed, so the stack var name is used for later refs.
+                // But for alloc calls we already set tracker to "ptr" above.
+                if next_stores_to_stack && !target_name.starts_with("malloc")
+                    && !target_name.starts_with("calloc") && !target_name.starts_with("realloc")
+                    && !target_name.starts_with("mmap") && !target_name.starts_with("strdup")
+                {
                     tracker.invalidate(0, 8);
                     tracker.invalidate(0, 4);
                 }
