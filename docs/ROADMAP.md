@@ -6,11 +6,29 @@
 
 **rsleigh 15 — Ghidra 6** on function discovery across PE32, PE64, Mach-O, ELF x86-64, and ARM32 ELF test binaries.
 
-**Key features:** 38K+ function signatures with param annotations, MSVC C++ demangling, ObjC bracket syntax, C++ stream wrapper inlining, Win32 typedef propagation (HKEY, HWND, REGSAM), MBA deobfuscation (SiMBA + equality saturation), interprocedural two-pass type propagation, do-while recovery, Ghidra-style local declarations with array sizing, type cast emission (constant type casts + return value casts), struct recovery (30 known structs, 1,861 named fields), string decryption engine (XOR auto-decrypt, stack strings, base64, ROT13), crypto algorithm detection (20+ patterns), WebAssembly decompilation (native stack-VM parser), taint analysis (24 sources, 32 sinks), YARA rule generation, diff decompilation, raw binary/firmware loading, ARM32 VFP/NEON float support (vmul.f64/vldr/vmov), AI-assisted RE toolkit (--summary, --xrefs, --search), vulnerability scanner (--vulnscan, 27 patterns), call graph export (--callgraph, JSON with behavioral tags), analysis API (FunctionMeta/VulnFinding/CallGraphEntry with Serialize), C++ class/vtable/hierarchy recovery (MSVC + GCC RTTI, template demangling, --classes/--classes --json).
+**Key features:** 38K+ function signatures with param annotations, MSVC C++ demangling, Swift symbol demangling, ObjC bracket syntax, C++ stream wrapper inlining, Win32 typedef propagation (HKEY, HWND, REGSAM), MBA deobfuscation (SiMBA + equality saturation), interprocedural two-pass type propagation, cross-function struct propagation, do-while recovery, Ghidra-style local declarations with array sizing, type cast emission (constant type casts + return value casts), struct recovery (30 known structs, 1,861 named fields), string decryption engine (XOR auto-decrypt, stack strings, base64, ROT13), crypto algorithm detection (20+ patterns), WebAssembly decompilation (native stack-VM parser), taint analysis (24 sources, 32 sinks), YARA rule generation, diff decompilation, raw binary/firmware loading, ARM32 VFP/NEON float support (vmul.f64/vldr/vmov), AI-assisted RE toolkit (--summary, --xrefs, --search), vulnerability scanner (--vulnscan, 27 patterns), call graph export (--callgraph, JSON with behavioral tags), analysis API (FunctionMeta/VulnFinding/CallGraphEntry with Serialize), C++ class/vtable/hierarchy recovery (MSVC + GCC RTTI, template demangling, --classes/--classes --json).
 
 ---
 
 ## Completed
+
+### MIPS Stripped ELF Function Discovery
+Endian-aware ELF parsing across the entire `discover_elf_functions` pipeline. MIPS JAL + BGEZAL/BAL scanning in ELF path (was only in `--raw`). MIPS prologue scanning: `addiu sp, sp, -N`, `sw ra, N(sp)`, `lui gp, N` patterns with JR RA boundary detection and gap analysis. MIPS decoder-based JAL target collection with `jr ra` terminator. Fixed `.init_array`, `.eh_frame`, vtable, and data pointer scanning for big-endian + 32-bit ELFs. busybox-mips: 9 → 5,405 functions. Validated on 13 MIPS32 BE binaries and 13 AArch64 stripped static binaries.
+
+### Cross-Function Struct Propagation
+When a function's parameter is identified as a struct pointer (e.g. `STARTUPINFOW*`), the type propagates to callers that pass variables to that function. Extends the two-pass interprocedural type system: Pass 1 extracts `LearnedStructParam` records from decompiled output, Pass 2 applies them via `lookup_all_struct_params()`. Field names resolve in callers even without direct field access. 195 → 201 struct identifications on main.exe.
+
+### Swift Symbol Demangling + ARC Noise Elision
+Swift mangled symbols (`$s...`) demangle to readable names: `$s...9fibonacciyS2iF` → `fibonacci`, `$s...10CalculatorC3addyS2i_SitF` → `Calculator.add`. Covers classes, methods, properties (getter/setter/modify), init/deinit, metadata accessors, field descriptors, free functions, Swift stdlib (`$ss`). Swift ARC runtime calls (`swift_retain`, `swift_release`, `swift_bridgeObjectRetain/Release`) stripped from decompiled output.
+
+### Expression Tracing Fixes
+Three fixes for garbled pseudocode expressions:
+1. **CDQ+IDIV simplification** — x86 signed division `Or(Lsl(Zext(sign), 32), Zext(val)) / Sext(divisor)` simplified to `val / divisor`. Eliminates `<< 32 |` concatenation noise. `mid = low + high << 32 | low + high / 2` → `mid = low + high / 2`.
+2. **SSA sub-register Zext deferral** — Root cause fix: x86-64 P-code generates `IntZext(EAX→RAX)` before address calculations that read RAX, clobbering the pointer. SSA builder now groups ops by instruction address and defers Zext writes until after all reads are resolved. `low[high / 2 + mid]` → `arr[mid]`.
+3. **Smart array access conversion** — Only converts `*(base + idx)` to `base[idx]` when base is a pointer-like variable name (param_N, arr, ptr, local_N, lVar, DAT_). Prevents short loop vars from being misidentified as array bases.
+
+### Spectra Integration Tests
+10 native backend integration tests in `spectra/src-tauri/tests/native_backend_tests.rs`: decoder (x86-64/AArch64/MIPS32 instruction sequences), decompilation (raw bytes + compiled Mach-O), analysis API (metadata extraction, vulnscan, JSON serialization), P-code JSON formatting, function discovery (symbol + recursive CALL descent), end-to-end pipeline (compile → discover → decode → decompile → metadata → vulnscan). 4 additional Spectra API contract tests in rsleigh test-harness.
 
 ### C++ Class/Vtable/Hierarchy Recovery
 `--classes` flag recovers C++ class hierarchies from binary RTTI metadata. MSVC RTTI: walks CompleteObjectLocator → TypeDescriptor → ClassHierarchyDescriptor → BaseClassArray to reconstruct full inheritance chains (9 classes recovered from PsExec). GCC RTTI: parses `_ZTV` vtable and `_ZTI` typeinfo symbols with template demangling (4 classes with template types from apt-cache, e.g. `APT::CacheFilter::Regex<std::basic_regex<char, std::regex_traits<char>>>`). Field inference from decompiled output identifies struct fields by offset gap analysis and typed API argument propagation. `--classes --json` emits structured JSON with CppClass, VirtualMethod, and ClassField records for tool integration.
@@ -115,18 +133,11 @@ Native WASM parser (not SLEIGH-based — WASM is a stack VM): auto-detect .wasm 
 
 ## Ship Quality — Make It Production-Ready
 
-### Spectra Integration Testing
-rsleigh is the decompilation backend for Spectra. The `rsleigh-api` + `rsleigh-decompile` API contract is untested in the UI context. Verify function discovery, ASM view, P-code view, and Code view all work correctly with the latest changes.
+### RISC-V Real-World Testing
+Supported architecture with zero real-world validation beyond golden P-code tests. Need: end-to-end decompilation testing on RISC-V toolchain output.
 
-### MIPS/RISC-V Real-World Testing
-Two supported architectures with zero real-world validation beyond golden P-code tests. Need: MIPS BL/JAL function discovery for stripped ELF, end-to-end decompilation testing on real firmware images (MIPS routers) and RISC-V toolchain output.
-
----
-
-## Output Quality — Close the Gap with Ghidra
-
-### Cross-Function Struct Propagation
-When a struct is identified in one function, propagate to callers/callees. Infer field types from usage context (field passed to `strlen` → `char *`).
+### Spectra End-to-End UI Testing
+The rsleigh API contract is tested (10 native backend tests + 4 API contract tests), but the full Spectra UI flow (Settings toggle → ASM/P-code/Code views → analysis panels) has not been validated with the latest changes.
 
 ---
 

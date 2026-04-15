@@ -30,9 +30,12 @@ Wired into Spectra as a native analysis backend replacing the Ghidra JVM daemon.
 
 **Supported binary formats:** ELF (32/64), PE (32/64), Mach-O (64), WASM (.wasm), Raw binary (any arch).
 
-**9 test categories, ~6000 assertions:** golden P-code, stress/boundary, functional
+**226 tests, ~6800+ assertions:** golden P-code, stress/boundary, functional
 sequences, bug probes, compiled code patterns, Ghidra differential, decompiler
-comparison, CTF binary validation, fuzz (5000 random byte sequences, zero panics).
+comparison, CTF binary validation, fuzz (5000 random byte sequences, zero panics),
+Spectra API contract tests (decoder/decompile/analysis/multi-arch), Spectra native
+backend integration tests (10 tests covering end-to-end pipeline).
+See `docs/TESTING.md` for the full test suite documentation.
 
 **Decompiler output (real binary, with DWARF debug info):**
 ```
@@ -193,6 +196,9 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - Multi-predecessor blocks inherit from first processed predecessor
 - Blocks re-processed when predecessor exit vars change (fixes back-edges)
 - Phi insertion at join points from converged exit maps
+- **Sub-register Zext deferral:** groups P-code ops by instruction address; when
+  `IntZext(EAX→RAX)` precedes an address calculation that reads RAX within the same
+  instruction, the Zext write is deferred to preserve the original pointer value
 
 **CFG builder (cfg.rs):**
 - CallInd resolution: `CALL [IAT_addr]` → traces Load source to constant, converts to Direct
@@ -208,6 +214,8 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - Call argument collection (runs BEFORE fold to prevent DCE of arg registers):
   x86-64 SysV, Windows x64 (auto-detected from PE), x86-32 cdecl/thiscall (stack-pushed)
 - Division-by-constant (multiply+shift → `x / 7`) and modulo (`x - (x/D)*D` → `x % D`)
+- **CDQ+IDIV simplification:** x86 signed division `Or(Lsl(Zext(sign),32),Zext(val))/Sext(div)`
+  simplified to `val / div` — eliminates 64-bit concatenation noise
 - Loop body preservation: register writes in back-edge blocks protected from DCE
 - **Type inference** (3-phase: seed → forward → backward): float, signed, unsigned, pointer, bool propagation from P-code op semantics
 - **Signature-based type propagation:** 38K+ function signatures auto-loaded; param types
@@ -241,7 +249,8 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - Manual PE import fallback: handles malformed binaries with corrupted import dirs (Stuxnet)
 - ELF32 PIE: GOT-relative string resolution, `__x86.get_pc_thunk` hiding
 - String literals: read-only section detection (filters .data, magic constants),
-  wide strings (UTF-16LE: `L"ntdll.dll"`), C++ demangling (ELF + Mach-O)
+  wide strings (UTF-16LE: `L"ntdll.dll"`), C++ demangling (ELF + Mach-O),
+  Swift symbol demangling (`$s...9fibonacciyS2iF` → `fibonacci`)
 - DWARF debug info: param names from `.debug_info` (DWARF4/5, macOS dSYM auto-discovery)
 - PDB debug info: function names and types from PE `.pdb` files
 - **Function signature database** (38K+ signatures, auto-loaded):
@@ -249,6 +258,7 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
   - Win32 typedef display: HANDLE, HKEY, HWND, DWORD, REGSAM, LSTATUS, LRESULT, WPARAM, LPARAM
   - 889 curated JSON + 304 macro + 36K embedded TSV — covers libc, POSIX, Linux, macOS, Win32, Android, OpenSSL
   - Interprocedural propagation: internal function params typed from API call context
+  - Cross-function struct propagation: struct types flow from callees to callers via two-pass system
 - Ghidra-style local declarations: `WCHAR local_8[262]; int local_c;` with array sizing from offset gaps
 - PE import thunk resolution: `JMP [IAT_addr]` stubs → import names
 - MSVC CRT wrapper recognition: `__acrt_iob_func + __stdio_common_vfprintf` → `printf`
@@ -256,7 +266,8 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - **MSVC C++ demangling:** `??6?$basic_ostream@...` → `cout <<`, `cin >>`, `cin.ignore`
 - **C++ wrapper inlining:** `func_XXX(cout, "text")` → `cout << "text"` (chained `<<` supported)
 - **Global data naming:** `*(0x4326f4)` → `DAT_004326f4` (auto-detected from address range)
-- **ARM64 prologue/epilogue elision:** callee-saved saves, FP/LR setup, ObjC ARC noise removal
+- **ARM64 prologue/epilogue elision:** callee-saved saves, FP/LR setup, ObjC ARC noise removal,
+  Swift ARC noise removal (swift_retain/release/bridgeObjectRetain/Release)
 - **ARM32 cleanup pass:** flag register elision (NG/ZR/CY/OV writes removed from output),
   register renaming (r0-r15 → named registers), carry flag artifact cleanup
 - **Architecture-aware register auto-naming:** x86-32 ESI/EDI → iVar, ARM64 x19-x28 → lVar,
@@ -300,6 +311,9 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - **Token-efficient output:** `--compact` (24% reduction), `--brief` (35%), `--min-complexity N` (skip trivial functions); combined `--brief --min-complexity 5` = 40% token reduction for LLM-assisted analysis
 - **ARM32 VFP/NEON float instructions:** vmul.f64, vldr, vmov decoded via ARM7_le.slaspec (not ARM7_le_base); full VFP/NEON constructor support
 - **C++ class/vtable/hierarchy recovery:** `CppClass` (name, base classes, vtable address, virtual methods, fields), `VirtualMethod` (name, vtable slot index, address), `ClassField` (offset, size, inferred type) structs. MSVC RTTI chain: CompleteObjectLocator → TypeDescriptor → ClassHierarchyDescriptor → BaseClassArray for multi-level inheritance. GCC RTTI: `_ZTV` vtable symbols + `_ZTI` typeinfo symbols with template demangling (`std::vector<int, std::allocator<int>>`). Field inference from decompiled output (offset gaps, typed API arguments). `--classes` and `--classes --json` CLI output.
+- **Swift ARM64 decompilation:** Swift mangled symbol demangling (classes, methods, properties, init/deinit, metadata), Swift ARC noise elision (swift_retain/release/bridgeObjectRetain/Release)
+- **Cross-function struct propagation:** struct types identified in callees propagate to callers via two-pass decompilation; field names resolve across call boundaries
+- **MIPS stripped ELF discovery:** JAL/BAL scanning, prologue detection (addiu sp/sw ra/lui gp), endian-aware ELF parsing; busybox-mips: 9 → 5,405 functions
 
 ---
 
