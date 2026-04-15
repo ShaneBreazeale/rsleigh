@@ -507,6 +507,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let lhs2 = l2[..eq2].to_string();
                 let rhs2 = l2[eq2 + 3..].trim_end_matches(';').to_string();
                 if lhs1 == lhs2 {
+                    // Pattern 1: REG = X; REG = REG op Y → REG = X op Y
                     if rhs2.starts_with(&format!("{} ", lhs1)) {
                         let suffix = &rhs2[lhs1.len()..];
                         let expr = if rhs1.contains(' ') {
@@ -519,8 +520,25 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         lines[i] = format!("{}{} = {};", pad, lhs1, expr);
                         lines.remove(i + 1);
                         continue;
-                    } else {
-                        // Dead store
+                    }
+                    // Pattern 2: REG = X; REG = Y op REG → REG = Y op X
+                    if rhs2.ends_with(&format!(" {}", lhs1)) || rhs2.contains(&format!(" {} ", lhs1)) {
+                        let new_rhs = if rhs1.contains(' ') {
+                            rhs2.replace(&lhs1, &format!("({})", rhs1))
+                        } else {
+                            rhs2.replace(&lhs1, &rhs1)
+                        };
+                        // Only fold if the replacement changed something
+                        if new_rhs != rhs2 {
+                            let indent = lines[i].len() - lines[i].trim_start().len();
+                            let pad = " ".repeat(indent);
+                            lines[i] = format!("{}{} = {};", pad, lhs1, new_rhs);
+                            lines.remove(i + 1);
+                            continue;
+                        }
+                    }
+                    // Dead store: same LHS, second doesn't reference first
+                    if !rhs2.contains(&lhs1) {
                         lines.remove(i);
                         continue;
                     }
@@ -7240,6 +7258,45 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         true
     });
 
+    // Final pass: fold sequential assignments to the same variable.
+    // REG = X; REG = Y op REG → REG = Y op X (after all other cleanup)
+    {
+        let mut i = 0;
+        while i + 1 < lines.len() {
+            let l1 = lines[i].trim().to_string();
+            let l2 = lines[i + 1].trim().to_string();
+            if let (Some(eq1), Some(eq2)) = (l1.find(" = "), l2.find(" = ")) {
+                let lhs1 = &l1[..eq1];
+                let rhs1 = l1[eq1 + 3..].trim_end_matches(';');
+                let lhs2 = &l2[..eq2];
+                let rhs2 = l2[eq2 + 3..].trim_end_matches(';');
+                if lhs1 == lhs2 && !lhs1.contains('(') && !lhs1.contains('[') {
+                    // Pattern: REG = X; REG = Y op REG → fold
+                    if rhs2.contains(lhs1) && rhs2 != lhs1 {
+                        let replacement = if rhs1.contains(' ') {
+                            rhs2.replace(lhs1, &format!("({})", rhs1))
+                        } else {
+                            rhs2.replace(lhs1, rhs1)
+                        };
+                        if replacement != rhs2.to_string() {
+                            let indent = lines[i].len() - lines[i].trim_start().len();
+                            let pad = " ".repeat(indent);
+                            lines[i] = format!("{}{} = {};", pad, lhs1, replacement);
+                            lines.remove(i + 1);
+                            continue;
+                        }
+                    }
+                    // Dead store: same LHS, second doesn't use first
+                    if !rhs2.contains(lhs1) {
+                        lines.remove(i);
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+
     for line in &lines {
         let is_blank = line.trim().is_empty();
         if is_blank && prev_blank { continue; }
@@ -8569,6 +8626,26 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
                 }
             }
 
+            // Simplify x + 0 → x, x - 0 → x, x * 1 → x, x | 0 → x, x & -1 → x
+            if matches!(kind, BinOpKind::Add | BinOpKind::Sub | BinOpKind::Or | BinOpKind::Xor) {
+                if let Expr::Const(0, _) = &ssa.var(*right).expr {
+                    return format_var_tracked(*left, ssa, ctx, tracker);
+                }
+            }
+            if matches!(kind, BinOpKind::Add | BinOpKind::Or | BinOpKind::Xor) {
+                if let Expr::Const(0, _) = &ssa.var(*left).expr {
+                    return format_var_tracked(*right, ssa, ctx, tracker);
+                }
+            }
+            if matches!(kind, BinOpKind::Mult) {
+                if let Expr::Const(1, _) = &ssa.var(*right).expr {
+                    return format_var_tracked(*left, ssa, ctx, tracker);
+                }
+                if let Expr::Const(1, _) = &ssa.var(*left).expr {
+                    return format_var_tracked(*right, ssa, ctx, tracker);
+                }
+            }
+
             let mut l = format_var_tracked(*left, ssa, ctx, tracker);
             let mut r = format_var_tracked(*right, ssa, ctx, tracker);
             let op = binop_str(*kind);
@@ -8586,14 +8663,21 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
                 BinOpKind::SLess | BinOpKind::SLessEq | BinOpKind::SDiv | BinOpKind::SRem => {
                     let lv = ssa.var(*left);
                     let rv = ssa.var(*right);
-                    // Cast operands to signed if they're not already signed
-                    if lv.inferred_type != InferredType::Signed && !l.starts_with('(')
+                    // Cast operands to signed only when needed:
+                    // - Size mismatch (widening/narrowing cast is meaningful)
+                    // - Explicitly unsigned type (cast makes signedness clear)
+                    // Skip cast for Unknown/Signed types at native int size (4 bytes)
+                    let needs_l_cast = lv.inferred_type == InferredType::Unsigned
+                        || (lv.inferred_type != InferredType::Signed && lv.size < 4);
+                    if needs_l_cast && !l.starts_with('(')
                         && !l.starts_with('-') && !l.starts_with('"') && l != "0"
                     {
                         let cast = match lv.size { 1 => "(char)", 2 => "(short)", _ => "(int)" };
                         l = format!("{}{}", cast, l);
                     }
-                    if rv.inferred_type != InferredType::Signed && !r.starts_with('(')
+                    let needs_r_cast = rv.inferred_type == InferredType::Unsigned
+                        || (rv.inferred_type != InferredType::Signed && rv.size < 4);
+                    if needs_r_cast && !r.starts_with('(')
                         && !r.starts_with('-') && !r.starts_with('"') && r != "0"
                         && !r.chars().next().map_or(false, |c| c.is_ascii_digit())
                     {
@@ -8898,12 +8982,17 @@ fn format_condition_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &R
             let rv = ssa.var(*right);
             match kind {
                 BinOpKind::SLess | BinOpKind::SLessEq => {
-                    if lv.inferred_type != InferredType::Signed && !l.starts_with('(')
+                    // Only cast when operand is explicitly unsigned or sub-int sized
+                    let needs_l = lv.inferred_type == InferredType::Unsigned
+                        || (lv.inferred_type != InferredType::Signed && lv.size < 4);
+                    if needs_l && !l.starts_with('(')
                         && !l.starts_with('-') && l != "0" {
                         let cast = match lv.size { 1 => "(char)", 2 => "(short)", _ => "(int)" };
                         l = format!("{}{}", cast, l);
                     }
-                    if rv.inferred_type != InferredType::Signed && !r.starts_with('(')
+                    let needs_r = rv.inferred_type == InferredType::Unsigned
+                        || (rv.inferred_type != InferredType::Signed && rv.size < 4);
+                    if needs_r && !r.starts_with('(')
                         && !r.starts_with('-') && !r.chars().next().map_or(false, |c| c.is_ascii_digit()) {
                         let cast = match rv.size { 1 => "(char)", 2 => "(short)", _ => "(int)" };
                         r = format!("{}{}", cast, r);
