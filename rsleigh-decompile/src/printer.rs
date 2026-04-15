@@ -94,18 +94,35 @@ pub fn print_c(
 }
 
 fn collect_store_aliases(stmts: &[StructuredStmt], ssa: &SsaCfg, ctx: &PrintCtx, tracker: &mut RegTracker) {
+    // Only collect aliases from the prologue — stores that happen before any calls or loops.
+    // These are the initial parameter saves (MOV [RBP-0x8], RDI etc.) and local initialization.
+    // Post-call stores may reference stale register values via the tracker and produce wrong aliases.
     for stmt in stmts {
+        // Stop at the first call, loop, or conditional — after these, register values are unreliable
+        match stmt {
+            StructuredStmt::Call { .. }
+            | StructuredStmt::While { .. }
+            | StructuredStmt::DoWhile { .. }
+            | StructuredStmt::IfElse { .. } => break,
+            _ => {}
+        }
+
         if let StructuredStmt::Store { addr, val } = stmt {
             if let Some(stack_name) = try_stack_var_name(*addr, ssa) {
-                let val_expr = format_var_tracked(*val, ssa, ctx, tracker);
+                let val_vdef = ssa.var(*val);
+                // For parameter saves (prologue stores), use the param name if available
+                let val_expr = if let Some(ref name) = val_vdef.param_name {
+                    name.clone()
+                } else {
+                    format_var_tracked(*val, ssa, ctx, tracker)
+                };
                 tracker.stack_alias.insert(stack_name, val_expr);
             }
         }
-        // Also check Assigns that write to arg registers
         if let StructuredStmt::Assign { lhs, .. } = stmt {
             let vdef = ssa.var(*lhs);
             if vdef.varnode.space == AddressSpaceId::Register {
-                if let Expr::Var(_) | Expr::Load(_) = &vdef.expr {
+                if let Expr::Var(_) | Expr::Load(_) | Expr::BinOp(_, _, _) | Expr::UnaryOp(_, _) = &vdef.expr {
                     tracker.set(vdef.varnode.offset, vdef.varnode.size, *lhs);
                 }
                 if vdef.param_name.is_some() {
@@ -7678,6 +7695,18 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                     } else { false }
                 });
 
+                // Check if the NEXT statement stores the return value to a stack variable.
+                // If so, clear the call_return tracker after the store is printed,
+                // so subsequent references use the stack var name instead of inlining the call.
+                let next_stores_to_stack = stmts.get(stmt_idx + 1).map_or(false, |s| {
+                    if let StructuredStmt::Store { addr, val } = s {
+                        let vdef = ssa.var(*val);
+                        vdef.varnode.space == AddressSpaceId::Register
+                            && vdef.varnode.offset == 0 // RAX/EAX
+                            && try_stack_var_name(*addr, ssa).is_some()
+                    } else { false }
+                });
+
                 if !next_reads_eax {
                     // For allocation functions, show the return assignment
                     // since the pointer is always used afterwards.
@@ -7689,6 +7718,13 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                     } else {
                         out.push_str(&format!("{}{};\n", pad, call_expr));
                     }
+                }
+
+                // If the result is stored to stack, invalidate the call_return tracker
+                // so the stack variable name is used for subsequent references
+                if next_stores_to_stack {
+                    tracker.invalidate(0, 8);
+                    tracker.invalidate(0, 4);
                 }
             }
         }
@@ -7911,11 +7947,24 @@ fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTrac
     }
     // Check register tracking (try exact size, then sub-register sizes)
     if vdef.varnode.space == AddressSpaceId::Register {
-        // If this register var has a non-trivial SSA expression (Load, BinOp, Call, etc.),
-        // use the SSA expression directly instead of the tracker. The tracker contains
-        // the *last* write to this register offset, which may be from a different instruction
-        // than this VarId represents. SSA is authoritative.
-        // Follow Var chains to find the underlying expression.
+        // Check call return tracker FIRST — call returns are not in the SSA expression tree
+        // because calls are modeled as statements/terminators, not expressions.
+        // The call_return tracker has authoritative call result strings.
+        if let Some(expr_str) = tracker.get_expr_str(vdef.varnode.offset, vdef.varnode.size) {
+            return expr_str.to_string();
+        }
+        // Also check smaller sizes at same offset (RAX → EAX tracking)
+        for sz in [4u32, 8, 2, 1] {
+            if sz == vdef.varnode.size { continue; }
+            if let Some(expr_str) = tracker.get_expr_str(vdef.varnode.offset, sz) {
+                return expr_str.to_string();
+            }
+        }
+
+        // SSA-direct rendering: if this register var has a concrete SSA expression
+        // (Load, BinOp, UnaryOp), use it directly instead of the reg_source tracker.
+        // This prevents stale register values from being substituted when registers are
+        // reused within a block. Skip for Unknown expressions (which need the tracker).
         {
             let mut cur_id = id;
             let mut cur_expr = &vdef.expr;
@@ -7933,18 +7982,7 @@ fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTrac
                 _ => {}
             }
         }
-        if let Some(expr_str) = tracker.get_expr_str(vdef.varnode.offset, vdef.varnode.size) {
-            return expr_str.to_string();
-        }
-        // Also check smaller sizes at same offset (RAX → EAX tracking)
-        if tracker.get_expr_str(vdef.varnode.offset, vdef.varnode.size).is_none() {
-            for sz in [4u32, 8, 2, 1] {
-                if sz == vdef.varnode.size { continue; }
-                if let Some(expr_str) = tracker.get_expr_str(vdef.varnode.offset, sz) {
-                    return expr_str.to_string();
-                }
-            }
-        }
+
         let tracked_id = tracker.get(vdef.varnode.offset, vdef.varnode.size)
             .or_else(|| {
                 // Try sub-register sizes
