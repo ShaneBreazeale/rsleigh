@@ -348,8 +348,34 @@ fn convert_terminator(
             SsaTerminator::Call { target: target.clone(), args: vec![], fallthrough: *fallthrough }
         }
         Terminator::Return => {
-            // Try to find RAX/X0 as return value (common convention)
-            SsaTerminator::Return(None)
+            // Try to find RAX/EAX/x0/r0/v0 (return value register) in current state.
+            // These are the conventional return value registers for each architecture:
+            // x86-64/x86-32: RAX/EAX at register offset 0
+            // AArch64: x0 at register offset 0 (per AAPCS64)
+            // ARM32: r0 at register offset 0
+            // MIPS32: v0 at register offset 16
+            // RISC-V: a0 at register offset 80
+            // Prefer the smaller (more specific) register first: EAX before RAX,
+            // w0 before x0. This gets the correct return type (int vs long).
+            // Only use the register if it has a real expression (not Unknown),
+            // to avoid false return values from void functions that happen to
+            // leave x0/EAX as the entry parameter value.
+            let ret_val = [
+                Varnode { space: AddressSpaceId::Register, offset: 0, size: 4 }, // EAX / w0 / r0
+                Varnode { space: AddressSpaceId::Register, offset: 0, size: 8 }, // RAX / x0
+                Varnode { space: AddressSpaceId::Register, offset: 16, size: 4 }, // MIPS v0
+                Varnode { space: AddressSpaceId::Register, offset: 80, size: 8 }, // RISC-V a0
+            ].iter().find_map(|vn| {
+                let var_id = current.get(vn).copied()?;
+                let vdef = &ssa.vars[var_id.0 as usize];
+                // Skip if this is just the entry parameter value (Unknown or Phi)
+                // — the function didn't explicitly set a return value
+                if matches!(&vdef.expr, Expr::Unknown) && vdef.param_name.is_some() {
+                    return None;
+                }
+                Some(var_id)
+            });
+            SsaTerminator::Return(ret_val)
         }
         Terminator::Indirect(vn) => {
             let v = resolve_input(ssa, current, vn);
