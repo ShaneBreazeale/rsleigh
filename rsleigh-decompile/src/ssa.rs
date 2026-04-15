@@ -46,6 +46,11 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
             }
 
             let mut current: HashMap<Varnode, VarId> = HashMap::new();
+            // Stack slot tracking: maps stack offset (relative to frame base) to VarId.
+            // INTRA-BLOCK ONLY: tracks stores and resolves loads within the same basic
+            // block. This is safe because instructions within a block execute sequentially.
+            // Cross-block propagation would require memory SSA (Phi nodes for memory).
+            let mut stack_slots: HashMap<i64, VarId> = HashMap::new();
 
             // Inherit from the first already-processed FORWARD predecessor.
             // A forward predecessor has a lower block ID (comes before in CFG order).
@@ -132,11 +137,31 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
                         PcodeOp::Store { ptr, val, .. } => {
                             let addr_var = resolve_input(&mut ssa, &mut current, &ptr);
                             let val_var = resolve_input(&mut ssa, &mut current, &val);
+                            // Track stack stores: if writing to a fixed stack offset,
+                            // record the value for later Load resolution
+                            if let Some(offset) = get_stack_offset(addr_var, &ssa) {
+                                stack_slots.insert(offset, val_var);
+                            }
                             stmts.push(Stmt::Store { addr: addr_var, val: val_var });
                         }
                         ref op => {
                             if let Some(out_vn) = get_output(op) {
-                                let expr = build_expr(&mut ssa, &mut current, op);
+                                // For Loads: check if we can resolve from stack slot tracking
+                                let expr = if let PcodeOp::Load { ptr, .. } = op {
+                                    let p = resolve_input(&mut ssa, &mut current, ptr);
+                                    if let Some(offset) = get_stack_offset(p, &ssa) {
+                                        if let Some(&stored_var) = stack_slots.get(&offset) {
+                                            // Stack value is known — use it directly
+                                            Expr::Var(stored_var)
+                                        } else {
+                                            Expr::Load(p)
+                                        }
+                                    } else {
+                                        Expr::Load(p)
+                                    }
+                                } else {
+                                    build_expr(&mut ssa, &mut current, op)
+                                };
                                 let var_id = ssa.new_var(out_vn, expr, out_vn.size);
                                 current.insert(out_vn, var_id);
                                 stmts.push(Stmt::Assign(var_id));
@@ -238,6 +263,46 @@ fn resolve_input(ssa: &mut SsaCfg, current: &mut HashMap<Varnode, VarId>, vn: &V
     let var_id = ssa.new_var(*vn, Expr::Unknown, vn.size);
     current.insert(*vn, var_id);
     var_id
+}
+
+/// Extract a constant stack offset from a pointer VarId.
+/// Recognizes: RBP + const, SP + const, RBP - const, SP - const.
+/// Returns (base_reg_offset, stack_offset) if the pattern matches.
+fn get_stack_offset(ptr_var: VarId, ssa: &SsaCfg) -> Option<i64> {
+    let vdef = &ssa.vars[ptr_var.0 as usize];
+    match &vdef.expr {
+        // Direct stack register (offset 0)
+        Expr::Unknown if vdef.varnode.space == AddressSpaceId::Register => {
+            // RBP (x86: 40, AArch64 x29: 29) or SP (x86: 32, AArch64: varies)
+            let is_frame = matches!(vdef.varnode.offset, 40 | 29 | 32 | 256);
+            if is_frame { Some(0) } else { None }
+        }
+        // BinOp(Add, base_reg, const_offset)
+        Expr::BinOp(BinOpKind::Add, left, right) => {
+            let lv = &ssa.vars[left.0 as usize];
+            let rv = &ssa.vars[right.0 as usize];
+            // base + const
+            if lv.varnode.space == AddressSpaceId::Register
+                && matches!(lv.varnode.offset, 40 | 29 | 32 | 256 | 112)
+                && matches!(&rv.expr, Expr::Const(_, _))
+            {
+                if let Expr::Const(val, _) = &rv.expr {
+                    return Some(*val as i64);
+                }
+            }
+            // const + base (commuted)
+            if rv.varnode.space == AddressSpaceId::Register
+                && matches!(rv.varnode.offset, 40 | 29 | 32 | 256 | 112)
+                && matches!(&lv.expr, Expr::Const(_, _))
+            {
+                if let Expr::Const(val, _) = &lv.expr {
+                    return Some(*val as i64);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 fn build_expr(ssa: &mut SsaCfg, current: &mut HashMap<Varnode, VarId>, op: &PcodeOp) -> Expr {
