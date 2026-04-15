@@ -4721,6 +4721,71 @@ int add(int a, int b) { return a + b; }
 
         eprintln!("  spectra_multi_arch_decode: all architectures passed");
     }
+
+    // ---- Float type recovery tests ----
+
+    #[test]
+    fn test_float_lerp_params() {
+        let t = std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(run_float_lerp_test)
+            .unwrap();
+        t.join().unwrap();
+    }
+
+    fn run_float_lerp_test() {
+        use rsleigh_api::{Architecture, Decoder};
+
+        // lerp(float a, float b, float t) { return a + t * (b - a); }
+        // Compiled x86-64: SUBSS XMM1,XMM0; MULSS XMM1,XMM2; ADDSS XMM0,XMM1; RET
+        // (minimal — no frame pointer prologue needed for this leaf)
+        let lerp_bytes: &[u8] = &[
+            0xf3, 0x0f, 0x5c, 0xc8, // SUBSS XMM1, XMM0
+            0xf3, 0x0f, 0x59, 0xca, // MULSS XMM1, XMM2
+            0xf3, 0x0f, 0x58, 0xc1, // ADDSS XMM0, XMM1
+            0xc3,                    // RET
+        ];
+
+        let mut dec = Decoder::new(Architecture::X86_64);
+        let mut insts = Vec::new();
+        let mut offset = 0usize;
+        while offset < lerp_bytes.len() {
+            let addr = 0x1000u64 + offset as u64;
+            match dec.decode(&lerp_bytes[offset..], addr) {
+                Ok(inst) => {
+                    let len = inst.len as usize;
+                    if len == 0 { break; }
+                    insts.push((addr, inst));
+                    offset += len;
+                }
+                Err(e) => panic!("Failed to decode at offset {}: {:?}", offset, e),
+            }
+        }
+        assert!(!insts.is_empty(), "lerp: should decode instructions");
+
+        let output = rsleigh_decompile::decompile(Architecture::X86_64, &insts);
+        eprintln!("--- lerp decompilation output ---");
+        eprintln!("{}", output);
+        eprintln!("--- end lerp output ---");
+
+        // The decompiler should recognize XMM registers as float parameters.
+        // Currently it produces "void lerp(void)" with raw XMM names — this test
+        // establishes the failing baseline for float type recovery.
+        assert!(
+            output.contains("float"),
+            "lerp: output should contain 'float' type annotation (for params or return type)\n\
+             Current output:\n{}",
+            output
+        );
+        assert!(
+            !output.contains("void lerp(void)"),
+            "lerp: should NOT produce 'void lerp(void)' — XMM params should be float\n\
+             Current output:\n{}",
+            output
+        );
+
+        eprintln!("  test_float_lerp_params: passed");
+    }
 }
 
 /// Validate structural properties of a P-code op.
