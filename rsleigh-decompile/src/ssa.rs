@@ -23,8 +23,14 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
         for (block_idx, block) in cfg.blocks.iter().enumerate() {
             let block_preds = &preds[block.id.0];
 
-            // On iteration > 0, skip blocks whose predecessors haven't changed
+            // On iteration > 0, skip blocks whose predecessors haven't changed.
+            // Also always skip the entry block — it has no predecessors, so its
+            // register state (function parameters) should never be modified by
+            // loop convergence iterations.
             if iteration > 0 {
+                if block_preds.is_empty() {
+                    continue; // Entry block — never re-process
+                }
                 let any_pred_changed = block_preds.iter().any(|pred| {
                     prev_exit_vars[pred.0] != block_exit_vars[pred.0]
                 });
@@ -41,12 +47,27 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
 
             let mut current: HashMap<Varnode, VarId> = HashMap::new();
 
-            // Inherit from the first already-processed predecessor
+            // Inherit from the first already-processed FORWARD predecessor.
+            // A forward predecessor has a lower block ID (comes before in CFG order).
+            // Back-edge predecessors (higher block ID, from loop back-edges) are excluded
+            // to prevent loop-contaminated register values from leaking into the loop
+            // header's initial state. Back-edge values are properly merged via Phi nodes.
             if !block_preds.is_empty() {
+                // First try forward predecessors only
                 for pred in block_preds {
-                    if !block_exit_vars[pred.0].is_empty() {
+                    if pred.0 < block.id.0 && !block_exit_vars[pred.0].is_empty() {
                         current = block_exit_vars[pred.0].clone();
                         break;
+                    }
+                }
+                // Fallback: if no forward predecessor has data (entry block or unreachable),
+                // use any predecessor
+                if current.is_empty() {
+                    for pred in block_preds {
+                        if !block_exit_vars[pred.0].is_empty() {
+                            current = block_exit_vars[pred.0].clone();
+                            break;
+                        }
                     }
                 }
             }

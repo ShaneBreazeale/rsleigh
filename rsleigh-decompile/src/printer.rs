@@ -7870,6 +7870,22 @@ fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTrac
         return name.clone();
     }
 
+    // For Phi/Var nodes on argument registers, check if any input has a param_name.
+    // This handles the case where SSA convergence created a Phi for a loop header
+    // that merges the entry param value with a loop-modified value.
+    if vdef.varnode.space == AddressSpaceId::Register {
+        let param = match &vdef.expr {
+            Expr::Phi(inputs) => inputs.iter().find_map(|inp| {
+                ssa.var(*inp).param_name.as_ref().cloned()
+            }),
+            Expr::Var(src) => ssa.var(*src).param_name.as_ref().cloned(),
+            _ => None,
+        };
+        if let Some(name) = param {
+            return name;
+        }
+    }
+
     // For Unique-space: normally use standard formatting.
     // BUT: if this Unique wraps a UnaryOp(Sext/Zext) of a register that has
     // a call return expression, inline it.
