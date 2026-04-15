@@ -559,6 +559,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
 
     // Convert pointer dereferences to array access: *(type*)(base + idx) → base[idx]
     // Also: *(base + idx) → base[idx]
+    // Only convert when the base looks like a simple variable name (no operators/spaces).
     for line in &mut lines {
         // Pattern 1: *(uintN_t*)(X + Y)
         while let Some(star_pos) = line.find("*(uint") {
@@ -566,7 +567,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let abs_paren = star_pos + type_end + 2;
                 if let Some(close) = find_matching_paren(line, abs_paren) {
                     let inner = &line[abs_paren + 1..close];
-                    if let Some(plus) = inner.find(" + ") {
+                    if let Some(plus) = find_array_split(inner) {
                         let base = &inner[..plus];
                         let idx = &inner[plus + 3..];
                         *line = format!("{}{}{}", &line[..star_pos],
@@ -583,7 +584,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             if line[star_pos + 2..].starts_with("uint") { break; }
             if let Some(close) = find_matching_paren(line, star_pos + 1) {
                 let inner = &line[star_pos + 2..close];
-                if let Some(plus) = inner.find(" + ") {
+                if let Some(plus) = find_array_split(inner) {
                     let base = &inner[..plus];
                     let idx = &inner[plus + 3..];
                     *line = format!("{}{}{}", &line[..star_pos],
@@ -7910,6 +7911,28 @@ fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTrac
     }
     // Check register tracking (try exact size, then sub-register sizes)
     if vdef.varnode.space == AddressSpaceId::Register {
+        // If this register var has a non-trivial SSA expression (Load, BinOp, Call, etc.),
+        // use the SSA expression directly instead of the tracker. The tracker contains
+        // the *last* write to this register offset, which may be from a different instruction
+        // than this VarId represents. SSA is authoritative.
+        // Follow Var chains to find the underlying expression.
+        {
+            let mut cur_id = id;
+            let mut cur_expr = &vdef.expr;
+            let mut depth = 0;
+            while let Expr::Var(src) = cur_expr {
+                if depth > 5 { break; }
+                cur_id = *src;
+                cur_expr = &ssa.var(*src).expr;
+                depth += 1;
+            }
+            match cur_expr {
+                Expr::Load(_) | Expr::BinOp(_, _, _) | Expr::UnaryOp(_, _) => {
+                    return format_vardef_expr(ssa.var(cur_id), ssa, ctx, tracker);
+                }
+                _ => {}
+            }
+        }
         if let Some(expr_str) = tracker.get_expr_str(vdef.varnode.offset, vdef.varnode.size) {
             return expr_str.to_string();
         }
@@ -8670,8 +8693,15 @@ fn format_cond_operand(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTra
     if let Expr::Var(inner) = &vdef.expr {
         return format_cond_operand(*inner, ssa, ctx, tracker);
     }
-    // For registers, also try the tracker for param names
+    // For registers with Unknown expressions, try the tracker as a last resort
     if vdef.varnode.space == AddressSpaceId::Register {
+        // Only fall back to tracker when the SSA expression is Unknown/trivial
+        // Don't use tracker for vars with real expressions — the SSA is authoritative
+        if !matches!(&vdef.expr, Expr::Unknown) {
+            // The SSA has a real expression but we already handled it above.
+            // Don't fall through to the tracker — it may have stale register values.
+            return format_var(id, ssa, ctx);
+        }
         if let Some(tracked) = tracker.get(vdef.varnode.offset, vdef.varnode.size) {
             let tv = ssa.var(tracked);
             if tv.param_name.is_some() {
@@ -8704,6 +8734,52 @@ fn find_balanced_comma(s: &str) -> Option<usize> {
 }
 
 /// Find matching closing paren for an opening paren at `pos`.
+/// Find the best ` + ` split point for array access conversion: *(base + idx) → base[idx].
+/// Returns the byte offset of the ` + ` separator, or None if no valid split exists.
+/// The base must look like a pointer/array variable — parameter, global, or known pointer.
+/// Reject local arithmetic variables (low, high, mid, i, j) as array bases.
+fn find_array_split(inner: &str) -> Option<usize> {
+    // Try the first ` + ` — if the base is a valid array name, use it
+    if let Some(pos) = inner.find(" + ") {
+        let base = inner[..pos].trim();
+        if is_valid_array_base(base) {
+            return Some(pos);
+        }
+    }
+    // Try the last ` + ` — the index might be simple and the base complex
+    if let Some(pos) = inner.rfind(" + ") {
+        let base = inner[..pos].trim();
+        // Only allow if base is a single valid name (no nested additions)
+        if is_valid_array_base(base) && !base.contains(" + ") {
+            return Some(pos);
+        }
+    }
+    None
+}
+
+/// Check if a string looks like a valid array/pointer base for `base[idx]` conversion.
+/// Must be a simple variable name that plausibly holds a pointer.
+fn is_valid_array_base(s: &str) -> bool {
+    let s = s.trim_start_matches('*');
+    if s.is_empty() || s.contains(' ') { return false; }
+    // Must be alphanumeric + underscores only
+    if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') { return false; }
+    // Must start with a letter or underscore
+    if !s.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_') { return false; }
+    // Accept: param_N, arr, ptr, buf, str, lVar, local_N, DAT_N, and other pointer-like names
+    // Reject: short loop variable names that are clearly not pointers
+    if s.starts_with("param_") || s.starts_with("local_") || s.starts_with("lVar")
+        || s.starts_with("DAT_") || s.starts_with("arr") || s.starts_with("ptr")
+        || s.starts_with("buf") || s.starts_with("str") || s.starts_with("func_")
+        || s.starts_with("iVar") || s.starts_with("x29") || s.starts_with("sp")
+    {
+        return true;
+    }
+    // For named variables: accept if the name is longer than 3 chars (likely a real variable)
+    // Short names like "low", "mid", "i", "j" are likely loop counters, not pointers
+    s.len() > 3
+}
+
 fn find_matching_paren(s: &str, pos: usize) -> Option<usize> {
     let mut depth = 0;
     for (ci, ch) in s[pos..].char_indices() {
