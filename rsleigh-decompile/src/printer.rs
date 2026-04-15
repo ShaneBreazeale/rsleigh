@@ -6,7 +6,7 @@ use crate::ir::*;
 const RBP_OFFSET: u64 = 40;
 const EBP_OFFSET: u64 = 20;
 const RSP_OFFSET: u64 = 32;
-const ESP_OFFSET: u64 = 16;
+const ESP_OFFSET: u64 = 32; // ESP is at same offset as RSP (lower 4 bytes)
 const RIP_OFFSET: u64 = 648;
 
 /// Print structured statements as C-like pseudocode.
@@ -8383,6 +8383,10 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
             }
         }
         StructuredStmt::IfElse { cond, then_body, else_body } => {
+            let cv = ssa.var(*cond);
+            if let Expr::BinOp(k, l, r) = &cv.expr {
+                let lv = ssa.var(*l); let rv = ssa.var(*r);
+            }
             let cond_expr = format_condition_tracked(*cond, ssa, ctx, tracker);
             let then_filtered = filter_boilerplate(then_body, ssa);
             let else_filtered = filter_boilerplate(else_body, ssa);
