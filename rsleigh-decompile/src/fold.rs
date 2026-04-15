@@ -2099,6 +2099,29 @@ fn detect_return_values(ssa: &mut SsaCfg) {
                         if found.is_some() { break; }
                     }
                 }
+                // Fallback: DCE may have removed the XMM0 assignment from block stmts
+                // because use_count was 0 (nothing reads XMM0 after ADDSS before RET).
+                // Search the vars array directly for the last XMM0 write with a float expr.
+                if found.is_none() {
+                    let mut best: Option<VarId> = None;
+                    for (vi, vd) in ssa.vars.iter().enumerate() {
+                        if vd.varnode.space == AddressSpaceId::Register
+                            && vd.varnode.offset == XMM0_OFFSET
+                            && matches!(&vd.expr,
+                                Expr::BinOp(BinOpKind::FloatAdd | BinOpKind::FloatSub
+                                    | BinOpKind::FloatMult | BinOpKind::FloatDiv, _, _)
+                                | Expr::UnaryOp(UnaryOpKind::FloatNeg | UnaryOpKind::FloatAbs
+                                    | UnaryOpKind::FloatSqrt | UnaryOpKind::Int2Float
+                                    | UnaryOpKind::Float2Float, _)
+                                | Expr::Var(_))
+                        {
+                            // Skip params (Unknown expr with param_name)
+                            if vd.param_name.is_some() { continue; }
+                            best = Some(VarId(vi as u32));
+                        }
+                    }
+                    found = best;
+                }
             }
         }
 

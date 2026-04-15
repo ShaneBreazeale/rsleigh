@@ -7675,9 +7675,17 @@ fn generate_function_signature(out: &mut String, ssa: &SsaCfg, func_name: &str) 
     let mut seen = std::collections::HashSet::new();
     params.retain(|p| seen.insert(p.0.clone()));
     params.sort_by(|a, b| {
-        let idx_a = a.0.strip_prefix("param_").and_then(|s| s.parse::<u32>().ok()).unwrap_or(999);
-        let idx_b = b.0.strip_prefix("param_").and_then(|s| s.parse::<u32>().ok()).unwrap_or(999);
-        idx_a.cmp(&idx_b).then(a.0.cmp(&b.0))
+        let idx_a = a.0.strip_prefix("param_")
+            .or_else(|| a.0.strip_prefix("fparam_"))
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(999);
+        let idx_b = b.0.strip_prefix("param_")
+            .or_else(|| b.0.strip_prefix("fparam_"))
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(999);
+        let is_float_a = a.0.starts_with("fparam_");
+        let is_float_b = b.0.starts_with("fparam_");
+        is_float_a.cmp(&is_float_b).then(idx_a.cmp(&idx_b)).then(a.0.cmp(&b.0))
     });
 
     // Format parameter list — use display_type > signature > InferredType
@@ -8128,7 +8136,7 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
             // Fold "REG = expr; return;" into "return expr;" when this is the
             // last visible assignment before a Return in the same statement list
             if vdef.varnode.space == AddressSpaceId::Register
-                && vdef.varnode.offset == 0 // RAX/EAX — return value register
+                && (vdef.varnode.offset == 0 || vdef.varnode.offset == 4608) // RAX/EAX or XMM0 — return value register
             {
                 // Only fold into return if there's an actual Return in the remaining stmts
                 let has_return = stmts[stmt_idx + 1..].iter().any(|s|
