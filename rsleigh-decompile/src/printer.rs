@@ -6385,7 +6385,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // so they should be auto-named. Only skip them in x86-64 SysV mode.
         let all_text_check = lines.join("");
         let is_arm64 = all_text_check.contains("x19") || all_text_check.contains("x29");
-        let is_32bit = !is_arm64 && !all_text_check.contains("RSP") && !all_text_check.contains("RBP");
+        let is_32bit = !is_arm64 && !all_text_check.contains("RSP") && !all_text_check.contains("RBP")
+            && !all_text_check.contains("fparam_"); // fparam_ indicates x86-64 SysV float ABI
 
         let skip_regs: &[&str] = if is_arm64 {
             // AArch64: skip param regs (x0-x7), frame pointer (x29), link reg (x30), sp
