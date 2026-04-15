@@ -177,7 +177,12 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                 PcodeOp::CallInd { dest } => {
                     // Try to resolve indirect calls through constant Load
                     // (e.g., CALL dword ptr [IAT_addr] → Load tmp, [const]; CallInd tmp)
-                    let target = resolve_callind_target(&ops, dest);
+                    // For MIPS PIC: pass all function ops to resolve GP-relative calls
+                    let func_addr = instructions[0].0;
+                    let all_ops: Vec<(u64, PcodeOp)> = instructions.iter()
+                        .flat_map(|(addr, inst)| inst.ops.iter().map(move |op| (*addr, op.clone())))
+                        .collect();
+                    let target = resolve_callind_target(&ops, dest, func_addr, &all_ops);
                     ops.pop();
                     // Strip x86-32 return address push (IntSub ESP + Store [ESP])
                     strip_call_push_ops(&mut ops);
@@ -273,21 +278,207 @@ fn strip_return_pop_ops(ops: &mut Vec<(u64, PcodeOp)>) {
 /// Resolve a CallInd target by scanning backwards for the Load that produced the
 /// dest varnode. If the Load reads from a constant address (e.g., IAT entry in PE),
 /// return CallTarget::Direct(addr) so the import map can resolve it.
-fn resolve_callind_target(ops: &[(u64, PcodeOp)], dest: &pcode_ir::Varnode) -> CallTarget {
-    // Scan backwards for a Load whose output matches the CallInd dest varnode
-    for (_addr, op) in ops.iter().rev() {
-        if let PcodeOp::Load { out, ptr, .. } = op {
-            if out.space == dest.space && out.offset == dest.offset && out.size == dest.size {
-                // Found the Load — check if the pointer is a constant (IAT-style)
-                if ptr.space == AddressSpaceId::Const {
-                    return CallTarget::Direct(ptr.offset);
+///
+/// Also handles MIPS PIC: `lw t9, -OFFSET(gp); jalr t9` → resolve GP+offset to GOT
+/// entry by tracing the GP register value from the function prologue.
+fn resolve_callind_target(ops: &[(u64, PcodeOp)], dest: &pcode_ir::Varnode, func_addr: u64, all_ops: &[(u64, PcodeOp)]) -> CallTarget {
+    // Trace backwards from the CallInd dest through IntAnd/IntSext/Copy chains
+    // to find the Load that produced the function address.
+    let mut target_vn = *dest;
+    for _depth in 0..5 {
+        let mut found_producer = false;
+        for (_addr, op) in ops.iter().rev() {
+            if let Some(out) = pcode_ir::get_output(op) {
+                if out.space == target_vn.space && out.offset == target_vn.offset {
+                    match op {
+                        // Load from memory — this is the function address source
+                        PcodeOp::Load { ptr, .. } => {
+                            if ptr.space == AddressSpaceId::Const {
+                                return CallTarget::Direct(ptr.offset);
+                            }
+                            // MIPS PIC: ptr is GP + offset (Unique from IntAdd)
+                            if ptr.space == AddressSpaceId::Unique {
+                                if let Some(addr) = resolve_gp_relative_addr(ops, ptr, func_addr, all_ops) {
+                                    return CallTarget::Direct(addr);
+                                }
+                            }
+                            return CallTarget::Indirect(*dest);
+                        }
+                        // IntAnd (MIPS ISA mode bit masking) — follow through
+                        PcodeOp::IntAnd { left, right, .. } => {
+                            // Follow the non-constant operand
+                            target_vn = if right.space == AddressSpaceId::Const { *left } else { *right };
+                            found_producer = true;
+                            break;
+                        }
+                        // IntSext/IntZext — follow through
+                        PcodeOp::IntSext { input, .. } | PcodeOp::IntZext { input, .. } => {
+                            target_vn = *input;
+                            found_producer = true;
+                            break;
+                        }
+                        // Copy — follow through
+                        PcodeOp::Copy { input, .. } => {
+                            if input.space == AddressSpaceId::Const {
+                                return CallTarget::Direct(input.offset);
+                            }
+                            target_vn = *input;
+                            found_producer = true;
+                            break;
+                        }
+                        _ => {
+                            return CallTarget::Indirect(*dest);
+                        }
+                    }
                 }
-                break;
             }
         }
+        if !found_producer { break; }
     }
     CallTarget::Indirect(*dest)
 }
+
+/// Resolve a GP-relative address for MIPS PIC calls.
+/// Scans backwards for IntAdd(GP_reg, const_offset) that produced the given Unique varnode,
+/// then traces GP to find its constant value from the function prologue.
+fn resolve_gp_relative_addr(ops: &[(u64, PcodeOp)], ptr: &pcode_ir::Varnode, _func_addr: u64, all_ops: &[(u64, PcodeOp)]) -> Option<u64> {
+    // Find the IntAdd that produced this Unique varnode
+    for (_addr, op) in ops.iter().rev() {
+        if let PcodeOp::IntAdd { out, left, right } = op {
+            if out.space == ptr.space && out.offset == ptr.offset && out.size == ptr.size {
+                // One operand should be GP (a register), the other a constant offset
+                let (reg, offset) = if right.space == AddressSpaceId::Const {
+                    (left, right.offset as i64)
+                } else if left.space == AddressSpaceId::Const {
+                    (right, left.offset as i64)
+                } else {
+                    return None;
+                };
+
+                // The register should be GP — trace its value
+                if reg.space == AddressSpaceId::Register {
+                    if let Some(gp_val) = trace_register_value(all_ops, reg) {
+                        // Handle negative offsets (sign-extend 32-bit)
+                        let got_addr = if offset > 0x7FFFFFFF {
+                            gp_val.wrapping_add(offset as u64 | 0xFFFFFFFF00000000)
+                        } else {
+                            (gp_val as i64 + offset) as u64
+                        };
+                        return Some(got_addr);
+                    }
+                }
+                return None;
+            }
+        }
+    }
+    None
+}
+
+/// Trace a register's constant value by scanning backwards through P-code ops.
+/// Handles MIPS GP setup patterns like: Copy(GP, const) or IntAdd(GP, GP, const).
+fn trace_register_value(ops: &[(u64, PcodeOp)], reg: &pcode_ir::Varnode) -> Option<u64> {
+    let mut value: Option<u64> = None;
+
+    // Scan FORWARD to build up the register value (handles multi-instruction setup)
+    for (_addr, op) in ops.iter() {
+        match op {
+            // Copy from constant: reg = const (lui produces this)
+            PcodeOp::Copy { out, input }
+                if out.offset == reg.offset && out.space == reg.space
+                    && input.space == AddressSpaceId::Const =>
+            {
+                value = Some(input.offset);
+            }
+            // IntAdd with constant: reg = reg + const (addiu reg, reg, lo)
+            PcodeOp::IntAdd { out, left, right }
+                if out.offset == reg.offset && out.space == reg.space
+                    && left.offset == reg.offset && left.space == reg.space
+                    && right.space == AddressSpaceId::Const =>
+            {
+                if let Some(prev) = value {
+                    value = Some((prev as i64 + right.offset as i64) as u64);
+                }
+            }
+            // IntAdd where result is in a DIFFERENT output but same logical register
+            // (handles t9 = gp + offset patterns where t9 is the output)
+            PcodeOp::IntAdd { out, left, right }
+                if out.offset == reg.offset && out.space == reg.space
+                    && right.space == AddressSpaceId::Const =>
+            {
+                // left must be a register we can resolve
+                if left.space == AddressSpaceId::Register {
+                    let left_val = trace_register_value_simple(ops, left);
+                    if let Some(lv) = left_val {
+                        value = Some((lv as i64 + right.offset as i64) as u64);
+                    }
+                }
+            }
+            // IntSext from a Unique — trace through to find the Unique's value
+            // This handles MIPS lui: IntLsl(const, 16) → Unique → IntSext → GP
+            PcodeOp::IntSext { out, input }
+                if out.offset == reg.offset && out.space == reg.space =>
+            {
+                // Try to resolve the Unique input to a constant
+                if input.space == AddressSpaceId::Unique {
+                    // Scan backward for the op that produced this Unique
+                    for (_a2, op2) in ops.iter().rev() {
+                        if let Some(out2) = pcode_ir::get_output(op2) {
+                            if out2.space == input.space && out2.offset == input.offset {
+                                if let PcodeOp::IntLsl { left, right, .. } = op2 {
+                                    if left.space == AddressSpaceId::Const
+                                        && right.space == AddressSpaceId::Const
+                                    {
+                                        value = Some(left.offset << right.offset);
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            // Any other write to this register clears our tracking
+            _ => {
+                if let Some(out) = pcode_ir::get_output(op) {
+                    if out.offset == reg.offset && out.space == reg.space {
+                        value = None;
+                    }
+                }
+            }
+        }
+    }
+    value
+}
+
+/// Simple constant trace for a register — just find the most recent Copy(reg, const).
+fn trace_register_value_simple(ops: &[(u64, PcodeOp)], reg: &pcode_ir::Varnode) -> Option<u64> {
+    for (_addr, op) in ops.iter().rev() {
+        if let PcodeOp::Copy { out, input } = op {
+            if out.offset == reg.offset && out.space == reg.space
+                && input.space == AddressSpaceId::Const
+            {
+                return Some(input.offset);
+            }
+        }
+        // IntAdd self: reg = reg + const
+        if let PcodeOp::IntAdd { out, left, right } = op {
+            if out.offset == reg.offset && out.space == reg.space
+                && left.offset == reg.offset && left.space == reg.space
+                && right.space == AddressSpaceId::Const
+            {
+                // Need previous value — scan further back
+                if let Some(prev) = trace_register_value_simple(
+                    &ops[..ops.iter().rposition(|(_, o)| std::ptr::eq(o, op)).unwrap_or(0)],
+                    reg,
+                ) {
+                    return Some((prev as i64 + right.offset as i64) as u64);
+                }
+            }
+        }
+    }
+    None
+}
+
 
 impl Cfg {
     pub fn successors(&self, block: BlockId) -> Vec<BlockId> {
