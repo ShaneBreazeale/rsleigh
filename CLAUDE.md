@@ -30,11 +30,12 @@ Wired into Spectra as a native analysis backend replacing the Ghidra JVM daemon.
 
 **Supported binary formats:** ELF (32/64), PE (32/64), Mach-O (64), WASM (.wasm), Raw binary (any arch).
 
-**226 tests, ~6800+ assertions:** golden P-code, stress/boundary, functional
+**240 tests, ~7200+ assertions:** golden P-code, stress/boundary, functional
 sequences, bug probes, compiled code patterns, Ghidra differential, decompiler
 comparison, CTF binary validation, fuzz (5000 random byte sequences, zero panics),
 Spectra API contract tests (decoder/decompile/analysis/multi-arch), Spectra native
-backend integration tests (10 tests covering end-to-end pipeline).
+backend integration tests (10 tests covering end-to-end pipeline),
+pseudocode quality regression tests (14 audit fixes).
 See `docs/TESTING.md` for the full test suite documentation.
 
 **Decompiler output (real binary, with DWARF debug info):**
@@ -149,8 +150,10 @@ PE machine type auto-detection: x86-64 (0x8664), ARM64 (0xAA64), i386 (0x014C).
 
 **Stripped ELF discovery** (12 methods): `.eh_frame` FDE unwinding → RTTI vtable pointer
 scanning → indirect call target resolution → prologue pattern matching (x86-64 push+sub,
-AArch64 STP+SUB+ADRP, ARM32 PUSH+SUB) → CALL target enumeration → `.init_array`/`.fini_array`
-function pointer recovery → PLT stub enumeration → cross-reference analysis.
+AArch64 STP+SUB+ADRP, ARM32 PUSH+SUB, MIPS addiu sp/sw ra/lui gp) → CALL target enumeration
+→ `.init_array`/`.fini_array` function pointer recovery → PLT stub enumeration →
+cross-reference analysis. MIPS: JAL/BAL scanning + endian-aware parsing (busybox: 9→5,405).
+MIPS PIC indirect call resolution: GP-relative GOT tracing (77% resolved, 423→98 unresolved).
 
 ---
 
@@ -199,6 +202,17 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - **Sub-register Zext deferral:** groups P-code ops by instruction address; when
   `IntZext(EAX→RAX)` precedes an address calculation that reads RAX within the same
   instruction, the Zext write is deferred to preserve the original pointer value
+- **Forward-edge predecessor priority:** prevents loop back-edge values from contaminating
+  merge points; entry block protected from re-processing
+- **ESP_OFFSET fix:** corrected register offset (was 16=EDX, should be 32=ESP) — root cause
+  of `!= 0` conditions instead of `!= target` in x86-32 comparisons
+- **Parameter naming before constant propagation:** ensures param names are established
+  before constants are folded, preserving meaningful variable names
+- **Memory SSA (two-phase stack slot forwarding):**
+  - Phase 1: intra-block store/load forwarding, per-block exit stack state collection
+  - Phase 2: fixed-point worklist with memory Phi insertion at join points
+  - SlotKey = (base_reg, displacement, size) prevents conflating different stack accesses
+  - Load resolution with safety guards (Phi/local/readonly)
 
 **CFG builder (cfg.rs):**
 - CallInd resolution: `CALL [IAT_addr]` → traces Load source to constant, converts to Direct
@@ -216,6 +230,17 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - Division-by-constant (multiply+shift → `x / 7`) and modulo (`x - (x/D)*D` → `x % D`)
 - **CDQ+IDIV simplification:** x86 signed division `Or(Lsl(Zext(sign),32),Zext(val))/Sext(div)`
   simplified to `val / div` — eliminates 64-bit concatenation noise
+- **Unnecessary cast removal:** `(int)high >= (int)low` → `high >= low` when both operands
+  share the same cast type
+- **Redundant assignment folding:** `x0 = X; x0 = Y + x0` → `x0 = Y + (X)` — collapses
+  sequential assignments where the second reads the first
+- **ADD-zero noise suppression:** eliminates `+ 0` artifacts from expression folding
+- **Format string leak fix:** param alias preservation prevents format specifier arguments
+  from being discarded during folding
+- **Extra variadic arg trimming:** counts format specifiers to trim excess arguments
+- **Call return over-inlining prevention:** return-fold protection prevents call results
+  from being inlined into multiple use sites
+- **Call return tracker priority:** ensures call returns are tracked before other folding
 - Loop body preservation: register writes in back-edge blocks protected from DCE
 - **Type inference** (3-phase: seed → forward → backward): float, signed, unsigned, pointer, bool propagation from P-code op semantics
 - **Signature-based type propagation:** 38K+ function signatures auto-loaded; param types
@@ -229,9 +254,11 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
     boolean basis {1,a,b,a&b,...} from 2^N evaluations (1-4 variables);
     bottom-up tree walking enables cascade simplification of deep expressions
   - Phase 3: Equality saturation via `egg` crate — 40+ rewrite rules explore all
-    equivalent MBA forms, extract cheapest (50ms/10K nodes per expression)
+    equivalent MBA forms, extract cheapest (50ms/10K nodes per expression);
+    panic-safe wrapper suppresses egg crate panics on malformed expressions
 - **Return type recovery:** multi-hop EAX/RAX search (3 hops), call_return tracking,
-  call-site inference (if callers use result → not void), two-pass propagation
+  call-site inference (if callers use result → not void), two-pass propagation;
+  works across all 6 architectures (x86-64, x86-32, AArch64, ARM32, MIPS32, RISC-V)
 - **x86-32 stack param modeling:** `Load(EBP+8)` = param value read (not pointer deref);
   `format_vardef_expr` suppresses `*(param_N)` for stack parameters
 - **Taint analysis:** tracks data flow from user inputs (recv, read, fgets) through
@@ -266,12 +293,23 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - **MSVC C++ demangling:** `??6?$basic_ostream@...` → `cout <<`, `cin >>`, `cin.ignore`
 - **C++ wrapper inlining:** `func_XXX(cout, "text")` → `cout << "text"` (chained `<<` supported)
 - **Global data naming:** `*(0x4326f4)` → `DAT_004326f4` (auto-detected from address range)
-- **ARM64 prologue/epilogue elision:** callee-saved saves, FP/LR setup, ObjC ARC noise removal,
-  Swift ARC noise removal (swift_retain/release/bridgeObjectRetain/Release)
+- **ARM64 prologue/epilogue elision:** complete elimination (71→0 noise lines);
+  callee-saved saves, FP/LR setup, sp[] stack noise (42→0), ObjC ARC noise removal,
+  Swift ARC noise removal (swift_retain/release/bridgeObjectRetain/Release),
+  Swift runtime call elision (swift_beginAccess, swift_allocObject, objc_opt_self),
+  Swift overflow check elimination (OV flag → trap patterns removed),
+  flag leak elimination (CY/ZR → 0), dead trap removal (pc = ?)
 - **ARM32 cleanup pass:** flag register elision (NG/ZR/CY/OV writes removed from output),
   register renaming (r0-r15 → named registers), carry flag artifact cleanup
 - **Architecture-aware register auto-naming:** x86-32 ESI/EDI → iVar, ARM64 x19-x28 → lVar,
-  x86-64 XMM0-15 → dVar, x86-64 param regs (RDI/RSI/RDX/RCX/R8/R9) → lVar in function body
+  ARM64 x0→param_0, x30→return, x86-64 XMM0-15 → dVar,
+  x86-64 param regs (RDI/RSI/RDX/RCX/R8/R9) → lVar in function body
+- **Heuristic struct field naming:** without debug info, infers field semantics from usage
+  patterns (e.g., `head->field_8` → `head->next` for linked list traversal)
+- **Named expression substitution:** propagates named intermediate variables into complex
+  expressions (e.g., `arr[low+high/2]` → `arr[mid]`)
+- **Loop counter naming heuristics:** `iVar1` → `i`, `j`, `k` for induction variables
+- **For-loop init recovery:** `for (;` → `for (i = 0;` by tracing pre-header assignments
 - **Pointer deref simplification:** `*(param_N)` → `*param_N`, `*(uint64_t*)(lVar)` → `*lVar`
 - **x86-64 RBP/RSP → local_XX:** `RBP + 560` → `local_230`, `N + RSP` → `local_N`
 - Control flow recovery: for-loops, **do-while** (back-edge post-test), switch/case, else-if
@@ -311,9 +349,12 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - **Token-efficient output:** `--compact` (24% reduction), `--brief` (35%), `--min-complexity N` (skip trivial functions); combined `--brief --min-complexity 5` = 40% token reduction for LLM-assisted analysis
 - **ARM32 VFP/NEON float instructions:** vmul.f64, vldr, vmov decoded via ARM7_le.slaspec (not ARM7_le_base); full VFP/NEON constructor support
 - **C++ class/vtable/hierarchy recovery:** `CppClass` (name, base classes, vtable address, virtual methods, fields), `VirtualMethod` (name, vtable slot index, address), `ClassField` (offset, size, inferred type) structs. MSVC RTTI chain: CompleteObjectLocator → TypeDescriptor → ClassHierarchyDescriptor → BaseClassArray for multi-level inheritance. GCC RTTI: `_ZTV` vtable symbols + `_ZTI` typeinfo symbols with template demangling (`std::vector<int, std::allocator<int>>`). Field inference from decompiled output (offset gaps, typed API arguments). `--classes` and `--classes --json` CLI output.
-- **Swift ARM64 decompilation:** Swift mangled symbol demangling (classes, methods, properties, init/deinit, metadata), Swift ARC noise elision (swift_retain/release/bridgeObjectRetain/Release)
-- **Cross-function struct propagation:** struct types identified in callees propagate to callers via two-pass decompilation; field names resolve across call boundaries
+- **Swift ARM64 decompilation:** Swift mangled symbol demangling (classes, methods, properties, init/deinit, metadata), Swift ARC noise elision (swift_retain/release/bridgeObjectRetain/Release), runtime call elision (swift_beginAccess, swift_allocObject), overflow check elimination, flag leak cleanup
+- **Cross-function struct propagation:** struct types identified in callees propagate to callers via two-pass decompilation; field names resolve across call boundaries (195→201 struct IDs on main.exe)
 - **MIPS stripped ELF discovery:** JAL/BAL scanning, prologue detection (addiu sp/sw ra/lui gp), endian-aware ELF parsing; busybox-mips: 9 → 5,405 functions
+- **MIPS PIC indirect call resolution:** GP-relative GOT tracing with GP invariance detection (lui+addiu+addu t9 pattern), addiu t9 adjustment accumulation; 423→98 unresolved (77% resolved)
+- **Memory SSA:** two-phase stack slot store/load forwarding with fixed-point worklist and memory Phi insertion at join points; restores values passed through stack (e.g., strlen(input))
+- **Pseudocode quality (14-point audit):** CDQ+IDIV simplification, Zext deferral, smart array base validation, call return tracking, format string preservation, variadic arg trimming, return-fold protection, AArch64 stack/prologue noise elimination, 6-arch return type inference, heuristic struct field naming, cast removal, assignment folding, ADD-zero suppression, register auto-naming, for-loop init recovery, loop counter naming, named expression substitution
 
 ---
 
@@ -324,9 +365,9 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - **Expression completeness** — some register values not traced back to their defining
   expression (e.g., `iVar1 * factorial(n-1)` instead of `n * factorial(n-1)`)
 - **Type inference** — basic signed/float/pointer/bool + Win32 typedef propagation +
-  interprocedural two-pass; no constraint-based inference, no full struct recovery
+  interprocedural two-pass + heuristic struct field naming; no constraint-based inference
 - **Stack frame reconstruction** — buffer sizes inferred from offset gaps; array sizing works;
-  no field-level struct typing
+  heuristic field naming (head->next) but no full constraint-based struct recovery
 - **MBA deobfuscation** — SiMBA handles 1-4 variable linear MBA; non-linear and 5+ variable
   expressions need synthesis-based approaches (equality saturation catches some)
 - **Loop conditions** — `while (OF == SF)` not always recovered to source comparison
@@ -350,6 +391,8 @@ Wired into Spectra via `rsleigh-api` + `rsleigh-decompile`:
 - All decode runs on 32MB stack threads (x86 pattern recursion depth)
 - Analysis API: `extract_function_meta()` and `scan_vulns()` provide structured metadata
   (FunctionMeta, VulnFinding, CallGraphEntry) with serde::Serialize for JSON transport
+- **14 integration tests:** 10 native backend tests (decoder/decompile/analysis/discovery/
+  end-to-end) + 4 API contract tests in rsleigh test-harness
 
 ## Ghidra Comparison Setup
 

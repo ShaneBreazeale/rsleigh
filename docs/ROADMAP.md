@@ -6,11 +6,41 @@
 
 **rsleigh 15 — Ghidra 6** on function discovery across PE32, PE64, Mach-O, ELF x86-64, and ARM32 ELF test binaries.
 
-**Key features:** 38K+ function signatures with param annotations, MSVC C++ demangling, Swift symbol demangling, ObjC bracket syntax, C++ stream wrapper inlining, Win32 typedef propagation (HKEY, HWND, REGSAM), MBA deobfuscation (SiMBA + equality saturation), interprocedural two-pass type propagation, cross-function struct propagation, do-while recovery, Ghidra-style local declarations with array sizing, type cast emission (constant type casts + return value casts), struct recovery (30 known structs, 1,861 named fields), string decryption engine (XOR auto-decrypt, stack strings, base64, ROT13), crypto algorithm detection (20+ patterns), WebAssembly decompilation (native stack-VM parser), taint analysis (24 sources, 32 sinks), YARA rule generation, diff decompilation, raw binary/firmware loading, ARM32 VFP/NEON float support (vmul.f64/vldr/vmov), AI-assisted RE toolkit (--summary, --xrefs, --search), vulnerability scanner (--vulnscan, 27 patterns), call graph export (--callgraph, JSON with behavioral tags), analysis API (FunctionMeta/VulnFinding/CallGraphEntry with Serialize), C++ class/vtable/hierarchy recovery (MSVC + GCC RTTI, template demangling, --classes/--classes --json).
+**Key features:** 38K+ function signatures with param annotations, MSVC C++ demangling, Swift symbol demangling, ObjC bracket syntax, C++ stream wrapper inlining, Win32 typedef propagation (HKEY, HWND, REGSAM), MBA deobfuscation (SiMBA + equality saturation), interprocedural two-pass type propagation, cross-function struct propagation, memory SSA (stack slot forwarding), do-while recovery, for-loop init recovery, loop counter naming, Ghidra-style local declarations with array sizing, type cast emission (constant type casts + return value casts), struct recovery (30 known structs, 1,861 named fields, heuristic field naming), string decryption engine (XOR auto-decrypt, stack strings, base64, ROT13), crypto algorithm detection (20+ patterns), WebAssembly decompilation (native stack-VM parser), taint analysis (24 sources, 32 sinks), YARA rule generation, diff decompilation, raw binary/firmware loading, ARM32 VFP/NEON float support (vmul.f64/vldr/vmov), AI-assisted RE toolkit (--summary, --xrefs, --search), vulnerability scanner (--vulnscan, 27 patterns), call graph export (--callgraph, JSON with behavioral tags), analysis API (FunctionMeta/VulnFinding/CallGraphEntry with Serialize), C++ class/vtable/hierarchy recovery (MSVC + GCC RTTI, template demangling, --classes/--classes --json), MIPS PIC indirect call resolution (77% resolved via GP-relative GOT tracing).
 
 ---
 
 ## Completed
+
+### Pseudocode Quality Audit (14 Issues Fixed)
+Comprehensive pseudocode quality pass addressing 14 issues identified during audit:
+1. **CDQ+IDIV simplification** — 64-bit concatenation noise eliminated from signed division
+2. **SSA sub-register Zext deferral** — prevents EAX→RAX clobbering pointer values within same instruction
+3. **Smart array base validation** — only converts `*(base+idx)` to `base[idx]` for pointer-like names
+4. **Call return tracker priority** — ensures call returns tracked before other folding passes
+5. **Format string leak fix** — param alias preservation prevents format args from being discarded
+6. **Extra variadic arg trimming** — counts format specifiers to trim excess arguments
+7. **Call return over-inlining prevention** — return-fold protection prevents multi-site inlining
+8. **AArch64 sp[] stack noise elision** — 42→0 stack bracket references
+9. **AArch64 prologue/epilogue elimination** — 71→0 noise lines (callee saves, FP/LR setup)
+10. **Return type inference (6 architectures)** — works across x86-64, x86-32, AArch64, ARM32, MIPS32, RISC-V
+11. **Heuristic struct field naming** — `head->field_8` → `head->next` without debug info
+12. **Unnecessary cast removal** — `(int)high >= (int)low` → `high >= low`
+13. **Redundant assignment folding** — `x0 = X; x0 = Y + x0` → `x0 = Y + (X)`
+14. **ADD-zero noise suppression** — eliminates `+ 0` artifacts
+Additional improvements: AArch64 register auto-naming (x0→param_0, x19→lVar1, x30→return), Swift OV overflow check elimination, for-loop init recovery (`for (;` → `for (i = 0;`), loop counter naming heuristics (iVar1 → i, j, k), named expression substitution (arr[low+high/2] → arr[mid]).
+
+### Memory SSA (Stack Slot Forwarding)
+Two-phase stack slot store/load forwarding for memory-carried values. Phase 1: intra-block forwarding with per-block exit stack state collection. Phase 2: fixed-point worklist with memory Phi insertion at join points, Load resolution with safety guards (Phi/local/readonly). SlotKey = (base_reg, displacement, size) prevents conflating different stack accesses. Restores values passed through stack (e.g., `strlen(input)` where input was stack-spilled).
+
+### MIPS PIC Indirect Call Resolution
+GP-relative GOT tracing resolves MIPS PIC indirect calls: 423→98 unresolved (77% resolved). GP invariance detection across functions via `lui+addiu+addu t9` pattern recognition. `addiu t9` adjustment accumulation for multi-step address computation.
+
+### SSA Correctness Fixes
+Forward-edge predecessor priority prevents loop back-edge values from contaminating merge points. Entry block protection (never re-processed). ESP_OFFSET bug fix (was 16=EDX, should be 32=ESP) — root cause of `!= 0` instead of `!= target` in x86-32 comparisons. Parameter naming established before constant propagation to preserve meaningful names.
+
+### Swift ARM64 Improvements
+Extended Swift support beyond symbol demangling: ARC runtime call elision (swift_beginAccess, swift_allocObject, objc_opt_self), Swift overflow check elimination (OV flag → trap pattern removed), flag leak elimination (CY/ZR → 0), dead trap removal (pc = ?).
 
 ### MIPS Stripped ELF Function Discovery
 Endian-aware ELF parsing across the entire `discover_elf_functions` pipeline. MIPS JAL + BGEZAL/BAL scanning in ELF path (was only in `--raw`). MIPS prologue scanning: `addiu sp, sp, -N`, `sw ra, N(sp)`, `lui gp, N` patterns with JR RA boundary detection and gap analysis. MIPS decoder-based JAL target collection with `jr ra` terminator. Fixed `.init_array`, `.eh_frame`, vtable, and data pointer scanning for big-endian + 32-bit ELFs. busybox-mips: 9 → 5,405 functions. Validated on 13 MIPS32 BE binaries and 13 AArch64 stripped static binaries.

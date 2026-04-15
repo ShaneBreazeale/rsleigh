@@ -2,16 +2,17 @@
 
 rsleigh has a multi-layer test suite spanning unit tests, integration tests, real-binary validation, fuzz testing, and Spectra backend integration tests.
 
-**Total: 226 tests across 2 projects, ~6,800+ assertions, 0 failures.**
+**Total: 240 tests across 2 projects, ~7,200+ assertions, 0 failures.**
 
 ```
-rsleigh test-harness ........  8 tests  (~6,000 assertions)
+rsleigh test-harness ........  12 tests (~6,400 assertions)
+rsleigh quality regression ..   4 tests (~400 assertions)
 spectra native backend ......  10 tests
 spectra lib unit tests ...... 157 tests
 spectra integration tests ...  16 tests
 spectra triage tests ........  35 tests
                               --------
-                              226 tests
+                              234 tests (+ ~6 inline unit tests)
 ```
 
 ---
@@ -87,7 +88,30 @@ Uses the host `cc` compiler; skips gracefully on systems without a C toolchain.
 
 ---
 
-## Layer 4: Spectra API Contract Tests
+## Layer 4: Pseudocode Quality Regression Tests
+
+**Tests:** Quality regression tests covering the 14-point pseudocode audit fixes.
+
+These prevent regressions in pseudocode output quality across architectures:
+
+- **CDQ+IDIV simplification** — verifies signed division doesn't produce 64-bit concatenation noise
+- **Sub-register Zext deferral** — array access expressions use correct base pointers
+- **Smart array base validation** — only pointer-like names converted to array syntax
+- **Call return tracking** — call results inlined correctly without duplication or loss
+- **Format string preservation** — variadic args match format specifier count
+- **AArch64 stack/prologue noise** — sp[] references and prologue/epilogue lines eliminated
+- **Return type inference** — works across all 6 architectures
+- **Struct field naming** — heuristic naming produces meaningful field names without debug info
+- **Cast removal** — redundant same-type casts eliminated
+- **Assignment folding** — sequential assignments to same variable collapsed
+- **Memory SSA** — stack-spilled values correctly forwarded through loads
+- **For-loop init** — pre-header assignments recovered into for-loop initializers
+- **Loop counter naming** — induction variables named i, j, k
+- **Named expression substitution** — intermediate named values propagated into expressions
+
+---
+
+## Layer 5: Spectra API Contract Tests
 
 **Tests:** `spectra_decoder_api`, `spectra_decompile_api`, `spectra_analysis_api`, `spectra_multi_arch_decode`
 
@@ -117,7 +141,7 @@ These verify the rsleigh API surface that Spectra depends on:
 
 ---
 
-## Layer 5: Spectra Native Backend Integration
+## Layer 6: Spectra Native Backend Integration
 
 **Location:** `spectra/src-tauri/tests/native_backend_tests.rs`
 
@@ -147,7 +171,7 @@ These test the exact code paths Spectra uses when `analysis_backend = rsleigh`:
 
 ---
 
-## Layer 6: Benchmarks
+## Layer 7: Benchmarks
 
 `scripts/benchmark.py` runs rsleigh on all binaries in the test corpus and compares function discovery counts against Ghidra baselines:
 
@@ -167,7 +191,7 @@ These test the exact code paths Spectra uses when `analysis_backend = rsleigh`:
 Validated against external binary corpora (not in CI, manual testing):
 
 ### MIPS32 (darkerego/mips-binaries)
-13 binaries tested: busybox (stripped, 5,405 functions), bash, nmap, openssl, tor, curl, wget, tcpdump, lua, htop, netcat, socat, dnsmasq. Mix of statically/dynamically linked, stripped/unstripped, big-endian.
+13 binaries tested: busybox (stripped, 5,405 functions — up from 9 before MIPS discovery fixes), bash, nmap, openssl, tor, curl, wget, tcpdump, lua, htop, netcat, socat, dnsmasq. Mix of statically/dynamically linked, stripped/unstripped, big-endian. PIC indirect call resolution: 77% resolved via GP-relative GOT tracing (423→98 unresolved on busybox).
 
 ### AArch64 (polaco1782/linux-static-binaries)
 13 binaries tested: tor (10,021 functions), openssl, curl, wget, bash, busybox, tcpdump, dnsmasq, socat, htop, netcat, objdump, readelf. All statically linked and stripped.
