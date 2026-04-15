@@ -282,10 +282,12 @@ fn strip_return_pop_ops(ops: &mut Vec<(u64, PcodeOp)>) {
 /// Also handles MIPS PIC: `lw t9, -OFFSET(gp); jalr t9` → resolve GP+offset to GOT
 /// entry by tracing the GP register value from the function prologue.
 fn resolve_callind_target(ops: &[(u64, PcodeOp)], dest: &pcode_ir::Varnode, func_addr: u64, all_ops: &[(u64, PcodeOp)]) -> CallTarget {
-    // Trace backwards from the CallInd dest through IntAnd/IntSext/Copy chains
+    // Trace backwards from the CallInd dest through IntAnd/IntSext/IntAdd/Copy chains
     // to find the Load that produced the function address.
+    // Accumulate constant adjustments (e.g., addiu t9, t9, -0x68c0).
     let mut target_vn = *dest;
-    for _depth in 0..5 {
+    let mut adjustment: i64 = 0;
+    for _depth in 0..8 {
         let mut found_producer = false;
         for (_addr, op) in ops.iter().rev() {
             if let Some(out) = pcode_ir::get_output(op) {
@@ -294,11 +296,13 @@ fn resolve_callind_target(ops: &[(u64, PcodeOp)], dest: &pcode_ir::Varnode, func
                         // Load from memory — this is the function address source
                         PcodeOp::Load { ptr, .. } => {
                             if ptr.space == AddressSpaceId::Const {
-                                return CallTarget::Direct(ptr.offset);
+                                let addr = (ptr.offset as i64 + adjustment) as u64;
+                                return CallTarget::Direct(addr);
                             }
                             // MIPS PIC: ptr is GP + offset (Unique from IntAdd)
                             if ptr.space == AddressSpaceId::Unique {
-                                if let Some(addr) = resolve_gp_relative_addr(ops, ptr, func_addr, all_ops) {
+                                if let Some(got_addr) = resolve_gp_relative_addr(ops, ptr, func_addr, all_ops) {
+                                    let addr = (got_addr as i64 + adjustment) as u64;
                                     return CallTarget::Direct(addr);
                                 }
                             }
@@ -306,10 +310,25 @@ fn resolve_callind_target(ops: &[(u64, PcodeOp)], dest: &pcode_ir::Varnode, func
                         }
                         // IntAnd (MIPS ISA mode bit masking) — follow through
                         PcodeOp::IntAnd { left, right, .. } => {
-                            // Follow the non-constant operand
                             target_vn = if right.space == AddressSpaceId::Const { *left } else { *right };
                             found_producer = true;
                             break;
+                        }
+                        // IntAdd with constant: t9 = t9 + offset (addiu adjustment)
+                        // Accumulate the adjustment and continue tracing the register operand
+                        PcodeOp::IntAdd { left, right, .. } => {
+                            if right.space == AddressSpaceId::Const {
+                                adjustment += right.offset as i64;
+                                target_vn = *left;
+                                found_producer = true;
+                                break;
+                            } else if left.space == AddressSpaceId::Const {
+                                adjustment += left.offset as i64;
+                                target_vn = *right;
+                                found_producer = true;
+                                break;
+                            }
+                            return CallTarget::Indirect(*dest);
                         }
                         // IntSext/IntZext — follow through
                         PcodeOp::IntSext { input, .. } | PcodeOp::IntZext { input, .. } => {
@@ -320,7 +339,8 @@ fn resolve_callind_target(ops: &[(u64, PcodeOp)], dest: &pcode_ir::Varnode, func
                         // Copy — follow through
                         PcodeOp::Copy { input, .. } => {
                             if input.space == AddressSpaceId::Const {
-                                return CallTarget::Direct(input.offset);
+                                let addr = (input.offset as i64 + adjustment) as u64;
+                                return CallTarget::Direct(addr);
                             }
                             target_vn = *input;
                             found_producer = true;
