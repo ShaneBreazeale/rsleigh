@@ -7297,6 +7297,76 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // AArch64 register renaming: replace bare register names with meaningful names.
+    // x0-x7 → param_0-param_7 (argument registers)
+    // x30 returns → void return (link register is not a return value)
+    {
+        // Detect AArch64 by presence of x0/x19/x29 in output
+        let is_aarch64 = lines.iter().any(|l| {
+            let t = l.trim();
+            t.contains("x0 ") || t.contains("x19") || t.contains("x29") || t.contains("x30")
+        }) && !lines.iter().any(|l| l.contains("RAX") || l.contains("RBP") || l.contains("ESP"));
+
+        if is_aarch64 {
+            for line in &mut lines {
+                let t = line.trim().to_string();
+
+                // "return x30;" → "return;" (link register epilogue, not a return value)
+                if t == "return x30;" {
+                    let indent = line.len() - line.trim_start().len();
+                    *line = format!("{}return;", " ".repeat(indent));
+                    continue;
+                }
+
+                // Replace bare x0-x7 with param_0-param_7 when used as values.
+                // Use word-boundary matching to avoid replacing inside longer names.
+                for reg_idx in 0..=7u64 {
+                    let reg = format!("x{}", reg_idx);
+                    let param = format!("param_{}", reg_idx);
+                    if !line.contains(&reg) { continue; }
+                    // Replace with word-boundary awareness
+                    let mut new_line = String::new();
+                    let mut remaining = line.as_str();
+                    while let Some(pos) = remaining.find(&reg) {
+                        let before_ok = pos == 0
+                            || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric()
+                            && remaining.as_bytes()[pos - 1] != b'_';
+                        let after_pos = pos + reg.len();
+                        let after_ok = after_pos >= remaining.len()
+                            || (!remaining.as_bytes()[after_pos].is_ascii_alphanumeric()
+                                && remaining.as_bytes()[after_pos] != b'_');
+                        if before_ok && after_ok {
+                            new_line.push_str(&remaining[..pos]);
+                            new_line.push_str(&param);
+                            remaining = &remaining[after_pos..];
+                        } else {
+                            new_line.push_str(&remaining[..after_pos]);
+                            remaining = &remaining[after_pos..];
+                        }
+                    }
+                    new_line.push_str(remaining);
+                    *line = new_line;
+                }
+            }
+
+            // Remove standalone "return x30;" that might have been inside if blocks
+            lines.retain(|l| l.trim() != "return x30;");
+
+            // Fix "x-N" artifacts: these are "x0 - N" where x0 was rendered as "x"
+            // (sub-register naming artifact). Replace with "param_0 - N".
+            for line in &mut lines {
+                // Match patterns like "= x-N;" or "= x-N " or "(x-N)"
+                let patterns = ["x-1", "x-2", "x-3", "x-4"];
+                for pat in &patterns {
+                    if line.contains(pat) {
+                        let replacement = format!("param_0 - {}", &pat[2..]);
+                        *line = line.replace(pat, &replacement);
+                    }
+                }
+            }
+        }
+    }
+
     for line in &lines {
         let is_blank = line.trim().is_empty();
         if is_blank && prev_blank { continue; }
@@ -10146,7 +10216,22 @@ fn try_read_wide_string(va: u64, ctx: &PrintCtx) -> Option<String> {
 fn var_name(vn: &Varnode, ctx: &PrintCtx) -> String {
     match vn.space {
         AddressSpaceId::Register => {
-            ctx.arch.register_name(vn.offset, vn.size).unwrap_or("?reg").to_string()
+            let name = ctx.arch.register_name(vn.offset, vn.size).unwrap_or("?reg");
+            // AArch64 register auto-naming:
+            // x0-x7 (offsets 0-7) = argument/result registers → param names handled elsewhere
+            // x8 = indirect result register
+            // x9-x15 (offsets 9-15) = caller-saved temporaries → iVar
+            // x16-x18 (offsets 16-18) = platform registers (IP0/IP1/PR)
+            // x19-x28 (offsets 19-28) = callee-saved registers → lVar
+            // x29 = frame pointer, x30 = link register
+            if matches!(ctx.arch, Architecture::AArch64) {
+                match vn.offset {
+                    9..=15 => return format!("iVar{}", vn.offset - 9 + 1),
+                    19..=28 => return format!("lVar{}", vn.offset - 19 + 1),
+                    _ => {}
+                }
+            }
+            name.to_string()
         }
         AddressSpaceId::Unique => format!("tmp_{:x}", vn.offset),
         AddressSpaceId::Ram => format!("mem_{:x}", vn.offset),
