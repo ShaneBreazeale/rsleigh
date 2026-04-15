@@ -5475,14 +5475,56 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     while hex_end < text.len() && text.as_bytes()[hex_end].is_ascii_hexdigit() { hex_end += 1; }
                     if hex_end > hex_start {
                         if let Ok(offset) = u64::from_str_radix(&text[hex_start..hex_end], 16) {
-                            if base.starts_with("param_") || base.starts_with("lVar")
-                                || base.starts_with("iVar") || base.starts_with("local_") {
+                            if !base.is_empty() && base.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_') {
                                 param_fields.entry(base.to_string()).or_default().insert(offset);
                             }
                         }
                     }
                     pos = hex_end;
                 } else { break; }
+            }
+        }
+
+        // Also scan for *(typeN*)(base + offset) patterns — direct pointer arithmetic
+        // that indicates struct field access without using ->field_N notation.
+        for line in &lines {
+            let text = line.trim();
+            // Pattern: *(uint32_t*)(varname + N) or *(uint64_t*)(varname)
+            for cast in ["uint8_t", "uint16_t", "uint32_t", "uint64_t", "int", "long", "char"] {
+                let prefix = format!("*({}*)(", cast);
+                let mut search_from = 0;
+                while let Some(star_pos) = text[search_from..].find(&prefix) {
+                    let abs_pos = search_from + star_pos;
+                    let inner_start = abs_pos + prefix.len();
+                    // Find matching close paren
+                    if let Some(close) = text[inner_start..].find(')') {
+                        let inner = &text[inner_start..inner_start + close];
+                        // Parse: "base + offset" or just "base"
+                        if let Some(plus) = inner.find(" + ") {
+                            let base = inner[..plus].trim();
+                            let offset_str = inner[plus + 3..].trim();
+                            if !base.is_empty() && base.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+                                && !base.contains(' ')
+                            {
+                                let offset = offset_str.strip_prefix("0x")
+                                    .and_then(|h| u64::from_str_radix(h, 16).ok())
+                                    .or_else(|| offset_str.parse::<u64>().ok());
+                                if let Some(off) = offset {
+                                    param_fields.entry(base.to_string()).or_default().insert(off);
+                                }
+                            }
+                        } else {
+                            // No offset — field at offset 0
+                            let base = inner.trim();
+                            if !base.is_empty() && base.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+                                && !base.contains(' ')
+                            {
+                                param_fields.entry(base.to_string()).or_default().insert(0);
+                            }
+                        }
+                    }
+                    search_from = abs_pos + prefix.len();
+                }
             }
         }
 
@@ -5647,11 +5689,13 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
 
         for (base, fields) in &param_fields {
-            if fields.len() < 3 { continue; }
             if struct_matches.contains_key(base) { continue; } // already identified by API
+            if fields.is_empty() { continue; }
 
-            // Try each known struct — score by how many of our fields match.
+            // Try each known struct — score by how many of our fields match (need 3+).
             // Filter by binary type: Win32 structs only for PE, POSIX only for ELF.
+            if fields.len() < 3 { /* skip known struct matching, fall through to unknown */ }
+            else {
             let is_pe = matches!(ctx.arch, Architecture::X86_64 | Architecture::X86_32)
                 && ctx.binary.map_or(false, |b| b.len() > 2 && b[0] == b'M' && b[1] == b'Z');
             let posix_structs = ["stat", "sockaddr_in", "addrinfo", "timeval", "iovec",
@@ -5689,6 +5733,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     }
                 }
             }
+            } // close the fields.len() >= 3 gate
         }
 
         // Also apply cross-function struct hints to variables that don't have enough
@@ -5711,23 +5756,69 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         let mut struct_comments: Vec<String> = Vec::new();
         // Comments for variables with field accesses
         for (base, fields) in &param_fields {
-            if fields.len() < 3 { continue; }
+            if fields.is_empty() { continue; }
+            // Skip register names — only process variable names
+            if base.len() <= 3 && base.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) {
+                continue; // RAX, RCX, etc. — not struct variables
+            }
             let fv: Vec<u64> = fields.iter().copied().collect();
 
             if let Some(struct_name) = struct_matches.get(base) {
                 // Known struct match
                 struct_comments.push(format!("// {} is {} *", base, struct_name));
-            } else if fv.len() >= 4 {
-                // Unknown struct — emit layout comment
+            } else if !fv.is_empty() {
+                // Unknown struct — infer field types from sizes and usage context,
+                // then rename ->field_N to descriptive names.
+                let all_text = lines.join("\n");
                 let mut def = format!("// struct layout for {} ({}+ fields): ", base, fv.len());
+                let mut int_count = 0u32;
+                let mut ptr_count = 0u32;
                 for (i, &offset) in fv.iter().enumerate() {
                     let sz = if i + 1 < fv.len() { (fv[i+1] - offset).min(8) } else { 8 };
-                    let ty = match sz { 1 => "byte", 2 => "short", 4 => "int", _ => "long" };
+
+                    // Usage-based type inference from the output text
+                    let field_pat = format!("{}->field_{:x}", base, offset);
+                    let is_compared_to_zero = all_text.contains(&format!("{} != 0", field_pat))
+                        || all_text.contains(&format!("{} == 0", field_pat))
+                        || all_text.contains(&format!("{} == NULL", field_pat));
+                    let is_dereferenced = all_text.contains(&format!("*{}", field_pat))
+                        || all_text.contains(&format!("{}->", field_pat));
+                    let is_str_arg = all_text.contains(&format!("strlen({})", field_pat))
+                        || all_text.contains(&format!("printf({}", field_pat))
+                        || all_text.contains(&format!("puts({})", field_pat))
+                        || all_text.contains(&format!("strcpy({}", field_pat));
+
+                    // Determine field type and name
+                    let (ty_name, field_name): (&str, String) = if is_str_arg {
+                        ("char *", format!("str_{:x}", offset))
+                    } else if is_dereferenced || (sz >= 8 && is_compared_to_zero) {
+                        ptr_count += 1;
+                        let name = if ptr_count == 1 && sz >= 8 { "next".to_string() }
+                            else { format!("ptr_{:x}", offset) };
+                        ("void *", name)
+                    } else if sz <= 4 {
+                        int_count += 1;
+                        let name = if int_count == 1 && offset == 0 { "value".to_string() }
+                            else { format!("field_{:x}", offset) };
+                        (match sz { 1 => "uint8_t", 2 => "uint16_t", _ => "int" }, name)
+                    } else {
+                        (match sz { 1 => "byte", 2 => "short", 4 => "int", _ => "long" },
+                         format!("field_{:x}", offset))
+                    };
+
+                    // Populate field_names for renaming
+                    // Leak the strings so they have 'static lifetime
+                    let leaked_name: &'static str = Box::leak(field_name.clone().into_boxed_str());
+                    let leaked_type: &'static str = Box::leak(ty_name.to_string().into_boxed_str());
+                    field_names.insert((base.clone(), offset), (leaked_name, leaked_type));
+
                     if i > 0 { def.push_str(", "); }
-                    def.push_str(&format!("+0x{:x} {}", offset, ty));
+                    def.push_str(&format!("+0x{:x} {} {}", offset, ty_name, field_name));
                     if i >= 12 { def.push_str(", ..."); break; }
                 }
-                struct_comments.push(def);
+                if fv.len() >= 4 {
+                    struct_comments.push(def);
+                }
             }
         }
         // Comments for cross-function propagated structs (variables without field accesses)
@@ -5753,20 +5844,47 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             }
         }
 
-        // Rename fields for known structs: ->field_XX → ->fieldName
+        // Rename fields for known/inferred structs
         if !field_names.is_empty() {
             for line in &mut lines {
                 for ((base, offset), (fname, _ftype)) in &field_names {
+                    // Pattern 1: base->field_XX → base->fieldName
                     let old = format!("{}->field_{:x}", base, offset);
                     if line.contains(&old) {
                         let new = format!("{}->{}", base, fname);
                         *line = line.replace(&old, &new);
                     }
-                    // Also match *base->field_X (dereferenced)
+                    // Pattern 2: *base->field_XX → *base->fieldName
                     let old_deref = format!("*{}->field_{:x}", base, offset);
                     if line.contains(&old_deref) {
                         let new_deref = format!("*{}->{}", base, fname);
                         *line = line.replace(&old_deref, &new_deref);
+                    }
+                    // Pattern 3: *(typeN*)(base + offset) → base->fieldName
+                    // Matches: *(uint32_t*)(base + 8), *(uint64_t*)(base), etc.
+                    if *offset > 0 {
+                        for cast in ["uint8_t", "uint16_t", "uint32_t", "uint64_t", "int", "long", "char"] {
+                            let old_cast = format!("*({}*)({} + {})", cast, base, offset);
+                            if line.contains(&old_cast) {
+                                let new_field = format!("{}->{}", base, fname);
+                                *line = line.replace(&old_cast, &new_field);
+                            }
+                            // Also hex offset: *(uint32_t*)(base + 0x8)
+                            let old_hex = format!("*({}*)({} + 0x{:x})", cast, base, offset);
+                            if line.contains(&old_hex) {
+                                let new_field = format!("{}->{}", base, fname);
+                                *line = line.replace(&old_hex, &new_field);
+                            }
+                        }
+                    } else {
+                        // Offset 0: *(typeN*)(base) → base->fieldName (or just *(base) for first field)
+                        for cast in ["uint8_t", "uint16_t", "uint32_t", "uint64_t", "int", "long", "char"] {
+                            let old_cast = format!("*({}*)({})", cast, base);
+                            if line.contains(&old_cast) {
+                                let new_field = format!("{}->{}", base, fname);
+                                *line = line.replace(&old_cast, &new_field);
+                            }
+                        }
                     }
                 }
             }
