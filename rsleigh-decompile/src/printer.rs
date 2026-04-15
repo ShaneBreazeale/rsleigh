@@ -647,39 +647,70 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
-    // Remove AArch64 stack spill patterns created by array conversion:
-    // *(uint64_t*)(sp + 8) → sp[1] after scaling. These are callee-saved register saves
-    // and return address stores that should be hidden from the output.
+    // Remove AArch64 stack spill/reload/epilogue patterns created by array conversion.
+    // The ARM64 prologue saves callee-saved registers and the link register to the stack,
+    // and the epilogue restores them. These appear as sp[N] assignments, sp->fieldN reads,
+    // x30 restores, and return-via-stack patterns. All are architectural boilerplate.
     lines.retain(|line| {
         let t = line.trim();
-        // sp[N] = VALUE; — callee-saved save or return address
+
+        // === PROLOGUE: register saves to stack ===
+        // sp[N] = VALUE; — callee-saved save, return address, or frame setup
         if t.starts_with("sp[") && t.ends_with(';') && t.contains("] = ") {
             let rhs = t.split("] = ").last().unwrap_or("").trim_end_matches(';').trim();
+            // Keep string literals and named function calls — those are real data
+            if rhs.starts_with('"') || rhs.starts_with("L\"") || rhs.contains("func_") {
+                return true;
+            }
             let is_spill = rhs.starts_with("lVar") || rhs.starts_with("iVar")
                 || rhs.starts_with("dVar") || rhs.starts_with("param_")
                 || rhs == "x29" || rhs == "x30" || rhs == "0"
                 || rhs.starts_with("x0") || rhs.starts_with("x1") || rhs.starts_with("x2")
                 || rhs.starts_with("x8") || rhs.starts_with("x9")
                 || rhs.starts_with("0x")
-                // Memory loads stored to stack (e.g., sp[N] = *(uint64_t*)(M))
-                || rhs.starts_with("*(");
+                || rhs.starts_with("*(")
+                // Small integer constants (stack frame size, alignment)
+                || rhs.chars().all(|c| c.is_ascii_digit());
             if is_spill { return false; }
         }
         // sp->fieldN = VALUE; (alternative syntax for stack spills)
         if t.starts_with("sp->field") && t.ends_with(';') && t.contains(" = ") {
             let rhs = t.split(" = ").last().unwrap_or("").trim_end_matches(';').trim();
+            if rhs.starts_with('"') || rhs.contains("func_") { return true; }
             let is_spill = rhs.starts_with("lVar") || rhs.starts_with("iVar")
                 || rhs.starts_with("dVar") || rhs.starts_with("param_")
                 || rhs == "x29" || rhs == "x30" || rhs == "0"
-                || rhs.starts_with("0x");
+                || rhs.starts_with("0x") || rhs.starts_with("*(")
+                || rhs.chars().all(|c| c.is_ascii_digit());
             if is_spill { return false; }
         }
-        // return sp->fieldN->field8; or return sp[N]->field8; (epilogue return address load)
+
+        // === EPILOGUE: register restores from stack ===
+        // x30 = sp->field_8; or x30 = sp[N]->field_8; (link register restore)
+        if t.starts_with("x30 = sp") && t.ends_with(';') {
+            return false;
+        }
+        // lVarN = sp[N]; or lVarN = sp[N]->field_8; (callee-saved register reload)
+        if (t.starts_with("lVar") || t.starts_with("iVar") || t.starts_with("dVar"))
+            && t.contains(" = sp[") && t.ends_with(';')
+        {
+            return false;
+        }
+        // lVarN = sp->fieldN; or lVarN = sp->fieldN->field_8; (alternative reload syntax)
+        if (t.starts_with("lVar") || t.starts_with("iVar") || t.starts_with("dVar"))
+            && t.contains(" = sp->field") && t.ends_with(';')
+        {
+            return false;
+        }
+
+        // === RETURN via stack (epilogue return address load) ===
+        // return sp->field_10->field_8; or return sp[N]->field_8;
         if t.starts_with("return sp") && !t.contains("func_") && !t.contains("param_")
             && !t.contains("malloc") && !t.contains("strlen")
         {
             return false;
         }
+
         true
     });
 
@@ -7051,6 +7082,30 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             }
         }
     }
+
+    // Final AArch64 cleanup: remove stack spill/reload patterns that were created
+    // by post-processing passes (struct field conversion, register inlining) after
+    // the main sp[] filter ran.
+    lines.retain(|line| {
+        let t = line.trim();
+        // lVarN = sp[N]; or lVarN = sp[N]->field_8; (callee-saved reload)
+        if (t.starts_with("lVar") || t.starts_with("iVar") || t.starts_with("dVar"))
+            && t.ends_with(';')
+            && (t.contains(" = sp[") || t.contains(" = sp->field"))
+            && !t.contains("func_")
+        {
+            return false;
+        }
+        // x30 = sp[N]->field_8; or x30 = sp->field_8; (link register restore)
+        if t.starts_with("x30 = sp") && t.ends_with(';') { return false; }
+        // return sp... patterns (epilogue return address)
+        if t.starts_with("return sp") && t.ends_with(';')
+            && !t.contains("func_") && !t.contains("param_")
+        {
+            return false;
+        }
+        true
+    });
 
     for line in &lines {
         let is_blank = line.trim().is_empty();
