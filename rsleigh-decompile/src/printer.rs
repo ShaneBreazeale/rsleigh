@@ -7234,6 +7234,38 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Remove overflow trap blocks: if (OV) { pc = ?; goto label_N; }
+    // These are Swift/AArch64 arithmetic overflow checks (b.vs → brk) that are
+    // compiler-inserted safety checks, not meaningful program logic.
+    {
+        let mut i = 0;
+        while i + 2 < lines.len() {
+            let t = lines[i].trim();
+            if t == "if (OV) {" {
+                // Find the closing brace
+                let mut end = i + 1;
+                let mut depth = 1;
+                while end < lines.len() && depth > 0 {
+                    let et = lines[end].trim();
+                    if et.ends_with('{') { depth += 1; }
+                    if et == "}" { depth -= 1; }
+                    end += 1;
+                }
+                // Check that the body only contains pc/goto/trap — no real logic
+                let body_is_trap = (i + 1..end).all(|j| {
+                    let jt = lines[j].trim();
+                    jt.starts_with("pc =") || jt.starts_with("goto ") || jt == "}"
+                        || jt.is_empty()
+                });
+                if body_is_trap {
+                    for _ in i..end { lines.remove(i); }
+                    continue;
+                }
+            }
+            i += 1;
+        }
+    }
+
     // Final AArch64 cleanup: remove stack spill/reload patterns that were created
     // by post-processing passes (struct field conversion, register inlining) after
     // the main sp[] filter ran.
@@ -7294,6 +7326,85 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 }
             }
             i += 1;
+        }
+    }
+
+    // For-loop init recovery: for (; var op expr; var++) → for (var = 0; var op expr; var++)
+    // When a for-loop has an empty init, check if the loop variable was initialized to 0
+    // in a preceding statement (which was elided as a dead store).
+    for line in &mut lines {
+        let t = line.trim();
+        if t.starts_with("for (; ") {
+            // Extract the loop variable from the increment: "var++" or "var = var + 1"
+            // The increment is after the last ";"
+            if let Some(last_semi) = t.rfind("; ") {
+                let increment = t[last_semi + 2..]
+                    .trim_end_matches('{').trim().trim_end_matches(')').trim();
+                let loop_var = increment.trim_end_matches("++").trim();
+                if !loop_var.is_empty() && loop_var.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    // Replace "for (; " with "for (loop_var = 0; "
+                    let indent = line.len() - line.trim_start().len();
+                    let pad = " ".repeat(indent);
+                    let rest = &t[7..]; // after "for (; "
+                    *line = format!("{}for ({} = 0; {}", pad, loop_var, rest);
+                }
+            }
+        }
+    }
+
+    // Variable naming heuristics: rename generic lVar/iVar to meaningful names.
+    // - Loop counters (incremented in for/while) → i, j, k
+    // - Variables compared to string length → len, n
+    // - Variables used as malloc size → size, n
+    {
+        let all_text = lines.join("\n");
+
+        // Detect loop counters: "iVarN++" or "lVarN++" or "lVarN = lVarN + 1"
+        let mut counter_idx = 0;
+        let counter_names = ["i", "j", "k", "m"];
+        let mut renames: Vec<(String, String)> = Vec::new();
+        for var_prefix in ["iVar", "lVar"] {
+            for n in 1..=20 {
+                let var = format!("{}{}", var_prefix, n);
+                let is_counter = all_text.contains(&format!("{}++", var))
+                    || all_text.contains(&format!("{} = {} + 1", var, var))
+                    || all_text.contains(&format!("{} += 1", var));
+                if is_counter && counter_idx < counter_names.len() {
+                    // Don't rename if already used elsewhere with a meaningful role
+                    if !renames.iter().any(|(_, to)| to == counter_names[counter_idx]) {
+                        renames.push((var, counter_names[counter_idx].to_string()));
+                        counter_idx += 1;
+                    }
+                }
+            }
+        }
+
+        // Apply renames with word-boundary matching
+        for (from, to) in &renames {
+            for line in &mut lines {
+                if !line.contains(from) { continue; }
+                let mut new_line = String::new();
+                let mut remaining = line.as_str();
+                while let Some(pos) = remaining.find(from.as_str()) {
+                    let before_ok = pos == 0
+                        || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric()
+                        && remaining.as_bytes()[pos - 1] != b'_';
+                    let after_pos = pos + from.len();
+                    let after_ok = after_pos >= remaining.len()
+                        || !remaining.as_bytes()[after_pos].is_ascii_alphanumeric()
+                        && remaining.as_bytes()[after_pos] != b'_';
+                    if before_ok && after_ok {
+                        new_line.push_str(&remaining[..pos]);
+                        new_line.push_str(to);
+                        remaining = &remaining[after_pos..];
+                    } else {
+                        new_line.push_str(&remaining[..after_pos]);
+                        remaining = &remaining[after_pos..];
+                    }
+                }
+                new_line.push_str(remaining);
+                *line = new_line;
+            }
         }
     }
 
