@@ -1,6 +1,18 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use pcode_ir::{PcodeOp, Varnode, AddressSpaceId, get_output};
 use crate::ir::*;
+
+/// Stack slot key: identifies a unique stack memory location.
+/// Keyed by (base register offset, displacement, access size) to prevent
+/// conflating different-sized accesses at the same offset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct SlotKey {
+    base_reg: u64,  // Frame register offset (RBP=40, x29=29, RSP=32, SP=256, GP=112)
+    disp: i64,      // Displacement from base
+    size: u32,      // Access size in bytes
+}
+
+type StackMap = HashMap<SlotKey, VarId>;
 
 /// Convert a CFG into SSA form.
 pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
@@ -15,39 +27,8 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
     // Per-block: map from varnode -> VarId at block exit
     let mut block_exit_vars: Vec<HashMap<Varnode, VarId>> = vec![HashMap::new(); cfg.blocks.len()];
 
-    // Per-block: stack slot values at block exit.
-    // Used for cross-block readonly propagation (prologue values).
-    let mut block_exit_stack: Vec<HashMap<i64, VarId>> = vec![HashMap::new(); cfg.blocks.len()];
-
-    // Track which stack offsets are written in non-entry blocks (not read-only).
-    let mut stack_written_in_blocks: HashMap<i64, Vec<usize>> = HashMap::new();
-    for (bi, blk) in cfg.blocks.iter().enumerate() {
-        for (_addr, op) in &blk.ops {
-            if let PcodeOp::Store { ptr, .. } = op {
-                if ptr.space == AddressSpaceId::Unique {
-                    for (_a2, op2) in &blk.ops {
-                        if let PcodeOp::IntAdd { out, left, right } = op2 {
-                            if out.space == ptr.space && out.offset == ptr.offset {
-                                let frame_offsets = [40u64, 29, 32, 256, 112];
-                                let is_frame = (left.space == AddressSpaceId::Register
-                                    && frame_offsets.contains(&left.offset))
-                                    || (right.space == AddressSpaceId::Register
-                                        && frame_offsets.contains(&right.offset));
-                                if is_frame {
-                                    let offset = if right.space == AddressSpaceId::Const {
-                                        right.offset as i64
-                                    } else if left.space == AddressSpaceId::Const {
-                                        left.offset as i64
-                                    } else { continue };
-                                    stack_written_in_blocks.entry(offset).or_default().push(bi);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // Per-block: stack slot values at block exit (Phase 1 collection).
+    let mut block_exit_stack: Vec<StackMap> = vec![HashMap::new(); cfg.blocks.len()];
 
     // Iterative dataflow: re-process blocks until exit vars stabilize (max 4 passes)
     for iteration in 0..4u32 {
@@ -80,22 +61,9 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
             }
 
             let mut current: HashMap<Varnode, VarId> = HashMap::new();
-            // Stack slot tracking: start with entry block readonly values.
-            // Only propagate slots written exclusively in the entry block.
-            // Slots written in multiple blocks (loop variables) are NOT propagated —
-            // they need proper memory SSA with Phi nodes (future work).
-            let mut stack_slots: HashMap<i64, VarId> = HashMap::new();
-            if !block_exit_stack[0].is_empty() {
-                for (&offset, &var_id) in &block_exit_stack[0] {
-                    // Only propagate if this slot is NOT written in any non-entry block
-                    let blocks_written = stack_written_in_blocks.get(&offset);
-                    let only_entry = blocks_written.map_or(true, |blocks|
-                        blocks.iter().all(|b| *b == 0));
-                    if only_entry {
-                        stack_slots.insert(offset, var_id);
-                    }
-                }
-            }
+            // Phase 1 stack tracking: INTRA-BLOCK only during SSA construction.
+            // Cross-block resolution happens in Phase 2 after Phi insertion.
+            let mut local_stack: StackMap = HashMap::new();
 
             // Inherit from the first already-processed FORWARD predecessor.
             // A forward predecessor has a lower block ID (comes before in CFG order).
@@ -182,24 +150,25 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
                         PcodeOp::Store { ptr, val, .. } => {
                             let addr_var = resolve_input(&mut ssa, &mut current, &ptr);
                             let val_var = resolve_input(&mut ssa, &mut current, &val);
-                            // Track stack stores: if writing to a fixed stack offset,
-                            // record the value for later Load resolution
-                            if let Some(offset) = get_stack_offset(addr_var, &ssa) {
-                                stack_slots.insert(offset, val_var);
+                            // Track stack stores for intra-block forwarding
+                            let val_size = ssa.vars[val_var.0 as usize].size;
+                            if let Some(key) = get_slot_key(addr_var, val_size, &ssa) {
+                                local_stack.insert(key, val_var);
                             }
                             stmts.push(Stmt::Store { addr: addr_var, val: val_var });
                         }
                         ref op => {
                             if let Some(out_vn) = get_output(op) {
-                                // For Loads: check if we can resolve from stack slot tracking
+                                // For Loads: only resolve from INTRA-BLOCK stores (Phase 1).
+                                // Cross-block resolution happens in Phase 2.
                                 let expr = if let PcodeOp::Load { ptr, .. } = op {
                                     let p = resolve_input(&mut ssa, &mut current, ptr);
-                                    if let Some(offset) = get_stack_offset(p, &ssa) {
-                                        if let Some(&stored_var) = stack_slots.get(&offset) {
-                                            // Stack value is known — use it directly
+                                    let key = get_slot_key(p, out_vn.size, &ssa);
+                                    if let Some(key) = key {
+                                        if let Some(&stored_var) = local_stack.get(&key) {
                                             Expr::Var(stored_var)
                                         } else {
-                                            Expr::Load(p)
+                                            Expr::Load(p) // Leave opaque for Phase 2
                                         }
                                     } else {
                                         Expr::Load(p)
@@ -223,11 +192,24 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
 
             let terminator = convert_terminator(&mut ssa, &mut current, &block.terminator);
 
-            if block_exit_vars[block.id.0] != current || block_exit_stack[block.id.0] != stack_slots {
+            // Build exit stack: inherit from forward predecessor + local stores
+            let mut exit_stack: StackMap = if !block_preds.is_empty() {
+                block_preds.iter()
+                    .find(|p| p.0 < block.id.0)
+                    .map(|p| block_exit_stack[p.0].clone())
+                    .unwrap_or_default()
+            } else {
+                HashMap::new()
+            };
+            for (key, var_id) in &local_stack {
+                exit_stack.insert(*key, *var_id);
+            }
+
+            if block_exit_vars[block.id.0] != current || block_exit_stack[block.id.0] != exit_stack {
                 changed = true;
             }
             block_exit_vars[block.id.0] = current;
-            block_exit_stack[block.id.0] = stack_slots;
+            block_exit_stack[block.id.0] = exit_stack;
 
             // On first iteration, push new blocks; on subsequent iterations, replace
             if iteration == 0 {
@@ -292,7 +274,156 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
         }
     }
 
-    // Count uses
+    // ====================================================================
+    // Phase 2: Memory SSA — resolve cross-block stack Loads via Phi nodes
+    // ====================================================================
+    //
+    // Phase 2a: Compute block_entry_stack to fixed point via worklist.
+    //           Insert memory Phis at join points where predecessors disagree.
+    // Phase 2b: Walk all Loads and replace opaque Expr::Load(ptr) with
+    //           Expr::Var(resolved_value) when the stack slot is known.
+    {
+        let mut block_entry_stack: Vec<StackMap> = vec![HashMap::new(); cfg.blocks.len()];
+        // Memory Phis created: (block_id, slot_key) → phi VarId
+        let mut mem_phis: HashMap<(usize, SlotKey), VarId> = HashMap::new();
+
+        // Phase 2a: Fixed-point computation of entry stack state
+        let mut worklist: VecDeque<usize> = (0..cfg.blocks.len()).collect();
+        let mut visited = vec![false; cfg.blocks.len()];
+        let max_iterations = cfg.blocks.len() * 4; // safety cap
+        let mut iter_count = 0;
+
+        while let Some(bid) = worklist.pop_front() {
+            iter_count += 1;
+            if iter_count > max_iterations { break; }
+
+            let block_preds_list = &preds[bid];
+            let mut new_entry: StackMap = HashMap::new();
+
+            if block_preds_list.is_empty() {
+                // Entry block: no predecessors, entry stack is empty
+                // (stores in entry block create exit_stack entries)
+            } else if block_preds_list.len() == 1 {
+                // Single predecessor: inherit directly
+                new_entry = block_exit_stack[block_preds_list[0].0].clone();
+            } else {
+                // Multiple predecessors: merge with Phi insertion
+                // Collect all slot keys across all predecessors
+                let mut all_keys: HashSet<SlotKey> = HashSet::new();
+                for &pred_id in block_preds_list {
+                    for key in block_exit_stack[pred_id.0].keys() {
+                        all_keys.insert(*key);
+                    }
+                }
+
+                for key in &all_keys {
+                    // Collect values from each predecessor (None = missing/unknown)
+                    let pred_values: Vec<Option<VarId>> = block_preds_list.iter()
+                        .map(|pred| block_exit_stack[pred.0].get(key).copied())
+                        .collect();
+
+                    // If ANY predecessor is missing this slot, don't forward (fail closed)
+                    if pred_values.iter().any(|v| v.is_none()) {
+                        continue;
+                    }
+
+                    let values: Vec<VarId> = pred_values.into_iter().map(|v| v.unwrap()).collect();
+
+                    // If all predecessors agree, no Phi needed
+                    if values.iter().all(|v| *v == values[0]) {
+                        new_entry.insert(*key, values[0]);
+                    } else {
+                        // Create or reuse a memory Phi
+                        let phi_key = (bid, *key);
+                        let phi_var = if let Some(&existing) = mem_phis.get(&phi_key) {
+                            // Update existing Phi's inputs
+                            ssa.vars[existing.0 as usize].expr = Expr::Phi(values.clone());
+                            existing
+                        } else {
+                            let slot_vn = Varnode {
+                                space: AddressSpaceId::Unique,
+                                offset: 0xF000_0000_u64.wrapping_add(key.disp as u64)
+                                    .wrapping_add(key.base_reg << 32),
+                                size: key.size,
+                            };
+                            let phi_var = ssa.new_var(slot_vn, Expr::Phi(values), key.size);
+                            // Prepend Phi stmt to block
+                            ssa.blocks[bid].stmts.insert(0, Stmt::Assign(phi_var));
+                            mem_phis.insert(phi_key, phi_var);
+                            phi_var
+                        };
+                        new_entry.insert(*key, phi_var);
+                    }
+                }
+            }
+
+            // Check for convergence
+            if visited[bid] && new_entry == block_entry_stack[bid] {
+                continue; // No change — don't re-process successors
+            }
+            visited[bid] = true;
+            block_entry_stack[bid] = new_entry.clone();
+
+            // Recompute exit stack: entry + local stores in this block
+            let mut recomputed_exit = new_entry;
+            let mut has_unknown_store = false;
+            for stmt in &ssa.blocks[bid].stmts {
+                if let Stmt::Store { addr, val } = stmt {
+                    let val_size = ssa.vars[val.0 as usize].size;
+                    if let Some(key) = get_slot_key(*addr, val_size, &ssa) {
+                        recomputed_exit.insert(key, *val);
+                    } else {
+                        // Unknown store address — conservatively kill all tracked slots
+                        has_unknown_store = true;
+                    }
+                }
+            }
+            if has_unknown_store {
+                recomputed_exit.clear();
+            }
+
+            if block_exit_stack[bid] != recomputed_exit {
+                block_exit_stack[bid] = recomputed_exit;
+                // Schedule successors for re-processing
+                for succ in cfg.successors(BlockId(bid)) {
+                    if !worklist.contains(&succ.0) {
+                        worklist.push_back(succ.0);
+                    }
+                }
+            }
+        }
+
+        // Phase 2b: Resolve cross-block Loads using computed entry stack
+        for bid in 0..ssa.blocks.len() {
+            let mut running_stack = block_entry_stack[bid].clone();
+
+            for stmt in &ssa.blocks[bid].stmts {
+                match stmt {
+                    Stmt::Store { addr, val } => {
+                        let val_size = ssa.vars[val.0 as usize].size;
+                        if let Some(key) = get_slot_key(*addr, val_size, &ssa) {
+                            running_stack.insert(key, *val);
+                        }
+                    }
+                    Stmt::Assign(var_id) => {
+                        let vdef = &ssa.vars[var_id.0 as usize];
+                        if let Expr::Load(ptr) = &vdef.expr {
+                            let load_size = vdef.size;
+                            if let Some(key) = get_slot_key(*ptr, load_size, &ssa) {
+                                if let Some(&stored_var) = running_stack.get(&key) {
+                                    // Resolve: replace Load with the stored value
+                                    ssa.vars[var_id.0 as usize].expr = Expr::Var(stored_var);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Count uses (after Phase 2 may have changed expressions)
     count_uses(&mut ssa);
 
     ssa
@@ -311,38 +442,34 @@ fn resolve_input(ssa: &mut SsaCfg, current: &mut HashMap<Varnode, VarId>, vn: &V
     var_id
 }
 
-/// Extract a constant stack offset from a pointer VarId.
-/// Recognizes: RBP + const, SP + const, RBP - const, SP - const.
-/// Returns (base_reg_offset, stack_offset) if the pattern matches.
-fn get_stack_offset(ptr_var: VarId, ssa: &SsaCfg) -> Option<i64> {
+/// Frame base register offsets recognized for stack slot tracking.
+const FRAME_REGS: [u64; 5] = [40, 29, 32, 256, 112]; // RBP, x29, RSP, SP, GP
+
+/// Extract a stack slot key from a pointer VarId.
+/// Recognizes: FRAME_REG + const, FRAME_REG - const (via large unsigned const).
+fn get_slot_key(ptr_var: VarId, size: u32, ssa: &SsaCfg) -> Option<SlotKey> {
     let vdef = &ssa.vars[ptr_var.0 as usize];
     match &vdef.expr {
-        // Direct stack register (offset 0)
         Expr::Unknown if vdef.varnode.space == AddressSpaceId::Register => {
-            // RBP (x86: 40, AArch64 x29: 29) or SP (x86: 32, AArch64: varies)
-            let is_frame = matches!(vdef.varnode.offset, 40 | 29 | 32 | 256);
-            if is_frame { Some(0) } else { None }
+            if FRAME_REGS.contains(&vdef.varnode.offset) {
+                Some(SlotKey { base_reg: vdef.varnode.offset, disp: 0, size })
+            } else { None }
         }
-        // BinOp(Add, base_reg, const_offset)
         Expr::BinOp(BinOpKind::Add, left, right) => {
             let lv = &ssa.vars[left.0 as usize];
             let rv = &ssa.vars[right.0 as usize];
-            // base + const
             if lv.varnode.space == AddressSpaceId::Register
-                && matches!(lv.varnode.offset, 40 | 29 | 32 | 256 | 112)
-                && matches!(&rv.expr, Expr::Const(_, _))
+                && FRAME_REGS.contains(&lv.varnode.offset)
             {
                 if let Expr::Const(val, _) = &rv.expr {
-                    return Some(*val as i64);
+                    return Some(SlotKey { base_reg: lv.varnode.offset, disp: *val as i64, size });
                 }
             }
-            // const + base (commuted)
             if rv.varnode.space == AddressSpaceId::Register
-                && matches!(rv.varnode.offset, 40 | 29 | 32 | 256 | 112)
-                && matches!(&lv.expr, Expr::Const(_, _))
+                && FRAME_REGS.contains(&rv.varnode.offset)
             {
                 if let Expr::Const(val, _) = &lv.expr {
-                    return Some(*val as i64);
+                    return Some(SlotKey { base_reg: rv.varnode.offset, disp: *val as i64, size });
                 }
             }
             None
