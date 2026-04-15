@@ -139,8 +139,38 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
                     }
                 }
 
+                // Detect MOVSD zero-clobber pattern:
+                // Load { out: XMM(off>=4608, sz:16) } followed by
+                // Copy { out: same_XMM, input: Const(0) }
+                // The Copy zeros upper bytes — drop it to preserve the Load result.
+                let mut skip_zero_copy: HashSet<usize> = HashSet::new();
+                for (i, op) in inst_ops.iter().enumerate() {
+                    if let PcodeOp::Load { out, .. } = op {
+                        if out.space == AddressSpaceId::Register
+                            && out.offset >= 4608
+                            && out.size == 16
+                        {
+                            if i + 1 < inst_ops.len() {
+                                if let PcodeOp::Copy { out: copy_out, input } = inst_ops[i + 1] {
+                                    if copy_out.space == out.space
+                                        && copy_out.offset == out.offset
+                                        && input.space == AddressSpaceId::Const
+                                        && input.offset == 0
+                                    {
+                                        skip_zero_copy.insert(i + 1);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Process remaining ops normally
-                for op in &inst_ops {
+                for (op_idx, op) in inst_ops.iter().enumerate() {
+                    // Skip MOVSD zero-clobber copies
+                    if skip_zero_copy.contains(&op_idx) {
+                        continue;
+                    }
                     // Skip ops we already handled as deferred Zext
                     if let PcodeOp::IntZext { out, input } = op {
                         if deferred_zext.iter().any(|(vn, _)| vn == out) {
@@ -180,7 +210,9 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
                                 } else {
                                     build_expr(&mut ssa, &mut current, op)
                                 };
-                                let var_id = ssa.new_var(out_vn, expr, out_vn.size);
+                                let effective_size = float_semantic_size(&expr, &ssa.vars)
+                                    .unwrap_or(out_vn.size);
+                                let var_id = ssa.new_var(out_vn, expr, effective_size);
                                 current.insert(out_vn, var_id);
                                 stmts.push(Stmt::Assign(var_id));
                             }
@@ -520,7 +552,18 @@ fn build_expr(ssa: &mut SsaCfg, current: &mut HashMap<Varnode, VarId>, op: &Pcod
         PcodeOp::IntSRem { left, right, .. } => bin!(SRem, left, right),
         PcodeOp::IntAnd { left, right, .. } => bin!(And, left, right),
         PcodeOp::IntOr { left, right, .. } => bin!(Or, left, right),
-        PcodeOp::IntXor { left, right, .. } => bin!(Xor, left, right),
+        PcodeOp::IntXor { left, right, out, .. } => {
+            // XOR reg, reg → 0 (common zero-init: XORPS/XORPD/XOR EAX,EAX)
+            if left.space == right.space
+                && left.offset == right.offset
+                && left.size == right.size
+                && left.space == AddressSpaceId::Register
+            {
+                Expr::Const(0, out.size)
+            } else {
+                bin!(Xor, left, right)
+            }
+        }
         PcodeOp::IntLsl { left, right, .. } => bin!(Lsl, left, right),
         PcodeOp::IntLsr { left, right, .. } => bin!(Lsr, left, right),
         PcodeOp::IntAsr { left, right, .. } => bin!(Asr, left, right),
@@ -576,6 +619,41 @@ fn build_expr(ssa: &mut SsaCfg, current: &mut HashMap<Varnode, VarId>, op: &Pcod
             }
         }
         _ => Expr::Unknown,
+    }
+}
+
+/// For float ops, return the semantic operand size (4=float, 8=double).
+/// SSE scalar instructions write to full 16-byte XMM registers but the
+/// meaningful result is only the low 4 or 8 bytes.
+fn float_semantic_size(expr: &Expr, vars: &[VarDef]) -> Option<u32> {
+    match expr {
+        Expr::BinOp(kind, left, right) => {
+            use BinOpKind::*;
+            match kind {
+                FloatAdd | FloatSub | FloatMult | FloatDiv => {
+                    let ls = vars[left.0 as usize].size;
+                    let rs = vars[right.0 as usize].size;
+                    Some(ls.min(rs))
+                }
+                _ => None,
+            }
+        }
+        Expr::UnaryOp(kind, input) => {
+            use UnaryOpKind::*;
+            match kind {
+                FloatNeg | FloatAbs | FloatSqrt | FloatCeil
+                | FloatFloor | FloatRound => {
+                    Some(vars[input.0 as usize].size)
+                }
+                Int2Float => {
+                    let is = vars[input.0 as usize].size;
+                    Some(if is >= 8 { 8 } else { 4 })
+                }
+                Float2Float => None,
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 
