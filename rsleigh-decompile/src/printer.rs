@@ -7414,6 +7414,56 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Named expression substitution: when VAR = EXPR is assigned at the same indent,
+    // replace later occurrences of EXPR with VAR on subsequent lines in the same scope.
+    // This turns arr[low + high / 2] → arr[mid] after mid = low + high / 2.
+    {
+        let mut substitutions: Vec<(String, String, usize)> = Vec::new(); // (expr, var_name, indent)
+        for line in &lines {
+            let t = line.trim();
+            // Match: VAR = EXPR; (simple assignment, not if/while/return/call)
+            if let Some(eq_pos) = t.find(" = ") {
+                let var_name = &t[..eq_pos];
+                let expr = t[eq_pos + 3..].trim_end_matches(';');
+                // Only substitute for simple variable names (not registers, not complex LHS)
+                let is_simple_var = !var_name.is_empty()
+                    && var_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    && var_name.chars().next().map_or(false, |c| c.is_ascii_lowercase())
+                    && !var_name.starts_with("if ")
+                    && !var_name.starts_with("while ")
+                    && !var_name.starts_with("return ");
+                // Only substitute expressions with operators (not simple values)
+                let is_expr = expr.contains(' ') && expr.len() >= 5
+                    && !expr.contains('(') // avoid substituting call results
+                    && !expr.starts_with('"'); // avoid string literals
+                let indent = line.len() - line.trim_start().len();
+                if is_simple_var && is_expr {
+                    substitutions.push((expr.to_string(), var_name.to_string(), indent));
+                }
+            }
+        }
+        // Apply substitutions: for each (expr, var), replace expr with var in later lines
+        // Only replace within array indices and conditions (not in assignments)
+        for (expr, var_name, _sub_indent) in &substitutions {
+            let mut found_def = false;
+            for line in &mut lines {
+                let t = line.trim();
+                if !found_def {
+                    // Find the definition line
+                    if t.starts_with(&format!("{} = {}", var_name, expr)) {
+                        found_def = true;
+                    }
+                    continue;
+                }
+                // Only substitute in conditions and array accesses, not assignments
+                if t.starts_with(&format!("{} = ", var_name)) { continue; } // skip self-assign
+                if line.contains(expr.as_str()) {
+                    *line = line.replace(expr.as_str(), var_name);
+                }
+            }
+        }
+    }
+
     // Variable naming heuristics: rename generic lVar/iVar to meaningful names.
     // - Loop counters (incremented in for/while) → i, j, k
     // - Variables compared to string length → len, n
