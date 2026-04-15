@@ -647,6 +647,42 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Remove AArch64 stack spill patterns created by array conversion:
+    // *(uint64_t*)(sp + 8) → sp[1] after scaling. These are callee-saved register saves
+    // and return address stores that should be hidden from the output.
+    lines.retain(|line| {
+        let t = line.trim();
+        // sp[N] = VALUE; — callee-saved save or return address
+        if t.starts_with("sp[") && t.ends_with(';') && t.contains("] = ") {
+            let rhs = t.split("] = ").last().unwrap_or("").trim_end_matches(';').trim();
+            let is_spill = rhs.starts_with("lVar") || rhs.starts_with("iVar")
+                || rhs.starts_with("dVar") || rhs.starts_with("param_")
+                || rhs == "x29" || rhs == "x30" || rhs == "0"
+                || rhs.starts_with("x0") || rhs.starts_with("x1") || rhs.starts_with("x2")
+                || rhs.starts_with("x8") || rhs.starts_with("x9")
+                || rhs.starts_with("0x")
+                // Memory loads stored to stack (e.g., sp[N] = *(uint64_t*)(M))
+                || rhs.starts_with("*(");
+            if is_spill { return false; }
+        }
+        // sp->fieldN = VALUE; (alternative syntax for stack spills)
+        if t.starts_with("sp->field") && t.ends_with(';') && t.contains(" = ") {
+            let rhs = t.split(" = ").last().unwrap_or("").trim_end_matches(';').trim();
+            let is_spill = rhs.starts_with("lVar") || rhs.starts_with("iVar")
+                || rhs.starts_with("dVar") || rhs.starts_with("param_")
+                || rhs == "x29" || rhs == "x30" || rhs == "0"
+                || rhs.starts_with("0x");
+            if is_spill { return false; }
+        }
+        // return sp->fieldN->field8; or return sp[N]->field8; (epilogue return address load)
+        if t.starts_with("return sp") && !t.contains("func_") && !t.contains("param_")
+            && !t.contains("malloc") && !t.contains("strlen")
+        {
+            return false;
+        }
+        true
+    });
+
     // Struct field access: ptr[4] → ptr->field4, ptr[8] → ptr->field8
     // Small constant offsets from pointers are struct field accesses, not array indices.
     // Convert base[N] to base->fieldN when N is a small constant (0-64).
@@ -1315,19 +1351,18 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         let t = line.trim();
         // ARM64 callee-saved register saves / stack frame setup:
         // sp[N] = lVarM; sp[N] = x29; sp[N] = x30; sp[N] = 0; sp[N+M] = xNN;
-        if t.starts_with("sp[") && t.ends_with(';') && t.contains(" = ") {
-            let rhs = t.split(" = ").last().unwrap_or("").trim_end_matches(';').trim();
-            if rhs.starts_with("lVar") || rhs.starts_with("iVar")
+        // sp[N + M] = 0xADDRESS (return address save from link register)
+        if t.starts_with("sp[") && t.ends_with(';') && t.contains("] = ") {
+            let rhs = t.split("] = ").last().unwrap_or("").trim_end_matches(';').trim();
+            let is_callee_save = rhs.starts_with("lVar") || rhs.starts_with("iVar")
+                || rhs.starts_with("dVar")
                 || rhs == "x29" || rhs == "x30" || rhs == "0"
                 || rhs.starts_with("x1") || rhs.starts_with("x2")
-            { return false; }
-        }
-        // sp[N + M] = xNN patterns (compound offset callee-saved saves)
-        if t.starts_with("sp[") && t.ends_with(';') && t.contains(" + ") && t.contains("] = ") {
-            let rhs = t.split("] = ").last().unwrap_or("").trim_end_matches(';').trim();
-            if rhs == "x30" || rhs == "x29" || rhs.starts_with("lVar")
-                || rhs.starts_with("x1") || rhs.starts_with("x2") || rhs == "0"
-            { return false; }
+                || rhs.starts_with("x8") || rhs.starts_with("x9")
+                || rhs.starts_with("param_")
+                // Return address constants (link register saves)
+                || rhs.starts_with("0x");
+            if is_callee_save { return false; }
         }
         if t.starts_with("*(uint64_t*)(sp)") && t.ends_with(';')
             && (t.contains("= x") || t.contains("= lVar") || t.contains("= 0"))
