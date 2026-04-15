@@ -7712,6 +7712,7 @@ fn inferred_type_to_c(ty: crate::ir::InferredType, size: u32) -> &'static str {
     match (ty, size) {
         (InferredType::Float, 4) => "float",
         (InferredType::Float, 8) => "double",
+        (InferredType::Float, _) => "float", // XMM registers may be 16 bytes; default to float
         (InferredType::Signed, 1) => "char",
         (InferredType::Signed, 4) => "int",
         (InferredType::Signed, 8) => "long",

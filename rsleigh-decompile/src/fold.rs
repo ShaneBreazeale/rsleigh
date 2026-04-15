@@ -21,14 +21,28 @@ const SYSV_ARG_REGS: &[u64] = &[56, 48, 16, 8, 128, 136]; // RDI, RSI, RDX, RCX,
 /// Windows x64 ABI argument register offsets.
 const WIN64_ARG_REGS: &[u64] = &[8, 16, 128, 136]; // RCX, RDX, R8, R9
 
+/// x86-64 SysV ABI float argument register offsets (XMM0-XMM7).
+const SYSV_FLOAT_ARG_REGS: &[u64] = &[4608, 4672, 4736, 4800, 4864, 4928, 4992, 5056];
+
+/// Windows x64 ABI float argument register offsets (XMM0-XMM3).
+const WIN64_FLOAT_ARG_REGS: &[u64] = &[4608, 4672, 4736, 4800];
+
 // Active argument register offsets — set by fold_with_cc() based on binary format.
 // Uses thread_local to avoid unsafe static mut.
 std::thread_local! {
     static ARG_REG_OFFSETS_TLS: std::cell::RefCell<&'static [u64]> = const { std::cell::RefCell::new(SYSV_ARG_REGS) };
 }
 
+std::thread_local! {
+    static FLOAT_ARG_REG_OFFSETS_TLS: std::cell::RefCell<&'static [u64]> = const { std::cell::RefCell::new(SYSV_FLOAT_ARG_REGS) };
+}
+
 fn arg_reg_offsets() -> &'static [u64] {
     ARG_REG_OFFSETS_TLS.with(|r| *r.borrow())
+}
+
+fn float_arg_reg_offsets() -> &'static [u64] {
+    FLOAT_ARG_REG_OFFSETS_TLS.with(|r| *r.borrow())
 }
 
 /// Calling convention detected from binary format.
@@ -51,6 +65,13 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
         *r.borrow_mut() = match cc {
             CallingConv::SysV => SYSV_ARG_REGS,
             CallingConv::Win64 => WIN64_ARG_REGS,
+            CallingConv::Cdecl32 => &[],
+        };
+    });
+    FLOAT_ARG_REG_OFFSETS_TLS.with(|r| {
+        *r.borrow_mut() = match cc {
+            CallingConv::SysV => SYSV_FLOAT_ARG_REGS,
+            CallingConv::Win64 => WIN64_FLOAT_ARG_REGS,
             CallingConv::Cdecl32 => &[],
         };
     });
@@ -2052,12 +2073,56 @@ fn detect_return_values(ssa: &mut SsaCfg) {
             }
         }
 
+        // Strategy 5: Float return — check XMM0 for functions with float ops.
+        if found.is_none() {
+            let has_float_ops = ssa.vars.iter().any(|v| matches!(&v.expr,
+                Expr::BinOp(BinOpKind::FloatAdd | BinOpKind::FloatSub
+                    | BinOpKind::FloatMult | BinOpKind::FloatDiv, _, _)
+                | Expr::UnaryOp(UnaryOpKind::FloatNeg | UnaryOpKind::FloatAbs
+                    | UnaryOpKind::FloatSqrt | UnaryOpKind::Int2Float
+                    | UnaryOpKind::Float2Float, _)
+            ));
+            if has_float_ops {
+                const XMM0_OFFSET: u64 = 4608;
+                found = find_float_ret_in_block(&ssa.blocks[bi].stmts, &ssa.vars, XMM0_OFFSET);
+                if found.is_none() {
+                    for pred_bi in 0..ssa.blocks.len() {
+                        if pred_bi == bi { continue; }
+                        let flows_to_bi = match &ssa.blocks[pred_bi].terminator {
+                            SsaTerminator::Fallthrough(b) | SsaTerminator::Branch(b) => b.0 == bi,
+                            SsaTerminator::CBranch { taken, fallthrough, .. } => taken.0 == bi || fallthrough.0 == bi,
+                            SsaTerminator::Call { fallthrough, .. } => fallthrough.0 == bi,
+                            _ => false,
+                        };
+                        if !flows_to_bi { continue; }
+                        found = find_float_ret_in_block(&ssa.blocks[pred_bi].stmts, &ssa.vars, XMM0_OFFSET);
+                        if found.is_some() { break; }
+                    }
+                }
+            }
+        }
+
         if let Some(var_id) = found {
             if let SsaTerminator::Return(ref mut ret_val) = ssa.blocks[bi].terminator {
                 *ret_val = Some(var_id);
             }
         }
     }
+}
+
+/// Search a block's statements backwards for an assignment to a float return register.
+fn find_float_ret_in_block(stmts: &[Stmt], vars: &[VarDef], float_ret_offset: u64) -> Option<VarId> {
+    for stmt in stmts.iter().rev() {
+        if let Stmt::Assign(var_id) = stmt {
+            let vdef = &vars[var_id.0 as usize];
+            if vdef.varnode.space == AddressSpaceId::Register
+                && vdef.varnode.offset == float_ret_offset
+            {
+                return Some(*var_id);
+            }
+        }
+    }
+    None
 }
 
 /// Search a block's statements backwards for an assignment to the return register.
@@ -2183,6 +2248,30 @@ fn collect_reg_args_from_block(stmts: &[Stmt], vars: &[VarDef], up_to: usize) ->
         }
         if matches!(&stmts[j], Stmt::Call { .. }) { break; }
     }
+
+    // Also collect float arguments from XMM registers
+    let float_offsets = float_arg_reg_offsets();
+    if !float_offsets.is_empty() {
+        let mut float_args: Vec<(u64, VarId)> = Vec::new();
+        for j in (0..up_to).rev() {
+            if let Stmt::Assign(var_id) = &stmts[j] {
+                let vdef = safe_var(vars, *var_id);
+                if vdef.varnode.space == AddressSpaceId::Register
+                    && float_offsets.contains(&vdef.varnode.offset)
+                {
+                    if !float_args.iter().any(|(off, _)| *off == vdef.varnode.offset) {
+                        float_args.push((vdef.varnode.offset, *var_id));
+                    }
+                }
+            }
+            if matches!(&stmts[j], Stmt::Call { .. }) { break; }
+        }
+        float_args.sort_by_key(|(off, _)| {
+            float_offsets.iter().position(|o| o == off).unwrap_or(99)
+        });
+        args.extend(float_args);
+    }
+
     args.sort_by_key(|(off, _)| {
         arg_reg_offsets().iter().position(|o| o == off).unwrap_or(99)
     });
@@ -3041,6 +3130,56 @@ fn name_parameters(ssa: &mut SsaCfg) {
                 {
                     ssa.vars[v].param_name = Some("this".to_string());
                     break;
+                }
+            }
+        }
+    }
+
+    // Pass 5: Float parameters from XMM registers (x86-64 SysV / Win64).
+    let float_offsets = float_arg_reg_offsets();
+    if !float_offsets.is_empty() {
+        let mut fparam_idx = 0u32;
+        let mut fnamed_offsets = std::collections::HashSet::new();
+
+        // Scan entry block for XMM register vars with Unknown expr
+        let stmts: Vec<Stmt> = ssa.blocks[entry].stmts.clone();
+        for stmt in &stmts {
+            if let Stmt::Assign(var_id) = stmt {
+                let idx = var_id.0 as usize;
+                let is_float_param = {
+                    let vdef = &ssa.vars[idx];
+                    matches!(&vdef.expr, Expr::Unknown)
+                        && vdef.varnode.space == AddressSpaceId::Register
+                        && float_offsets.contains(&vdef.varnode.offset)
+                        && !fnamed_offsets.contains(&vdef.varnode.offset)
+                };
+                if is_float_param {
+                    let offset = ssa.vars[idx].varnode.offset;
+                    ssa.vars[idx].param_name = Some(format!("fparam_{}", fparam_idx));
+                    ssa.vars[idx].inferred_type = InferredType::Float;
+                    fnamed_offsets.insert(offset);
+                    fparam_idx += 1;
+                }
+            }
+        }
+
+        // Fallback: scan all vars for XMM reads with no prior def (optimized code)
+        if fparam_idx == 0 {
+            for &offset in float_offsets.iter() {
+                for v in 0..ssa.vars.len() {
+                    let vdef = &ssa.vars[v];
+                    if vdef.varnode.space == AddressSpaceId::Register
+                        && vdef.varnode.offset == offset
+                        && vdef.param_name.is_none()
+                    {
+                        if matches!(&vdef.expr, Expr::Unknown | Expr::Phi(_)) {
+                            ssa.vars[v].param_name = Some(format!("fparam_{}", fparam_idx));
+                            ssa.vars[v].inferred_type = InferredType::Float;
+                            fnamed_offsets.insert(offset);
+                            fparam_idx += 1;
+                            break;
+                        }
+                    }
                 }
             }
         }
