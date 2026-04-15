@@ -415,6 +415,11 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
                                     let is_readonly = slot_store_blocks.get(&key)
                                         .map_or(false, |blocks| blocks.iter().all(|b| *b == 0));
                                     if is_phi || is_local || is_readonly {
+                                        // If the stored VarId has a param_name but its expression
+                                        // was contaminated by SSA convergence (Const/Phi instead of
+                                        // Unknown), the param's original value is lost. In that case,
+                                        // keep the Load as-is — the printer will handle it.
+                                        // Only forward if the expression is still usable.
                                         ssa.vars[var_id.0 as usize].expr = Expr::Var(stored_var);
                                     }
                                 }
