@@ -341,7 +341,7 @@ fn resolve_callind_target(ops: &[(u64, PcodeOp)], dest: &pcode_ir::Varnode, func
 /// Resolve a GP-relative address for MIPS PIC calls.
 /// Scans backwards for IntAdd(GP_reg, const_offset) that produced the given Unique varnode,
 /// then traces GP to find its constant value from the function prologue.
-fn resolve_gp_relative_addr(ops: &[(u64, PcodeOp)], ptr: &pcode_ir::Varnode, _func_addr: u64, all_ops: &[(u64, PcodeOp)]) -> Option<u64> {
+fn resolve_gp_relative_addr(ops: &[(u64, PcodeOp)], ptr: &pcode_ir::Varnode, func_addr: u64, all_ops: &[(u64, PcodeOp)]) -> Option<u64> {
     // Find the IntAdd that produced this Unique varnode
     for (_addr, op) in ops.iter().rev() {
         if let PcodeOp::IntAdd { out, left, right } = op {
@@ -355,9 +355,11 @@ fn resolve_gp_relative_addr(ops: &[(u64, PcodeOp)], ptr: &pcode_ir::Varnode, _fu
                     return None;
                 };
 
-                // The register should be GP — trace its value
+                // The register should be GP — trace its value.
+                // Try all_ops first (function-wide GP setup from prologue).
+                // GP is function-invariant in MIPS PIC: set once, restored after calls.
                 if reg.space == AddressSpaceId::Register {
-                    if let Some(gp_val) = trace_register_value(all_ops, reg, _func_addr) {
+                    if let Some(gp_val) = trace_register_value(all_ops, reg, func_addr) {
                         // Handle negative offsets (sign-extend 32-bit)
                         let got_addr = if offset > 0x7FFFFFFF {
                             gp_val.wrapping_add(offset as u64 | 0xFFFFFFFF00000000)
@@ -459,6 +461,27 @@ fn trace_register_value(ops: &[(u64, PcodeOp)], reg: &pcode_ir::Varnode, func_ad
                         }
                     }
                 }
+            }
+            // GP register restores: in MIPS PIC, lw gp, N(sp) restores the prologue
+            // GP value after a call. The P-code chain is Load→IntSext→GP.
+            // Don't clear tracking — GP is function-invariant.
+            PcodeOp::Load { out, .. }
+                if out.offset == reg.offset && out.space == reg.space
+                    && reg.offset == 112 =>
+            {
+                // GP restore from stack — keep the prologue value
+            }
+            PcodeOp::IntSext { out, .. }
+                if out.offset == reg.offset && out.space == reg.space
+                    && reg.offset == 112 =>
+            {
+                // GP restore via sign extension — keep the prologue value
+            }
+            PcodeOp::Copy { out, .. }
+                if out.offset == reg.offset && out.space == reg.space
+                    && reg.offset == 112 =>
+            {
+                // GP copy — keep the prologue value
             }
             // Any other write to this register clears our tracking
             _ => {
