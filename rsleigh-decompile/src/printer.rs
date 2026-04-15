@@ -1441,6 +1441,24 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         if t.starts_with("swift_bridgeObjectRelease(") && t.ends_with(");") { return false; }
         if t.starts_with("swift_unknownObjectRetain(") && t.ends_with(");") { return false; }
         if t.starts_with("swift_unknownObjectRelease(") && t.ends_with(");") { return false; }
+        // Swift runtime housekeeping (access control, allocation, type checks)
+        if t.starts_with("swift_beginAccess(") && t.ends_with(");") { return false; }
+        if t.starts_with("swift_endAccess(") && t.ends_with(");") { return false; }
+        if t.starts_with("swift_allocObject(") && t.ends_with(");") { return false; }
+        if t.starts_with("swift_isUniquelyReferenced") && t.ends_with(");") { return false; }
+        if t.starts_with("objc_opt_self(") && t.ends_with(");") { return false; }
+        // Dead trap code: pc = ?; from incomplete OV block removal
+        if t == "pc = ?;" || t.starts_with("goto label_") { return false; }
+        // AArch64 flag register leaks: CY (carry), ZR (zero) are internal CPSR flags
+        // that should have been folded into comparison expressions
+        if (t.contains("CY") || t.contains("ZR") || t.contains("NG") || t.contains("OV"))
+            && !t.contains("func_") && !t.contains("printf") && !t.contains("strlen")
+            && t.ends_with(';') && !t.starts_with("if ") && !t.starts_with("while ")
+            && !t.starts_with("return ") && !t.starts_with("//")
+        {
+            // Assignments to/from flag registers are internal noise
+            return false;
+        }
         // x30 = address (link register setup for calls — noise)
         if t.starts_with("x30 = 0x") && t.ends_with(';') { return false; }
         if t.starts_with("x30 = ") && t.contains(" + ") && t.ends_with(';') && !t.contains("func_") { return false; }
@@ -6103,6 +6121,50 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // #SWIFT_DEMANGLE: Demangle Swift mangled names ($s..., $ss...) in the output.
+    {
+        let all_text = lines.join("\n");
+        let mut replacements: Vec<(String, String)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        // Find $s... and $S... patterns (Swift mangled symbols)
+        let mut pos = 0;
+        let bytes = all_text.as_bytes();
+        while pos < bytes.len() {
+            if bytes[pos] == b'$' && pos + 1 < bytes.len()
+                && (bytes[pos + 1] == b's' || bytes[pos + 1] == b'S')
+            {
+                let start = pos;
+                let mut end = pos + 2;
+                while end < bytes.len() {
+                    let b = bytes[end];
+                    if b.is_ascii_alphanumeric() || b == b'_' { end += 1; } else { break; }
+                }
+                let mangled = &all_text[start..end];
+                if mangled.len() > 4 && !seen.contains(mangled) {
+                    seen.insert(mangled.to_string());
+                    if let Some(demangled) = crate::imports::demangle_swift_for_output(mangled) {
+                        if demangled != mangled && demangled.len() < mangled.len() {
+                            replacements.push((mangled.to_string(), demangled));
+                        }
+                    }
+                }
+                pos = end;
+            } else {
+                pos += 1;
+            }
+        }
+
+        replacements.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        for (mangled, demangled) in &replacements {
+            for line in &mut lines {
+                if line.contains(mangled.as_str()) {
+                    *line = line.replace(mangled.as_str(), &demangled);
+                }
+            }
+        }
+    }
+
     // #CPP_WRAPPER: Detect and inline C++ stream operator wrappers.
     // Pattern: func_XXX(cout, "string") → cout << "string"
     //          func_XXX(cout) → cout << endl
@@ -7466,13 +7528,27 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // Fix "x-N" artifacts: these are "x0 - N" where x0 was rendered as "x"
             // (sub-register naming artifact). Replace with "param_0 - N".
             for line in &mut lines {
-                // Match patterns like "= x-N;" or "= x-N " or "(x-N)"
                 let patterns = ["x-1", "x-2", "x-3", "x-4"];
                 for pat in &patterns {
                     if line.contains(pat) {
                         let replacement = format!("param_0 - {}", &pat[2..]);
                         *line = line.replace(pat, &replacement);
                     }
+                }
+            }
+
+            // Fix "param_-N" artifacts: negative param offsets from stack-relative
+            // address computation. Replace with "sp - N" or remove.
+            for line in &mut lines {
+                if line.contains("param_-") {
+                    // Replace param_-N with (sp - N) in expressions
+                    let mut new = line.clone();
+                    for n in (1..=256).rev() {
+                        let pat = format!("param_-{}", n);
+                        let rep = format!("(sp - {})", n);
+                        new = new.replace(&pat, &rep);
+                    }
+                    *line = new;
                 }
             }
         }

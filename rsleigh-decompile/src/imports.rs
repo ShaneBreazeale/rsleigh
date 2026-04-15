@@ -86,11 +86,31 @@ fn demangle_name(name: &str) -> String {
 ///
 /// Types: S = String, Si = Int, Sb = Bool, Sd = Double, SS = String (again)
 ///        S2i = (Int, Int), Say = Array
+/// Public wrapper for Swift demangling, used by the printer's text-level demangling pass.
+pub fn demangle_swift_for_output(name: &str) -> Option<String> {
+    let swift_name = name.strip_prefix('_').unwrap_or(name);
+    if swift_name.starts_with("$s") || swift_name.starts_with("$S") {
+        demangle_swift(swift_name)
+    } else {
+        None
+    }
+}
+
 fn demangle_swift(name: &str) -> Option<String> {
     let s = name.strip_prefix("$s").or_else(|| name.strip_prefix("$S"))?;
 
-    // Parse module name: <length><name>
-    let (module, rest) = parse_swift_identifier(s)?;
+    // Parse module name: <length><name> or single-char abbreviation (s = Swift stdlib)
+    // Also handle $sSS (type abbreviation without explicit module)
+    let (module, rest) = if s.starts_with('s') && !s.as_bytes().get(0).map_or(false, |b| b.is_ascii_digit()) {
+        // $ss... → module = "s" (Swift stdlib), rest starts after the 's'
+        ("s", &s[1..])
+    } else if s.starts_with("SS") || s.starts_with("Si") || s.starts_with("Sb")
+        || s.starts_with("Sd") || s.starts_with("Sa") || s.starts_with("SD") {
+        // $sSS... → top-level type abbreviation (implicit stdlib module)
+        ("s", s)
+    } else {
+        parse_swift_identifier(s)?
+    };
 
     // Parse entity name and suffix
     // Common patterns:
@@ -167,9 +187,47 @@ fn demangle_swift(name: &str) -> Option<String> {
 
     // stdlib: $ss prefix (Swift standard library)
     if module == "s" {
-        if let Some((entity, _)) = parse_swift_identifier(rest) {
-            return Some(format!("Swift.{}", entity));
+        // Handle Swift type abbreviations: SS=String, Si=Int, Sb=Bool, etc.
+        // When module is 's' (stdlib), single S followed by digit means String method.
+        let (type_name, after_type) = if rest.starts_with("SS") {
+            ("String", &rest[2..])
+        } else if rest.starts_with("S") && rest.len() > 1 && rest.as_bytes()[1].is_ascii_digit() {
+            ("String", &rest[1..])
+        } else if rest.starts_with("Si") {
+            ("Int", &rest[2..])
+        } else if rest.starts_with("Sb") {
+            ("Bool", &rest[2..])
+        } else if rest.starts_with("Sd") {
+            ("Double", &rest[2..])
+        } else if rest.starts_with("Sf") {
+            ("Float", &rest[2..])
+        } else if rest.starts_with("Sa") {
+            ("Array", &rest[2..])
+        } else if rest.starts_with("SD") {
+            ("Dictionary", &rest[2..])
+        } else if let Some((name, after)) = parse_swift_identifier(rest) {
+            (name, after)
+        } else {
+            return None;
+        };
+
+        // Parse method/property after the type
+        if let Some((method, after_method)) = parse_swift_identifier(after_type) {
+            if after_method.contains("vg") { return Some(format!("{}.{}.getter", type_name, method)); }
+            if after_method.contains("vs") { return Some(format!("{}.{}.setter", type_name, method)); }
+            if after_method.contains("vM") { return Some(format!("{}.{}.modify", type_name, method)); }
+            if after_method.contains("Tj") { return Some(format!("{}.{}", type_name, method)); }
+            return Some(format!("{}.{}", type_name, method));
         }
+
+        // Protocol: $ss...P... (Protocol requirement)
+        if after_type.starts_with("P") {
+            if let Some((method, _)) = parse_swift_identifier(&after_type[1..]) {
+                return Some(format!("{}.{}", type_name, method));
+            }
+        }
+
+        return Some(type_name.to_string());
     }
 
     None
