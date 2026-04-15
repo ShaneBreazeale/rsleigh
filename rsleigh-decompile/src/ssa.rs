@@ -15,9 +15,39 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
     // Per-block: map from varnode -> VarId at block exit
     let mut block_exit_vars: Vec<HashMap<Varnode, VarId>> = vec![HashMap::new(); cfg.blocks.len()];
 
-    // Function-wide read-only stack slots: written once in the prologue (entry block),
-    // never overwritten. Safe to propagate to any block. Populated after first iteration.
-    let mut readonly_stack: HashMap<i64, VarId> = HashMap::new();
+    // Per-block: stack slot values at block exit.
+    // Used for cross-block readonly propagation (prologue values).
+    let mut block_exit_stack: Vec<HashMap<i64, VarId>> = vec![HashMap::new(); cfg.blocks.len()];
+
+    // Track which stack offsets are written in non-entry blocks (not read-only).
+    let mut stack_written_in_blocks: HashMap<i64, Vec<usize>> = HashMap::new();
+    for (bi, blk) in cfg.blocks.iter().enumerate() {
+        for (_addr, op) in &blk.ops {
+            if let PcodeOp::Store { ptr, .. } = op {
+                if ptr.space == AddressSpaceId::Unique {
+                    for (_a2, op2) in &blk.ops {
+                        if let PcodeOp::IntAdd { out, left, right } = op2 {
+                            if out.space == ptr.space && out.offset == ptr.offset {
+                                let frame_offsets = [40u64, 29, 32, 256, 112];
+                                let is_frame = (left.space == AddressSpaceId::Register
+                                    && frame_offsets.contains(&left.offset))
+                                    || (right.space == AddressSpaceId::Register
+                                        && frame_offsets.contains(&right.offset));
+                                if is_frame {
+                                    let offset = if right.space == AddressSpaceId::Const {
+                                        right.offset as i64
+                                    } else if left.space == AddressSpaceId::Const {
+                                        left.offset as i64
+                                    } else { continue };
+                                    stack_written_in_blocks.entry(offset).or_default().push(bi);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Iterative dataflow: re-process blocks until exit vars stabilize (max 4 passes)
     for iteration in 0..4u32 {
@@ -50,10 +80,22 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
             }
 
             let mut current: HashMap<Varnode, VarId> = HashMap::new();
-            // Stack slot tracking: maps stack offset (relative to frame base) to VarId.
-            // Start with function-wide read-only prologue values (params, GP, callee-saved).
-            // Intra-block stores/loads add to this within the current block.
-            let mut stack_slots: HashMap<i64, VarId> = readonly_stack.clone();
+            // Stack slot tracking: start with entry block readonly values.
+            // Only propagate slots written exclusively in the entry block.
+            // Slots written in multiple blocks (loop variables) are NOT propagated —
+            // they need proper memory SSA with Phi nodes (future work).
+            let mut stack_slots: HashMap<i64, VarId> = HashMap::new();
+            if !block_exit_stack[0].is_empty() {
+                for (&offset, &var_id) in &block_exit_stack[0] {
+                    // Only propagate if this slot is NOT written in any non-entry block
+                    let blocks_written = stack_written_in_blocks.get(&offset);
+                    let only_entry = blocks_written.map_or(true, |blocks|
+                        blocks.iter().all(|b| *b == 0));
+                    if only_entry {
+                        stack_slots.insert(offset, var_id);
+                    }
+                }
+            }
 
             // Inherit from the first already-processed FORWARD predecessor.
             // A forward predecessor has a lower block ID (comes before in CFG order).
@@ -181,59 +223,11 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
 
             let terminator = convert_terminator(&mut ssa, &mut current, &block.terminator);
 
-            if block_exit_vars[block.id.0] != current {
+            if block_exit_vars[block.id.0] != current || block_exit_stack[block.id.0] != stack_slots {
                 changed = true;
             }
             block_exit_vars[block.id.0] = current;
-
-            // After entry block (iteration 0): capture prologue stack slots as read-only.
-            // Only keep slots that are NOT written in any other block (truly read-only).
-            if iteration == 0 && block.id.0 == 0 && readonly_stack.is_empty() {
-                // Collect all stack offsets written in non-entry blocks
-                let mut written_in_other_blocks: std::collections::HashSet<i64> = std::collections::HashSet::new();
-                for (bi, blk) in cfg.blocks.iter().enumerate() {
-                    if bi == 0 { continue; }
-                    for (_addr, op) in &blk.ops {
-                        if let PcodeOp::Store { ptr, .. } = op {
-                            // Check if the Store targets the same frame base register
-                            // by looking for IntAdd(frame_reg, const) pattern in the raw P-code
-                            // The ptr is a Unique that was produced by IntAdd
-                            // We need to scan the same instruction's ops for the IntAdd
-                            // This is approximate — we check if any Store in this block
-                            // writes to a stack-like address by checking nearby IntAdd ops
-                            if ptr.space == AddressSpaceId::Unique {
-                                // Find the IntAdd that produced this Unique in the same block
-                                for (_a2, op2) in &blk.ops {
-                                    if let PcodeOp::IntAdd { out, left, right } = op2 {
-                                        if out.space == ptr.space && out.offset == ptr.offset {
-                                            // Check if one operand is a frame register
-                                            let frame_offsets = [40u64, 29, 32, 256, 112]; // RBP, x29, RSP, SP, GP
-                                            let is_frame = (left.space == AddressSpaceId::Register
-                                                && frame_offsets.contains(&left.offset))
-                                                || (right.space == AddressSpaceId::Register
-                                                    && frame_offsets.contains(&right.offset));
-                                            if is_frame {
-                                                let offset = if right.space == AddressSpaceId::Const {
-                                                    right.offset as i64
-                                                } else if left.space == AddressSpaceId::Const {
-                                                    left.offset as i64
-                                                } else { continue };
-                                                written_in_other_blocks.insert(offset);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                // Only keep prologue slots that are never written elsewhere
-                for (offset, var_id) in &stack_slots {
-                    if !written_in_other_blocks.contains(offset) {
-                        readonly_stack.insert(*offset, *var_id);
-                    }
-                }
-            }
+            block_exit_stack[block.id.0] = stack_slots;
 
             // On first iteration, push new blocks; on subsequent iterations, replace
             if iteration == 0 {
