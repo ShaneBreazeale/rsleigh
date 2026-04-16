@@ -1561,6 +1561,113 @@ fn recover_conditions(ssa: &mut SsaCfg) {
             }
         }
     }
+
+    // Pass 3: Recover CSETM/CSET algebraic flag patterns.
+    // CSETM: Mult(Zext(flag_cond), Neg(1)) or equivalent → Ternary(cond, -1, 0)
+    // CSET:  Zext(flag_cond) → Ternary(cond, 1, 0)
+    // These are AArch64 conditional-set instructions that compute flag conditions
+    // algebraically instead of using intra-instruction CBranch.
+    let mut cset_recoveries: Vec<(usize, VarId, i64, i64, usize)> = Vec::new();
+
+    for (bi, block) in ssa.blocks.iter().enumerate() {
+        for stmt in &block.stmts {
+            if let Stmt::Assign(vid) = stmt {
+                let vi = vid.0 as usize;
+                if let Some((cond_id, then_val, else_val)) = extract_cset_pattern(vi, ssa) {
+                    if is_flag_derived(cond_id, ssa) {
+                        cset_recoveries.push((vi, cond_id, then_val, else_val, bi));
+                    }
+                }
+            }
+        }
+    }
+
+    for (vi, cond_id, then_val, else_val, block_idx) in cset_recoveries {
+        let recovered = try_recover_condition(cond_id, block_idx, ssa);
+        let final_cond = recovered.unwrap_or(cond_id);
+
+        let size = ssa.vars[vi].size;
+        let then_var = ssa.new_var(
+            pcode_ir::Varnode::constant(then_val as u64, size),
+            Expr::Const(then_val as u64, size),
+            size,
+        );
+        let else_var = ssa.new_var(
+            pcode_ir::Varnode::constant(else_val as u64, size),
+            Expr::Const(else_val as u64, size),
+            size,
+        );
+        ssa.vars[vi].expr = Expr::Ternary(final_cond, then_var, else_var);
+    }
+}
+
+/// Extract CSETM/CSET algebraic flag patterns from an expression.
+/// Returns (flag_condition_id, then_value, else_value) if the pattern matches.
+///
+/// CSETM pattern: `Zext(Mult(Zext(flag_cond), Neg(1)))` or without outer Zext
+///   When flag_cond is true:  zext(1) * -1 = -1 (0xFFFFFFFF)
+///   When flag_cond is false: zext(0) * -1 = 0
+///   Result: (flag_cond, -1, 0)
+///
+/// CSET pattern: `Zext(Zext(flag_cond))` or bare `Zext(flag_cond)` where flag_cond is flag-derived
+///   Result: (flag_cond, 1, 0)
+fn extract_cset_pattern(var_idx: usize, ssa: &SsaCfg) -> Option<(VarId, i64, i64)> {
+    let vdef = &ssa.vars[var_idx];
+
+    // Peel off an outer Zext (32→64 bit extension)
+    let inner_idx = if let Expr::UnaryOp(UnaryOpKind::Zext, inner) = &vdef.expr {
+        inner.0 as usize
+    } else {
+        var_idx
+    };
+
+    let inner_def = &ssa.vars[inner_idx];
+
+    // CSETM: Mult(Zext(flag_cond), Neg(1)) or Mult(Neg(1), Zext(flag_cond))
+    // Also: Mult(Zext(flag_cond), Const(0xFFFF...)) where the const is -1 for the size
+    if let Expr::BinOp(BinOpKind::Mult, left, right) = &inner_def.expr {
+        // Try both orderings: Mult(Zext(cond), neg) or Mult(neg, Zext(cond))
+        for (zext_side, neg_side) in [(*left, *right), (*right, *left)] {
+            let zext_def = &ssa.vars[zext_side.0 as usize];
+            let neg_def = &ssa.vars[neg_side.0 as usize];
+
+            // Check if neg_side is -1: either Neg(Const(1)) or Const(mask) where mask is all-1s
+            let is_neg_one = match &neg_def.expr {
+                Expr::UnaryOp(UnaryOpKind::Neg, c) => {
+                    matches!(&ssa.vars[c.0 as usize].expr, Expr::Const(1, _))
+                }
+                Expr::Const(val, sz) => {
+                    let mask = if *sz >= 8 { u64::MAX } else { (1u64 << (sz * 8)) - 1 };
+                    *val == mask
+                }
+                _ => false,
+            };
+
+            if !is_neg_one { continue; }
+
+            // Check if zext_side is Zext(flag_cond)
+            if let Expr::UnaryOp(UnaryOpKind::Zext, cond_id) = &zext_def.expr {
+                return Some((*cond_id, -1, 0));
+            }
+        }
+    }
+
+    // CSET: Zext(flag_cond) where the inner is flag-derived and boolean-sized
+    // We already peeled the outer Zext above, so inner_def might itself be Zext(cond)
+    if inner_idx != var_idx {
+        if let Expr::UnaryOp(UnaryOpKind::Zext, cond_id) = &inner_def.expr {
+            // This is Zext(Zext(cond)) — double extension of a boolean flag condition
+            if is_flag_derived(*cond_id, ssa) {
+                return Some((*cond_id, 1, 0));
+            }
+        }
+        // Also check if inner_def itself is directly flag-derived (single Zext)
+        if is_flag_derived(VarId(inner_idx as u32), ssa) && inner_def.size <= 1 {
+            return Some((VarId(inner_idx as u32), 1, 0));
+        }
+    }
+
+    None
 }
 
 /// Check if a VarId's expression tree references any flag registers.
