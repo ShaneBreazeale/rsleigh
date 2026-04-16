@@ -3123,6 +3123,10 @@ fn propagate_call_returns(ssa: &mut SsaCfg) {
                     for stmt in &ssa.blocks[ft.0].stmts {
                         if let Stmt::Assign(var_id) = stmt {
                             let vdef = &ssa.vars[var_id.0 as usize];
+                            // Skip if already marked call_return by SSA-level clobber
+                            if vdef.call_return {
+                                break;
+                            }
                             if vdef.varnode.space == AddressSpaceId::Register
                                 && (vdef.varnode.offset == RAX_OFFSET)
                                 && matches!(&vdef.expr, Expr::Unknown)
@@ -3147,6 +3151,11 @@ fn propagate_call_returns(ssa: &mut SsaCfg) {
             if after_call {
                 if let Stmt::Assign(var_id) = &stmts[i] {
                     let vdef = &ssa.vars[var_id.0 as usize];
+                    // Skip if already marked call_return by SSA-level clobber
+                    if vdef.call_return {
+                        after_call = false;
+                        continue;
+                    }
                     if vdef.varnode.space == AddressSpaceId::Register
                         && vdef.varnode.offset == RAX_OFFSET
                     {
