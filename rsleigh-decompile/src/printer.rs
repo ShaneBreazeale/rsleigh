@@ -1450,13 +1450,14 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // Dead trap code: pc = ?; from incomplete OV block removal
         if t == "pc = ?;" || t.starts_with("goto label_") { return false; }
         // AArch64 flag register leaks: CY (carry), ZR (zero) are internal CPSR flags
-        // that should have been folded into comparison expressions
-        if (t.contains("CY") || t.contains("ZR") || t.contains("NG") || t.contains("OV"))
-            && !t.contains("func_") && !t.contains("printf") && !t.contains("strlen")
-            && t.ends_with(';') && !t.starts_with("if ") && !t.starts_with("while ")
-            && !t.starts_with("return ") && !t.starts_with("//")
+        // that should have been folded into comparison expressions.
+        // Only strip lines where a flag register IS the assignment target (e.g., "NG = ...").
+        // Don't strip lines where flags appear inside expressions assigned to named vars
+        // (e.g., "lVar1 = (NG != OV) * -1" — this is a CSETM result we need to keep).
+        if (t.starts_with("CY") || t.starts_with("ZR") || t.starts_with("NG") || t.starts_with("OV")
+            || t.starts_with("tmpCY") || t.starts_with("tmpZR") || t.starts_with("tmpNG") || t.starts_with("tmpOV"))
+            && t.contains(" = ") && t.ends_with(';')
         {
-            // Assignments to/from flag registers are internal noise
             return false;
         }
         // x30 = address (link register setup for calls — noise)

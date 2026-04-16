@@ -544,6 +544,20 @@ fn resolve_input(ssa: &mut SsaCfg, current: &mut HashMap<Varnode, VarId>, vn: &V
     if let Some(&var_id) = current.get(vn) {
         return var_id;
     }
+    // Sub-register aliasing: if reading w8(offset=X, size=4) and x8(offset=X, size=8)
+    // exists in current, reuse the larger register's VarId directly.
+    // Common on AArch64 where CSETM writes x8 (8-byte) and CSINC reads w8 (4-byte).
+    // The high bytes are zero from IntZext, so using the 8-byte var for 4-byte reads is safe.
+    if vn.space == AddressSpaceId::Register {
+        for (&existing_vn, &existing_var) in current.iter() {
+            if existing_vn.space == AddressSpaceId::Register
+                && existing_vn.offset == vn.offset
+                && existing_vn.size > vn.size
+            {
+                return existing_var;
+            }
+        }
+    }
     // Unknown — function parameter or uninitialized
     let var_id = ssa.new_var(*vn, Expr::Unknown, vn.size);
     current.insert(*vn, var_id);
