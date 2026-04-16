@@ -6,7 +6,7 @@
 #![no_std]
 
 extern crate alloc;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -397,14 +397,53 @@ fn analyze_unique_outputs(ops: &[PcodeOp]) -> Vec<Option<UniqueOutputInfo>> {
     let mut next_access = BTreeMap::<Varnode, NextAccess>::new();
     let mut result = vec![None; ops.len()];
 
+    // Pre-scan: find Unique varnodes that are written on both sides of an
+    // intra-instruction CBranch (Const-space dest). These are conditional-select
+    // patterns (AArch64 CSEL/CSINC/CNEG) where both writes are live because
+    // the branch may skip the second write. For these varnodes, the backward
+    // analysis must not clear future_reads or mark next_access as Write.
+    let mut cbranch_protected = BTreeSet::<Varnode>::new();
+    {
+        // Find CBranch indices
+        let cbranch_indices: Vec<usize> = ops.iter().enumerate()
+            .filter(|(_, op)| matches!(op, PcodeOp::CBranch { dest, .. } if dest.space == AddressSpaceId::Const))
+            .map(|(i, _)| i)
+            .collect();
+        for &cb_idx in &cbranch_indices {
+            // Collect Unique varnodes written before and after this CBranch
+            let mut before = BTreeSet::new();
+            let mut after = BTreeSet::new();
+            for (i, op) in ops.iter().enumerate() {
+                if let Some(out) = get_output(op) {
+                    if out.space == AddressSpaceId::Unique {
+                        if i < cb_idx {
+                            before.insert(out);
+                        } else if i > cb_idx {
+                            after.insert(out);
+                        }
+                    }
+                }
+            }
+            for v in before.intersection(&after) {
+                cbranch_protected.insert(*v);
+            }
+        }
+    }
+
     for (idx, op) in ops.iter().enumerate().rev() {
         if let Some(out) = get_output(op).filter(|out| out.space == AddressSpaceId::Unique) {
-            result[idx] = Some(UniqueOutputInfo {
-                future_reads: future_reads.get(&out).copied().unwrap_or(0),
-                next_access: next_access.get(&out).copied(),
-            });
-            future_reads.remove(&out);
-            next_access.insert(out, NextAccess::Write);
+            if cbranch_protected.contains(&out) {
+                // This varnode is written on both sides of a CBranch — both writes
+                // are potentially live. Return None so no pass touches either write.
+                result[idx] = None;
+            } else {
+                result[idx] = Some(UniqueOutputInfo {
+                    future_reads: future_reads.get(&out).copied().unwrap_or(0),
+                    next_access: next_access.get(&out).copied(),
+                });
+                future_reads.remove(&out);
+                next_access.insert(out, NextAccess::Write);
+            }
         }
 
         visit_reads(op, &mut |v| {
