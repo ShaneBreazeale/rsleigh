@@ -234,9 +234,37 @@ fn emit_region(
                     };
 
                     let mut body = Vec::new();
-                    // For self-loops, the block's statements ARE the loop body
+                    // For self-loops, the block's statements ARE the loop body.
+                    // But Phi nodes should be emitted BEFORE the while (as initialization),
+                    // not inside the body — otherwise the text post-processor folds them
+                    // into the accumulator expression, destroying the loop semantics.
                     if is_self_loop {
-                        emit_block_stmts(block, &mut body);
+                        for stmt in &block.stmts {
+                            if let Stmt::Assign(var_id) = stmt {
+                                if matches!(&ssa.vars[var_id.0 as usize].expr, Expr::Phi(_)) {
+                                    // Emit Phi as initialization before the while
+                                    out.push(StructuredStmt::Assign { lhs: *var_id, rhs: *var_id });
+                                } else {
+                                    // Emit non-Phi stmts inside the while body
+                                    body.push(StructuredStmt::Assign { lhs: *var_id, rhs: *var_id });
+                                }
+                            } else {
+                                // Store/Call — always inside loop body
+                                match stmt {
+                                    Stmt::Store { addr, val } => {
+                                        body.push(StructuredStmt::Store { addr: *addr, val: *val });
+                                    }
+                                    Stmt::Call { target, args, out: call_out } => {
+                                        body.push(StructuredStmt::Call {
+                                            target: target.clone(),
+                                            args: args.clone(),
+                                            out: *call_out,
+                                        });
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
                     }
                     // Mark exit block as emitted to bound the loop body
                     let exit_was_emitted = emitted[exit.0];

@@ -7357,11 +7357,18 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
 
     // Final pass: fold sequential assignments to the same variable.
     // REG = X; REG = Y op REG → REG = Y op X (after all other cleanup)
+    // Skip folding across while/for loop boundaries — the first assignment
+    // may be a loop initializer and the second a loop accumulator.
     {
         let mut i = 0;
         while i + 1 < lines.len() {
             let l1 = lines[i].trim().to_string();
             let l2 = lines[i + 1].trim().to_string();
+            // Don't fold if l2 is inside a while/for body (different indent from l1)
+            // or if there's a loop boundary between them
+            let indent1 = lines[i].len() - lines[i].trim_start().len();
+            let indent2 = lines[i + 1].len() - lines[i + 1].trim_start().len();
+            if indent2 > indent1 { i += 1; continue; }
             if let (Some(eq1), Some(eq2)) = (l1.find(" = "), l2.find(" = ")) {
                 let lhs1 = &l1[..eq1];
                 let rhs1 = l1[eq1 + 3..].trim_end_matches(';');

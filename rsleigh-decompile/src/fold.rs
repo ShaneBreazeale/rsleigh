@@ -1382,33 +1382,13 @@ fn eliminate_dead(ssa: &mut SsaCfg) {
                     let precedes_call = block.stmts.get(i + 1..).map_or(false, |rest|
                         rest.iter().any(|s| matches!(s, Stmt::Call { .. })))
                         || matches!(block.terminator, SsaTerminator::Call { .. });
-                    // Check if this block branches back to an earlier block (loop body)
-                    let is_loop_body = match &block.terminator {
-                        SsaTerminator::CBranch { taken, fallthrough, .. } =>
-                            taken.0 <= block.id.0 || fallthrough.0 <= block.id.0,
-                        SsaTerminator::Branch(b) => b.0 <= block.id.0,
-                        _ => false,
-                    };
-                    // Also check if this block's successor is a loop header
-                    let is_pre_loop = match &block.terminator {
-                        SsaTerminator::Fallthrough(b) | SsaTerminator::Branch(b) =>
-                            b.0 < block.id.0,
-                        _ => false,
-                    };
-                    // Preserve non-flag register writes in loop bodies — they may be
-                    // loop accumulators (count += bit, total += arr[i]) whose use_count
-                    // is 0 due to incomplete phi resolution in the SSA builder.
-                    let preserve_in_loop = (is_loop_body || is_pre_loop)
-                        && vdef.varnode.space == AddressSpaceId::Register
-                        && !FLAG_OFFSETS.contains(&vdef.varnode.offset)
-                        && vdef.varnode.offset != RIP_OFFSET
-                        && vdef.varnode.offset != RSP_OFFSET
-                        && vdef.varnode.offset != ESP_OFFSET;
+                    // With proper Phi re-linking, loop-carried values (accumulators)
+                    // have use_count > 0 from Phi inputs. No special loop body
+                    // preservation needed — standard DCE rules apply.
                     if vdef.varnode.space == AddressSpaceId::Register
                         && !read_after.contains(&key)
                         && vdef.use_count == 0
                         && !(is_arg_reg && precedes_call)
-                        && !preserve_in_loop
                     { dead_indices.push(i); continue; }
 
                     let mut visited = std::collections::HashSet::new();
@@ -2388,6 +2368,22 @@ fn find_float_ret_in_block(stmts: &[Stmt], vars: &[VarDef], float_ret_offset: u6
 
 /// Search a block's statements backwards for an assignment to the return register.
 fn find_ret_reg_in_block(stmts: &[Stmt], vars: &[VarDef], ret_reg_offset: u64) -> Option<VarId> {
+    // First check if there's a Phi for this register — loop-carried values
+    // should return the Phi (the loop variable) rather than the raw last-write.
+    // This ensures post-loop returns reference the accumulator variable.
+    for stmt in stmts {
+        if let Stmt::Assign(var_id) = stmt {
+            let vdef = &vars[var_id.0 as usize];
+            if vdef.varnode.space == AddressSpaceId::Register
+                && vdef.varnode.offset == ret_reg_offset
+                && vdef.varnode.size >= 4
+                && matches!(&vdef.expr, Expr::Phi(_))
+            {
+                return Some(*var_id);
+            }
+        }
+    }
+    // Fallback: scan backwards for any write to this register
     for stmt in stmts.iter().rev() {
         if let Stmt::Assign(var_id) = stmt {
             let vdef = &vars[var_id.0 as usize];

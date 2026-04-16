@@ -57,7 +57,13 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
                         !prev_exit_vars[pred.0].contains_key(k)
                     })
                 });
-                if !any_pred_changed && !any_new_keys {
+                // Self-loop blocks (block is its own predecessor) must be re-processed
+                // on iteration 1 so that early Phi nodes can be created for loop accumulators.
+                // Without this, the skip condition prevents the block from ever seeing its
+                // own back-edge exit vars.
+                let is_self_loop = block_preds.iter().any(|pred| pred.0 == block.id.0);
+                let has_back_edge = block_preds.iter().any(|pred| pred.0 >= block.id.0);
+                if !any_pred_changed && !any_new_keys && !(has_back_edge && iteration == 1) {
                     continue;
                 }
             }
@@ -93,6 +99,9 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
             }
 
             let mut stmts = Vec::new();
+
+            // Note: Phi nodes for loop-carried variables are created in the late Phi
+            // pass (after all iterations) and then re-linked into loop body expressions.
 
             // Group P-code ops by instruction address for correct intra-instruction
             // register handling. x86-64 generates IntZext(EAX→RAX) before address
@@ -318,8 +327,104 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
             phi_stmts.push(Stmt::Assign(phi_var));
         }
 
-        // Prepend phis to block
+        // Prepend phis to block and re-link loop body expressions
         if !phi_stmts.is_empty() {
+            // Build a replacement map: for each Phi, map the forward-predecessor's
+            // VarId to the Phi VarId. This allows re-linking loop body expressions
+            // so they read the Phi output instead of the stale pre-loop value.
+            let mut relink: HashMap<VarId, VarId> = HashMap::new();
+            for stmt in &phi_stmts {
+                if let Stmt::Assign(phi_vid) = stmt {
+                    if let Expr::Phi(inputs) = &ssa.vars[phi_vid.0 as usize].expr {
+                        // The first input is typically the forward-predecessor value.
+                        // Find which inputs come from forward preds (pred.0 < bid).
+                        let phi_vn = ssa.vars[phi_vid.0 as usize].varnode;
+                        for &pred_id in block_preds {
+                            if pred_id.0 < bid {
+                                if let Some(&fwd_var) = block_exit_vars[pred_id.0].get(&phi_vn) {
+                                    relink.insert(fwd_var, *phi_vid);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Also build back-edge relink: map back-edge VarIds to Phi VarIds.
+            // This ensures post-loop blocks reference the Phi (loop variable)
+            // instead of the raw loop body result.
+            let mut back_relink: HashMap<VarId, VarId> = HashMap::new();
+            for stmt in &phi_stmts {
+                if let Stmt::Assign(phi_vid) = stmt {
+                    if let Expr::Phi(inputs) = &ssa.vars[phi_vid.0 as usize].expr {
+                        let phi_vn = ssa.vars[phi_vid.0 as usize].varnode;
+                        for &pred_id in block_preds {
+                            if pred_id.0 >= bid {
+                                if let Some(&back_var) = block_exit_vars[pred_id.0].get(&phi_vn) {
+                                    back_relink.insert(back_var, *phi_vid);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Re-link: replace stale forward-pred references with Phi VarIds
+            // in all expressions within this block.
+            if !relink.is_empty() {
+                let block = &mut ssa.blocks[bid];
+                for stmt in &block.stmts {
+                    if let Stmt::Assign(vid) = stmt {
+                        let vi = vid.0 as usize;
+                        ssa.vars[vi].expr = relink_expr(&ssa.vars[vi].expr, &relink);
+                    }
+                }
+                // Also re-link the terminator condition
+                if let SsaTerminator::CBranch { cond, taken, fallthrough } = &block.terminator {
+                    if let Some(&new_cond) = relink.get(cond) {
+                        let t = *taken;
+                        let f = *fallthrough;
+                        ssa.blocks[bid].terminator = SsaTerminator::CBranch {
+                            cond: new_cond, taken: t, fallthrough: f,
+                        };
+                    }
+                }
+            }
+
+            // Re-link successor blocks: replace back-edge VarIds with Phi VarIds.
+            // This ensures post-loop returns reference the Phi (the loop variable)
+            // instead of the raw ADD result from the last iteration.
+            if !back_relink.is_empty() {
+                // Find successor blocks (exit targets from this loop header)
+                let successors: Vec<usize> = match &ssa.blocks[bid].terminator {
+                    SsaTerminator::CBranch { taken, fallthrough, .. } => {
+                        let mut s = Vec::new();
+                        if taken.0 != bid { s.push(taken.0); }
+                        if fallthrough.0 != bid { s.push(fallthrough.0); }
+                        s
+                    }
+                    SsaTerminator::Fallthrough(b) | SsaTerminator::Branch(b) => {
+                        if b.0 != bid { vec![b.0] } else { vec![] }
+                    }
+                    _ => vec![],
+                };
+                for succ_bid in successors {
+                    if succ_bid >= ssa.blocks.len() { continue; }
+                    for stmt in &ssa.blocks[succ_bid].stmts {
+                        if let Stmt::Assign(vid) = stmt {
+                            let vi = vid.0 as usize;
+                            ssa.vars[vi].expr = relink_expr(&ssa.vars[vi].expr, &back_relink);
+                        }
+                    }
+                    // Re-link return value
+                    if let SsaTerminator::Return(Some(ret_var)) = &ssa.blocks[succ_bid].terminator {
+                        if let Some(&phi_var) = back_relink.get(ret_var) {
+                            ssa.blocks[succ_bid].terminator = SsaTerminator::Return(Some(phi_var));
+                        }
+                    }
+                }
+            }
+
             let block = &mut ssa.blocks[bid];
             let mut new_stmts = phi_stmts;
             new_stmts.append(&mut block.stmts);
@@ -544,17 +649,27 @@ fn resolve_input(ssa: &mut SsaCfg, current: &mut HashMap<Varnode, VarId>, vn: &V
     if let Some(&var_id) = current.get(vn) {
         return var_id;
     }
-    // Sub-register aliasing: if reading w8(offset=X, size=4) and x8(offset=X, size=8)
-    // exists in current, reuse the larger register's VarId directly.
-    // Common on AArch64 where CSETM writes x8 (8-byte) and CSINC reads w8 (4-byte).
-    // The high bytes are zero from IntZext, so using the 8-byte var for 4-byte reads is safe.
+    // Sub-register aliasing at the same offset:
+    // Case 1: Reading smaller (w8) when larger (x8) was written → reuse directly
+    //   Common on AArch64 where CSETM writes x8 and CSINC reads w8.
+    // Case 2: Reading larger (RDX) when smaller (EDX) was written → zero-extend
+    //   Common on x86-64 where 32-bit ops implicitly zero-extend to 64-bit.
     if vn.space == AddressSpaceId::Register {
         for (&existing_vn, &existing_var) in current.iter() {
             if existing_vn.space == AddressSpaceId::Register
                 && existing_vn.offset == vn.offset
-                && existing_vn.size > vn.size
+                && existing_vn.size != vn.size
             {
-                return existing_var;
+                if existing_vn.size > vn.size {
+                    // Case 1: read smaller from larger — reuse directly
+                    return existing_var;
+                } else {
+                    // Case 2: read larger from smaller — zero-extend
+                    let expr = Expr::UnaryOp(UnaryOpKind::Zext, existing_var);
+                    let var_id = ssa.new_var(*vn, expr, vn.size);
+                    current.insert(*vn, var_id);
+                    return var_id;
+                }
             }
         }
     }
@@ -562,6 +677,33 @@ fn resolve_input(ssa: &mut SsaCfg, current: &mut HashMap<Varnode, VarId>, vn: &V
     let var_id = ssa.new_var(*vn, Expr::Unknown, vn.size);
     current.insert(*vn, var_id);
     var_id
+}
+
+/// Replace VarId references in an expression according to a replacement map.
+/// Used to re-link loop body expressions to read from Phi nodes instead of
+/// stale pre-loop values.
+fn relink_expr(expr: &Expr, relink: &HashMap<VarId, VarId>) -> Expr {
+    match expr {
+        Expr::Var(id) => Expr::Var(*relink.get(id).unwrap_or(id)),
+        Expr::BinOp(k, l, r) => {
+            Expr::BinOp(*k, *relink.get(l).unwrap_or(l), *relink.get(r).unwrap_or(r))
+        }
+        Expr::UnaryOp(k, i) => {
+            Expr::UnaryOp(*k, *relink.get(i).unwrap_or(i))
+        }
+        Expr::Load(p) => Expr::Load(*relink.get(p).unwrap_or(p)),
+        Expr::Ternary(c, t, e) => {
+            Expr::Ternary(
+                *relink.get(c).unwrap_or(c),
+                *relink.get(t).unwrap_or(t),
+                *relink.get(e).unwrap_or(e),
+            )
+        }
+        Expr::Phi(inputs) => {
+            Expr::Phi(inputs.iter().map(|i| *relink.get(i).unwrap_or(i)).collect())
+        }
+        _ => expr.clone(),
+    }
 }
 
 /// Frame base register offsets recognized for stack slot tracking.
