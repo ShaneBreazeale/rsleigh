@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use pcode_ir::{PcodeOp, Varnode, AddressSpaceId, get_output};
 use crate::ir::*;
+use crate::fold::CallingConv;
 
 /// Stack slot key: identifies a unique stack memory location.
 /// Keyed by (base register offset, displacement, access size) to prevent
@@ -730,6 +731,75 @@ fn relink_expr(expr: &Expr, relink: &HashMap<VarId, VarId>) -> Expr {
 
 /// Frame base register offsets recognized for stack slot tracking.
 const FRAME_REGS: [u64; 5] = [40, 29, 32, 256, 112]; // RBP, x29, RSP, SP, GP
+
+/// Caller-saved (volatile) integer register offsets per ABI.
+/// These registers must be invalidated in the SSA `current` map after any Call.
+///
+/// x86-64 offsets: RAX=0, RCX=8, RDX=16, RSI=48, RDI=56, R8=128, R9=136, R10=144, R11=152
+/// AArch64: x0=16384 stride 8, x0..x18 are caller-saved
+/// ARM32/x86-32: r0/EAX=0, r1/ECX=8, r2/EDX=16, r3=44(ARM) or nothing extra
+/// MIPS/RISC-V: covered by SysV default as fallback
+const WIN64_CALLER_SAVED: &[u64] = &[
+    0,   // RAX
+    8,   // RCX
+    16,  // RDX
+    128, // R8
+    136, // R9
+    144, // R10
+    152, // R11
+];
+
+const SYSV64_CALLER_SAVED: &[u64] = &[
+    0,   // RAX
+    8,   // RCX
+    16,  // RDX
+    48,  // RSI
+    56,  // RDI
+    128, // R8
+    136, // R9
+    144, // R10
+    152, // R11
+];
+
+/// AArch64 AAPCS64 caller-saved: x0..x18 at stride 8 starting at 16384.
+const AARCH64_CALLER_SAVED: &[u64] = &[
+    16384, 16392, 16400, 16408, 16416, 16424, 16432, 16440, // x0..x7
+    16448, 16456, 16464, 16472, 16480, 16488, 16496, 16504, // x8..x15
+    16512, 16520, 16528,                                    // x16..x18
+];
+
+/// x86-32 cdecl caller-saved: EAX, ECX, EDX. Offsets same as x86-64 lower regs.
+const X86_32_CALLER_SAVED: &[u64] = &[
+    0,  // EAX
+    8,  // ECX
+    16, // EDX
+];
+
+/// Register offset of the return register per calling convention.
+fn return_reg_offset(cc: CallingConv) -> u64 {
+    match cc {
+        CallingConv::SysV | CallingConv::Win64 | CallingConv::Cdecl32 => 0, // RAX/EAX
+        CallingConv::AArch64 => 16384, // x0
+    }
+}
+
+/// Size in bytes of the return register per calling convention.
+fn return_reg_size(cc: CallingConv) -> u32 {
+    match cc {
+        CallingConv::SysV | CallingConv::Win64 => 8,
+        CallingConv::Cdecl32 => 4,
+        CallingConv::AArch64 => 8,
+    }
+}
+
+fn caller_saved_offsets(cc: CallingConv) -> &'static [u64] {
+    match cc {
+        CallingConv::Win64 => WIN64_CALLER_SAVED,
+        CallingConv::SysV => SYSV64_CALLER_SAVED,
+        CallingConv::AArch64 => AARCH64_CALLER_SAVED,
+        CallingConv::Cdecl32 => X86_32_CALLER_SAVED,
+    }
+}
 
 /// Extract a stack slot key from a pointer VarId.
 /// Recognizes: FRAME_REG + const, FRAME_REG - const (via large unsigned const).
