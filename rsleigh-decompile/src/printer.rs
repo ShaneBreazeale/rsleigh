@@ -40,7 +40,15 @@ pub fn print_c(
     }
     // Collect parameter names for return value inference
     let param_names: Vec<String> = ssa.vars.iter()
-        .filter_map(|v| v.param_name.as_ref().cloned())
+        .filter_map(|v| {
+            let name = v.param_name.as_ref()?;
+            // Exclude loop Phi variable names (e.g., "iVar1", "lVar1") —
+            // they use param_name for printer elision but are not function parameters.
+            if matches!(&v.expr, Expr::Phi(_)) && !name.starts_with("param_") {
+                return None;
+            }
+            Some(name.clone())
+        })
         .collect();
     post_process(&mut out, &all_aliases, &param_names, struct_fields, &ctx);
 
@@ -7674,9 +7682,14 @@ fn generate_function_signature(out: &mut String, ssa: &SsaCfg, func_name: &str) 
     }
 
     // Collect parameters — variables with param_name set
+    // Exclude loop Phi variable names (e.g., "iVar1") which use param_name
+    // for printer elision but are not function parameters.
     let mut params: Vec<(String, u32, InferredType, Option<&str>)> = Vec::new();
     for v in &ssa.vars {
         if let Some(ref name) = v.param_name {
+            if matches!(&v.expr, Expr::Phi(_)) && !name.starts_with("param_") {
+                continue;
+            }
             params.push((name.clone(), v.size, v.inferred_type, v.display_type));
         }
     }
@@ -8011,7 +8024,8 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
             let vdef = ssa.var(*lhs);
             if vdef.varnode.space == AddressSpaceId::Unique { return; }
             if vdef.varnode.space == AddressSpaceId::Register && is_flag(vdef.varnode.offset) { return; }
-            if matches!(&vdef.expr, Expr::Phi(_)) { return; }
+            // Skip unnamed Phi nodes; named loop Phis render as initialization (e.g., "iVar1 = 0")
+            if matches!(&vdef.expr, Expr::Phi(_)) && vdef.param_name.is_none() { return; }
             if is_zext_artifact(vdef, ssa) { return; }
             if is_self_assign(vdef, ssa) { return; }
             if vdef.call_return && vdef.use_count <= 1 { return; }
@@ -8113,7 +8127,15 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
             }
 
             // Format RHS BEFORE any invalidation of this register
-            let name = var_name(&vdef.varnode, ctx);
+            // Use param_name if set, otherwise check if a named loop Phi exists
+            // on the same register (so EAX assignments in the loop body use "iVar1" not "EAX").
+            let name = if let Some(ref pn) = vdef.param_name {
+                pn.clone()
+            } else if let Some(phi_name) = find_register_loop_phi(vdef, ssa) {
+                phi_name
+            } else {
+                var_name(&vdef.varnode, ctx)
+            };
             let mut rhs = format_vardef_expr(vdef, ssa, ctx, tracker);
 
             // Add narrowing cast when output is smaller than input (Subpiece truncation)
@@ -8163,10 +8185,28 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                     }
                 });
                 if next_is_return {
-                    out.push_str(&format!("{}return {};\n", pad, rhs));
-                    // Mark that we've printed the return
-                    tracker.set_call_return(0, 0, "<<returned>>".to_string());
-                    return;
+                    // For named loop Phis: the assignment is "iVar1 = 0" (initialization),
+                    // so don't fold it into "return 0". Instead, print the assignment
+                    // separately and let the Return handler emit "return iVar1".
+                    if vdef.param_name.is_some() && matches!(&vdef.expr, Expr::Phi(_)) {
+                        out.push_str(&format!("{}{} = {};\n", pad, name, rhs));
+                        // Don't mark <<returned>> — let the Return handler run
+                    } else {
+                        // Check if a named loop Phi exists on the same register.
+                        // If so, use the Phi's name for the return instead of folding
+                        // "EAX = 0; return;" → "return 0;" (which loses the loop variable).
+                        let loop_phi_name = find_register_loop_phi(vdef, ssa);
+                        if let Some(ref phi_name) = loop_phi_name {
+                            // Emit the init assignment and let Return use the Phi name
+                            out.push_str(&format!("{}{} = {};\n", pad, phi_name, rhs));
+                            // Don't mark <<returned>> — Return handler will resolve through Phi
+                        } else {
+                            out.push_str(&format!("{}return {};\n", pad, rhs));
+                            // Mark that we've printed the return
+                            tracker.set_call_return(0, 0, "<<returned>>".to_string());
+                            return;
+                        }
+                    }
                 }
             }
             // Skip truly dead stores: var_X with use_count 0 AND a simple value.
@@ -8544,6 +8584,53 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
         StructuredStmt::Label(addr) => {
             out.push_str(&format!("label_{:x}:\n", addr));
         }
+    }
+}
+
+/// Check if a named loop Phi exists for the same register as the given VarDef.
+/// Returns the Phi's param_name if found.
+fn find_register_loop_phi(vdef: &VarDef, ssa: &SsaCfg) -> Option<String> {
+    if vdef.varnode.space != AddressSpaceId::Register { return None; }
+    for v in &ssa.vars {
+        if v.varnode.space == AddressSpaceId::Register
+            && v.varnode.offset == vdef.varnode.offset
+        {
+            if let Some(ref name) = v.param_name {
+                if matches!(&v.expr, Expr::Phi(_)) {
+                    return Some(name.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Follow Var/BinOp/UnaryOp chains to find a named variable (param_name set).
+/// Returns the name if found within `depth` hops, None otherwise.
+fn resolve_to_named_var(id: VarId, ssa: &SsaCfg, depth: u32) -> Option<String> {
+    if depth == 0 { return None; }
+    let vdef = ssa.var(id);
+    if let Some(ref name) = vdef.param_name {
+        return Some(name.clone());
+    }
+    match &vdef.expr {
+        Expr::Var(inner) => resolve_to_named_var(*inner, ssa, depth - 1),
+        Expr::Phi(inputs) => {
+            for inp in inputs {
+                if let Some(name) = resolve_to_named_var(*inp, ssa, depth - 1) {
+                    return Some(name);
+                }
+            }
+            None
+        }
+        Expr::UnaryOp(UnaryOpKind::Zext | UnaryOpKind::Sext, inner) => {
+            resolve_to_named_var(*inner, ssa, depth - 1)
+        }
+        Expr::BinOp(_, l, r) => {
+            resolve_to_named_var(*l, ssa, depth - 1)
+                .or_else(|| resolve_to_named_var(*r, ssa, depth - 1))
+        }
+        _ => None,
     }
 }
 
@@ -8926,6 +9013,13 @@ fn format_vardef_expr(vdef: &VarDef, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &Reg
         if matches!(&vdef.expr, Expr::Load(_)) {
             return name.clone();
         }
+        // For named loop Phis: render as the initial value (first input).
+        // This produces "iVar1 = 0" instead of "iVar1 = phi(0, iVar1+1)".
+        if let Expr::Phi(ref inputs) = vdef.expr {
+            if !inputs.is_empty() {
+                return format_var_tracked(inputs[0], ssa, ctx, tracker);
+            }
+        }
     }
     let result = format_expr_tracked(&vdef.expr, ssa, ctx, tracker);
 
@@ -9126,6 +9220,16 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
             let t = format_var_tracked(*then_val, ssa, ctx, tracker);
             let e = format_var_tracked(*else_val, ssa, ctx, tracker);
             format!("({}) ? {} : {}", c, t, e)
+        }
+        Expr::Phi(inputs) => {
+            // Check if any input resolves to a named variable (loop Phi or param).
+            // Use the name instead of expanding "phi(...)".
+            for inp in inputs {
+                if let Some(name) = resolve_to_named_var(*inp, ssa, 4) {
+                    return name;
+                }
+            }
+            format_expr(expr, ssa, ctx)
         }
         _ => format_expr(expr, ssa, ctx),
     }

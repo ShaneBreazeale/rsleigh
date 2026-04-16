@@ -104,6 +104,10 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
         recover_conditions(ssa);
         detect_return_values(ssa);
         recount_uses(ssa);
+        // Name loop Phi variables so the printer uses the name instead of
+        // expanding the Phi expression. This prevents #PHI_CLEANUP from
+        // destroying loop variable semantics (e.g., "return phi(0, count+1)" → "return 0").
+        name_loop_phis(ssa);
         name_parameters(ssa); // Re-run to catch params exposed by folding
         let after = count_live_stmts(ssa);
         if before == after { break; }
@@ -3691,5 +3695,51 @@ pub fn propagate_signature_return_types(ssa: &mut SsaCfg, import_map: &std::coll
                 }
             }
         }
+    }
+}
+
+/// Assign names to self-referential Phi VarDefs (loop variables).
+/// A self-referential Phi is one where at least one input transitively
+/// references the Phi itself (via Add, Var, etc.). These represent
+/// loop-carried values like counters and accumulators.
+///
+/// When a Phi has a param_name, format_var returns the name directly
+/// instead of expanding "phi(init, body_val)" — which prevents the
+/// text-level #PHI_CLEANUP from replacing "return phi(0, ...)" with "return 0".
+fn name_loop_phis(ssa: &mut SsaCfg) {
+    let mut loop_phi_count = 0u32;
+    for vi in 0..ssa.vars.len() {
+        if ssa.vars[vi].param_name.is_some() { continue; }
+        if let Expr::Phi(ref inputs) = ssa.vars[vi].expr {
+            if inputs.len() < 2 { continue; }
+            let phi_id = VarId(vi as u32);
+            // Check if any input transitively references this Phi (self-referential)
+            let is_self_ref = inputs.iter().any(|input| {
+                refs_varid(*input, phi_id, &ssa.vars, 6)
+            });
+            if is_self_ref {
+                // This is a loop Phi. Assign a name based on the register size.
+                let vn = ssa.vars[vi].varnode;
+                let prefix = if vn.size <= 4 { "i" } else { "l" };
+                loop_phi_count += 1;
+                ssa.vars[vi].param_name = Some(format!("{}Var{}", prefix, loop_phi_count));
+            }
+        }
+    }
+}
+
+/// Check if a VarId's expression tree transitively references a target VarId.
+fn refs_varid(id: VarId, target: VarId, vars: &[VarDef], depth: u32) -> bool {
+    if depth == 0 { return false; }
+    if id == target { return true; }
+    let vdef = &vars[id.0 as usize];
+    match &vdef.expr {
+        Expr::Var(inner) => refs_varid(*inner, target, vars, depth - 1),
+        Expr::BinOp(_, l, r) => {
+            refs_varid(*l, target, vars, depth - 1) || refs_varid(*r, target, vars, depth - 1)
+        }
+        Expr::UnaryOp(_, i) => refs_varid(*i, target, vars, depth - 1),
+        Expr::Phi(inputs) => inputs.iter().any(|i| refs_varid(*i, target, vars, depth - 1)),
+        _ => false,
     }
 }
