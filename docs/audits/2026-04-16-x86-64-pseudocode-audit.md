@@ -99,3 +99,56 @@ $GHIDRA_HOME/support/analyzeHeadless /tmp/ghidra_proj_brew proj \
     -import ~/Downloads/test_bin/cb_baristas_secret_x64.exe \
     -postScript /tmp/DecompFunc.py -deleteProject
 ```
+
+---
+
+## Post-Fix Results (2026-04-16)
+
+After implementing `docs/superpowers/plans/2026-04-16-ssa-call-clobber-plan.md`
+(SSA call-clobber + printer param-name fix):
+
+### main (0x140001e41)
+
+Improvements observed:
+- `puts(...) + 5` noise expression is **gone** — the `+ 5` pointer-math artifact from
+  caller-saved register reuse after the `puts` call has been eliminated by the
+  call-clobber pass invalidating the register correctly.
+- `printf` now emits as `fprintf(...)` with recognizable format string `" FLAG: CODEBREW{%s}\n\n"`.
+
+Still broken (unaddressed defect classes):
+- `strcspn` return value still not captured: `strcspn(/*s*/ local_60, ...)` appears as a
+  void call; the `*(uint8_t*)(-96 + lVar1) = 0` assignment uses `lVar1` (unresolved) instead
+  of `input[sVar]`. Root cause: RAX post-`strcspn` is clobbered correctly but the memory SSA
+  does not yet forward the stack-spilled result.
+- `if (0 == 0 == 0)` — double-zero condition from `fgets` return still unfolded (class A).
+- `if (!(0 == 0) == 0)` — double negation still present (class A).
+- `func_140001c54(buf)` — validate call present but `buf` not resolved to `input` (class C).
+- `fprintf` args garbled: `fprintf(" FLAG: CODEBREW{%s}\n\n", /*format*/ puts(...), ...)`
+  shows `puts` inlined as the format arg — shadow-store for variadic args still missing (class C).
+
+### check2 (0x140001a68)
+
+- `*(C)` **is gone** — the printer param-name fix correctly stops renaming pointer dereferences
+  to single-letter register names. The byte-pickoff expressions now show `*lVar1`, `*lVar2`
+  (unresolved temporaries) instead of the misleading `*(C)` form.
+- The underlying shadow-store issue (class C) remains: `RSP - 8 - 45 + 7` raw stack addresses
+  still appear because memory SSA does not forward the `[RSP+0x20]` shadow-store back to the
+  parameter. No regression here versus baseline.
+- `func_140001806(...)` decode call shows the obfuscated-string arg correctly with 4 arguments.
+
+### Full test suite
+
+0 rsleigh-decompile unit tests (doctests only, 1 ignored), 9 test-harness tests pass (0 regressions).
+
+### Smoke tests
+
+ChocolateFactory.exe: 10 functions decompile cleanly, 216 lines, no panic.
+rust-crackme-easy.exe: 10 functions decompile cleanly, 392 lines, no panic.
+(Note: `--all` on 603-function / 487-function binaries times out in CI; per-function decoding confirmed clean.)
+
+### Remaining defect classes (unaddressed — future work)
+
+- B: Global data addresses rendered as string literals (`.data`/`.bss` addresses hit `looks_like_string()`)
+- A: Control flow / double-neg / loop condition recovery (`(X==0)==0` not canonicalized to `X!=0`)
+- D: Fold noise (duplicate casts `(uint)(uint)(uint8_t)`, redundant expressions from one-shot fold)
+- C: Shadow-store / variadic arg tracking — `[RSP+8..0x20]` not aliased to formal params across calls
