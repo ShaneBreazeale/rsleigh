@@ -19,6 +19,24 @@ use std::path::Path;
 use pcode_ir::Instruction;
 use rsleigh_api::Architecture;
 
+/// Detect calling convention from binary format and architecture.
+fn detect_cc(arch: Architecture, binary: Option<&[u8]>) -> fold::CallingConv {
+    if let Some(binary) = binary {
+        if let Ok(goblin::Object::PE(pe)) = goblin::Object::parse(binary) {
+            return if pe.is_64 {
+                fold::CallingConv::Win64
+            } else {
+                fold::CallingConv::Cdecl32
+            };
+        }
+    }
+    match arch {
+        Architecture::X86_32 | Architecture::ARM32 | Architecture::MIPS32 => fold::CallingConv::Cdecl32,
+        Architecture::AArch64 => fold::CallingConv::AArch64,
+        _ => fold::CallingConv::SysV,
+    }
+}
+
 /// Decompile a function's instructions into C-like pseudocode.
 pub fn decompile(arch: Architecture, instructions: &[(u64, Instruction)]) -> String {
     decompile_with_binary(arch, instructions, None, None)
@@ -50,28 +68,8 @@ pub fn decompile_with_binary(
         .map(|b| imports::resolve_imports(b))
         .unwrap_or_default();
 
-    let mut ssa = ssa::build_ssa(&cfg);
-
-    // Detect calling convention from binary format
-    let cc = if let Some(binary) = binary {
-        if let Ok(obj) = goblin::Object::parse(binary) {
-            match &obj {
-                goblin::Object::PE(pe) => if pe.is_64 {
-                    fold::CallingConv::Win64
-                } else {
-                    fold::CallingConv::Cdecl32 // PE32 uses cdecl stack-based args
-                },
-                _ => match arch {
-                    Architecture::X86_32 | Architecture::ARM32 | Architecture::MIPS32
-                        => fold::CallingConv::Cdecl32,
-                    Architecture::AArch64 => fold::CallingConv::AArch64,
-                    _ => fold::CallingConv::SysV,
-                }
-            }
-        } else if arch == Architecture::AArch64 { fold::CallingConv::AArch64 }
-          else { fold::CallingConv::SysV }
-    } else if arch == Architecture::AArch64 { fold::CallingConv::AArch64 }
-      else { fold::CallingConv::SysV };
+    let cc = detect_cc(arch, binary);
+    let mut ssa = ssa::build_ssa_with_cc(&cfg, cc);
 
     fold::fold_with_cc(&mut ssa, cc);
 
@@ -200,27 +198,8 @@ pub fn extract_learned_types(
         .map(|b| imports::resolve_imports(b))
         .unwrap_or_default();
 
-    let mut ssa = ssa::build_ssa(&cfg);
-
-    let cc = if let Some(binary) = binary {
-        if let Ok(obj) = goblin::Object::parse(binary) {
-            match &obj {
-                goblin::Object::PE(pe) => if pe.is_64 {
-                    fold::CallingConv::Win64
-                } else {
-                    fold::CallingConv::Cdecl32
-                },
-                _ => match arch {
-                    Architecture::X86_32 | Architecture::ARM32 | Architecture::MIPS32
-                        => fold::CallingConv::Cdecl32,
-                    Architecture::AArch64 => fold::CallingConv::AArch64,
-                    _ => fold::CallingConv::SysV,
-                }
-            }
-        } else if arch == Architecture::AArch64 { fold::CallingConv::AArch64 }
-          else { fold::CallingConv::SysV }
-    } else if arch == Architecture::AArch64 { fold::CallingConv::AArch64 }
-      else { fold::CallingConv::SysV };
+    let cc = detect_cc(arch, binary);
+    let mut ssa = ssa::build_ssa_with_cc(&cfg, cc);
 
     fold::fold_with_cc(&mut ssa, cc);
     fold::apply_signature_names(&mut ssa, &import_map);
@@ -334,27 +313,8 @@ pub fn infer_returns_from_callsites(
     if cfg_result.blocks.is_empty() { return Vec::new(); }
 
     let import_map = binary.map(|b| imports::resolve_imports(b)).unwrap_or_default();
-    let mut ssa = ssa::build_ssa(&cfg_result);
-
-    let cc = if let Some(binary) = binary {
-        if let Ok(obj) = goblin::Object::parse(binary) {
-            match &obj {
-                goblin::Object::PE(pe) => if pe.is_64 {
-                    fold::CallingConv::Win64
-                } else {
-                    fold::CallingConv::Cdecl32
-                },
-                _ => match arch {
-                    Architecture::X86_32 | Architecture::ARM32 | Architecture::MIPS32
-                        => fold::CallingConv::Cdecl32,
-                    Architecture::AArch64 => fold::CallingConv::AArch64,
-                    _ => fold::CallingConv::SysV,
-                }
-            }
-        } else if arch == Architecture::AArch64 { fold::CallingConv::AArch64 }
-          else { fold::CallingConv::SysV }
-    } else if arch == Architecture::AArch64 { fold::CallingConv::AArch64 }
-      else { fold::CallingConv::SysV };
+    let cc = detect_cc(arch, binary);
+    let mut ssa = ssa::build_ssa_with_cc(&cfg_result, cc);
 
     fold::fold_with_cc(&mut ssa, cc);
 
