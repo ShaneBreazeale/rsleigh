@@ -64,11 +64,14 @@ pub fn decompile_with_binary(
                 _ => match arch {
                     Architecture::X86_32 | Architecture::ARM32 | Architecture::MIPS32
                         => fold::CallingConv::Cdecl32,
+                    Architecture::AArch64 => fold::CallingConv::AArch64,
                     _ => fold::CallingConv::SysV,
                 }
             }
-        } else { fold::CallingConv::SysV }
-    } else { fold::CallingConv::SysV };
+        } else if arch == Architecture::AArch64 { fold::CallingConv::AArch64 }
+          else { fold::CallingConv::SysV }
+    } else if arch == Architecture::AArch64 { fold::CallingConv::AArch64 }
+      else { fold::CallingConv::SysV };
 
     fold::fold_with_cc(&mut ssa, cc);
 
@@ -210,11 +213,14 @@ pub fn extract_learned_types(
                 _ => match arch {
                     Architecture::X86_32 | Architecture::ARM32 | Architecture::MIPS32
                         => fold::CallingConv::Cdecl32,
+                    Architecture::AArch64 => fold::CallingConv::AArch64,
                     _ => fold::CallingConv::SysV,
                 }
             }
-        } else { fold::CallingConv::SysV }
-    } else { fold::CallingConv::SysV };
+        } else if arch == Architecture::AArch64 { fold::CallingConv::AArch64 }
+          else { fold::CallingConv::SysV }
+    } else if arch == Architecture::AArch64 { fold::CallingConv::AArch64 }
+      else { fold::CallingConv::SysV };
 
     fold::fold_with_cc(&mut ssa, cc);
     fold::apply_signature_names(&mut ssa, &import_map);
@@ -341,11 +347,14 @@ pub fn infer_returns_from_callsites(
                 _ => match arch {
                     Architecture::X86_32 | Architecture::ARM32 | Architecture::MIPS32
                         => fold::CallingConv::Cdecl32,
+                    Architecture::AArch64 => fold::CallingConv::AArch64,
                     _ => fold::CallingConv::SysV,
                 }
             }
-        } else { fold::CallingConv::SysV }
-    } else { fold::CallingConv::SysV };
+        } else if arch == Architecture::AArch64 { fold::CallingConv::AArch64 }
+          else { fold::CallingConv::SysV }
+    } else if arch == Architecture::AArch64 { fold::CallingConv::AArch64 }
+      else { fold::CallingConv::SysV };
 
     fold::fold_with_cc(&mut ssa, cc);
 

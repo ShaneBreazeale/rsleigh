@@ -21,6 +21,9 @@ const SYSV_ARG_REGS: &[u64] = &[56, 48, 16, 8, 128, 136]; // RDI, RSI, RDX, RCX,
 /// Windows x64 ABI argument register offsets.
 const WIN64_ARG_REGS: &[u64] = &[8, 16, 128, 136]; // RCX, RDX, R8, R9
 
+/// AArch64 AAPCS64 argument register offsets (x0-x7, stride 8 starting at 16384).
+const AARCH64_ARG_REGS: &[u64] = &[16384, 16392, 16400, 16408, 16416, 16424, 16432, 16440];
+
 /// x86-64 SysV ABI float argument register offsets (XMM0-XMM7).
 const SYSV_FLOAT_ARG_REGS: &[u64] = &[4608, 4672, 4736, 4800, 4864, 4928, 4992, 5056];
 
@@ -51,6 +54,7 @@ pub enum CallingConv {
     SysV,     // Linux, macOS, BSD — RDI, RSI, RDX, RCX, R8, R9
     Win64,    // Windows x64 — RCX, RDX, R8, R9
     Cdecl32,  // x86-32 cdecl — stack-based
+    AArch64,  // AAPCS64 — x0-x7
 }
 
 /// Fold expressions: inline temps, eliminate dead code, recover conditions.
@@ -66,6 +70,7 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
             CallingConv::SysV => SYSV_ARG_REGS,
             CallingConv::Win64 => WIN64_ARG_REGS,
             CallingConv::Cdecl32 => &[],
+            CallingConv::AArch64 => AARCH64_ARG_REGS,
         };
     });
     FLOAT_ARG_REG_OFFSETS_TLS.with(|r| {
@@ -73,6 +78,7 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
             CallingConv::SysV => SYSV_FLOAT_ARG_REGS,
             CallingConv::Win64 => WIN64_FLOAT_ARG_REGS,
             CallingConv::Cdecl32 => &[],
+            CallingConv::AArch64 => &[],  // AArch64 float params in d0-d7 — defer for now
         };
     });
     // Collect call arguments FIRST, before any optimization.
@@ -1525,6 +1531,36 @@ fn recover_conditions(ssa: &mut SsaCfg) {
             }
         }
     }
+
+    // Also recover conditions inside Ternary expressions (from CSEL/CSINC/CNEG).
+    // These are intra-instruction conditional selects that use flag registers.
+    let mut ternary_to_recover: Vec<(usize, VarId, usize)> = Vec::new(); // (var_idx, cond_id, block_idx)
+    for (bi, block) in ssa.blocks.iter().enumerate() {
+        for stmt in &block.stmts {
+            if let Stmt::Assign(vid) = stmt {
+                let vi = vid.0 as usize;
+                if let Expr::Ternary(cond, _, _) = &ssa.vars[vi].expr {
+                    if is_flag_derived(*cond, ssa) {
+                        // Check it's not already a recovered comparison
+                        let already = if let Expr::BinOp(k, l, r) = &ssa.vars[cond.0 as usize].expr {
+                            is_comparison(*k) && !is_flag_derived(*l, ssa) && !is_flag_derived(*r, ssa)
+                        } else { false };
+                        if !already {
+                            ternary_to_recover.push((vi, *cond, bi));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for (vi, cond_id, block_idx) in ternary_to_recover {
+        if let Some(new_cond) = try_recover_condition(cond_id, block_idx, ssa) {
+            if let Expr::Ternary(_, then_val, else_val) = ssa.vars[vi].expr {
+                ssa.vars[vi].expr = Expr::Ternary(new_cond, then_val, else_val);
+            }
+        }
+    }
 }
 
 /// Check if a VarId's expression tree references any flag registers.
@@ -1630,6 +1666,8 @@ fn trace_cond_to_cmp(cond_id: VarId, ssa: &SsaCfg, depth: u32) -> Option<(VarId,
         }
         // BoolNot(inner) → trace inner
         Expr::UnaryOp(UnaryOpKind::BoolNot, inner) => trace_cond_to_cmp(*inner, ssa, depth - 1),
+        // Zext/Sext wrapping (common in ternary conditions from CSEL/CNEG) → trace inner
+        Expr::UnaryOp(UnaryOpKind::Zext | UnaryOpKind::Sext, inner) => trace_cond_to_cmp(*inner, ssa, depth - 1),
         // Var(inner) → follow
         Expr::Var(inner) => trace_cond_to_cmp(*inner, ssa, depth - 1),
         // Compound: BoolAnd/BoolOr → trace both sides for CMP operands
@@ -1707,8 +1745,10 @@ fn find_cmp_in_block(block_idx: usize, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
                     return Some((*left, *right));
                 }
             }
-            // ARM64: NG/ZR from tmp flag writes
-            if v.varnode.space == AddressSpaceId::Register && v.varnode.offset == 257 { // ZR (ARM64)
+            // ARM64: NG/ZR and tmpNG/tmpZR from flag writes
+            if v.varnode.space == AddressSpaceId::Register
+                && matches!(v.varnode.offset, 257 | 264) // ZR or tmpZR (ARM64)
+            {
                 if let Expr::BinOp(BinOpKind::Eq, result_id, zero_id) = &v.expr {
                     let zero = &ssa.vars[zero_id.0 as usize];
                     if matches!(&zero.expr, Expr::Const(0, _)) {
@@ -1716,7 +1756,9 @@ fn find_cmp_in_block(block_idx: usize, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
                     }
                 }
             }
-            if v.varnode.space == AddressSpaceId::Register && v.varnode.offset == 256 { // NG (ARM64)
+            if v.varnode.space == AddressSpaceId::Register
+                && matches!(v.varnode.offset, 256 | 263) // NG or tmpNG (ARM64)
+            {
                 if let Expr::BinOp(BinOpKind::SLess, result_id, zero_id) = &v.expr {
                     let zero = &ssa.vars[zero_id.0 as usize];
                     if matches!(&zero.expr, Expr::Const(0, _)) {
@@ -1846,6 +1888,18 @@ fn resolve_cmp_operand_depth(id: VarId, ssa: &SsaCfg, depth: u32) -> VarId {
 fn classify_jcc_condition(cond_id: VarId, ssa: &SsaCfg) -> Option<(BinOpKind, bool)> {
     let vdef = &ssa.vars[cond_id.0 as usize];
 
+    // Unwrap Zext/Sext/Var wrappers (common in ternary conditions from CSEL/CNEG)
+    if let Expr::UnaryOp(UnaryOpKind::Zext | UnaryOpKind::Sext, inner) = &vdef.expr {
+        return classify_jcc_condition(*inner, ssa);
+    }
+    if let Expr::Var(inner) = &vdef.expr {
+        if ssa.vars[inner.0 as usize].varnode.space == AddressSpaceId::Register
+            || ssa.vars[inner.0 as usize].varnode.space == AddressSpaceId::Unique
+        {
+            return classify_jcc_condition(*inner, ssa);
+        }
+    }
+
     // General BoolNot unwrapping: !cond → invert the inner condition
     if let Expr::UnaryOp(UnaryOpKind::BoolNot, inner) = &vdef.expr {
         if let Some((kind, swap)) = classify_jcc_condition(*inner, ssa) {
@@ -1865,14 +1919,14 @@ fn classify_jcc_condition(cond_id: VarId, ssa: &SsaCfg) -> Option<(BinOpKind, bo
         }
     }
 
-    // Helper: check ZF (x86=518), ZR (ARM64=257), ZR (ARM32=97)
-    let is_zf = |id: VarId| is_flag_ref(id, 518, ssa) || is_flag_ref(id, 257, ssa) || is_flag_ref(id, 97, ssa);
-    // Helper: check CF (x86=512), CY (ARM64=258), CY (ARM32=98)
-    let is_cf = |id: VarId| is_flag_ref(id, 512, ssa) || is_flag_ref(id, 258, ssa) || is_flag_ref(id, 98, ssa);
-    // Helper: check OF (x86=523), OV (ARM64=259), OV (ARM32=99)
-    let is_of = |id: VarId| is_flag_ref(id, 523, ssa) || is_flag_ref(id, 259, ssa) || is_flag_ref(id, 99, ssa);
-    // Helper: check SF (x86=519), NG (ARM64=256), NG (ARM32=96)
-    let is_sf = |id: VarId| is_flag_ref(id, 519, ssa) || is_flag_ref(id, 256, ssa) || is_flag_ref(id, 96, ssa);
+    // Helper: check ZF (x86=518), ZR (ARM64=257,tmpZR=264), ZR (ARM32=97)
+    let is_zf = |id: VarId| is_flag_ref(id, 518, ssa) || is_flag_ref(id, 257, ssa) || is_flag_ref(id, 264, ssa) || is_flag_ref(id, 97, ssa);
+    // Helper: check CF (x86=512), CY (ARM64=258,tmpCY=261), CY (ARM32=98)
+    let is_cf = |id: VarId| is_flag_ref(id, 512, ssa) || is_flag_ref(id, 258, ssa) || is_flag_ref(id, 261, ssa) || is_flag_ref(id, 98, ssa);
+    // Helper: check OF (x86=523), OV (ARM64=259,tmpOV=262), OV (ARM32=99)
+    let is_of = |id: VarId| is_flag_ref(id, 523, ssa) || is_flag_ref(id, 259, ssa) || is_flag_ref(id, 262, ssa) || is_flag_ref(id, 99, ssa);
+    // Helper: check SF (x86=519), NG (ARM64=256,tmpNG=263), NG (ARM32=96)
+    let is_sf = |id: VarId| is_flag_ref(id, 519, ssa) || is_flag_ref(id, 256, ssa) || is_flag_ref(id, 263, ssa) || is_flag_ref(id, 96, ssa);
 
     match &vdef.expr {
         // ZF/ZR directly → JE/BEQ → a == b
@@ -1918,6 +1972,8 @@ fn classify_jcc_condition(cond_id: VarId, ssa: &SsaCfg) -> Option<(BinOpKind, bo
         }
 
         // BoolOr(ZF, NotEq(OF, SF)) → JLE → a <= b (signed)
+        // BoolOr(BoolNot(CY), ZR) → AArch64 BLS → unsigned a <= b
+        //   (AArch64 CY is inverted vs x86 CF: CY=1 means no borrow = a >= b)
         Expr::BinOp(BinOpKind::BoolOr, left, right) => {
             let left_def = &ssa.vars[left.0 as usize];
             let right_def = &ssa.vars[right.0 as usize];
@@ -1930,10 +1986,29 @@ fn classify_jcc_condition(cond_id: VarId, ssa: &SsaCfg) -> Option<(BinOpKind, bo
                     Expr::BinOp(BinOpKind::NotEq, a, b)
                     if (is_of(*a) && is_sf(*b)) || (is_sf(*a) && is_of(*b))));
             if zf_or_sfneqof {
-                Some((BinOpKind::SLessEq, false))
-            } else {
-                None
+                return Some((BinOpKind::SLessEq, false));
             }
+            // AArch64: BoolOr(BoolNot(CY), ZR) → BLS → unsigned a <= b
+            let not_cy_or_zr =
+                (matches!(&left_def.expr, Expr::UnaryOp(UnaryOpKind::BoolNot, inner) if is_cf(*inner))
+                    && is_zf(*right))
+                || (matches!(&right_def.expr, Expr::UnaryOp(UnaryOpKind::BoolNot, inner) if is_cf(*inner))
+                    && is_zf(*left));
+            if not_cy_or_zr {
+                return Some((BinOpKind::LessEq, false));
+            }
+            // AArch64: BoolOr(ZR, NotEq(OV, NG)) → signed a <= b
+            let zr_or_ngneqov =
+                (is_zf(*left) && matches!(&right_def.expr,
+                    Expr::BinOp(BinOpKind::NotEq, a, b)
+                    if (is_of(*a) && is_sf(*b)) || (is_sf(*a) && is_of(*b))))
+                || (is_zf(*right) && matches!(&left_def.expr,
+                    Expr::BinOp(BinOpKind::NotEq, a, b)
+                    if (is_of(*a) && is_sf(*b)) || (is_sf(*a) && is_of(*b))));
+            if zr_or_ngneqov {
+                return Some((BinOpKind::SLessEq, false));
+            }
+            None
         }
 
         // BoolAnd(BoolNot(ZF/ZR), IntEq(OF/OV, SF/NG)) → JG/BGT → a > b = b < a
@@ -1994,11 +2069,32 @@ fn is_comparison(kind: BinOpKind) -> bool {
 
 fn detect_return_values(ssa: &mut SsaCfg) {
     // Try to detect architecture from register usage:
-    // ARM32 r0 = offset 32 (0x20), x86 RAX = offset 0, AArch64 x0 = offset 0
+    // ARM32 r0 = offset 32 (0x20), x86 RAX = offset 0, AArch64 x0 = offset 16384
     let has_arm32_regs = ssa.vars.iter().any(|v|
         v.varnode.space == AddressSpaceId::Register && v.varnode.offset == 32 && v.varnode.size == 4
         && matches!(v.varnode.offset, 32..=92)); // ARM32 r0-r15 range
-    let ret_reg_offset = if has_arm32_regs { 32 } else { RAX_OFFSET }; // ARM32 r0=32, x86 RAX=0
+    let has_aarch64_regs = ssa.vars.iter().any(|v|
+        v.varnode.space == AddressSpaceId::Register
+        && v.varnode.offset >= 16384 && v.varnode.offset <= 16440  // x0-x7 range
+        && (v.varnode.size == 4 || v.varnode.size == 8));
+    let ret_reg_offset = if has_arm32_regs { 32 }
+        else if has_aarch64_regs { 16384 }  // AArch64 x0
+        else { RAX_OFFSET }; // x86 RAX=0
+
+    // AArch64: unwrap Zext from existing return values (SSA builder may have picked
+    // x0 size=8 when the function actually operates on w0 size=4).
+    if has_aarch64_regs {
+        for bi in 0..ssa.blocks.len() {
+            if let SsaTerminator::Return(Some(var_id)) = ssa.blocks[bi].terminator {
+                if let Expr::UnaryOp(UnaryOpKind::Zext, inner) = &ssa.vars[var_id.0 as usize].expr {
+                    if ssa.vars[inner.0 as usize].varnode.size == 4 {
+                        let inner_id = *inner;
+                        ssa.blocks[bi].terminator = SsaTerminator::Return(Some(inner_id));
+                    }
+                }
+            }
+        }
+    }
 
     for bi in 0..ssa.blocks.len() {
         if let SsaTerminator::Return(ref ret_val) = ssa.blocks[bi].terminator {
@@ -2151,8 +2247,18 @@ fn detect_return_values(ssa: &mut SsaCfg) {
         }
 
         if let Some(var_id) = found {
+            // AArch64: if return value is Zext of a 4-byte w-register result, prefer the
+            // inner 4-byte value so the return type prints as `int` rather than `long`.
+            let actual_id = if has_aarch64_regs {
+                if let Expr::UnaryOp(UnaryOpKind::Zext, inner) = &ssa.vars[var_id.0 as usize].expr {
+                    if ssa.vars[inner.0 as usize].varnode.size == 4 {
+                        *inner
+                    } else { var_id }
+                } else { var_id }
+            } else { var_id };
+
             if let SsaTerminator::Return(ref mut ret_val) = ssa.blocks[bi].terminator {
-                *ret_val = Some(var_id);
+                *ret_val = Some(actual_id);
             }
         }
     }

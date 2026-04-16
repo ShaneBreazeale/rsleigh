@@ -8671,7 +8671,8 @@ fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTrac
                 depth += 1;
             }
             match cur_expr {
-                Expr::Load(_) | Expr::BinOp(_, _, _) | Expr::UnaryOp(_, _) => {
+                Expr::Load(_) | Expr::BinOp(_, _, _) | Expr::UnaryOp(_, _)
+                | Expr::Ternary(_, _, _) => {
                     return format_vardef_expr(ssa.var(cur_id), ssa, ctx, tracker);
                 }
                 _ => {}
@@ -9791,6 +9792,14 @@ fn format_var(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
     // Inline constants
     if let Expr::Const(val, sz) = &vdef.expr {
         return format_const_ctx(*val, *sz, ctx);
+    }
+
+    // Inline Register-space Ternary expressions (CSEL/CNEG with recovered conditions)
+    if let Expr::Ternary(cond, then_val, else_val) = &vdef.expr {
+        let c = format_var(*cond, ssa, ctx);
+        let t = format_var(*then_val, ssa, ctx);
+        let e = format_var(*else_val, ssa, ctx);
+        return format!("({}) ? {} : {}", c, t, e);
     }
 
     var_name(&vdef.varnode, ctx)
