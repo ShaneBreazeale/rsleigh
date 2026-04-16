@@ -6384,7 +6384,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // In x86-32, EDI/ESI/EDX/ECX are NOT parameter registers (all args on stack),
         // so they should be auto-named. Only skip them in x86-64 SysV mode.
         let all_text_check = lines.join("");
-        let is_arm64 = all_text_check.contains("x19") || all_text_check.contains("x29");
+        let is_arm64 = matches!(ctx.arch, Architecture::AArch64)
+            || all_text_check.contains("x19") || all_text_check.contains("x29");
         let is_32bit = !is_arm64 && !all_text_check.contains("RSP") && !all_text_check.contains("RBP")
             && !all_text_check.contains("fparam_"); // fparam_ indicates x86-64 SysV float ABI
 
