@@ -3142,6 +3142,7 @@ fn propagate_call_returns(ssa: &mut SsaCfg) {
 
         // For Call statements within a block: the next RAX assignment is the return value
         let mut call_idx: Option<usize> = None;
+        let mut to_remove: Vec<usize> = Vec::new();
         for i in 0..ssa.blocks[bi].stmts.len() {
             if matches!(&ssa.blocks[bi].stmts[i], Stmt::Call { .. }) {
                 call_idx = Some(i);
@@ -3163,6 +3164,7 @@ fn propagate_call_returns(ssa: &mut SsaCfg) {
                                     args: args.clone(),
                                     out: Some(var_id),
                                 };
+                                to_remove.push(i);
                             }
                         }
                         call_idx = None;
@@ -3182,6 +3184,7 @@ fn propagate_call_returns(ssa: &mut SsaCfg) {
                                     args: args.clone(),
                                     out: Some(var_id),
                                 };
+                                to_remove.push(i);
                             }
                         }
                         call_idx = None;
@@ -3191,6 +3194,9 @@ fn propagate_call_returns(ssa: &mut SsaCfg) {
                     call_idx = None;
                 }
             }
+        }
+        for idx in to_remove.into_iter().rev() {
+            ssa.blocks[bi].stmts.remove(idx);
         }
     }
 }
