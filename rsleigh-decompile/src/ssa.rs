@@ -165,6 +165,61 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
                     }
                 }
 
+                // Detect intra-instruction CBranch (AArch64 CSEL/CSINC/CNEG pattern)
+                // Pattern: [pre-ops..., CBranch{Const,cond}, else-ops..., post-op]
+                // CBranch condition TRUE → skip else → use "then" value (from pre-ops)
+                // CBranch condition FALSE → execute else → use "else" value
+                let cbranch_idx = inst_ops.iter().position(|op| {
+                    matches!(op, PcodeOp::CBranch { dest, .. } if dest.space == AddressSpaceId::Const)
+                });
+
+                if let Some(cb_idx) = cbranch_idx {
+                    // Get the CBranch condition varnode
+                    let cond_vn = if let PcodeOp::CBranch { cond, .. } = inst_ops[cb_idx] {
+                        *cond
+                    } else { unreachable!() };
+
+                    // Process pre-CBranch ops normally (condition setup + then-value copies)
+                    for (op_idx, op) in inst_ops[..cb_idx].iter().enumerate() {
+                        if skip_zero_copy.contains(&op_idx) { continue; }
+                        if let PcodeOp::IntZext { out, .. } = op {
+                            if deferred_zext.iter().any(|(vn, _)| vn == out) { continue; }
+                        }
+                        process_op(&mut ssa, &mut current, &mut local_stack, &mut slot_store_blocks, block.id.0, &mut stmts, op);
+                    }
+
+                    let cond_var = resolve_input(&mut ssa, &mut current, &cond_vn);
+
+                    // Snapshot current state — Unique varnodes hold "then" values
+                    let then_state: HashMap<Varnode, VarId> = current.iter()
+                        .filter(|(vn, _)| vn.space == AddressSpaceId::Unique)
+                        .map(|(vn, vid)| (*vn, *vid))
+                        .collect();
+
+                    // Process else-path ops (between CBranch and last op)
+                    let last_idx = inst_ops.len() - 1;
+                    for op in &inst_ops[cb_idx+1..last_idx] {
+                        process_op(&mut ssa, &mut current, &mut local_stack, &mut slot_store_blocks, block.id.0, &mut stmts, op);
+                    }
+
+                    // For each Unique varnode written in both then and else paths,
+                    // create a Ternary expression
+                    for (vn, then_var) in &then_state {
+                        if let Some(&else_var) = current.get(vn) {
+                            if else_var != *then_var {
+                                let ternary_expr = Expr::Ternary(cond_var, *then_var, else_var);
+                                let ternary_id = ssa.new_var(*vn, ternary_expr, vn.size);
+                                current.insert(*vn, ternary_id);
+                                stmts.push(Stmt::Assign(ternary_id));
+                            }
+                        }
+                    }
+
+                    // Process post-label ops (final assignment like IntZext)
+                    if last_idx < inst_ops.len() {
+                        process_op(&mut ssa, &mut current, &mut local_stack, &mut slot_store_blocks, block.id.0, &mut stmts, inst_ops[last_idx]);
+                    }
+                } else {
                 // Process remaining ops normally
                 for (op_idx, op) in inst_ops.iter().enumerate() {
                     // Skip MOVSD zero-clobber copies
@@ -178,46 +233,8 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
                         }
                     }
 
-                    match (*op).clone() {
-                        PcodeOp::Store { ptr, val, .. } => {
-                            let addr_var = resolve_input(&mut ssa, &mut current, &ptr);
-                            let val_var = resolve_input(&mut ssa, &mut current, &val);
-                            // Track stack stores for intra-block forwarding
-                            let val_size = ssa.vars[val_var.0 as usize].size;
-                            let key = get_slot_key(addr_var, val_size, &ssa);
-                            if let Some(key) = key {
-                                local_stack.insert(key, val_var);
-                                slot_store_blocks.entry(key).or_default().push(block.id.0);
-                            }
-                            stmts.push(Stmt::Store { addr: addr_var, val: val_var });
-                        }
-                        ref op => {
-                            if let Some(out_vn) = get_output(op) {
-                                // For Loads: only resolve from INTRA-BLOCK stores (Phase 1).
-                                // Cross-block resolution happens in Phase 2.
-                                let expr = if let PcodeOp::Load { ptr, .. } = op {
-                                    let p = resolve_input(&mut ssa, &mut current, ptr);
-                                    let key = get_slot_key(p, out_vn.size, &ssa);
-                                    if let Some(key) = key {
-                                        if let Some(&stored_var) = local_stack.get(&key) {
-                                            Expr::Var(stored_var)
-                                        } else {
-                                            Expr::Load(p) // Leave opaque for Phase 2
-                                        }
-                                    } else {
-                                        Expr::Load(p)
-                                    }
-                                } else {
-                                    build_expr(&mut ssa, &mut current, op)
-                                };
-                                let effective_size = float_semantic_size(&expr, &ssa.vars)
-                                    .unwrap_or(out_vn.size);
-                                let var_id = ssa.new_var(out_vn, expr, effective_size);
-                                current.insert(out_vn, var_id);
-                                stmts.push(Stmt::Assign(var_id));
-                            }
-                        }
-                    }
+                    process_op(&mut ssa, &mut current, &mut local_stack, &mut slot_store_blocks, block.id.0, &mut stmts, op);
+                }
                 }
 
                 // Now apply deferred Zext writes
@@ -470,6 +487,56 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
     ssa
 }
 
+/// Process a single P-code op: resolve inputs, build SSA expression, update current map.
+/// Extracted to avoid duplication between normal path and CSEL path.
+fn process_op(
+    ssa: &mut SsaCfg,
+    current: &mut HashMap<Varnode, VarId>,
+    local_stack: &mut StackMap,
+    slot_store_blocks: &mut HashMap<SlotKey, Vec<usize>>,
+    block_id: usize,
+    stmts: &mut Vec<Stmt>,
+    op: &PcodeOp,
+) {
+    match op.clone() {
+        PcodeOp::Store { ptr, val, .. } => {
+            let addr_var = resolve_input(ssa, current, &ptr);
+            let val_var = resolve_input(ssa, current, &val);
+            let val_size = ssa.vars[val_var.0 as usize].size;
+            let key = get_slot_key(addr_var, val_size, ssa);
+            if let Some(key) = key {
+                local_stack.insert(key, val_var);
+                slot_store_blocks.entry(key).or_default().push(block_id);
+            }
+            stmts.push(Stmt::Store { addr: addr_var, val: val_var });
+        }
+        ref op => {
+            if let Some(out_vn) = get_output(op) {
+                let expr = if let PcodeOp::Load { ptr, .. } = op {
+                    let p = resolve_input(ssa, current, ptr);
+                    let key = get_slot_key(p, out_vn.size, ssa);
+                    if let Some(key) = key {
+                        if let Some(&stored_var) = local_stack.get(&key) {
+                            Expr::Var(stored_var)
+                        } else {
+                            Expr::Load(p)
+                        }
+                    } else {
+                        Expr::Load(p)
+                    }
+                } else {
+                    build_expr(ssa, current, op)
+                };
+                let effective_size = float_semantic_size(&expr, &ssa.vars)
+                    .unwrap_or(out_vn.size);
+                let var_id = ssa.new_var(out_vn, expr, effective_size);
+                current.insert(out_vn, var_id);
+                stmts.push(Stmt::Assign(var_id));
+            }
+        }
+    }
+}
+
 fn resolve_input(ssa: &mut SsaCfg, current: &mut HashMap<Varnode, VarId>, vn: &Varnode) -> VarId {
     if vn.space == AddressSpaceId::Const {
         return ssa.new_var(*vn, Expr::Const(vn.offset, vn.size), vn.size);
@@ -685,17 +752,22 @@ fn convert_terminator(
             // Only use the register if it has a real expression (not Unknown),
             // to avoid false return values from void functions that happen to
             // leave x0/EAX as the entry parameter value.
+            // AArch64 x0 checked first: on AArch64, offset 0 is PC (set by RET),
+            // not the return value register. Checking 16384 first prevents false matches.
             let ret_val = [
-                Varnode { space: AddressSpaceId::Register, offset: 0, size: 4 }, // EAX / w0 / r0
-                Varnode { space: AddressSpaceId::Register, offset: 0, size: 8 }, // RAX / x0
+                Varnode { space: AddressSpaceId::Register, offset: 16384, size: 4 }, // AArch64 w0
+                Varnode { space: AddressSpaceId::Register, offset: 16384, size: 8 }, // AArch64 x0
+                Varnode { space: AddressSpaceId::Register, offset: 0, size: 4 }, // EAX / r0
+                Varnode { space: AddressSpaceId::Register, offset: 0, size: 8 }, // RAX
                 Varnode { space: AddressSpaceId::Register, offset: 16, size: 4 }, // MIPS v0
                 Varnode { space: AddressSpaceId::Register, offset: 80, size: 8 }, // RISC-V a0
             ].iter().find_map(|vn| {
                 let var_id = current.get(vn).copied()?;
                 let vdef = &ssa.vars[var_id.0 as usize];
-                // Skip if this is just the entry parameter value (Unknown or Phi)
-                // — the function didn't explicitly set a return value
-                if matches!(&vdef.expr, Expr::Unknown) && vdef.param_name.is_some() {
+                // Skip if this is just the entry parameter value (Unknown)
+                // — the function didn't explicitly set a return value.
+                // Also skip bare Unknown without param_name (uninitialized reads).
+                if matches!(&vdef.expr, Expr::Unknown) {
                     return None;
                 }
                 Some(var_id)
@@ -757,6 +829,7 @@ fn collect_expr_refs(expr: &Expr) -> Vec<VarId> {
         Expr::BinOp(_, l, r) => vec![*l, *r],
         Expr::UnaryOp(_, i) | Expr::Load(i) | Expr::FieldAccess(i, _) => vec![*i],
         Expr::Phi(inputs) => inputs.clone(),
+        Expr::Ternary(c, t, e) => vec![*c, *t, *e],
         Expr::Const(_, _) | Expr::Unknown => vec![],
     }
 }

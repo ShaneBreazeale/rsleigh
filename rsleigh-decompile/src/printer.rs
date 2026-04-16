@@ -9111,6 +9111,12 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
             let base_str = format_var_tracked(*base, ssa, ctx, tracker);
             format!("{}->field_{:x}", base_str, offset)
         }
+        Expr::Ternary(cond, then_val, else_val) => {
+            let c = format_var_tracked(*cond, ssa, ctx, tracker);
+            let t = format_var_tracked(*then_val, ssa, ctx, tracker);
+            let e = format_var_tracked(*else_val, ssa, ctx, tracker);
+            format!("({}) ? {} : {}", c, t, e)
+        }
         _ => format_expr(expr, ssa, ctx),
     }
 }
@@ -9962,6 +9968,12 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
             if inputs.len() == 1 { return format_var(inputs[0], ssa, ctx); }
             let args: Vec<String> = inputs.iter().map(|i| format_var(*i, ssa, ctx)).collect();
             format!("phi({})", args.join(", "))
+        }
+        Expr::Ternary(cond, then_val, else_val) => {
+            let c = format_var(*cond, ssa, ctx);
+            let t = format_var(*then_val, ssa, ctx);
+            let e = format_var(*else_val, ssa, ctx);
+            format!("({}) ? {} : {}", c, t, e)
         }
         Expr::Unknown => "?".to_string(),
     }

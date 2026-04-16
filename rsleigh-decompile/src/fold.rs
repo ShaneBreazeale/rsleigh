@@ -124,6 +124,25 @@ fn fold_once(ssa: &mut SsaCfg) {
         }
     }
 
+    // Pass 1b: Simplify trivial ternaries
+    for v in 0..ssa.vars.len() {
+        if let Expr::Ternary(cond, then_val, else_val) = &ssa.vars[v].expr {
+            let c = *cond; let t = *then_val; let e = *else_val;
+            // Ternary(Const(1), a, b) → Var(a)
+            if matches!(&ssa.vars[c.0 as usize].expr, Expr::Const(v, _) if *v != 0) {
+                ssa.vars[v].expr = Expr::Var(t);
+            }
+            // Ternary(Const(0), a, b) → Var(b)
+            else if matches!(&ssa.vars[c.0 as usize].expr, Expr::Const(0, _)) {
+                ssa.vars[v].expr = Expr::Var(e);
+            }
+            // Ternary(c, a, a) → Var(a)
+            else if t == e {
+                ssa.vars[v].expr = Expr::Var(t);
+            }
+        }
+    }
+
     // Pass 2: Algebraic simplification + constant folding
     for v in 0..ssa.vars.len() {
         let expr = ssa.vars[v].expr.clone();
@@ -303,6 +322,7 @@ fn collect_base_vars(expr: &Expr, vars: &[VarDef], bases: &mut Vec<VarId>, depth
             let inner = &vars[id.0 as usize].expr;
             if matches!(inner, Expr::Unknown) || matches!(inner, Expr::Load(_))
                 || matches!(inner, Expr::Phi(_)) || matches!(inner, Expr::FieldAccess(_, _))
+                || matches!(inner, Expr::Ternary(_, _, _))
             {
                 bases.push(*id); // This is a base variable (input)
             } else {
@@ -326,7 +346,7 @@ fn eval_expr(expr: &Expr, vars: &[VarDef], env: &std::collections::HashMap<u32, 
     if depth > 20 { return None; }
     match expr {
         Expr::Const(val, _) => Some(*val & mask),
-        Expr::Unknown | Expr::Load(_) | Expr::Phi(_) | Expr::FieldAccess(_, _) => None,
+        Expr::Unknown | Expr::Load(_) | Expr::Phi(_) | Expr::FieldAccess(_, _) | Expr::Ternary(_, _, _) => None,
         Expr::Var(id) => {
             if let Some(&val) = env.get(&id.0) {
                 Some(val & mask)
@@ -1441,8 +1461,13 @@ fn collect_expr_reads_inner(expr: &Expr, vars: &[VarDef], reads: &mut std::colle
             collect_var_reads_inner(*l, vars, reads, visited);
             collect_var_reads_inner(*r, vars, reads, visited);
         }
-        Expr::UnaryOp(_, i) | Expr::Load(i) => collect_var_reads_inner(*i, vars, reads, visited),
+        Expr::UnaryOp(_, i) | Expr::Load(i) | Expr::FieldAccess(i, _) => collect_var_reads_inner(*i, vars, reads, visited),
         Expr::Phi(inputs) => { for i in inputs { collect_var_reads_inner(*i, vars, reads, visited); } }
+        Expr::Ternary(c, t, e) => {
+            collect_var_reads_inner(*c, vars, reads, visited);
+            collect_var_reads_inner(*t, vars, reads, visited);
+            collect_var_reads_inner(*e, vars, reads, visited);
+        }
         _ => {}
     }
 }
@@ -2460,6 +2485,10 @@ fn infer_types(ssa: &mut SsaCfg) {
             Expr::Var(v) => {
                 backward_propagate(ssa, v, ty);
             }
+            Expr::Ternary(_, t, e) => {
+                backward_propagate(ssa, t, ty);
+                backward_propagate(ssa, e, ty);
+            }
             _ => {}
         }
     }
@@ -2588,6 +2617,7 @@ pub(crate) fn recount_uses(ssa: &mut SsaCfg) {
             Expr::BinOp(_, l, r) => { use_counts[l.0 as usize] += 1; use_counts[r.0 as usize] += 1; }
             Expr::UnaryOp(_, i) | Expr::Load(i) | Expr::FieldAccess(i, _) => use_counts[i.0 as usize] += 1,
             Expr::Phi(inputs) => { for i in inputs { use_counts[i.0 as usize] += 1; } }
+            Expr::Ternary(c, t, e) => { use_counts[c.0 as usize] += 1; use_counts[t.0 as usize] += 1; use_counts[e.0 as usize] += 1; }
             Expr::Const(_, _) | Expr::Unknown => {}
         }
     }

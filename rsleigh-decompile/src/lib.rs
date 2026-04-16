@@ -37,60 +37,9 @@ pub fn decompile_with_binary(
         return "// empty function\n".to_string();
     }
 
-    // Preprocess: expand intra-instruction CBranches (CMOV, CSEL) into
-    // separate instruction entries so the CFG builder creates proper branches.
-    let mut expanded: Vec<(u64, pcode_ir::Instruction)> = Vec::new();
-    for (addr, inst) in instructions {
-        // Look for CBranch(Const, cond) within the instruction's ops
-        let cbranch_idx = inst.ops.iter().position(|op| matches!(op,
-            pcode_ir::PcodeOp::CBranch { dest, .. }
-                if dest.space == pcode_ir::AddressSpaceId::Const));
-
-        if let Some(ci) = cbranch_idx {
-            if let pcode_ir::PcodeOp::CBranch { dest, cond } = &inst.ops[ci] {
-                let target = dest.offset;
-                // The ops after the CBranch are conditional
-                if ci + 1 < inst.ops.len() {
-                    // Split into: [pre-ops + CBranch(Ram, target)] and [post-ops + Branch(target)]
-                    let mut pre_ops: Vec<pcode_ir::PcodeOp> = inst.ops[..ci].to_vec();
-                    let post_ops: Vec<pcode_ir::PcodeOp> = inst.ops[ci + 1..].to_vec();
-
-                    // CBranch to target in RAM space so the CFG builder handles it
-                    pre_ops.push(pcode_ir::PcodeOp::CBranch {
-                        dest: pcode_ir::Varnode { space: pcode_ir::AddressSpaceId::Ram, offset: target, size: dest.size },
-                        cond: *cond,
-                    });
-
-                    expanded.push((*addr, pcode_ir::Instruction {
-                        ops: pre_ops,
-                        len: 1, // Synthetic: 1-byte so next_addr = addr + 1
-                        disassembly: String::new(),
-                    }));
-
-                    // Fallthrough: the conditional ops at a synthetic address
-                    // Use addr+1 since the pre part has len=0, giving space for the fallthrough
-                    let mut fall_ops = post_ops;
-                    // Add unconditional branch to the real target
-                    fall_ops.push(pcode_ir::PcodeOp::Branch {
-                        dest: pcode_ir::Varnode { space: pcode_ir::AddressSpaceId::Ram, offset: target, size: dest.size },
-                    });
-
-                    // Use a synthetic address between this instruction and the next
-                    // The CBranch target IS the next real instruction, so the fallthrough
-                    // block sits between this addr and the target
-                    let synth_addr = *addr + 1; // +1 byte offset as synthetic
-                    expanded.push((synth_addr, pcode_ir::Instruction {
-                        ops: fall_ops,
-                        len: target.saturating_sub(synth_addr).max(1), // span to the target
-                        disassembly: String::new(),
-                    }));
-                    continue;
-                }
-            }
-        }
-
-        expanded.push((*addr, inst.clone()));
-    }
+    // Pass instructions through unchanged — intra-instruction CBranch (CSEL/CMOV)
+    // patterns are handled by the SSA builder as Expr::Ternary, not as CFG branches.
+    let expanded: Vec<(u64, pcode_ir::Instruction)> = instructions.to_vec();
 
     let cfg = cfg::build_cfg(&expanded);
     if cfg.blocks.is_empty() {

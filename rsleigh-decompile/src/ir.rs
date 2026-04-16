@@ -132,6 +132,9 @@ pub enum Expr {
     /// Recognized from Load(Add(base, Const(offset))) patterns.
     FieldAccess(VarId, u64),
     Phi(Vec<VarId>),
+    /// Conditional select: cond != 0 ? then_val : else_val
+    /// Generated from AArch64 CSEL-family intra-instruction CBranch patterns.
+    Ternary(VarId, VarId, VarId),
     Unknown,
 }
 
