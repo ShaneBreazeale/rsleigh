@@ -3141,27 +3141,54 @@ fn propagate_call_returns(ssa: &mut SsaCfg) {
         }
 
         // For Call statements within a block: the next RAX assignment is the return value
-        let stmts = &ssa.blocks[bi].stmts;
-        let mut after_call = false;
-        for i in 0..stmts.len() {
-            if matches!(&stmts[i], Stmt::Call { .. }) {
-                after_call = true;
+        let mut call_idx: Option<usize> = None;
+        for i in 0..ssa.blocks[bi].stmts.len() {
+            if matches!(&ssa.blocks[bi].stmts[i], Stmt::Call { .. }) {
+                call_idx = Some(i);
                 continue;
             }
-            if after_call {
-                if let Stmt::Assign(var_id) = &stmts[i] {
+            if let Some(cidx) = call_idx {
+                if let Stmt::Assign(var_id) = &ssa.blocks[bi].stmts[i] {
+                    let var_id = *var_id;
                     let vdef = &ssa.vars[var_id.0 as usize];
-                    // Skip if already marked call_return by SSA-level clobber
                     if vdef.call_return {
-                        after_call = false;
+                        // Already handled by SSA clobber; wire out if use_count > 0
+                        let use_count = ssa.vars[var_id.0 as usize].use_count;
+                        if use_count > 0 {
+                            if let Stmt::Call { ref target, ref args, .. } =
+                                ssa.blocks[bi].stmts[cidx].clone()
+                            {
+                                ssa.blocks[bi].stmts[cidx] = Stmt::Call {
+                                    target: target.clone(),
+                                    args: args.clone(),
+                                    out: Some(var_id),
+                                };
+                            }
+                        }
+                        call_idx = None;
                         continue;
                     }
                     if vdef.varnode.space == AddressSpaceId::Register
                         && vdef.varnode.offset == RAX_OFFSET
                     {
                         ssa.vars[var_id.0 as usize].call_return = true;
-                        after_call = false;
+                        let use_count = ssa.vars[var_id.0 as usize].use_count;
+                        if use_count > 0 {
+                            if let Stmt::Call { ref target, ref args, .. } =
+                                ssa.blocks[bi].stmts[cidx].clone()
+                            {
+                                ssa.blocks[bi].stmts[cidx] = Stmt::Call {
+                                    target: target.clone(),
+                                    args: args.clone(),
+                                    out: Some(var_id),
+                                };
+                            }
+                        }
+                        call_idx = None;
                     }
+                } else {
+                    // Non-assign stmt between call and return read — reset
+                    call_idx = None;
                 }
             }
         }
