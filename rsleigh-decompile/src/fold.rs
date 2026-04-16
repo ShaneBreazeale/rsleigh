@@ -3156,14 +3156,8 @@ fn propagate_call_returns(ssa: &mut SsaCfg) {
                         // Already handled by SSA clobber; wire out if use_count > 0
                         let use_count = ssa.vars[var_id.0 as usize].use_count;
                         if use_count > 0 {
-                            if let Stmt::Call { ref target, ref args, .. } =
-                                ssa.blocks[bi].stmts[cidx].clone()
-                            {
-                                ssa.blocks[bi].stmts[cidx] = Stmt::Call {
-                                    target: target.clone(),
-                                    args: args.clone(),
-                                    out: Some(var_id),
-                                };
+                            if let Stmt::Call { out, .. } = &mut ssa.blocks[bi].stmts[cidx] {
+                                *out = Some(var_id);
                                 to_remove.push(i);
                             }
                         }
@@ -3176,14 +3170,8 @@ fn propagate_call_returns(ssa: &mut SsaCfg) {
                         ssa.vars[var_id.0 as usize].call_return = true;
                         let use_count = ssa.vars[var_id.0 as usize].use_count;
                         if use_count > 0 {
-                            if let Stmt::Call { ref target, ref args, .. } =
-                                ssa.blocks[bi].stmts[cidx].clone()
-                            {
-                                ssa.blocks[bi].stmts[cidx] = Stmt::Call {
-                                    target: target.clone(),
-                                    args: args.clone(),
-                                    out: Some(var_id),
-                                };
+                            if let Stmt::Call { out, .. } = &mut ssa.blocks[bi].stmts[cidx] {
+                                *out = Some(var_id);
                                 to_remove.push(i);
                             }
                         }
