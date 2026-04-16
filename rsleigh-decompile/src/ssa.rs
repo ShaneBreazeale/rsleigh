@@ -420,6 +420,20 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
                     if let SsaTerminator::Return(Some(ret_var)) = &ssa.blocks[succ_bid].terminator {
                         if let Some(&phi_var) = back_relink.get(ret_var) {
                             ssa.blocks[succ_bid].terminator = SsaTerminator::Return(Some(phi_var));
+                        } else {
+                            // Also check: the return might reference a Var/Zext chain
+                            // that wraps a back-edge VarId. Follow one level.
+                            let rv = &ssa.vars[ret_var.0 as usize];
+                            let inner = match &rv.expr {
+                                Expr::Var(v) => Some(*v),
+                                Expr::UnaryOp(UnaryOpKind::Zext, v) => Some(*v),
+                                _ => None,
+                            };
+                            if let Some(inner_id) = inner {
+                                if let Some(&phi_var) = back_relink.get(&inner_id) {
+                                    ssa.blocks[succ_bid].terminator = SsaTerminator::Return(Some(phi_var));
+                                }
+                            }
                         }
                     }
                 }
@@ -636,6 +650,14 @@ fn process_op(
                     .unwrap_or(out_vn.size);
                 let var_id = ssa.new_var(out_vn, expr, effective_size);
                 current.insert(out_vn, var_id);
+                // Sub-register propagation: when writing to a larger register (e.g., RAX 8-byte),
+                // also update the smaller sub-register at the same offset (e.g., EAX 4-byte).
+                // This ensures that return value detection finds the correct value when the
+                // function uses 64-bit ops (LEA/INC on RAX) but the return checks EAX first.
+                if out_vn.space == AddressSpaceId::Register && out_vn.size == 8 {
+                    let sub_vn = Varnode { space: out_vn.space, offset: out_vn.offset, size: 4 };
+                    current.insert(sub_vn, var_id);
+                }
                 stmts.push(Stmt::Assign(var_id));
             }
         }
@@ -910,6 +932,10 @@ fn convert_terminator(
             // leave x0/EAX as the entry parameter value.
             // AArch64 x0 checked first: on AArch64, offset 0 is PC (set by RET),
             // not the return value register. Checking 16384 first prevents false matches.
+            // Check smaller register first (EAX before RAX) for correct return types.
+            // BUT: if EAX has a stale value (Const(0) from XOR self-zeroing) and
+            // RAX has a real value, prefer RAX. This handles loop counters where
+            // XOR EAX,EAX inits the counter but LEA/INC on RAX is the loop result.
             let ret_val = [
                 Varnode { space: AddressSpaceId::Register, offset: 16384, size: 4 }, // AArch64 w0
                 Varnode { space: AddressSpaceId::Register, offset: 16384, size: 8 }, // AArch64 x0
