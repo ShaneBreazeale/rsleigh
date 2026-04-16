@@ -5,6 +5,7 @@
 
 use pcode_ir::{AddressSpaceId, Instruction, PcodeOp, Varnode};
 use rsleigh_api::{Architecture, Decoder};
+use rsleigh_decompile::decompile_with_binary;
 use rsleigh_decompile::cfg::build_cfg;
 use rsleigh_decompile::fold::CallingConv;
 use rsleigh_decompile::ir::Expr;
@@ -78,6 +79,87 @@ fn post_call_rax_is_unknown_win64() {
             assert!(
                 rax_src.call_return,
                 "post-call RAX must be marked call_return=true"
+            );
+        })
+        .expect("thread spawn failed");
+    handle.join().expect("test thread panicked");
+}
+
+/// Regression: printer must not render a register as the parameter name
+/// when the register has been clobbered by a Call. Specifically, after a
+/// call-clobber, *(RCX) should NOT become *(param_C).
+///
+/// We test this by checking the full check2 output does not contain "*(C)".
+/// If the fixture binary is missing, the test skips gracefully.
+#[test]
+fn check2_no_star_c_after_clobber() {
+    let path = "/Users/shane/Downloads/test_bin/cb_baristas_secret_x64.exe";
+    let data = match std::fs::read(path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("skipping check2_no_star_c_after_clobber: fixture binary not found");
+            return;
+        }
+    };
+
+    let pe = match goblin::pe::PE::parse(&data) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("skipping check2_no_star_c_after_clobber: PE parse error: {}", e);
+            return;
+        }
+    };
+    let image_base = pe.image_base as u64;
+    let func_va: u64 = 0x140001a68;
+    let rva = func_va - image_base;
+    let mut file_off = None;
+    for s in &pe.sections {
+        let s_va = s.virtual_address as u64;
+        let s_sz = s.virtual_size as u64;
+        if rva >= s_va && rva < s_va + s_sz {
+            file_off = Some((s.pointer_to_raw_data as u64 + (rva - s_va)) as usize);
+            break;
+        }
+    }
+    let off = match file_off {
+        Some(o) => o,
+        None => {
+            eprintln!("skipping check2_no_star_c_after_clobber: func_va not in any section");
+            return;
+        }
+    };
+    let func_len = 0x200_usize.min(data.len() - off);
+    let bytes = data[off..off + func_len].to_vec();
+
+    let handle = std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || {
+            let mut dec = Decoder::new(Architecture::X86_64);
+            let mut insts = Vec::new();
+            let mut io = 0usize;
+            while io < bytes.len() {
+                match dec.decode(&bytes[io..], func_va + io as u64) {
+                    Ok(inst) => {
+                        let is_ret = inst.ops.iter().any(|op| matches!(op, PcodeOp::Return { .. }));
+                        let l = inst.len as usize;
+                        insts.push((func_va + io as u64, inst));
+                        io += l;
+                        if is_ret { break; }
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            let out = decompile_with_binary(
+                Architecture::X86_64,
+                &insts,
+                Some(&data),
+                Some(std::path::Path::new(path)),
+            );
+            assert!(
+                !out.contains("*(C)"),
+                "printer rendered *(C) after call-clobber fix; output snippet:\n{}",
+                out.lines().filter(|l| l.contains("*(C)")).collect::<Vec<_>>().join("\n")
             );
         })
         .expect("thread spawn failed");

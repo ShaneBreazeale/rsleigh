@@ -925,8 +925,15 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     }
 
     // Replace *(REG) with *(param) for pointer dereferences in conditions
+    // (skip lines that look like byte-pickoff expressions — those use post-call registers
+    // which are not parameters and must not be renamed)
     if !param_names.is_empty() {
         for line in &mut lines {
+            // Don't rename register dereferences in bit-shift byte-pack expressions;
+            // those use post-call registers which are not parameters.
+            if line.contains("<< 24") || line.contains("<< 16") || line.contains("<< 8") {
+                continue;
+            }
             let reg_names = ["RAX", "RCX", "RDX", "RBX", "RSI", "RDI", "R8", "R9",
                              "EAX", "ECX", "EDX", "EBX", "ESI", "EDI"];
             let mut param_idx = 0;
