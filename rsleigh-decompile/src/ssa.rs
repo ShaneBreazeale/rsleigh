@@ -15,8 +15,14 @@ struct SlotKey {
 
 type StackMap = HashMap<SlotKey, VarId>;
 
-/// Convert a CFG into SSA form.
+/// Convert a CFG into SSA form (SysV calling convention).
 pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
+    build_ssa_with_cc(cfg, CallingConv::SysV)
+}
+
+/// Convert a CFG into SSA form with a specific calling convention.
+/// The `cc` parameter controls which registers are invalidated after Call sites.
+pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
     let mut ssa = SsaCfg {
         blocks: Vec::new(),
         vars: Vec::new(),
@@ -195,7 +201,7 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
                         if let PcodeOp::IntZext { out, .. } = op {
                             if deferred_zext.iter().any(|(vn, _)| vn == out) { continue; }
                         }
-                        process_op(&mut ssa, &mut current, &mut local_stack, &mut slot_store_blocks, block.id.0, &mut stmts, op);
+                        process_op(&mut ssa, &mut current, &mut local_stack, &mut slot_store_blocks, block.id.0, &mut stmts, op, cc);
                     }
 
                     let cond_var = resolve_input(&mut ssa, &mut current, &cond_vn);
@@ -209,7 +215,7 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
                     // Process else-path ops (between CBranch and last op)
                     let last_idx = inst_ops.len() - 1;
                     for op in &inst_ops[cb_idx+1..last_idx] {
-                        process_op(&mut ssa, &mut current, &mut local_stack, &mut slot_store_blocks, block.id.0, &mut stmts, op);
+                        process_op(&mut ssa, &mut current, &mut local_stack, &mut slot_store_blocks, block.id.0, &mut stmts, op, cc);
                     }
 
                     // For each Unique varnode written in both then and else paths,
@@ -227,7 +233,7 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
 
                     // Process post-label ops (final assignment like IntZext)
                     if last_idx < inst_ops.len() {
-                        process_op(&mut ssa, &mut current, &mut local_stack, &mut slot_store_blocks, block.id.0, &mut stmts, inst_ops[last_idx]);
+                        process_op(&mut ssa, &mut current, &mut local_stack, &mut slot_store_blocks, block.id.0, &mut stmts, inst_ops[last_idx], cc);
                     }
                 } else {
                 // Process remaining ops normally
@@ -243,7 +249,7 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
                         }
                     }
 
-                    process_op(&mut ssa, &mut current, &mut local_stack, &mut slot_store_blocks, block.id.0, &mut stmts, op);
+                    process_op(&mut ssa, &mut current, &mut local_stack, &mut slot_store_blocks, block.id.0, &mut stmts, op, cc);
                 }
                 }
 
@@ -253,7 +259,7 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
                 }
             }
 
-            let terminator = convert_terminator(&mut ssa, &mut current, &block.terminator);
+            let terminator = convert_terminator(&mut ssa, &mut current, &block.terminator, cc, &mut stmts);
 
             // Build exit stack: inherit from forward predecessor + local stores
             let mut exit_stack: StackMap = if !block_preds.is_empty() {
@@ -617,6 +623,7 @@ fn process_op(
     block_id: usize,
     stmts: &mut Vec<Stmt>,
     op: &PcodeOp,
+    _cc: CallingConv,
 ) {
     match op.clone() {
         PcodeOp::Store { ptr, val, .. } => {
@@ -801,6 +808,48 @@ fn caller_saved_offsets(cc: CallingConv) -> &'static [u64] {
     }
 }
 
+/// Invalidate caller-saved registers in `current` after a Call.
+/// Emits one `Stmt::Assign(ret_var)` for the return register with `call_return=true`.
+/// Other caller-saved registers are removed from `current`; if read later,
+/// `resolve_input` will create fresh Unknown VarDefs for them.
+fn clobber_caller_saved(
+    ssa: &mut SsaCfg,
+    current: &mut HashMap<Varnode, VarId>,
+    cc: CallingConv,
+    stmts: &mut Vec<Stmt>,
+) {
+    let offsets = caller_saved_offsets(cc);
+    let ret_off = return_reg_offset(cc);
+    let ret_size = return_reg_size(cc);
+
+    // Drop every current entry at any caller-saved offset, regardless of size.
+    current.retain(|vn, _| {
+        !(vn.space == AddressSpaceId::Register && offsets.contains(&vn.offset))
+    });
+
+    // Create a fresh return-register clobber with call_return=true.
+    let ret_vn = Varnode {
+        space: AddressSpaceId::Register,
+        offset: ret_off,
+        size: ret_size,
+    };
+    let ret_var = ssa.new_var(ret_vn, Expr::Unknown, ret_size);
+    ssa.vars[ret_var.0 as usize].call_return = true;
+    current.insert(ret_vn, ret_var);
+
+    // Seed size-4 sub-register too (so `mov eax, ...` reads see the same VarId).
+    if ret_size == 8 {
+        let sub_vn = Varnode {
+            space: AddressSpaceId::Register,
+            offset: ret_off,
+            size: 4,
+        };
+        current.insert(sub_vn, ret_var);
+    }
+
+    stmts.push(Stmt::Assign(ret_var));
+}
+
 /// Extract a stack slot key from a pointer VarId.
 /// Recognizes: FRAME_REG + const, FRAME_REG - const (via large unsigned const).
 fn get_slot_key(ptr_var: VarId, size: u32, ssa: &SsaCfg) -> Option<SlotKey> {
@@ -976,6 +1025,8 @@ fn convert_terminator(
     ssa: &mut SsaCfg,
     current: &mut HashMap<Varnode, VarId>,
     term: &Terminator,
+    cc: CallingConv,
+    stmts: &mut Vec<Stmt>,
 ) -> SsaTerminator {
     match term {
         Terminator::Fallthrough(b) => SsaTerminator::Fallthrough(*b),
@@ -985,6 +1036,7 @@ fn convert_terminator(
             SsaTerminator::CBranch { cond: cond_var, taken: *taken, fallthrough: *fallthrough }
         }
         Terminator::Call { target, fallthrough } => {
+            clobber_caller_saved(ssa, current, cc, stmts);
             SsaTerminator::Call { target: target.clone(), args: vec![], fallthrough: *fallthrough }
         }
         Terminator::Return => {
