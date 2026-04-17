@@ -139,6 +139,16 @@ fn combine_frame_offset(op1: BinOpKind, c1: u64, op2: BinOpKind, c2: u64) -> (Bi
     }
 }
 
+/// Return the logical negation of an equality/inequality operator.
+/// Only handles Eq↔NotEq. Returns None for Less/SLess/etc. (those need operand swapping).
+fn negate_eq_op(op: BinOpKind) -> Option<BinOpKind> {
+    match op {
+        BinOpKind::Eq    => Some(BinOpKind::NotEq),
+        BinOpKind::NotEq => Some(BinOpKind::Eq),
+        _ => None,
+    }
+}
+
 fn fold_once(ssa: &mut SsaCfg) {
     // Pass 1: Collapse trivial Phis
     for v in 0..ssa.vars.len() {
@@ -995,6 +1005,42 @@ fn mba_simplify_expr(var_idx: usize, vars: &[VarDef]) -> Option<Expr> {
         Expr::UnaryOp(UnaryOpKind::Not, inner) => {
             if let Expr::UnaryOp(UnaryOpKind::Not, inner2) = &vars[inner.0 as usize].expr {
                 return Some(Expr::Var(*inner2));
+            }
+            None
+        }
+        // BoolNot(BoolNot(x)) → x
+        // BoolNot(Eq(a, b))   → NotEq(a, b)
+        // BoolNot(NotEq(a, b)) → Eq(a, b)
+        Expr::UnaryOp(UnaryOpKind::BoolNot, inner) => {
+            if let Expr::UnaryOp(UnaryOpKind::BoolNot, inner2) = &vars[inner.0 as usize].expr {
+                return Some(Expr::Var(*inner2));
+            }
+            if let Expr::BinOp(cmp_op, a, b) = vars[inner.0 as usize].expr {
+                if let Some(neg_op) = negate_eq_op(cmp_op) {
+                    return Some(Expr::BinOp(neg_op, a, b));
+                }
+            }
+            None
+        }
+        // (Eq(a,b) == 0) → NotEq(a,b),  (NotEq(a,b) == 0) → Eq(a,b)
+        Expr::BinOp(BinOpKind::Eq, inner_id, zero_id) => {
+            if matches!(vars[zero_id.0 as usize].expr, Expr::Const(0, _)) {
+                if let Expr::BinOp(cmp_op, a, b) = vars[inner_id.0 as usize].expr {
+                    if let Some(neg_op) = negate_eq_op(cmp_op) {
+                        return Some(Expr::BinOp(neg_op, a, b));
+                    }
+                }
+            }
+            None
+        }
+        // (Eq(a,b) != 0) → Eq(a,b),  (NotEq(a,b) != 0) → NotEq(a,b)  [identity: already a bool]
+        Expr::BinOp(BinOpKind::NotEq, inner_id, zero_id) => {
+            if matches!(vars[zero_id.0 as usize].expr, Expr::Const(0, _)) {
+                if matches!(vars[inner_id.0 as usize].expr,
+                    Expr::BinOp(BinOpKind::Eq, _, _) | Expr::BinOp(BinOpKind::NotEq, _, _)
+                ) {
+                    return Some(Expr::Var(*inner_id));
+                }
             }
             None
         }
