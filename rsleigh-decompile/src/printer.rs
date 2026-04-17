@@ -333,6 +333,16 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         }
                     }
                     if is_redundant {
+                        if std::env::var("RSLEIGH_DEBUG_PRINTER").is_ok() {
+                            eprintln!("[#2b] removing redundant: {:?}", lines[i].trim());
+                            // Find which line made it redundant
+                            for j in (0..i).chain(i+1..lines.len()) {
+                                if lines[j].trim().contains(rhs) {
+                                    eprintln!("[#2b]   found in line {}: {:?}", j, lines[j].trim());
+                                    break;
+                                }
+                            }
+                        }
                         lines.remove(i);
                         continue;
                     }
@@ -547,6 +557,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     }
                     // Dead store: same LHS, second doesn't reference first
                     if !rhs2.contains(&lhs1) {
+                        if std::env::var("RSLEIGH_DEBUG_PRINTER").is_ok() {
+                            eprintln!("[dead-store] removing: {:?}", lines[i].trim());
+                        }
                         lines.remove(i);
                         continue;
                     }
@@ -1069,15 +1082,21 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         })
                         .map(|l| l.trim().to_string());
                     if next_nonblank.as_ref().map_or(false, |n| n.starts_with("while (")) {
-                        // Record the register value for use inside the loop
-                        // Only record meaningful expressions (not other registers or constants)
-                        if rhs.contains("var_") || rhs.contains("len") || rhs.contains("param")
-                            || rhs.contains("str") || (rhs.contains(' ') && !rhs.starts_with("0x"))
-                        {
-                            loop_reg_values.insert(lhs, rhs);
+                        // Don't remove function call results before while loops — the call
+                        // has side effects and its return value binding should be visible.
+                        // Only remove/record simple variable references and expressions.
+                        let is_call_rhs = rhs.contains('(') && rhs.contains(')');
+                        if !is_call_rhs {
+                            // Record the register value for use inside the loop
+                            // Only record meaningful expressions (not other registers or constants)
+                            if rhs.contains("var_") || rhs.contains("len") || rhs.contains("param")
+                                || rhs.contains("str") || (rhs.contains(' ') && !rhs.starts_with("0x"))
+                            {
+                                loop_reg_values.insert(lhs, rhs);
+                            }
+                            lines.remove(i);
+                            continue;
                         }
-                        lines.remove(i);
-                        continue;
                     }
                 }
             }
@@ -3805,6 +3824,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         }
                     }
                     if !used {
+                        if std::env::var("RSLEIGH_DEBUG_PRINTER").is_ok() {
+                            eprintln!("[#DEADREG] removing: {:?}", lines[i].trim());
+                        }
                         lines.remove(i);
                         continue;
                     }
@@ -3848,6 +3870,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 // Check if next non-empty line is } or end of function
                 let next = lines.get(i + 1).map(|l| l.trim().to_string()).unwrap_or_default();
                 if next == "}" || next.is_empty() || next.starts_with('}') {
+                    if std::env::var("RSLEIGH_DEBUG_PRINTER").is_ok() {
+                        eprintln!("[#TRAILINGDEAD] removing: {:?}", lt);
+                    }
                     lines.remove(i);
                     continue;
                 }
@@ -8128,8 +8153,13 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                         return; // Elided: stack Load tracked
                     }
                 } else {
-                    // Format BEFORE invalidating so the expression can resolve
-                    // the old register values through the tracker
+                    // REG = computed expression (BinOp, etc.): invalidate call_return
+                    // so it is not incorrectly propagated through subsequent copies.
+                    if std::env::var("RSLEIGH_DEBUG_PRINTER").is_ok() {
+                        eprintln!("[tracker-inv] invalidating off={} size={} for VarId {:?}",
+                            vdef.varnode.offset, vdef.varnode.size, lhs);
+                    }
+                    tracker.invalidate(vdef.varnode.offset, vdef.varnode.size);
                 }
             }
 
@@ -8394,8 +8424,31 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
             tracker.invalidate_all();
 
             if let Some(out_var) = call_out {
-                let name = var_name(&ssa.var(*out_var).varnode, ctx);
+                // Use format_var to get the proper name (param_name > register name).
+                // This ensures "len = strlen(str);" rather than "RAX = strlen(str);"
+                // The auto-rename pass will later rename "RAX" → "lVar1" if needed,
+                // so "RAX = strcspn(...);" becomes "lVar1 = strcspn(...);" in the final output.
+                let name = format_var(*out_var, ssa, ctx);
                 out.push_str(&format!("{}{} = {};\n", pad, name, call_expr));
+                // Track the register as a normal SSA source (not a call_return expr string).
+                // Using set() instead of set_call_return() prevents the call expression from
+                // being re-inlined into subsequent statements. This is important because:
+                // 1. The result is already explicitly named ("RAX = strcspn(...)"), so
+                //    inlining it again would create a duplicate (and post_process #2b would
+                //    then remove the named assignment as "redundant").
+                // 2. The call result may be used for address computation (e.g., [RBP+RAX-60]=0)
+                //    before being passed to another function — we want the named variable, not
+                //    the re-inlined call expression, at those use sites.
+                let vdef = ssa.var(*out_var);
+                if vdef.varnode.space == AddressSpaceId::Register {
+                    tracker.set(vdef.varnode.offset, vdef.varnode.size, *out_var);
+                    // Also cover sub-register aliases (RAX/EAX at same offset)
+                    if vdef.varnode.size == 8 {
+                        tracker.set(vdef.varnode.offset, 4, *out_var);
+                    } else if vdef.varnode.size == 4 {
+                        tracker.set(vdef.varnode.offset, 8, *out_var);
+                    }
+                }
             } else {
                 // Set call return expression for potential inlining
                 tracker.set_call_return(0, 8, call_expr.clone()); // RAX

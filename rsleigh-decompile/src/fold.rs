@@ -1256,6 +1256,7 @@ fn propagate_register_constants(ssa: &mut SsaCfg) {
         if v.varnode.space == AddressSpaceId::Register && matches!(&v.expr, Expr::Unknown)
             && v.param_name.is_none()
             && v.use_count <= 2  // Low use count = likely a constant setup, not a loop var
+            && !v.call_return    // Don't overwrite call-return placeholders with stale constants
             && !FLAG_OFFSETS.contains(&v.varnode.offset)
             && v.varnode.offset != RSP_OFFSET
             && v.varnode.offset != RIP_OFFSET
@@ -2433,9 +2434,14 @@ fn collect_call_arguments(ssa: &mut SsaCfg) {
             };
 
             if !args.is_empty() {
+                // Preserve existing `out` field if already set
+                let existing_out = if let SsaTerminator::Call { out, .. } = &ssa.blocks[bi].terminator {
+                    *out
+                } else { None };
                 ssa.blocks[bi].terminator = SsaTerminator::Call {
                     target,
                     args,
+                    out: existing_out,
                     fallthrough,
                 };
             }
@@ -2845,7 +2851,12 @@ pub(crate) fn recount_uses(ssa: &mut SsaCfg) {
         match &block.terminator {
             SsaTerminator::CBranch { cond, .. } => use_counts[cond.0 as usize] += 1,
             SsaTerminator::Return(Some(v)) | SsaTerminator::Indirect(v) => use_counts[v.0 as usize] += 1,
-            SsaTerminator::Call { args, .. } => { for a in args { use_counts[a.0 as usize] += 1; } }
+            SsaTerminator::Call { args, out, .. } => {
+                for a in args { use_counts[a.0 as usize] += 1; }
+                // out var is "defined by" this call — don't count as a use here.
+                // (It's a def, not a use. Printer reads out to emit `lhs = call(...)`)
+                let _ = out; // suppress warning
+            }
             _ => {}
         }
     }
@@ -3111,12 +3122,38 @@ fn propagate_call_returns(ssa: &mut SsaCfg) {
         // Check if this block has a Call terminator
         let has_call_term = matches!(&ssa.blocks[bi].terminator, SsaTerminator::Call { .. });
 
-        // For Call terminators: the fallthrough block's first RAX assignment is the return value
+        // For Call terminators: wire SsaTerminator::Call.out from the call_return var
+        // in the current block (placed by clobber_caller_saved).
+        // Also scan the fallthrough block for additional RAX assignments to mark.
         if has_call_term {
             let fallthrough = match &ssa.blocks[bi].terminator {
                 SsaTerminator::Call { fallthrough, .. } => Some(*fallthrough),
                 _ => None,
             };
+
+            // Wire out: find the last call_return var in the current block's stmts.
+            // If use_count > 0, wire it to SsaTerminator::Call.out and remove the stmt.
+            let mut out_var: Option<VarId> = None;
+            let mut out_stmt_idx: Option<usize> = None;
+            for (idx, stmt) in ssa.blocks[bi].stmts.iter().enumerate().rev() {
+                if let Stmt::Assign(var_id) = stmt {
+                    let vdef = &ssa.vars[var_id.0 as usize];
+                    if vdef.call_return {
+                        if vdef.use_count > 0 {
+                            out_var = Some(*var_id);
+                            out_stmt_idx = Some(idx);
+                        }
+                        break; // Only check the last call_return var
+                    }
+                }
+            }
+            if let (Some(var), Some(idx)) = (out_var, out_stmt_idx) {
+                if let SsaTerminator::Call { out, .. } = &mut ssa.blocks[bi].terminator {
+                    *out = Some(var);
+                }
+                ssa.blocks[bi].stmts.remove(idx);
+            }
+
             if let Some(ft) = fallthrough {
                 if ft.0 < ssa.blocks.len() {
                     // Find the first RAX/EAX assignment in the fallthrough block

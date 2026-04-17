@@ -1037,7 +1037,7 @@ fn convert_terminator(
         }
         Terminator::Call { target, fallthrough } => {
             clobber_caller_saved(ssa, current, cc, stmts);
-            SsaTerminator::Call { target: target.clone(), args: vec![], fallthrough: *fallthrough }
+            SsaTerminator::Call { target: target.clone(), args: vec![], out: None, fallthrough: *fallthrough }
         }
         Terminator::Return => {
             // Try to find RAX/EAX/x0/r0/v0 (return value register) in current state.

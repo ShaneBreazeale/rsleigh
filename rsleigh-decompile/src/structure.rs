@@ -1,5 +1,25 @@
+use std::collections::HashSet;
 use crate::ir::*;
 use crate::dominators::{compute_dominators, compute_post_dominators};
+
+/// Scan the first few statements of `block_id` for a `call_return=true` var
+/// that is actually used (use_count > 0). Returns it if found.
+/// This covers the case where `SsaTerminator::Call.out` is still None because
+/// `propagate_call_returns` placed the return var in the fallthrough block.
+fn find_call_return_in_block(ssa: &SsaCfg, block_id: BlockId) -> Option<VarId> {
+    if block_id.0 >= ssa.blocks.len() {
+        return None;
+    }
+    for stmt in &ssa.blocks[block_id.0].stmts {
+        if let Stmt::Assign(var_id) = stmt {
+            let vdef = &ssa.vars[var_id.0 as usize];
+            if vdef.call_return && vdef.use_count > 0 {
+                return Some(*var_id);
+            }
+        }
+    }
+    None
+}
 
 /// Recover structured control flow from SSA CFG.
 pub fn recover_structure(ssa: &SsaCfg, cfg: &Cfg) -> Vec<StructuredStmt> {
@@ -22,9 +42,10 @@ pub fn recover_structure(ssa: &SsaCfg, cfg: &Cfg) -> Vec<StructuredStmt> {
 
     let mut emitted = vec![false; cfg.blocks.len()];
     let mut result = Vec::new();
+    let mut consumed: HashSet<VarId> = HashSet::new();
 
     emit_region(ssa, cfg, &dom, &pdom, &back_edges, cfg.entry,
-                &mut emitted, &mut result, 0, None);
+                &mut emitted, &mut result, 0, None, &mut consumed);
 
     // Post-pass: convert if-else chains on the same variable into switch/case
     collapse_if_else_to_switch(&mut result, ssa);
@@ -73,6 +94,7 @@ fn emit_region(
     out: &mut Vec<StructuredStmt>,
     depth: usize,
     _loop_ctx: Option<&LoopCtx>,
+    consumed: &mut HashSet<VarId>,
 ) {
     if depth >= MAX_STRUCTURE_DEPTH {
         out.push(StructuredStmt::Goto(0)); // bail on too-deep nesting
@@ -101,7 +123,7 @@ fn emit_region(
 
         if !is_self_loop {
             // Normal block: emit statements before control flow
-            emit_block_stmts(block, out);
+            emit_block_stmts(block, out, consumed);
         }
 
         match &block.terminator {
@@ -158,13 +180,13 @@ fn emit_region(
                                     // from being emitted inside the body twice
                                     let back_was_emitted = emitted[back_src.0];
 
-                                    emit_region(ssa, cfg, dom, pdom, back_edges, *next, emitted, &mut body, depth + 1, None);
+                                    emit_region(ssa, cfg, dom, pdom, back_edges, *next, emitted, &mut body, depth + 1, None, consumed);
 
                                     // If the back-edge source wasn't emitted as part of the body,
                                     // emit its statements now (they're part of the loop body)
                                     if !back_was_emitted && !emitted[back_src.0] {
                                         emitted[back_src.0] = true;
-                                        emit_block_stmts(&ssa.blocks[back_src.0], &mut body);
+                                        emit_block_stmts(&ssa.blocks[back_src.0], &mut body, consumed);
                                     }
 
                                     if exit.0 < emitted.len() { emitted[exit.0] = exit_was_emitted; }
@@ -194,7 +216,7 @@ fn emit_region(
                         if !emitted[next.0] {
                             emitted[next.0] = true;
                             // Emit the next block's statements (e.g., the condition check)
-                            emit_block_stmts(next_block, out);
+                            emit_block_stmts(next_block, out, consumed);
 
                             let (body_start, exit, negate) = if can_reach(cfg, *taken, current, emitted)
                                 || can_reach_limited(cfg, *taken, current, cfg.blocks.len())
@@ -207,7 +229,7 @@ fn emit_region(
                             let mut body = Vec::new();
                             let exit_was_emitted = emitted[exit.0];
                             emitted[exit.0] = true;
-                            emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body, depth + 1, None);
+                            emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body, depth + 1, None, consumed);
                             emitted[exit.0] = exit_was_emitted;
                             out.push(StructuredStmt::While { cond: *cond, negate, body });
                             current = exit;
@@ -269,7 +291,7 @@ fn emit_region(
                     // Mark exit block as emitted to bound the loop body
                     let exit_was_emitted = emitted[exit.0];
                     emitted[exit.0] = true;
-                    emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body, depth + 1, None);
+                    emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body, depth + 1, None, consumed);
                     emitted[exit.0] = exit_was_emitted;
 
                     out.push(StructuredStmt::While {
@@ -288,10 +310,10 @@ fn emit_region(
                 let mut else_body = Vec::new();
 
                 if *taken != merge {
-                    emit_region(ssa, cfg, dom, pdom, back_edges, *taken, emitted, &mut then_body, depth + 1, None);
+                    emit_region(ssa, cfg, dom, pdom, back_edges, *taken, emitted, &mut then_body, depth + 1, None, consumed);
                 }
                 if *fallthrough != merge {
-                    emit_region(ssa, cfg, dom, pdom, back_edges, *fallthrough, emitted, &mut else_body, depth + 1, None);
+                    emit_region(ssa, cfg, dom, pdom, back_edges, *fallthrough, emitted, &mut else_body, depth + 1, None, consumed);
                 }
 
                 if else_body.is_empty() {
@@ -311,7 +333,18 @@ fn emit_region(
                 // Continue at merge point
                 current = merge;
             }
-            SsaTerminator::Call { target, args, fallthrough } => {
+            SsaTerminator::Call { target, args, out: term_out, fallthrough } => {
+                // Resolve the call return: use the terminator's out if set, otherwise
+                // check the fallthrough block's first call_return=true stmt.
+                let call_out = term_out.or_else(|| find_call_return_in_block(ssa, *fallthrough));
+                if std::env::var("RSLEIGH_DEBUG_STRUCT").is_ok() {
+                    eprintln!("[STRUCT] Call block {} term_out={:?} call_out={:?} fallthrough={}",
+                        current.0, term_out, call_out, fallthrough.0);
+                }
+                if let Some(v) = call_out {
+                    consumed.insert(v);
+                }
+
                 // Check if this call block is a loop header — try do-while first
                 if is_loop_header {
                     let back_source = back_edges.iter()
@@ -337,18 +370,18 @@ fn emit_region(
                                     body.push(StructuredStmt::Call {
                                         target: target.clone(),
                                         args: args.clone(),
-                                        out: None,
+                                        out: call_out,
                                     });
 
                                     let exit_was_emitted = if exit.0 < emitted.len() { emitted[exit.0] } else { true };
                                     if exit.0 < emitted.len() { emitted[exit.0] = true; }
                                     let back_was_emitted = emitted[back_src.0];
 
-                                    emit_region(ssa, cfg, dom, pdom, back_edges, *fallthrough, emitted, &mut body, depth + 1, None);
+                                    emit_region(ssa, cfg, dom, pdom, back_edges, *fallthrough, emitted, &mut body, depth + 1, None, consumed);
 
                                     if !back_was_emitted && !emitted[back_src.0] {
                                         emitted[back_src.0] = true;
-                                        emit_block_stmts(&ssa.blocks[back_src.0], &mut body);
+                                        emit_block_stmts(&ssa.blocks[back_src.0], &mut body, consumed);
                                     }
 
                                     if exit.0 < emitted.len() { emitted[exit.0] = exit_was_emitted; }
@@ -373,13 +406,13 @@ fn emit_region(
                     out.push(StructuredStmt::Call {
                         target: target.clone(),
                         args: args.clone(),
-                        out: None,
+                        out: call_out,
                     });
                     let next_block = &ssa.blocks[fallthrough.0];
                     if let SsaTerminator::CBranch { cond, taken, fallthrough: fall } = &next_block.terminator {
                         if !emitted[fallthrough.0] {
                             emitted[fallthrough.0] = true;
-                            emit_block_stmts(next_block, out);
+                            emit_block_stmts(next_block, out, consumed);
                             let (body_start, exit, negate) = if can_reach(cfg, *taken, current, emitted)
                                 || can_reach_limited(cfg, *taken, current, cfg.blocks.len())
                             {
@@ -390,7 +423,7 @@ fn emit_region(
                             let mut body = Vec::new();
                             let exit_was_emitted = emitted[exit.0];
                             emitted[exit.0] = true;
-                            emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body, depth + 1, None);
+                            emit_region(ssa, cfg, dom, pdom, back_edges, body_start, emitted, &mut body, depth + 1, None, consumed);
                             emitted[exit.0] = exit_was_emitted;
                             out.push(StructuredStmt::While { cond: *cond, negate, body });
                             current = exit;
@@ -401,7 +434,7 @@ fn emit_region(
                     out.push(StructuredStmt::Call {
                         target: target.clone(),
                         args: args.clone(),
-                        out: None,
+                        out: call_out,
                     });
                 }
                 current = *fallthrough;
@@ -414,10 +447,13 @@ fn emit_region(
     }
 }
 
-fn emit_block_stmts(block: &SsaBlock, out: &mut Vec<StructuredStmt>) {
+fn emit_block_stmts(block: &SsaBlock, out: &mut Vec<StructuredStmt>, consumed: &HashSet<VarId>) {
     for stmt in &block.stmts {
         match stmt {
             Stmt::Assign(var_id) => {
+                if consumed.contains(var_id) {
+                    continue;
+                }
                 out.push(StructuredStmt::Assign { lhs: *var_id, rhs: *var_id });
             }
             Stmt::Store { addr, val } => {

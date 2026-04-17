@@ -59,7 +59,7 @@ pub enum SsaTerminator {
     Fallthrough(BlockId),
     Branch(BlockId),
     CBranch { cond: VarId, taken: BlockId, fallthrough: BlockId },
-    Call { target: CallTarget, args: Vec<VarId>, fallthrough: BlockId },
+    Call { target: CallTarget, args: Vec<VarId>, out: Option<VarId>, fallthrough: BlockId },
     Return(Option<VarId>),
     Indirect(VarId),
 }
