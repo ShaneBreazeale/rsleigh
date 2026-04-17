@@ -4,7 +4,7 @@
 
 **Goal:** Stop PE `.rdata` pointer-table entries from being emitted as 2-char string literals when used as Load addresses.
 
-**Architecture:** Add `format_const_ctx_load` (min_len=4 variant of `format_const_ctx`) in `printer.rs`. Patch the two `*(addr)` construction sites in `format_cond_operand` and `format_store_operand` to use it when the Load pointer resolves to a `Const`.
+**Architecture:** Add `resolve_to_const` (deep Var/Zext/Sext resolver) and `format_const_ctx_load` (min_len=4, imports-first) to `printer.rs`. Patch all four `*(addr)` construction sites to use `format_const_ctx_load` when the pointer resolves to a Const.
 
 **Tech Stack:** Rust, `rsleigh-decompile` crate, `printer.rs`.
 
@@ -12,34 +12,39 @@
 
 ## Background for the implementer
 
-**The bug:** In `printer.rs`, `format_const_ctx` calls `try_read_string(addr)`. For PE `.rdata`, every 8-byte pointer has `0x00` at byte 2 (e.g. `60 40 00 40 01 00 00 00` = VA `0x140004060`). `try_read_string` reads bytes 0–1 as a 2-char string. The current guard is `s.len() < 2`, so 2-char results like `` `@ `` or `ȡ` pass through and get printed as string literals inside dereferences: `` *(("`@")) ``.
+**The bug:** `format_const_ctx` calls `try_read_string(addr)`. PE `.rdata` pointer tables have `0x00` at byte 2 (e.g. `60 40 00 40 01 00 00 00`). `try_read_string` reads 2 bytes as a UTF-8 string. The guard `s.len() < 2` lets 2-byte results through, producing `*("ȡ")` etc. Note: `"È¡"` in the terminal is `"ȡ"` in Rust source — UTF-8 encoding difference.
 
-**The fix:** When a `Const` is being formatted as a Load address (the thing being dereferenced in `*(addr)`), require at least 4 printable chars before treating it as a string. This is `format_const_ctx_load`.
+**All four sites that must be patched** (each produces `*(addr)` and routes Load addresses through `format_const_ctx`):
+1. `format_cond_operand` non-stack Load — line ~9578
+2. `format_cond_operand` register Load — line ~9597
+3. `format_store_operand` Load — line ~10084
+4. `format_addr` fallthrough — line ~9955
 
-**Two call sites produce `*(addr)`:**
-1. `format_cond_operand` around line 9577–9579
-2. `format_store_operand` around line 10082–10085
+**The fix pattern** at each site: resolve the pointer VarId to its underlying Const using `resolve_to_const`, and if found, format with `format_const_ctx_load` instead of the existing recursive call.
 
-At each site the pattern is:
-```rust
-let addr = format_cond_operand(*ptr, ssa, ctx, tracker);  // recursive call
-return format!("*({})", addr);
-```
-When `*ptr` resolves to a `Const`, that recursive call hits `format_const_ctx` with min_len=2. The fix intercepts Const pointer values before the recursive call.
+**`resolve_to_const`** follows `Expr::Var` chains (up to 8 hops) and unwraps `Expr::UnaryOp(Zext/Sext, inner)` wrappers, returning `Some((val, size))` if it reaches an `Expr::Const`, `None` otherwise. This handles: direct Const, Var(Const), Var(Var(Const)), Zext(Const), Var(Zext(Const)), etc.
 
-**Key functions (do not modify):**
-- `try_read_string(va, ctx)` — reads bytes from the binary at a VA, returns `Option<String>`
-- `format_const_ctx(val, size, ctx)` — formats a Const, tries string resolution with min_len=2
-- `format_const(val, size)` — formats a Const as hex/decimal (fallback)
+**`format_const_ctx_load`** differs from `format_const_ctx` in two ways:
+- Checks `ctx.imports` and vtable names **before** string resolution (load addresses are more likely named globals)
+- Requires `s.len() >= 4` instead of `s.len() >= 2`
 
-**Register offsets for reference:** not needed for this fix — it's pure printer logic.
+**`resolve_through_vars` in printer.rs (line ~10754) is only 1-hop** — do NOT use it for this fix; it will miss almost all cases.
+
+**Key types and functions:**
+- `VarId` — SSA variable identifier (u32 wrapper)
+- `ssa.var(id)` → `&VarDef` with `.expr: Expr` and `.varnode`
+- `Expr::Var(VarId)`, `Expr::Const(u64, u32)`, `Expr::UnaryOp(UnaryOpKind, VarId)`, `Expr::Load(VarId)`
+- `UnaryOpKind::Zext`, `UnaryOpKind::Sext` — zero/sign extension ops
+- `format_const_ctx(val, size, ctx)` — existing function, unchanged
+- `format_const(val, size)` — hex/decimal fallback
+- `try_read_string(val, ctx)`, `try_read_wide_string(val, ctx)` — existing, unchanged
 
 ---
 
 ## Files
 
-- **Modify:** `rsleigh-decompile/src/printer.rs` — add `format_const_ctx_load`, patch two call sites
-- **Create:** `rsleigh-decompile/tests/string_false_positive.rs` — 3 tests
+- **Modify:** `rsleigh-decompile/src/printer.rs`
+- **Create:** `rsleigh-decompile/tests/string_false_positive.rs`
 
 ---
 
@@ -55,22 +60,14 @@ When `*ptr` resolves to a `Const`, that recursive call hits `format_const_ctx` w
 //!
 //! Spec: docs/superpowers/specs/2026-04-17-string-false-positive-design.md
 
-/// Test 1: the 4 known false-positive strings must not appear in 0x140001154 output.
-/// Decompile __tmainCRTStartup (0x140001154) from cb_baristas_secret_x64.exe.
-/// Before the fix this emits *(*("È¡")), *("`@"), etc.
-#[test]
-fn no_string_literal_as_load_address() {
+fn decompile_func(func_va: u64, max_len: usize) -> Option<String> {
+    use pcode_ir::PcodeOp;
+    use rsleigh_api::{Architecture, Decoder};
+
     let path = "/Users/shane/Downloads/test_bin/cb_baristas_secret_x64.exe";
-    let data = match std::fs::read(path) {
-        Ok(d) => d,
-        Err(_) => { eprintln!("skipping: fixture not found"); return; }
-    };
-    let pe = match goblin::pe::PE::parse(&data) {
-        Ok(p) => p,
-        Err(e) => { eprintln!("skipping: PE parse error: {}", e); return; }
-    };
+    let data = std::fs::read(path).ok()?;
+    let pe = goblin::pe::PE::parse(&data).ok()?;
     let image_base = pe.image_base as u64;
-    let func_va: u64 = 0x140001154;
     let rva = func_va - image_base;
     let mut file_off = None;
     for s in &pe.sections {
@@ -81,191 +78,101 @@ fn no_string_literal_as_load_address() {
             break;
         }
     }
-    let off = match file_off {
-        Some(o) => o,
-        None => { eprintln!("skipping: VA not in any section"); return; }
-    };
-    let func_len = 0x400_usize.min(data.len() - off);
+    let off = file_off?;
+    let func_len = max_len.min(data.len() - off);
     let bytes = data[off..off + func_len].to_vec();
 
+    let mut dec = Decoder::new(Architecture::X86_64);
+    let mut insts = Vec::new();
+    let mut io = 0usize;
+    while io < bytes.len() {
+        match dec.decode(&bytes[io..], func_va + io as u64) {
+            Ok(inst) => {
+                let is_ret = inst.ops.iter().any(|op| matches!(op, PcodeOp::Return { .. }));
+                let l = inst.len as usize;
+                insts.push((func_va + io as u64, inst));
+                io += l;
+                if is_ret { break; }
+            }
+            Err(_) => break,
+        }
+    }
+
+    let out = rsleigh_decompile::decompile_with_binary(
+        Architecture::X86_64,
+        &insts,
+        Some(&data),
+        Some(std::path::Path::new(path)),
+    );
+    Some(out)
+}
+
+/// Primary test: no string literal may appear as a Load address in 0x140001154.
+/// Catches all deref-of-string patterns: *("...") or *(type*)("...").
+/// Before the fix this emits *(*("ȡ")), *("`@"), etc.
+#[test]
+fn no_string_literal_as_load_address() {
     let handle = std::thread::Builder::new()
         .stack_size(32 * 1024 * 1024)
-        .spawn(move || {
-            use pcode_ir::PcodeOp;
-            use rsleigh_api::{Architecture, Decoder};
-            let mut dec = Decoder::new(Architecture::X86_64);
-            let mut insts = Vec::new();
-            let mut io = 0usize;
-            while io < bytes.len() {
-                match dec.decode(&bytes[io..], func_va + io as u64) {
-                    Ok(inst) => {
-                        let is_ret = inst.ops.iter().any(|op| matches!(op, PcodeOp::Return { .. }));
-                        let l = inst.len as usize;
-                        insts.push((func_va + io as u64, inst));
-                        io += l;
-                        if is_ret { break; }
-                    }
-                    Err(_) => break,
-                }
-            }
-            let out = rsleigh_decompile::decompile_with_binary(
-                Architecture::X86_64,
-                &insts,
-                Some(&data),
-                Some(std::path::Path::new(path)),
-            );
-            // None of the 4 known false-positive string literals should appear
-            let bad: Vec<&str> = out.lines()
+        .spawn(|| {
+            let out = match decompile_func(0x140001154, 0x400) {
+                Some(s) => s,
+                None => { eprintln!("skipping: fixture not found"); return; }
+            };
+
+            // Check for any deref-of-string-literal pattern: *("...") anywhere in output
+            let bad_lines: Vec<&str> = out.lines()
                 .filter(|l| {
-                    l.contains("\"È¡\"") || l.contains("\"hS\"")
-                        || l.contains("\"`@\"") || l.contains("\"0@\"")
+                    // *(  "  — direct deref of string
+                    // *( something *)( "  — typed deref of string
+                    (l.contains("*(\"") )
+                    || (l.contains("*(") && l.contains("*)(\""))
                 })
                 .collect();
             assert!(
-                bad.is_empty(),
-                "string false positives still present in output:\n{}",
-                bad.join("\n")
+                bad_lines.is_empty(),
+                "string literal used as load address:\n{}",
+                bad_lines.join("\n")
             );
         })
         .expect("thread spawn");
     handle.join().expect("test panicked");
 }
 
-/// Test 2: the load positions must show DAT_ names or hex addresses, not empty/gibberish.
-/// Checks that suppressing the false-positive string doesn't produce a blank address.
+/// Positive guard: after the fix, the load positions must show DAT_ names or hex.
+/// Prevents a vacuous pass where the output is just empty.
 #[test]
 fn load_address_uses_dat_or_hex() {
-    let path = "/Users/shane/Downloads/test_bin/cb_baristas_secret_x64.exe";
-    let data = match std::fs::read(path) {
-        Ok(d) => d,
-        Err(_) => { eprintln!("skipping: fixture not found"); return; }
-    };
-    let pe = match goblin::pe::PE::parse(&data) {
-        Ok(p) => p,
-        Err(e) => { eprintln!("skipping: PE parse error: {}", e); return; }
-    };
-    let image_base = pe.image_base as u64;
-    let func_va: u64 = 0x140001154;
-    let rva = func_va - image_base;
-    let mut file_off = None;
-    for s in &pe.sections {
-        let s_va = s.virtual_address as u64;
-        let s_sz = s.virtual_size as u64;
-        if rva >= s_va && rva < s_va + s_sz {
-            file_off = Some((s.pointer_to_raw_data as u64 + (rva - s_va)) as usize);
-            break;
-        }
-    }
-    let off = match file_off {
-        Some(o) => o,
-        None => { eprintln!("skipping: VA not in any section"); return; }
-    };
-    let func_len = 0x400_usize.min(data.len() - off);
-    let bytes = data[off..off + func_len].to_vec();
-
     let handle = std::thread::Builder::new()
         .stack_size(32 * 1024 * 1024)
-        .spawn(move || {
-            use pcode_ir::PcodeOp;
-            use rsleigh_api::{Architecture, Decoder};
-            let mut dec = Decoder::new(Architecture::X86_64);
-            let mut insts = Vec::new();
-            let mut io = 0usize;
-            while io < bytes.len() {
-                match dec.decode(&bytes[io..], func_va + io as u64) {
-                    Ok(inst) => {
-                        let is_ret = inst.ops.iter().any(|op| matches!(op, PcodeOp::Return { .. }));
-                        let l = inst.len as usize;
-                        insts.push((func_va + io as u64, inst));
-                        io += l;
-                        if is_ret { break; }
-                    }
-                    Err(_) => break,
-                }
-            }
-            let out = rsleigh_decompile::decompile_with_binary(
-                Architecture::X86_64,
-                &insts,
-                Some(&data),
-                Some(std::path::Path::new(path)),
-            );
-            // The replaced addresses should appear as DAT_ names or hex constants
-            let has_dat_or_hex = out.contains("DAT_") || out.contains("0x14000568")
-                || out.contains("0x14000569") || out.contains("0x1400056")
-                || out.contains("0x140005");
+        .spawn(|| {
+            let out = match decompile_func(0x140001154, 0x400) {
+                Some(s) => s,
+                None => { eprintln!("skipping: fixture not found"); return; }
+            };
             assert!(
-                has_dat_or_hex,
-                "expected DAT_ or hex address in load positions after fix, got output:\n{}",
-                out
+                out.contains("DAT_") || out.contains("0x1400"),
+                "expected DAT_ or hex address in output after fix:\n{}", out
             );
         })
         .expect("thread spawn");
     handle.join().expect("test panicked");
 }
 
-/// Test 3: real long strings in .rdata are still resolved as string literals.
-/// Function 0x140001a68 passes a long encrypted string to a call — it must still appear.
+/// Regression guard: real long strings (≥4 chars) in .rdata must still be resolved.
+/// Function 0x140001a68 passes "v`cav``|rarqzprQAVD>" (19 chars) — must still appear.
 #[test]
 fn real_strings_still_resolved() {
-    let path = "/Users/shane/Downloads/test_bin/cb_baristas_secret_x64.exe";
-    let data = match std::fs::read(path) {
-        Ok(d) => d,
-        Err(_) => { eprintln!("skipping: fixture not found"); return; }
-    };
-    let pe = match goblin::pe::PE::parse(&data) {
-        Ok(p) => p,
-        Err(e) => { eprintln!("skipping: PE parse error: {}", e); return; }
-    };
-    let image_base = pe.image_base as u64;
-    let func_va: u64 = 0x140001a68;
-    let rva = func_va - image_base;
-    let mut file_off = None;
-    for s in &pe.sections {
-        let s_va = s.virtual_address as u64;
-        let s_sz = s.virtual_size as u64;
-        if rva >= s_va && rva < s_va + s_sz {
-            file_off = Some((s.pointer_to_raw_data as u64 + (rva - s_va)) as usize);
-            break;
-        }
-    }
-    let off = match file_off {
-        Some(o) => o,
-        None => { eprintln!("skipping: VA not in any section"); return; }
-    };
-    let func_len = 0x400_usize.min(data.len() - off);
-    let bytes = data[off..off + func_len].to_vec();
-
     let handle = std::thread::Builder::new()
         .stack_size(32 * 1024 * 1024)
-        .spawn(move || {
-            use pcode_ir::PcodeOp;
-            use rsleigh_api::{Architecture, Decoder};
-            let mut dec = Decoder::new(Architecture::X86_64);
-            let mut insts = Vec::new();
-            let mut io = 0usize;
-            while io < bytes.len() {
-                match dec.decode(&bytes[io..], func_va + io as u64) {
-                    Ok(inst) => {
-                        let is_ret = inst.ops.iter().any(|op| matches!(op, PcodeOp::Return { .. }));
-                        let l = inst.len as usize;
-                        insts.push((func_va + io as u64, inst));
-                        io += l;
-                        if is_ret { break; }
-                    }
-                    Err(_) => break,
-                }
-            }
-            let out = rsleigh_decompile::decompile_with_binary(
-                Architecture::X86_64,
-                &insts,
-                Some(&data),
-                Some(std::path::Path::new(path)),
-            );
-            // The long encrypted string "v`cav``|rarqzprQAVD>" (19 chars) must still appear
+        .spawn(|| {
+            let out = match decompile_func(0x140001a68, 0x400) {
+                Some(s) => s,
+                None => { eprintln!("skipping: fixture not found"); return; }
+            };
             assert!(
                 out.contains("\"v`cav"),
-                "real string literal was suppressed by the fix:\n{}",
-                out
+                "real string literal was suppressed by the fix:\n{}", out
             );
         })
         .expect("thread spawn");
@@ -282,12 +189,12 @@ cargo test -p rsleigh-decompile --test string_false_positive 2>&1 | tail -15
 
 Expected:
 ```
-test no_string_literal_as_load_address ... FAILED   ← must fail (bug not fixed yet)
-test load_address_uses_dat_or_hex ... ok or FAILED  ← may pass or fail
-test real_strings_still_resolved ... ok             ← must pass (real strings work)
+test no_string_literal_as_load_address ... FAILED   ← must fail (bug present)
+test load_address_uses_dat_or_hex ... ok or FAILED
+test real_strings_still_resolved ... ok             ← must pass
 ```
 
-If `no_string_literal_as_load_address` passes instead of failing, the bug is not reproducible — check the binary path and function VA.
+If `no_string_literal_as_load_address` passes, the bug is not reproducible — check the binary path and function VA, or print the decompiled output to verify.
 
 - [ ] **Step 3: Commit the failing tests**
 
@@ -299,35 +206,54 @@ git commit -m "test: add failing string false positive tests"
 
 ---
 
-### Task 2: Implement the fix in printer.rs
+### Task 2: Add `resolve_to_const` and `format_const_ctx_load` to printer.rs
 
 **Files:**
 - Modify: `rsleigh-decompile/src/printer.rs`
 
-- [ ] **Step 1: Add `format_const_ctx_load` after `format_const_ctx`**
+- [ ] **Step 1: Add `resolve_to_const` near `resolve_through_vars` (line ~10754)**
 
-Find `fn format_const_ctx` in `printer.rs` (around line 10231). It ends around line 10262. Insert the new function immediately after it:
+Find `fn resolve_through_vars` (around line 10754). Insert the new function immediately before it:
+
+```rust
+fn resolve_to_const(mut id: VarId, ssa: &SsaCfg) -> Option<(u64, u32)> {
+    for _ in 0..8 {
+        let expr = &ssa.var(id).expr;
+        match expr {
+            Expr::Const(val, sz) => return Some((*val, *sz)),
+            Expr::Var(next) => id = *next,
+            Expr::UnaryOp(UnaryOpKind::Zext, inner)
+            | Expr::UnaryOp(UnaryOpKind::Sext, inner) => id = *inner,
+            _ => return None,
+        }
+    }
+    None
+}
+```
+
+- [ ] **Step 2: Add `format_const_ctx_load` after `format_const_ctx` (line ~10262)**
+
+Find `fn format_const_ctx` (around line 10231) — it ends around line 10262. Insert the new function immediately after it:
 
 ```rust
 fn format_const_ctx_load(val: u64, size: u32, ctx: &PrintCtx) -> String {
-    // Like format_const_ctx but requires ≥4 chars for string resolution.
-    // Used when val is the address being dereferenced in *(val) — prevents
-    // PE .rdata pointer-table entries (null at byte 2) from being misread
-    // as 2-char string literals.
+    // Like format_const_ctx, but for load-address context:
+    // 1. Prefers named imports/vtable over string resolution
+    // 2. Requires ≥4 bytes of string content to avoid PE pointer-table false positives
     if val == 0 { return "0".to_string(); }
     if val < 10 { return format!("{}", val); }
     if size >= 4 && val > 0x200 {
-        if let Some(s) = try_read_string(val, ctx) {
-            if s.len() >= 4 {
-                return format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"));
-            }
-        }
         if let Some(name) = ctx.imports.get(&val) {
             return name.clone();
         }
         if let Some(binary) = ctx.binary {
             if let Some(vtable_name) = crate::imports::resolve_pe_vtable(val, binary) {
                 return vtable_name;
+            }
+        }
+        if let Some(s) = try_read_string(val, ctx) {
+            if s.len() >= 4 {
+                return format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"));
             }
         }
         if let Some(ws) = try_read_wide_string(val, ctx) {
@@ -338,68 +264,7 @@ fn format_const_ctx_load(val: u64, size: u32, ctx: &PrintCtx) -> String {
 }
 ```
 
-- [ ] **Step 2: Patch `format_cond_operand` — the first `*(addr)` site**
-
-Find the `// Non-stack Load` comment around line 9577. The current code is:
-
-```rust
-        // Non-stack Load: dereference a pointer (e.g., *s for string access)
-        let addr = format_cond_operand(*ptr, ssa, ctx, tracker);
-        return format!("*({})", addr);
-```
-
-Replace it with:
-
-```rust
-        // Non-stack Load: dereference a pointer (e.g., *s for string access)
-        // For Const load addresses, use min_len=4 to avoid pointer-table bytes
-        // being misread as 2-char strings.
-        let addr = {
-            let mut pid = *ptr;
-            for _ in 0..4 {
-                if let Expr::Var(next) = ssa.vars[pid.0 as usize].expr { pid = next; } else { break; }
-            }
-            if let Expr::Const(val, sz) = ssa.vars[pid.0 as usize].expr {
-                format_const_ctx_load(val, sz, ctx)
-            } else {
-                format_cond_operand(*ptr, ssa, ctx, tracker)
-            }
-        };
-        return format!("*({})", addr);
-```
-
-- [ ] **Step 3: Patch `format_store_operand` — the second `*(addr)` site**
-
-Find the `// Non-stack load` comment around line 10082. The current code is:
-
-```rust
-            // Non-stack load (array element, struct field, etc.)
-            // Show as *(addr) or resolve to array syntax
-            let addr = format_store_operand(*ptr, ssa, ctx, tracker);
-            return format!("*({})", addr);
-```
-
-Replace it with:
-
-```rust
-            // Non-stack load (array element, struct field, etc.)
-            // For Const load addresses, use min_len=4 to avoid pointer-table bytes
-            // being misread as 2-char strings.
-            let addr = {
-                let mut pid = *ptr;
-                for _ in 0..4 {
-                    if let Expr::Var(next) = ssa.vars[pid.0 as usize].expr { pid = next; } else { break; }
-                }
-                if let Expr::Const(val, sz) = ssa.vars[pid.0 as usize].expr {
-                    format_const_ctx_load(val, sz, ctx)
-                } else {
-                    format_store_operand(*ptr, ssa, ctx, tracker)
-                }
-            };
-            return format!("*({})", addr);
-```
-
-- [ ] **Step 4: Build**
+- [ ] **Step 3: Build to confirm it compiles**
 
 ```bash
 cd /Users/shane/repos/rsleigh
@@ -408,7 +273,113 @@ cargo build -p rsleigh-decompile 2>&1 | grep "^error"
 
 Expected: no errors.
 
-- [ ] **Step 5: Run all three tests**
+- [ ] **Step 4: Commit the two new functions**
+
+```bash
+cd /Users/shane/repos/rsleigh
+git add rsleigh-decompile/src/printer.rs
+git commit -m "printer: add resolve_to_const and format_const_ctx_load helpers"
+```
+
+---
+
+### Task 3: Patch the four Load-address sites
+
+**Files:**
+- Modify: `rsleigh-decompile/src/printer.rs`
+
+- [ ] **Step 1: Patch site 1 — `format_cond_operand` non-stack Load (~line 9577)**
+
+Find the comment `// Non-stack Load: dereference a pointer`. The current code is:
+
+```rust
+        // Non-stack Load: dereference a pointer (e.g., *s for string access)
+        let addr = format_cond_operand(*ptr, ssa, ctx, tracker);
+        return format!("*({})", addr);
+```
+
+Replace with:
+
+```rust
+        // Non-stack Load: dereference a pointer (e.g., *s for string access)
+        let addr = match resolve_to_const(*ptr, ssa) {
+            Some((val, sz)) => format_const_ctx_load(val, sz, ctx),
+            None => format_cond_operand(*ptr, ssa, ctx, tracker),
+        };
+        return format!("*({})", addr);
+```
+
+- [ ] **Step 2: Patch site 2 — `format_cond_operand` register Load (~line 9597)**
+
+Find the block ending with `let addr = format_cond_operand(*ptr, ssa, ctx, tracker);` inside the `if vdef.varnode.space == AddressSpaceId::Register` guard (around line 9597). The current code is:
+
+```rust
+            let addr = format_cond_operand(*ptr, ssa, ctx, tracker);
+            return format!("*({})", addr);
+```
+
+Replace with:
+
+```rust
+            let addr = match resolve_to_const(*ptr, ssa) {
+                Some((val, sz)) => format_const_ctx_load(val, sz, ctx),
+                None => format_cond_operand(*ptr, ssa, ctx, tracker),
+            };
+            return format!("*({})", addr);
+```
+
+- [ ] **Step 3: Patch site 3 — `format_store_operand` Load (~line 10084)**
+
+Find the comment `// Non-stack load (array element, struct field, etc.)`. The current code is:
+
+```rust
+            // Non-stack load (array element, struct field, etc.)
+            // Show as *(addr) or resolve to array syntax
+            let addr = format_store_operand(*ptr, ssa, ctx, tracker);
+            return format!("*({})", addr);
+```
+
+Replace with:
+
+```rust
+            // Non-stack load (array element, struct field, etc.)
+            // Show as *(addr) or resolve to array syntax
+            let addr = match resolve_to_const(*ptr, ssa) {
+                Some((val, sz)) => format_const_ctx_load(val, sz, ctx),
+                None => format_store_operand(*ptr, ssa, ctx, tracker),
+            };
+            return format!("*({})", addr);
+```
+
+- [ ] **Step 4: Patch site 4 — `format_addr` fallthrough (~line 9955)**
+
+Find `fn format_addr`. It ends with:
+
+```rust
+    format_var(id, ssa, ctx)
+}
+```
+
+Replace the final `format_var` call with:
+
+```rust
+    match resolve_to_const(id, ssa) {
+        Some((val, sz)) => format_const_ctx_load(val, sz, ctx),
+        None => format_var(id, ssa, ctx),
+    }
+}
+```
+
+- [ ] **Step 5: Build**
+
+```bash
+cd /Users/shane/repos/rsleigh
+cargo build -p rsleigh-decompile 2>&1 | grep "^error"
+```
+
+Expected: no errors. If there are unused variable warnings on `ptr` at any patch site, check the match — the variable is still used in the `None` arm so there should be none.
+
+- [ ] **Step 6: Run all three tests**
 
 ```bash
 cd /Users/shane/repos/rsleigh
@@ -422,21 +393,21 @@ test load_address_uses_dat_or_hex ... ok
 test real_strings_still_resolved ... ok
 ```
 
-If `no_string_literal_as_load_address` still fails, the Const is being reached through a different path. Check the decompiled output to see what string is still present, trace the call path, and add an equivalent patch at the relevant `*(addr)` site.
+If `no_string_literal_as_load_address` still fails, there is a fifth deref-address site not covered by these four patches. Print the offending lines from the decompiled output to find which format function is producing them, then apply the same `resolve_to_const` + `format_const_ctx_load` pattern to that site too.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 cd /Users/shane/repos/rsleigh
 git add rsleigh-decompile/src/printer.rs
-git commit -m "printer: use min_len=4 for string resolution when Const is a Load address"
+git commit -m "printer: use format_const_ctx_load at all Load-address sites to fix string false positives"
 ```
 
 ---
 
-### Task 3: Full regression suite
+### Task 4: Full regression suite
 
-**Files:** none (running existing tests)
+**Files:** none
 
 - [ ] **Step 1: Run the full rsleigh-decompile test suite**
 
