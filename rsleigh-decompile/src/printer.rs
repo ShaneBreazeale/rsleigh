@@ -9575,7 +9575,10 @@ fn format_cond_operand(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTra
             return name;
         }
         // Non-stack Load: dereference a pointer (e.g., *s for string access)
-        let addr = format_cond_operand(*ptr, ssa, ctx, tracker);
+        let addr = match resolve_to_const(*ptr, ssa) {
+            Some((val, sz)) => format_const_ctx_load(val, sz, ctx),
+            None => format_cond_operand(*ptr, ssa, ctx, tracker),
+        };
         return format!("*({})", addr);
     }
     // For registers, trace through the SSA to find the underlying expression
@@ -9594,7 +9597,10 @@ fn format_cond_operand(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTra
             if let Some(param) = get_ebp_param(*ptr, ssa) {
                 return param;
             }
-            let addr = format_cond_operand(*ptr, ssa, ctx, tracker);
+            let addr = match resolve_to_const(*ptr, ssa) {
+                Some((val, sz)) => format_const_ctx_load(val, sz, ctx),
+                None => format_cond_operand(*ptr, ssa, ctx, tracker),
+            };
             return format!("*({})", addr);
         }
     }
@@ -9952,7 +9958,10 @@ fn format_addr(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
         }
     }
 
-    format_var(id, ssa, ctx)
+    match resolve_to_const(id, ssa) {
+        Some((val, sz)) => format_const_ctx_load(val, sz, ctx),
+        None => format_var(id, ssa, ctx),
+    }
 }
 
 fn format_rbp_offset(val: u64) -> String {
@@ -10081,7 +10090,10 @@ fn format_store_operand(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTr
             }
             // Non-stack load (array element, struct field, etc.)
             // Show as *(addr) or resolve to array syntax
-            let addr = format_store_operand(*ptr, ssa, ctx, tracker);
+            let addr = match resolve_to_const(*ptr, ssa) {
+                Some((val, sz)) => format_const_ctx_load(val, sz, ctx),
+                None => format_store_operand(*ptr, ssa, ctx, tracker),
+            };
             return format!("*({})", addr);
         }
         // If the register holds a Var(other_reg), follow one level
@@ -10265,6 +10277,8 @@ fn format_const_ctx_load(val: u64, size: u32, ctx: &PrintCtx) -> String {
     // Like format_const_ctx, but for load-address context:
     // 1. Prefers named imports/vtable over string resolution
     // 2. Requires ≥4 bytes of string content to avoid PE pointer-table false positives
+    // 3. Never falls through to format_const's ASCII-decode path (would produce string
+    //    literals from pointer constants, e.g. 0xC8A1 → "È¡").
     if val == 0 { return "0".to_string(); }
     if val < 10 { return format!("{}", val); }
     if size >= 4 && val > 0x200 {
@@ -10285,7 +10299,12 @@ fn format_const_ctx_load(val: u64, size: u32, ctx: &PrintCtx) -> String {
             return ws;
         }
     }
-    format_const(val, size)
+    // For load-address context, avoid format_const's ASCII decode (false positives).
+    // Emit DAT_ for addresses in a plausible binary range, otherwise plain hex.
+    if val > 0x200 {
+        return format!("DAT_{:08x}", val);
+    }
+    format!("0x{:x}", val)
 }
 
 fn format_const(val: u64, size: u32) -> String {
