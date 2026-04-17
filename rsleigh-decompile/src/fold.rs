@@ -1918,7 +1918,6 @@ fn try_recover_condition(cond_id: VarId, block_idx: usize, ssa: &mut SsaCfg) -> 
         };
         let r_is_of_sf = is_of_sf_eq(ba_right);
         let l_is_of_sf = is_of_sf_eq(ba_left);
-        drop(is_of_sf_eq);
 
         let neq_side = if r_is_of_sf { Some(ba_left) } else if l_is_of_sf { Some(ba_right) } else { None };
         let neq_pair = neq_side.and_then(|id| {
