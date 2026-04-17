@@ -1020,10 +1020,15 @@ fn mba_simplify_expr(var_idx: usize, vars: &[VarDef]) -> Option<Expr> {
                 if let Some(neg_op) = negate_eq_op(cmp_op) {
                     return Some(Expr::BinOp(neg_op, a, b));
                 }
+                // BoolNot(Sub(a, b)) → Eq(a, b)  [!(a - b) means a == b]
+                if matches!(cmp_op, BinOpKind::Sub) {
+                    return Some(Expr::BinOp(BinOpKind::Eq, a, b));
+                }
             }
             None
         }
         // (Eq(a,b) == 0) → NotEq(a,b),  (NotEq(a,b) == 0) → Eq(a,b)
+        // (Sub(a,b) == 0) → Eq(a,b)  [a - b == 0 means a == b]
         Expr::BinOp(BinOpKind::Eq, inner_id, zero_id) => {
             if matches!(vars[zero_id.0 as usize].expr, Expr::Const(0, _)) {
                 // Follow Var chains to reach the underlying BinOp
@@ -1039,11 +1044,16 @@ fn mba_simplify_expr(var_idx: usize, vars: &[VarDef]) -> Option<Expr> {
                     if let Some(neg_op) = negate_eq_op(cmp_op) {
                         return Some(Expr::BinOp(neg_op, a, b));
                     }
+                    // Eq(Sub(a, b), 0) → Eq(a, b)  [a - b == 0 means a == b]
+                    if matches!(cmp_op, BinOpKind::Sub) {
+                        return Some(Expr::BinOp(BinOpKind::Eq, a, b));
+                    }
                 }
             }
             None
         }
         // (BinOp(a,b) != 0) → BinOp(a,b)  [identity: comparison already a bool]
+        // (Sub(a,b) != 0) → NotEq(a,b)  [a - b != 0 means a != b]
         Expr::BinOp(BinOpKind::NotEq, inner_id, zero_id) => {
             if matches!(vars[zero_id.0 as usize].expr, Expr::Const(0, _)) {
                 // Follow Var chains to reach the underlying BinOp
@@ -1053,6 +1063,12 @@ fn mba_simplify_expr(var_idx: usize, vars: &[VarDef]) -> Option<Expr> {
                         resolved = next;
                     } else {
                         break;
+                    }
+                }
+                if let Expr::BinOp(cmp_op, a, b) = vars[resolved.0 as usize].expr {
+                    // NotEq(Sub(a, b), 0) → NotEq(a, b)  [a - b != 0 means a != b]
+                    if matches!(cmp_op, BinOpKind::Sub) {
+                        return Some(Expr::BinOp(BinOpKind::NotEq, a, b));
                     }
                 }
                 if let Expr::BinOp(_, _, _) = vars[resolved.0 as usize].expr {
