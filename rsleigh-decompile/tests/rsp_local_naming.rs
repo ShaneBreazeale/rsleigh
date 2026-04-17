@@ -86,6 +86,92 @@ fn fold_collapses_chained_rsp_arithmetic() {
     handle.join().expect("test thread panicked");
 }
 
+/// Integration test: decompile check2 (0x140001a68) from the baristas_secret binary.
+///
+/// Assert:
+///   1. Output does NOT contain chained RSP arithmetic like "RSP - N -"
+///   2. Output DOES contain at least one `local_` variable.
+///
+/// Skips gracefully if the fixture binary is not present.
+#[test]
+fn check2_has_no_chained_rsp_arithmetic() {
+    use rsleigh_decompile::decompile_with_binary;
+
+    let binary_path = "/Users/shane/Downloads/test_bin/cb_baristas_secret_x64.exe";
+    let data = match std::fs::read(binary_path) {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("skipping check2_has_no_chained_rsp_arithmetic: fixture binary not found");
+            return;
+        }
+    };
+
+    let pe = match goblin::pe::PE::parse(&data) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("skipping: PE parse error: {}", e);
+            return;
+        }
+    };
+    let image_base = pe.image_base as u64;
+    let func_va: u64 = 0x140001a68;
+    let rva = func_va - image_base;
+    let mut file_off = None;
+    for s in &pe.sections {
+        let s_va = s.virtual_address as u64;
+        let s_sz = s.virtual_size as u64;
+        if rva >= s_va && rva < s_va + s_sz {
+            file_off = Some((s.pointer_to_raw_data as u64 + (rva - s_va)) as usize);
+            break;
+        }
+    }
+    let off = match file_off {
+        Some(o) => o,
+        None => {
+            eprintln!("skipping: func_va not in any section");
+            return;
+        }
+    };
+    let func_len = 0x200_usize.min(data.len() - off);
+    let bytes = data[off..off + func_len].to_vec();
+
+    let handle = std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || {
+            let insts = decode_x64(&bytes, func_va);
+            let out = decompile_with_binary(
+                Architecture::X86_64,
+                &insts,
+                Some(&data),
+                Some(std::path::Path::new(binary_path)),
+            );
+
+            // Must NOT contain chained RSP arithmetic: "RSP - <digit>"  followed by " -"
+            let has_chain = out.lines().any(|l| {
+                if let Some(idx) = l.find("RSP - ") {
+                    let rest = &l[idx + 6..];
+                    rest.chars().next().map_or(false, |c| c.is_ascii_hexdigit() || c.is_ascii_digit())
+                        && rest.contains(" -")
+                } else {
+                    false
+                }
+            });
+            assert!(
+                !has_chain,
+                "check2 output still contains chained RSP arithmetic.\nLines with RSP:\n{}",
+                out.lines().filter(|l| l.contains("RSP")).collect::<Vec<_>>().join("\n")
+            );
+
+            assert!(
+                out.contains("local_"),
+                "check2 output has no local_ variables:\n{}",
+                out
+            );
+        })
+        .expect("thread spawn failed");
+    handle.join().expect("test thread panicked");
+}
+
 /// Decompiling a function with RSP-relative stack accesses should produce `local_XX`
 /// variable names, not raw `RSP ± N` expressions.
 ///
