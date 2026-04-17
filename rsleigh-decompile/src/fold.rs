@@ -1651,6 +1651,37 @@ fn recover_conditions(ssa: &mut SsaCfg) {
         }
     }
 
+    // Pass 1b: Sub(a, b) used bare as a CBranch condition → NotEq(a, b).
+    // Handles `if (x - 1)` → `if (x != 1)` for non-flag-derived conditions.
+    let mut sub_cond: Vec<(usize, VarId, VarId)> = Vec::new(); // (bi, a, b)
+    for (bi, block) in ssa.blocks.iter().enumerate() {
+        if let SsaTerminator::CBranch { cond, .. } = &block.terminator {
+            if is_flag_derived(*cond, ssa) { continue; }
+            let mut resolved = *cond;
+            for _ in 0..4 {
+                if let Expr::Var(next) = ssa.vars[resolved.0 as usize].expr {
+                    resolved = next;
+                } else {
+                    break;
+                }
+            }
+            if let Expr::BinOp(BinOpKind::Sub, a, b) = ssa.vars[resolved.0 as usize].expr {
+                sub_cond.push((bi, a, b));
+            }
+        }
+    }
+    for (bi, a, b) in sub_cond {
+        let cond_varnode = if let SsaTerminator::CBranch { cond, .. } = ssa.blocks[bi].terminator {
+            ssa.vars[cond.0 as usize].varnode
+        } else { continue; };
+        let new_cond = ssa.new_var(cond_varnode, Expr::BinOp(BinOpKind::NotEq, a, b), 1);
+        if let SsaTerminator::CBranch { taken, fallthrough, .. } = ssa.blocks[bi].terminator {
+            ssa.blocks[bi].terminator = SsaTerminator::CBranch {
+                cond: new_cond, taken, fallthrough,
+            };
+        }
+    }
+
     // Also recover conditions inside Ternary expressions (from CSEL/CSINC/CNEG).
     // These are intra-instruction conditional selects that use flag registers.
     let mut ternary_to_recover: Vec<(usize, VarId, usize)> = Vec::new(); // (var_idx, cond_id, block_idx)
