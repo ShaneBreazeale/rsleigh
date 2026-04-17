@@ -9076,8 +9076,8 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
     match expr {
         Expr::Var(id) => format_var_tracked(*id, ssa, ctx, tracker),
         Expr::BinOp(kind, left, right) => {
-            // If this BinOp computes an RSP-relative address, emit it as local_XX.
-            // This handles chained RSP arithmetic like (RSP - 8) - 45 → local_35.
+            // If this BinOp computes an RSP-relative address, emit it as var_XX.
+            // This handles chained RSP arithmetic like (RSP - 8) - 45 → var_35.
             if matches!(kind, BinOpKind::Sub | BinOpKind::Add) {
                 if let Some(off_c) = get_const_val(*right, ssa) {
                     if let Some(inner_off) = get_rsp_offset(*left, ssa) {
@@ -9087,7 +9087,7 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
                         };
                         let total = inner_off + delta;
                         if total < 0 {
-                            return format!("local_{:x}", (-total) as u64);
+                            return format!("var_{:x}", (-total) as u64);
                         }
                     }
                 }
@@ -9873,6 +9873,13 @@ fn get_rbp_offset(id: VarId, ssa: &SsaCfg) -> Option<u64> {
 /// Handles up to two levels of indirection, e.g. `(RSP - N1) - N2` stored
 /// as `BinOp(Sub, alias_to_(RSP-N1), N2)` where the alias has `Expr::Var`.
 fn get_rsp_offset(id: VarId, ssa: &SsaCfg) -> Option<i64> {
+    get_rsp_offset_depth(id, ssa, 0)
+}
+
+fn get_rsp_offset_depth(id: VarId, ssa: &SsaCfg, depth: u8) -> Option<i64> {
+    if depth > 4 {
+        return None;
+    }
     let expr = resolve_through_vars(id, ssa);
     match &expr {
         Expr::BinOp(op @ (BinOpKind::Sub | BinOpKind::Add), base_id, off_id) => {
@@ -9889,7 +9896,7 @@ fn get_rsp_offset(id: VarId, ssa: &SsaCfg) -> Option<i64> {
                 });
             }
             // Indirect: (RSP - N1) op2 N2 where base is Var alias or direct BinOp
-            let inner_offset = get_rsp_offset(*base_id, ssa)?;
+            let inner_offset = get_rsp_offset_depth(*base_id, ssa, depth + 1)?;
             let delta = match op {
                 BinOpKind::Sub => -(off_c as i64),
                 _ => off_c as i64,
@@ -9994,12 +10001,12 @@ fn format_var(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
             // Don't emit "?" — try to find a meaningful name from the context
             // (this var is likely an unresolved intermediate)
         } else {
-            // If this Unique var holds an RSP-relative address, show it as local_XX
-            // (e.g. RSP - 8 - 45 → local_35). This handles multi-level RSP arithmetic
+            // If this Unique var holds an RSP-relative address, show it as var_XX
+            // (e.g. RSP - 8 - 45 → var_35). This handles multi-level RSP arithmetic
             // that fold.rs did not collapse, making it appear as a stack-local name.
             if let Some(signed_off) = get_rsp_offset(id, ssa) {
                 if signed_off < 0 {
-                    return format!("local_{:x}", (-signed_off) as u64);
+                    return format!("var_{:x}", (-signed_off) as u64);
                 }
             }
             return format_expr(&vdef.expr, ssa, ctx);
@@ -10112,8 +10119,8 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
         Expr::Var(id) => format_var(*id, ssa, ctx),
         Expr::Const(val, sz) => format_const_ctx(*val, *sz, ctx),
         Expr::BinOp(kind, left, right) => {
-            // If this BinOp computes an RSP-relative address, emit it as local_XX.
-            // This handles chained RSP arithmetic like (RSP - 8) - 45 → local_35.
+            // If this BinOp computes an RSP-relative address, emit it as var_XX.
+            // This handles chained RSP arithmetic like (RSP - 8) - 45 → var_35.
             if matches!(kind, BinOpKind::Sub | BinOpKind::Add) {
                 if let Some(off_c) = get_const_val(*right, ssa) {
                     if let Some(inner_off) = get_rsp_offset(*left, ssa) {
@@ -10123,7 +10130,7 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
                         };
                         let total = inner_off + delta;
                         if total < 0 {
-                            return format!("local_{:x}", (-total) as u64);
+                            return format!("var_{:x}", (-total) as u64);
                         }
                     }
                 }
