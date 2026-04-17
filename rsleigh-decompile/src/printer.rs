@@ -9847,6 +9847,35 @@ fn get_rbp_offset(id: VarId, ssa: &SsaCfg) -> Option<u64> {
     None
 }
 
+fn get_rsp_offset(id: VarId, ssa: &SsaCfg) -> Option<i64> {
+    let expr = resolve_through_vars(id, ssa);
+    match &expr {
+        Expr::BinOp(BinOpKind::Sub, base_id, off_id) => {
+            let base = ssa.var(*base_id);
+            if base.varnode.space == AddressSpaceId::Register
+                && base.varnode.offset == RSP_OFFSET
+                && matches!(base.expr, Expr::Unknown)
+            {
+                let c = get_const_val_expr(&ssa.var(*off_id).expr, ssa)?;
+                return Some(-(c as i64));
+            }
+            None
+        }
+        Expr::BinOp(BinOpKind::Add, base_id, off_id) => {
+            let base = ssa.var(*base_id);
+            if base.varnode.space == AddressSpaceId::Register
+                && base.varnode.offset == RSP_OFFSET
+                && matches!(base.expr, Expr::Unknown)
+            {
+                let c = get_const_val_expr(&ssa.var(*off_id).expr, ssa)?;
+                return Some(c as i64);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 fn get_const_val(id: VarId, ssa: &SsaCfg) -> Option<u64> {
     get_const_val_expr(&ssa.var(id).expr, ssa)
 }
