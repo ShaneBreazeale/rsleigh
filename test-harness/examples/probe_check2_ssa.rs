@@ -181,7 +181,7 @@ fn terminator_tag(t: &rsleigh_decompile::ir::SsaTerminator) -> String {
         CBranch { cond, taken, fallthrough } => {
             format!("CBranch(v{} -> b{} / b{})", cond.0, taken.0, fallthrough.0)
         }
-        Call { target, args, fallthrough } => {
+        Call { target, args, fallthrough, .. } => {
             format!(
                 "Call({:?}, args={:?}, fall=b{})",
                 target,
