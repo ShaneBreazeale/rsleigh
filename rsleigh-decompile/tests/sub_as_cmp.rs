@@ -27,7 +27,7 @@ fn decode_x64(bytes: &[u8], base: u64) -> Vec<(u64, pcode_ir::Instruction)> {
 }
 
 /// After fold, no CBranch condition should resolve to a bare BinOp(Sub, _, _).
-/// Encodes: mov rax, rcx; sub rax, 1; test rax, rax; jnz +3; xor rax, rax; ret
+/// Encodes: mov rax, rcx; sub rax, 1; jnz +3; xor rax, rax; ret
 #[test]
 fn sub_cond_becomes_comparison() {
     let handle = std::thread::Builder::new()
@@ -36,7 +36,6 @@ fn sub_cond_becomes_comparison() {
             let bytes: &[u8] = &[
                 0x48, 0x89, 0xC8,       // mov rax, rcx
                 0x48, 0x83, 0xE8, 0x01, // sub rax, 1
-                0x48, 0x85, 0xC0,       // test rax, rax
                 0x75, 0x03,             // jnz +3
                 0x48, 0x31, 0xC0,       // xor rax, rax
                 0xC3,                   // ret
