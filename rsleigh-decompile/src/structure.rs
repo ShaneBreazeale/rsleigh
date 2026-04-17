@@ -2,17 +2,16 @@ use std::collections::HashSet;
 use crate::ir::*;
 use crate::dominators::{compute_dominators, compute_post_dominators};
 
-/// Scan the first few statements of `block_id` for a `call_return=true` var
-/// that is actually used (use_count > 0). Returns it if found.
-/// This covers the case where `SsaTerminator::Call.out` is still None because
-/// `propagate_call_returns` placed the return var in the fallthrough block.
+/// Scan the statements of `block_id` for the first `call_return=true` var
+/// with `use_count > 0`. SSA VarId uniqueness ensures each call_return var
+/// appears in exactly one block, so a global consumed set is safe.
 fn find_call_return_in_block(ssa: &SsaCfg, block_id: BlockId) -> Option<VarId> {
     if block_id.0 >= ssa.blocks.len() {
         return None;
     }
     for stmt in &ssa.blocks[block_id.0].stmts {
         if let Stmt::Assign(var_id) = stmt {
-            let vdef = &ssa.vars[var_id.0 as usize];
+            let vdef = ssa.var(*var_id);
             if vdef.call_return && vdef.use_count > 0 {
                 return Some(*var_id);
             }
