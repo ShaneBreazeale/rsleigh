@@ -197,7 +197,12 @@ fn fold_once(ssa: &mut SsaCfg) {
             Expr::Const(val, _) => val,
             _ => continue,
         };
-        let (op1, frame_id, c1_id) = match &ssa.vars[inner_id.0 as usize].expr {
+        // Resolve one level of Var indirection before matching the inner BinOp.
+        let inner_real_id = match &ssa.vars[inner_id.0 as usize].expr {
+            Expr::Var(deref) => *deref,
+            _ => inner_id,
+        };
+        let (op1, frame_id, c1_id) = match &ssa.vars[inner_real_id.0 as usize].expr {
             Expr::BinOp(op, frame, c1) if matches!(op, BinOpKind::Add | BinOpKind::Sub) => {
                 (*op, *frame, *c1)
             }
