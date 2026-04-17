@@ -1902,47 +1902,43 @@ fn try_recover_condition(cond_id: VarId, block_idx: usize, ssa: &mut SsaCfg) -> 
     // mba_simplify rewrites BoolNot(ZF) → NotEq(cmp_a, cmp_b) before recover_conditions.
     // Handle BoolAnd(NotEq(a,b), Eq(OF/OV,SF/NG)) and its mirror — both orderings.
     // Validates that NotEq operands match cmp_left/cmp_right to prevent false positives.
-    {
-        let ba_parts = if let Expr::BinOp(BinOpKind::BoolAnd, l, r) = &ssa.vars[cond_id.0 as usize].expr {
-            Some((*l, *r))
-        } else { None };
+    let ba_parts = if let Expr::BinOp(BinOpKind::BoolAnd, l, r) = &ssa.vars[cond_id.0 as usize].expr {
+        Some((*l, *r))
+    } else { None };
 
-        if let Some((ba_left, ba_right)) = ba_parts {
-            let r_is_of_sf = if let Expr::BinOp(BinOpKind::Eq, a, b) = &ssa.vars[ba_right.0 as usize].expr {
+    if let Some((ba_left, ba_right)) = ba_parts {
+        let is_of_sf_eq = |id: VarId| -> bool {
+            if let Expr::BinOp(BinOpKind::Eq, a, b) = &ssa.vars[id.0 as usize].expr {
                 let a_of = is_flag_ref(*a,523,ssa)||is_flag_ref(*a,259,ssa)||is_flag_ref(*a,262,ssa)||is_flag_ref(*a,99,ssa);
                 let a_sf = is_flag_ref(*a,519,ssa)||is_flag_ref(*a,256,ssa)||is_flag_ref(*a,263,ssa)||is_flag_ref(*a,96,ssa);
                 let b_of = is_flag_ref(*b,523,ssa)||is_flag_ref(*b,259,ssa)||is_flag_ref(*b,262,ssa)||is_flag_ref(*b,99,ssa);
                 let b_sf = is_flag_ref(*b,519,ssa)||is_flag_ref(*b,256,ssa)||is_flag_ref(*b,263,ssa)||is_flag_ref(*b,96,ssa);
                 (a_of && b_sf) || (a_sf && b_of)
-            } else { false };
-            let l_is_of_sf = if let Expr::BinOp(BinOpKind::Eq, a, b) = &ssa.vars[ba_left.0 as usize].expr {
-                let a_of = is_flag_ref(*a,523,ssa)||is_flag_ref(*a,259,ssa)||is_flag_ref(*a,262,ssa)||is_flag_ref(*a,99,ssa);
-                let a_sf = is_flag_ref(*a,519,ssa)||is_flag_ref(*a,256,ssa)||is_flag_ref(*a,263,ssa)||is_flag_ref(*a,96,ssa);
-                let b_of = is_flag_ref(*b,523,ssa)||is_flag_ref(*b,259,ssa)||is_flag_ref(*b,262,ssa)||is_flag_ref(*b,99,ssa);
-                let b_sf = is_flag_ref(*b,519,ssa)||is_flag_ref(*b,256,ssa)||is_flag_ref(*b,263,ssa)||is_flag_ref(*b,96,ssa);
-                (a_of && b_sf) || (a_sf && b_of)
-            } else { false };
+            } else { false }
+        };
+        let r_is_of_sf = is_of_sf_eq(ba_right);
+        let l_is_of_sf = is_of_sf_eq(ba_left);
+        drop(is_of_sf_eq);
 
-            let neq_side = if r_is_of_sf { Some(ba_left) } else if l_is_of_sf { Some(ba_right) } else { None };
-            let neq_pair = neq_side.and_then(|id| {
-                if let Expr::BinOp(BinOpKind::NotEq, l, r) = &ssa.vars[id.0 as usize].expr {
-                    if !is_flag_derived(*l, ssa) && !is_flag_derived(*r, ssa) {
-                        return Some((*l, *r));
-                    }
+        let neq_side = if r_is_of_sf { Some(ba_left) } else if l_is_of_sf { Some(ba_right) } else { None };
+        let neq_pair = neq_side.and_then(|id| {
+            if let Expr::BinOp(BinOpKind::NotEq, l, r) = &ssa.vars[id.0 as usize].expr {
+                if !is_flag_derived(*l, ssa) && !is_flag_derived(*r, ssa) {
+                    return Some((*l, *r));
                 }
-                None
-            });
+            }
+            None
+        });
 
-            if let Some((neq_l, neq_r)) = neq_pair {
-                let ra = resolve_cmp_operand(neq_l, ssa);
-                let rb = resolve_cmp_operand(neq_r, ssa);
-                let ca = resolve_cmp_operand(cmp_left, ssa);
-                let cb = resolve_cmp_operand(cmp_right, ssa);
-                if (ra == ca && rb == cb) || (ra == cb && rb == ca) {
-                    let varnode = ssa.vars[cond_id.0 as usize].varnode;
-                    let new_var = ssa.new_var(varnode, Expr::BinOp(BinOpKind::SLess, cmp_right, cmp_left), 1);
-                    return Some(new_var);
-                }
+        if let Some((neq_l, neq_r)) = neq_pair {
+            let ra = resolve_cmp_operand(neq_l, ssa);
+            let rb = resolve_cmp_operand(neq_r, ssa);
+            let ca = resolve_cmp_operand(cmp_left, ssa);
+            let cb = resolve_cmp_operand(cmp_right, ssa);
+            if (ra == ca && rb == cb) || (ra == cb && rb == ca) {
+                let varnode = ssa.vars[cond_id.0 as usize].varnode;
+                let new_var = ssa.new_var(varnode, Expr::BinOp(BinOpKind::SLess, cmp_right, cmp_left), 1);
+                return Some(new_var);
             }
         }
     }
