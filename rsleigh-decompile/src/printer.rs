@@ -10261,6 +10261,33 @@ fn format_const_ctx(val: u64, size: u32, ctx: &PrintCtx) -> String {
     format_const(val, size)
 }
 
+fn format_const_ctx_load(val: u64, size: u32, ctx: &PrintCtx) -> String {
+    // Like format_const_ctx, but for load-address context:
+    // 1. Prefers named imports/vtable over string resolution
+    // 2. Requires ≥4 bytes of string content to avoid PE pointer-table false positives
+    if val == 0 { return "0".to_string(); }
+    if val < 10 { return format!("{}", val); }
+    if size >= 4 && val > 0x200 {
+        if let Some(name) = ctx.imports.get(&val) {
+            return name.clone();
+        }
+        if let Some(binary) = ctx.binary {
+            if let Some(vtable_name) = crate::imports::resolve_pe_vtable(val, binary) {
+                return vtable_name;
+            }
+        }
+        if let Some(s) = try_read_string(val, ctx) {
+            if s.len() >= 4 {
+                return format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"));
+            }
+        }
+        if let Some(ws) = try_read_wide_string(val, ctx) {
+            return ws;
+        }
+    }
+    format_const(val, size)
+}
+
 fn format_const(val: u64, size: u32) -> String {
     if val == 0 { return "0".to_string(); }
     // Small positive values in decimal for readability
@@ -10749,6 +10776,20 @@ fn var_name(vn: &Varnode, ctx: &PrintCtx) -> String {
         AddressSpaceId::Ram => format!("mem_{:x}", vn.offset),
         AddressSpaceId::Const => format_const(vn.offset, 8),
     }
+}
+
+fn resolve_to_const(mut id: VarId, ssa: &SsaCfg) -> Option<(u64, u32)> {
+    for _ in 0..8 {
+        let expr = &ssa.var(id).expr;
+        match expr {
+            Expr::Const(val, sz) => return Some((*val, *sz)),
+            Expr::Var(next) => id = *next,
+            Expr::UnaryOp(UnaryOpKind::Zext, inner)
+            | Expr::UnaryOp(UnaryOpKind::Sext, inner) => id = *inner,
+            _ => return None,
+        }
+    }
+    None
 }
 
 fn resolve_through_vars(id: VarId, ssa: &SsaCfg) -> Expr {
