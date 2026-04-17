@@ -122,6 +122,23 @@ fn count_live_stmts(ssa: &SsaCfg) -> usize {
     ssa.blocks.iter().map(|b| b.stmts.len()).sum()
 }
 
+/// Combine two chained frame-register offset operations into a single (op, const) pair.
+///
+/// Given: `(FRAME_REG op1 C1) op2 C2`, returns `(result_op, result_const)` such that
+/// `FRAME_REG result_op result_const` is numerically equivalent.
+fn combine_frame_offset(op1: BinOpKind, c1: u64, op2: BinOpKind, c2: u64) -> (BinOpKind, u64) {
+    let s1 = c1 as i64;
+    let s2 = c2 as i64;
+    let delta1: i64 = if matches!(op1, BinOpKind::Sub) { -s1 } else { s1 };
+    let delta2: i64 = if matches!(op2, BinOpKind::Sub) { -s2 } else { s2 };
+    let combined = delta1.wrapping_add(delta2);
+    if combined < 0 {
+        (BinOpKind::Sub, (-combined) as u64)
+    } else {
+        (BinOpKind::Add, combined as u64)
+    }
+}
+
 fn fold_once(ssa: &mut SsaCfg) {
     // Pass 1: Collapse trivial Phis
     for v in 0..ssa.vars.len() {
@@ -166,6 +183,44 @@ fn fold_once(ssa: &mut SsaCfg) {
             }
         }
     }
+    // Pass 2b: Collapse chained RSP frame-register arithmetic.
+    // Pattern: (RSP op1 C1) op2 C2 → RSP combined_op combined_C
+    // Needed for RSP-relative local naming: single-level RSP±N patterns.
+    for v in 0..ssa.vars.len() {
+        let (op2, inner_id, c2_id) = match &ssa.vars[v].expr {
+            Expr::BinOp(op, inner, c2) if matches!(op, BinOpKind::Add | BinOpKind::Sub) => {
+                (*op, *inner, *c2)
+            }
+            _ => continue,
+        };
+        let c2_val = match ssa.vars[c2_id.0 as usize].expr {
+            Expr::Const(val, _) => val,
+            _ => continue,
+        };
+        let (op1, frame_id, c1_id) = match &ssa.vars[inner_id.0 as usize].expr {
+            Expr::BinOp(op, frame, c1) if matches!(op, BinOpKind::Add | BinOpKind::Sub) => {
+                (*op, *frame, *c1)
+            }
+            _ => continue,
+        };
+        let c1_val = match ssa.vars[c1_id.0 as usize].expr {
+            Expr::Const(val, _) => val,
+            _ => continue,
+        };
+        let frame_vdef = &ssa.vars[frame_id.0 as usize];
+        if frame_vdef.varnode.space != AddressSpaceId::Register
+            || frame_vdef.varnode.offset != RSP_OFFSET
+            || !matches!(frame_vdef.expr, Expr::Unknown)
+        {
+            continue;
+        }
+        let (combined_op, combined_c) = combine_frame_offset(op1, c1_val, op2, c2_val);
+        let sz = ssa.vars[c1_id.0 as usize].size;
+        let varnode = ssa.vars[c1_id.0 as usize].varnode;
+        let new_const_id = ssa.new_var(varnode, Expr::Const(combined_c, sz), sz);
+        ssa.vars[v].expr = Expr::BinOp(combined_op, frame_id, new_const_id);
+    }
+
     // MBA deobfuscation: deep algebraic simplification through expression trees.
     mba_simplify(ssa);
 
