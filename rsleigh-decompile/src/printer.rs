@@ -333,16 +333,6 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         }
                     }
                     if is_redundant {
-                        if std::env::var("RSLEIGH_DEBUG_PRINTER").is_ok() {
-                            eprintln!("[#2b] removing redundant: {:?}", lines[i].trim());
-                            // Find which line made it redundant
-                            for j in (0..i).chain(i+1..lines.len()) {
-                                if lines[j].trim().contains(rhs) {
-                                    eprintln!("[#2b]   found in line {}: {:?}", j, lines[j].trim());
-                                    break;
-                                }
-                            }
-                        }
                         lines.remove(i);
                         continue;
                     }
@@ -557,9 +547,6 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     }
                     // Dead store: same LHS, second doesn't reference first
                     if !rhs2.contains(&lhs1) {
-                        if std::env::var("RSLEIGH_DEBUG_PRINTER").is_ok() {
-                            eprintln!("[dead-store] removing: {:?}", lines[i].trim());
-                        }
                         lines.remove(i);
                         continue;
                     }
@@ -3824,9 +3811,6 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         }
                     }
                     if !used {
-                        if std::env::var("RSLEIGH_DEBUG_PRINTER").is_ok() {
-                            eprintln!("[#DEADREG] removing: {:?}", lines[i].trim());
-                        }
                         lines.remove(i);
                         continue;
                     }
@@ -3870,9 +3854,6 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 // Check if next non-empty line is } or end of function
                 let next = lines.get(i + 1).map(|l| l.trim().to_string()).unwrap_or_default();
                 if next == "}" || next.is_empty() || next.starts_with('}') {
-                    if std::env::var("RSLEIGH_DEBUG_PRINTER").is_ok() {
-                        eprintln!("[#TRAILINGDEAD] removing: {:?}", lt);
-                    }
                     lines.remove(i);
                     continue;
                 }
@@ -8155,10 +8136,6 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                 } else {
                     // REG = computed expression (BinOp, etc.): invalidate call_return
                     // so it is not incorrectly propagated through subsequent copies.
-                    if std::env::var("RSLEIGH_DEBUG_PRINTER").is_ok() {
-                        eprintln!("[tracker-inv] invalidating off={} size={} for VarId {:?}",
-                            vdef.varnode.offset, vdef.varnode.size, lhs);
-                    }
                     tracker.invalidate(vdef.varnode.offset, vdef.varnode.size);
                 }
             }

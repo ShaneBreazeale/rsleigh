@@ -337,10 +337,6 @@ fn emit_region(
                 // Resolve the call return: use the terminator's out if set, otherwise
                 // check the fallthrough block's first call_return=true stmt.
                 let call_out = term_out.or_else(|| find_call_return_in_block(ssa, *fallthrough));
-                if std::env::var("RSLEIGH_DEBUG_STRUCT").is_ok() {
-                    eprintln!("[STRUCT] Call block {} term_out={:?} call_out={:?} fallthrough={}",
-                        current.0, term_out, call_out, fallthrough.0);
-                }
                 if let Some(v) = call_out {
                     consumed.insert(v);
                 }
