@@ -9803,6 +9803,12 @@ fn try_stack_var_name(addr_id: VarId, ssa: &SsaCfg) -> Option<String> {
     if let Some(param_name) = get_ebp_param(addr_id, ssa) {
         return Some(param_name);
     }
+    // x86-64: RSP-relative locals (negative offsets from RSP)
+    if let Some(signed_off) = get_rsp_offset(addr_id, ssa) {
+        if signed_off < 0 {
+            return Some(format!("var_{:x}", (-signed_off) as u64));
+        }
+    }
     None
 }
 
@@ -9901,6 +9907,12 @@ fn format_addr(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
     // Try x86-32 parameter (positive EBP offset)
     if let Some(param) = get_ebp_param(id, ssa) {
         return param;
+    }
+    // Try x86-64 RSP-relative local (negative offset = local variable)
+    if let Some(signed_off) = get_rsp_offset(id, ssa) {
+        if signed_off < 0 {
+            return format!("var_{:x}", (-signed_off) as u64);
+        }
     }
 
     let expr = resolve_through_vars(id, ssa);
