@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "P-code intermediate representation types for SLEIGH-generated decoders"
 license = "Apache-2.0"
+repository = "https://github.com/ShaneBreazeale/rsleigh"
 
 # Zero runtime dependencies by design.
 # The generated code should only depend on pcode-ir.
