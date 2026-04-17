@@ -146,7 +146,8 @@ fn main_func_no_double_negation_in_output() {
             );
 
             assert!(
-                !out.contains("== 0) == 0") && !out.contains("!= 0) == 0"),
+                !out.contains("== 0) == 0") && !out.contains("!= 0) == 0")
+                    && !out.contains("== 0 == 0") && !out.contains("!= 0 == 0"),
                 "double-negation still present in main output:\n{}",
                 out.lines()
                     .filter(|l| l.contains("== 0"))

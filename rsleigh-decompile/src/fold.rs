@@ -102,6 +102,7 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
         eliminate_dead(ssa);
         recount_uses(ssa);
         recover_conditions(ssa);
+        mba_simplify(ssa);
         detect_return_values(ssa);
         recount_uses(ssa);
         // Name loop Phi variables so the printer uses the name instead of
@@ -1025,7 +1026,16 @@ fn mba_simplify_expr(var_idx: usize, vars: &[VarDef]) -> Option<Expr> {
         // (Eq(a,b) == 0) → NotEq(a,b),  (NotEq(a,b) == 0) → Eq(a,b)
         Expr::BinOp(BinOpKind::Eq, inner_id, zero_id) => {
             if matches!(vars[zero_id.0 as usize].expr, Expr::Const(0, _)) {
-                if let Expr::BinOp(cmp_op, a, b) = vars[inner_id.0 as usize].expr {
+                // Follow Var chains to reach the underlying BinOp
+                let mut resolved = *inner_id;
+                for _ in 0..4 {
+                    if let Expr::Var(next) = vars[resolved.0 as usize].expr {
+                        resolved = next;
+                    } else {
+                        break;
+                    }
+                }
+                if let Expr::BinOp(cmp_op, a, b) = vars[resolved.0 as usize].expr {
                     if let Some(neg_op) = negate_eq_op(cmp_op) {
                         return Some(Expr::BinOp(neg_op, a, b));
                     }
@@ -1036,8 +1046,17 @@ fn mba_simplify_expr(var_idx: usize, vars: &[VarDef]) -> Option<Expr> {
         // (BinOp(a,b) != 0) → BinOp(a,b)  [identity: comparison already a bool]
         Expr::BinOp(BinOpKind::NotEq, inner_id, zero_id) => {
             if matches!(vars[zero_id.0 as usize].expr, Expr::Const(0, _)) {
-                if let Expr::BinOp(_, _, _) = vars[inner_id.0 as usize].expr {
-                    return Some(Expr::Var(*inner_id));
+                // Follow Var chains to reach the underlying BinOp
+                let mut resolved = *inner_id;
+                for _ in 0..4 {
+                    if let Expr::Var(next) = vars[resolved.0 as usize].expr {
+                        resolved = next;
+                    } else {
+                        break;
+                    }
+                }
+                if let Expr::BinOp(_, _, _) = vars[resolved.0 as usize].expr {
+                    return Some(Expr::Var(resolved));
                 }
             }
             None
