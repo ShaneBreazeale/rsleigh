@@ -1033,12 +1033,10 @@ fn mba_simplify_expr(var_idx: usize, vars: &[VarDef]) -> Option<Expr> {
             }
             None
         }
-        // (Eq(a,b) != 0) → Eq(a,b),  (NotEq(a,b) != 0) → NotEq(a,b)  [identity: already a bool]
+        // (BinOp(a,b) != 0) → BinOp(a,b)  [identity: comparison already a bool]
         Expr::BinOp(BinOpKind::NotEq, inner_id, zero_id) => {
             if matches!(vars[zero_id.0 as usize].expr, Expr::Const(0, _)) {
-                if matches!(vars[inner_id.0 as usize].expr,
-                    Expr::BinOp(BinOpKind::Eq, _, _) | Expr::BinOp(BinOpKind::NotEq, _, _)
-                ) {
+                if let Expr::BinOp(_, _, _) = vars[inner_id.0 as usize].expr {
                     return Some(Expr::Var(*inner_id));
                 }
             }
