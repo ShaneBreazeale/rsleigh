@@ -1,0 +1,66 @@
+// FUN_000100d4
+void func_100d4(void) {
+    return func_100dc(); // thunk
+}
+
+// FUN_000100e0
+int func_100e0(void) {
+    long lVar1;
+lVar1 = param_0;
+func_90724();
+func_90728();
+func_ab410();
+func_a86c4();
+return param_0;
+}
+
+// FUN_00010100
+int func_10100(void) {
+    long lVar1;
+    long lVar5;
+sp = ((((((sp - 4 - 4) - 4 - 4 - 4) - 4 - 4 - 4 - 4) - 4 - 4 - 4 - 4 - 4) - 4 - 4 - 4 - 4 - 4 - 4) - 4 - 4 - 4 - 4 - 4 - 4 - 4) - 4 - 4 - 4 - 4 - 4 - 4 - 4 - 4;
+lVar1 = param_1 + 4;
+sp->field_0 = d8;
+param_1 = lVar1->field_0;
+if (*(lVar1) != 0) {
+    lVar5 = sp - 8 - 412 + 16;
+    param_0 = DAT_000104e0->field_0;
+    sp[8] = lVar5;
+    func_20c80();
+    return *(DAT_000104e0);
+}
+return param_0;
+}
+
+// FUN_00010147
+long func_10147(void) {
+return -229;
+}
+
+// FUN_00010618
+int func_10618(void) {
+    long lVar1;
+    long lVar2;
+    long lVar3;
+    long lVar4;
+sp = (((sp - 4 - 4) - 4 - 4 - 4) - 4 - 4 - 4 - 4) - 4 - 4 - 4 - 4 - 4;
+lVar3 = param_2 - param_0;
+lVar2 = 0;
+lVar4 = param_3 - param_1 + (0 <= 0) ? 1 : 0;
+lVar1 = -1;
+sp->field_0 = d8;
+param_1 = 0;
+param_3 = 0;
+    lVar3 = param_2 - param_0;
+    lVar4 = param_3 - param_1 + (0 <= 0) ? 1 : 0 + 1 + (CY) ? 1 : 0;
+    param_1 = lVar4;
+    func_ac664();
+    d8 = (uint)param_1 << 32 + (uint)param_0;
+    param_0 = sp[4];
+    param_1 = sp + 32->field_4;
+    d16 = (uint)param_1 << 32 + (uint)param_0;
+    d0 = (uint)param_1 << 32 + (uint)param_0 / (uint)param_1 << 32 + (uint)param_0;
+    d16 = 100;
+}
+}
+

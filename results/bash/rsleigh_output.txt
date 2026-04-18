@@ -1,0 +1,148 @@
+// sh_regmatch
+int sh_regmatch(long param_0, int param_1, int param_2) {
+    int iVar1;
+    int iVar2;
+    long lVar1;
+    long lVar2;
+    long lVar3;
+    long lVar4;
+    long lVar5;
+    long lVar6;
+    long lVar7;
+    long lVar8;
+*(uint64_t*)(-local_30) = lVar2;
+*(uint64_t*)(-local_20) = lVar3;
+*(uint64_t*)(-local_28) = lVar9;
+*(uint64_t*)(-local_18) = lVar4;
+*(uint64_t*)(-local_10) = lVar5;
+*(uint64_t*)(-local_8) = lVar6;
+if (glob_ignore_case != 0) {
+    param_0 = 3;
+    lVar7 = local_20 - 152 + 8 - 16 * (uint8_t)DF;
+    *(uint64_t*)(lVar7) = lVar1;
+    lVar1 = regcomp((void *)local_20 - 152);
+    local_4->field_0 = 2;
+    if (lVar1 == 0) {
+        lVar1 = regexec(/*preg*/ (void *)local_20 - 168, /*string*/ (char *)param_0, /*nmatch*/ local_50->field_0 + 1, /*pmatch*/ lVar1, 0);
+        local_4->field_0 = lVar1 != 0;
+        lVar1 = strlen((const char *)param_0);
+        iVar2 = lVar1 + 10;
+        iVar1 = lVar1 + 11;
+        unbind_variable("BASH_REMATCH");
+        lVar1 = make_new_array_variable("BASH_REMATCH");
+        local_18->field_0 = ?;
+        local_8->field_0 = *(lVar1 + 8);
+        if (*(local_4 == 208)) {
+            if (param_1 & 1 != 0) {
+                if (lVar1 != 0) {
+                    iVar2 = (int)lVar1 + 10;
+                    *local_10 = iVar2;
+                    iVar2 = 0;
+                    lVar1 = RSP - 208;
+                    iVar2 = 0 + 1;
+                    do {
+                        memset(/*s*/ lVar4, 0, /*n*/ *(uint64_t*)(16 + lVar1));
+                        param_0 = iVar2 - (int)*param_0;
+                        strncpy(/*dest*/ lVar4, /*src*/ (const char *)param_0 + lVar8, /*n*/ (int)iVar2 - (int)*param_0);
+                    } while ((uint)iVar2 + 1 <= (uint)*(80 + lVar1 - 8 - 8 - 8));
+                    lVar1 = *(uint64_t*)(24 + ESP);
+                    *(uint32_t*)(lVar1 + 40) = param_0->field_28 | 2;
+                    sh_xfree(lVar4);
+                    sh_xfree(lVar9);
+                    return 2;
+                }
+            }
+        }
+    }
+    } else {
+    param_0 = 1;
+}
+return param_0;
+}
+
+// fatal_error
+long fatal_error(long param_0, long param_1, long param_2, long param_3, long param_4, float fparam_0, float fparam_1, float fparam_2, float fparam_3, float fparam_4, float fparam_5, float fparam_6, float fparam_7) {
+    long lVar1;
+local_30->field_0 = param_0;
+local_38->field_0 = param_1;
+local_40->field_0 = param_2;
+local_48->field_0 = param_3;
+local_28->field_0 = param_4;
+*(double*)(lVar1 - 15) = fparam_7;
+*(double*)(lVar1 - 31) = fparam_6;
+*(double*)(lVar1 - 47) = fparam_5;
+*(double*)(lVar1 - 63) = fparam_4;
+*(double*)(lVar1 - 79) = fparam_3;
+*(double*)(lVar1 - 95) = fparam_2;
+*(double*)(lVar1 - 111) = fparam_1;
+*(double*)(lVar1 - 127) = fparam_0;
+func_43e050(0, local_cf - 224);
+local_4->field_0 = 48;
+local_8->field_0 = func_43e050(0, local_cf - 224);
+local_10->field_0 = func_43e050(0, local_cf - 224);
+vfprintf(/*s*/ stderr->field_0, /*format*/ (char *)2, /*arg*/ RSP - 448);
+fputc(/*c*/ (int)10, /*stream*/ stderr->field_0);
+sh_exit(2);
+return local_20 - 448;
+}
+
+// set_sigwinch_handler
+void set_sigwinch_handler(void) {
+return set_signal_handler(28, sigwinch_sighandler);
+}
+
+// set_shellopts
+long set_shellopts(int param_0, int param_1) {
+    uint8_t bVar1;
+    int iVar1;
+    int iVar2;
+    long lVar1;
+    long lVar2;
+    long lVar3;
+    long lVar4;
+if (o_options == 0) {
+    return RSP - 656;
+}
+while (*(iVar2) == 0) {
+    if (*(DAT_004bf740) == 0) {
+        bVar1 = iVar1 != 0;
+        if (bVar1 == 0) {
+            if (*(DAT_004bf748) == 0) {
+                lVar1 = sh_xmalloc((int)lVar3 + 1, "../../bash/builtins/../../bash/builtins/set.def", 492);
+                while (*(param_1) == 0) {
+                    if (*(DAT_004bf748) == 0) {
+                        if (*(32 + lVar2) == 0) {
+                            *(uint8_t*)(lVar2 + lVar1) = 0;
+                            if (find_variable("SHELLOPTS") == 0) {
+                                lVar1 = bind_variable("SHELLOPTS", lVar2, 0);
+                                param_0 = *(uint32_t*)(lVar1 + 40) | 2;
+                                *(uint32_t*)(lVar1 + 40) = *(lVar1 + 40) | 2;
+} else if (mark_modified_vars != 0) {
+                                        if (*(lVar1 + 40) | 2 & 1 != 0) {
+                                            param_0 = *(uint32_t*)(lVar1 + 40) | 2 & 0xfffffffe;
+                                            *(uint32_t*)(lVar1 + 40) = *(lVar1 + 40) | 2 & 0xfffffffe;
+    }
+    return;
+                                }
+                    } else {
+                                *(uint32_t*)(lVar1 + 40) = *(lVar1 + 40) & 0xfffffffd;
+                            }
+                        }
+                    }
+                }
+                strcpy(/*dest*/ lVar2 + lVar4, /*src*/ o_options->field_0);
+                *(uint8_t*)(lVar2 + lVar1) = 58;
+            }
+        }
+    }
+}
+if (find_flag() != 0) {
+    param_0 = *(uint32_t*)(lVar1);
+}
+}
+
+// execute_command
+void execute_command(long param_0) {
+return param_0;
+}
+

@@ -49,7 +49,7 @@ def export_decompile_results(program, output_file):
     with open(output_file, 'w') as f:
         json.dump(results, f, indent=2)
 
-    print(f"Exported {len(results)} functions to {output_file}")
+    print("Exported {} functions to {}".format(len(results), output_file))
 
 # Entry point for Ghidra script
 if __name__ == "__main__":

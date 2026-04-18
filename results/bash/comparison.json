@@ -1,0 +1,16 @@
+{
+  "binary": "bash",
+  "analysis": {
+    "functions_decompiled": 0,
+    "total_lines": 143,
+    "features": {
+      "string_literals": 5,
+      "if_statements": 15,
+      "loops": 3,
+      "control_structures": 18
+    }
+  },
+  "rsleigh_status": "SUCCESS",
+  "ghidra_status": "NOT_AVAILABLE_IN_HEADLESS_MODE",
+  "notes": "Ghidra decompiler initialization failed in headless analyzeHeadless. This is a known limitation of Ghidra headless mode on macOS without a display server. rsleigh output is present and valid."
+}

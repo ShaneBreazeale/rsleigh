@@ -1,0 +1,140 @@
+// FUN_140001000
+void func_140001000(void) {
+local_28->field_0 = DAT_140005000->field_0 ^ RSP - 56; // stack cookie
+}
+
+// FUN_140001020
+long func_140001020(int param_0) {
+    long lVar1;
+local_30->field_0 = 0;
+do {
+    system("cls");
+    func_1400012b0(*(uint64_t*)(cout), "_\\|/ ^\n(_oo\n | \n/|\\\n |\n LL");
+    lVar1 = cout <<(lVar1, DAT_140005074->field_0);
+    func_1400012b0(lVar1, " Groschen");
+    lVar1 = func_1400012b0(lVar1, "\n1: Payment Portal");
+    func_1400012b0(lVar1, "\n2: Talk to a representative");
+    func_1400012b0(*(uint64_t*)(cout), "\n\nYOUR CHOICE: ");
+    lVar1 = cin >>(*(uint64_t*)(cin), local_20 - 8 - 8 - 8 - 8 - 8 - 8 - 8 - 8 - 8 - 8);
+    if ((int)lVar1 >= (char)2) {
+        DAT_1400050fc->field_0 = *(local_20);
+        if (*(local_20 - 8 - 8 - 8 - 8 - 8 - 8 - 8 - 8 - 8 - 8 - 8) != 255) {
+            if (lVar1 != 1) {
+                param_0 = "\nAll representatives are busy. Try again later.\n";
+                if (lVar1 != 2) {
+                    param_0 = "\nNegative values are not allowed.\n";
+                    func_1400012b0(*(uint64_t*)(cout), "\nNegative values are not allowed.\n");
+                    cin.ignore(*(uint64_t*)(cin), 1, INFINITE);
+                }
+            } else {
+                param_0 = "\nPayment system is currently down...\n";
+            }
+    } else {
+            func_1400012b0(*(uint64_t*)(cout), "\n[+] Hidden admin access unlocked\n");
+            cin.ignore(*(uint64_t*)(cin), 1, INFINITE);
+            cin.get(*(uint64_t*)(cin));
+            system("cls");
+            func_1400012b0(*(uint64_t*)(cout), "\nADMIN TERMINAL\n");
+            func_1400012b0(*(uint64_t*)(cout), "1: Set users debt to zero\n");
+            func_1400012b0(*(uint64_t*)(cout), "2: Exit\n");
+            func_1400012b0(*(uint64_t*)(cout), "\nSelection: ");
+            if (*(local_24 - 8 - 8 - 8 - 8 - 8 - 8 - 8 - 8 - 8 - 8 - 8 - 8 - 8 - 8 - 8 - 8 - 8 - 8 - 8 - 8) == 1) {
+                DAT_140005074->field_0 = 0;
+                func_1400012b0(*(uint64_t*)(cout), "\n[+] Debt cleared.\n");
+                func_1400012b0(*(uint64_t*)(cout), "\nPress enter to continue...");
+                cin.ignore(*(uint64_t*)(cin), 1, INFINITE);
+                cin.get(*(uint64_t*)(cin));
+            }
+        }
+} else {
+        param_0 = "\nNegative values are not allowed.\n";
+    }
+} while (*(DAT_140005074) != 0);
+return RSP - 8 - 8 - 8;
+}
+
+// FUN_140001299
+int func_140001299(void) {
+__security_check_cookie(local_28->field_0 ^ RSP); // stack cookie
+return 0;
+}
+
+// FUN_1400012b0
+long func_1400012b0(long param_0) {
+    int iVar1;
+    int iVar2;
+    long lVar1;
+    long lVar2;
+    long lVar3;
+    long lVar4;
+    long lVar5;
+    long lVar6;
+local_10->field_0 = lVar2;
+local_8->field_0 = param_0;
+local_70->field_0 = 0;
+lVar1 = strlen((const char *)param_0);
+if (*(40 + param_0->field_4 + param_0) - lVar1 <= 1) {
+    local_20->field_0 = param_0;
+    if (*(72 + param_0->field_4 + param_0) == 0) {
+        if (lVar1 != 0) {
+            lVar6 = *(uint64_t*)(80 + lVar6 + lVar5);
+            if (*(80 + param_0->field_4 + param_0) == 0) {
+                local_28->field_0 = 1;
+                if (lVar1 != 0) {
+                    param_0 = *(uint64_t*)(lVar5);
+                    if (*(24 + param_0->field_4 + param_0) & 448 == 64) {
+                        param_0 = *(uint64_t*)(lVar5);
+                        if (>::sputn(*(uint64_t*)(72 + lVar6 + lVar5), param_0, lVar4) != lVar1) {
+                            local_70->field_0 = 4;
+                            *(uint64_t*)(40 + lVar6 + lVar5) = 0;
+                            >::setstate((int)param_0->field_4 + iVar2, iVar1, 0);
+                            if (std::uncaught_exceptions() != 0) {
+                                if (*(72 + param_0->field_4 + param_0) == 0) {
+                                    return param_0;
+                                }
+                                (*tmp_1400014648003)();
+                                return RSP - 8 - 8 - 8;
+                                return RSP - 104;
+                            }
+                            cout._Osfx(lVar3);
+                            return RSP - 8 - 8 - 8;
+                        }
+                        while (*(40 + param_0->field_4 + param_0) - lVar1 > 1) {
+                            if (>::sputc(*(uint64_t*)(72 + lVar6 + lVar5), (uint8_t)*(88 + lVar6 + lVar5)) != -1) {
+                            }
+                        }
+                    } else {
+                        return (int)param_0->field_4;
+                    }
+                }
+        } else if (*(80 + param_0->field_4 + param_0) != param_0) {
+    cout.flush();
+    lVar1 = std::ios_base::good((int)param_0->field_4 + param_0);
+    local_28->field_0 = ?;
+            }
+} else {
+            local_28->field_0 = ?;
+        }
+    }
+    (*tmp_1400013138003)();
+}
+}
+
+// FUN_140001480
+long func_140001480(long param_0) {
+    long lVar1;
+    long lVar2;
+    long lVar3;
+if (std::uncaught_exceptions() != 0) {
+    lVar2 = *(long*)(lVar1);
+    lVar3 = *(long*)(72 + (int)param_0->field_4 + lVar2);
+    if (*(72 + param_0->field_4 + *param_0) == 0) {
+        return *param_0;
+    }
+    (*tmp_1400014b88003)();
+    return *param_0;
+    return;
+}
+cout._Osfx(*(uint64_t*)(lVar1));
+}
+
