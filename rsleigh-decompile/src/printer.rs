@@ -8208,6 +8208,32 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Drop gratuitous parens around bare `local_<hex>` identifiers left over
+    // from earlier sp-rewrites that inherited outer parens from the original
+    // expression (e.g. `(sp + 200)` → `(local_200)`). A single identifier
+    // never needs parens in C.
+    for line in lines.iter_mut() {
+        let mut search_from = 0usize;
+        while let Some(rel) = line[search_from..].find("(local_") {
+            let open = search_from + rel;
+            let inner_start = open + 1;
+            let name_end = inner_start + "local_".len();
+            let after = &line[name_end..];
+            let hex_end = after.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(after.len());
+            if hex_end == 0 { search_from = open + 1; continue; }
+            let close_pos = name_end + hex_end;
+            if line.as_bytes().get(close_pos).copied() != Some(b')') {
+                search_from = open + 1;
+                continue;
+            }
+            // Replace `(local_HEX)` with `local_HEX`.
+            *line = format!("{}{}{}",
+                &line[..open],
+                &line[inner_start..close_pos],
+                &line[close_pos + 1..]);
+        }
+    }
+
     // Drop stale struct-layout comments that reference the frame-base
     // sentinel (`local_0` or raw `sp`). Their field list is the pre-collapse
     // view; downstream passes now map those fields to `local_<offset>` so
@@ -8818,6 +8844,29 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     }
                 }
             }
+        }
+    }
+
+    // Final `(local_<hex>)` paren cleanup — runs after every other transform
+    // so any late-added redundant wrappers are caught.
+    for line in lines.iter_mut() {
+        let mut search_from = 0usize;
+        while let Some(rel) = line[search_from..].find("(local_") {
+            let open = search_from + rel;
+            let inner_start = open + 1;
+            let name_end = inner_start + "local_".len();
+            let after = &line[name_end..];
+            let hex_end = after.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(after.len());
+            if hex_end == 0 { search_from = open + 1; continue; }
+            let close_pos = name_end + hex_end;
+            if line.as_bytes().get(close_pos).copied() != Some(b')') {
+                search_from = open + 1;
+                continue;
+            }
+            *line = format!("{}{}{}",
+                &line[..open],
+                &line[inner_start..close_pos],
+                &line[close_pos + 1..]);
         }
     }
 
