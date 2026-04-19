@@ -32,7 +32,8 @@ fn detect_cc(arch: Architecture, binary: Option<&[u8]>) -> fold::CallingConv {
         }
     }
     match arch {
-        Architecture::X86_32 | Architecture::ARM32 | Architecture::MIPS32 => fold::CallingConv::Cdecl32,
+        Architecture::X86_32 | Architecture::MIPS32 => fold::CallingConv::Cdecl32,
+        Architecture::ARM32 => fold::CallingConv::Arm32,
         Architecture::AArch64 => fold::CallingConv::AArch64,
         _ => fold::CallingConv::SysV,
     }

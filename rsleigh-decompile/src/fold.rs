@@ -23,6 +23,8 @@ const WIN64_ARG_REGS: &[u64] = &[8, 16, 128, 136]; // RCX, RDX, R8, R9
 
 /// AArch64 AAPCS64 argument register offsets (x0-x7, stride 8 starting at 16384).
 const AARCH64_ARG_REGS: &[u64] = &[16384, 16392, 16400, 16408, 16416, 16424, 16432, 16440];
+/// ARM32 AAPCS argument register offsets (r0-r3 at SLEIGH offsets 0x20..0x2c).
+const ARM32_ARG_REGS: &[u64] = &[32, 36, 40, 44];
 
 /// x86-64 SysV ABI float argument register offsets (XMM0-XMM7).
 const SYSV_FLOAT_ARG_REGS: &[u64] = &[4608, 4672, 4736, 4800, 4864, 4928, 4992, 5056];
@@ -55,6 +57,7 @@ pub enum CallingConv {
     Win64,    // Windows x64 — RCX, RDX, R8, R9
     Cdecl32,  // x86-32 cdecl — stack-based
     AArch64,  // AAPCS64 — x0-x7
+    Arm32,    // AAPCS — r0-r3
 }
 
 /// Fold expressions: inline temps, eliminate dead code, recover conditions.
@@ -71,6 +74,7 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
             CallingConv::Win64 => WIN64_ARG_REGS,
             CallingConv::Cdecl32 => &[],
             CallingConv::AArch64 => AARCH64_ARG_REGS,
+            CallingConv::Arm32 => ARM32_ARG_REGS,
         };
     });
     FLOAT_ARG_REG_OFFSETS_TLS.with(|r| {
@@ -79,6 +83,7 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
             CallingConv::Win64 => WIN64_FLOAT_ARG_REGS,
             CallingConv::Cdecl32 => &[],
             CallingConv::AArch64 => &[],  // AArch64 float params in d0-d7 — defer for now
+            CallingConv::Arm32 => &[],    // ARM32 float params in s0-s15 — defer
         };
     });
     // Collect call arguments FIRST, before any optimization.
