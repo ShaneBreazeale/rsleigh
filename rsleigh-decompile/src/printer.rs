@@ -6589,12 +6589,30 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         let is_32bit = !is_arm64 && !all_text_check.contains("RSP") && !all_text_check.contains("RBP")
             && !all_text_check.contains("fparam_"); // fparam_ indicates x86-64 SysV float ABI
 
+        // AArch64: dynamic skip list — only x0..x(param_count-1) are actual params
+        // and should be protected from auto-renaming. Registers beyond the detected
+        // param count (xN..x7) that get ADRP+LDR-initialized are real locals and
+        // should be renamed like x8+ to avoid leaking raw `x2`/`x3` into output.
+        // `param_names` contains one entry per SSA var with `param_name` set — the
+        // same logical parameter may appear multiple times (different SSA versions),
+        // so count DISTINCT `param_<N>` / DWARF identifiers to get the real count.
+        let arm64_skip_owned: Vec<String> = if is_arm64 {
+            let mut unique: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+            for p in param_names { unique.insert(p.as_str()); }
+            let pc = unique.len().min(8);
+            let mut v: Vec<String> = Vec::new();
+            for i in 0..pc {
+                v.push(format!("x{}", i));
+                v.push(format!("w{}", i));
+            }
+            v.extend(["x29", "x30", "sp",
+                      "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7"]
+                     .iter().map(|s| s.to_string()));
+            v
+        } else { Vec::new() };
+        let arm64_skip_refs: Vec<&str> = arm64_skip_owned.iter().map(|s| s.as_str()).collect();
         let skip_regs: &[&str] = if is_arm64 {
-            // AArch64: skip param regs (x0-x7), frame pointer (x29), link reg (x30), sp
-            &["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7",
-              "w0", "w1", "w2", "w3", "w4", "w5", "w6", "w7",
-              "x29", "x30", "sp",
-              "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7"]
+            &arm64_skip_refs
         } else if is_32bit {
             &["RSP", "ESP", "RBP", "EBP", "RIP", "EIP",
               "XMM0", "XMM1", "XMM2", "XMM3", "XMM4", "XMM5"]
@@ -6606,8 +6624,14 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
 
         // Candidate registers for renaming
         let reg_candidates: &[(&str, &str)] = if is_arm64 {
+            // AArch64: include x0-x7 and w0-w7 here so non-param regs (filtered by
+            // dynamic skip_regs above) get auto-renamed to lVar/iVar. Params stay
+            // in skip_regs so the earlier x0..x(count-1) → param_N pass owns them.
             &[
-                // AArch64: 64-bit → l, 32-bit → i
+                ("x0", "l"), ("x1", "l"), ("x2", "l"), ("x3", "l"),
+                ("x4", "l"), ("x5", "l"), ("x6", "l"), ("x7", "l"),
+                ("w0", "i"), ("w1", "i"), ("w2", "i"), ("w3", "i"),
+                ("w4", "i"), ("w5", "i"), ("w6", "i"), ("w7", "i"),
                 ("x8", "l"), ("x9", "l"), ("x10", "l"), ("x11", "l"),
                 ("x12", "l"), ("x13", "l"), ("x14", "l"), ("x15", "l"),
                 ("x16", "l"), ("x17", "l"), ("x18", "l"),
@@ -7779,11 +7803,13 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // x0-x7 → param_0-param_7 (argument registers)
     // x30 returns → void return (link register is not a return value)
     {
-        // Detect AArch64 by presence of x0/x19/x29 in output
-        let is_aarch64 = lines.iter().any(|l| {
-            let t = l.trim();
-            t.contains("x0 ") || t.contains("x19") || t.contains("x29") || t.contains("x30")
-        }) && !lines.iter().any(|l| l.contains("RAX") || l.contains("RBP") || l.contains("ESP"));
+        // Detect AArch64: prefer the architecture context; fall back to textual
+        // heuristic for test paths that do not thread ctx through (x0-leak scan).
+        let is_aarch64 = matches!(ctx.arch, Architecture::AArch64)
+            || (lines.iter().any(|l| {
+                let t = l.trim();
+                t.contains("x0 ") || t.contains("x19") || t.contains("x29") || t.contains("x30")
+            }) && !lines.iter().any(|l| l.contains("RAX") || l.contains("RBP") || l.contains("ESP")));
 
         if is_aarch64 {
             for line in &mut lines {
@@ -7797,15 +7823,21 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 }
 
                 // Replace bare x0-x(N-1) with param_0-param_(N-1) when used as values.
-                // N is the SSA-detected parameter count from `param_names`. Registers
-                // beyond that count (xN..x7) are NOT function parameters in this
-                // function — they were written before being read (e.g., via ADRP+LDR
-                // setting up GOT pointers). Renaming them to param_N would be wrong.
-                // If `param_names` carries DWARF names, use those instead of `param_N`.
-                let aarch64_param_count = param_names.len().min(8);
+                // `param_names` contains one entry per SSA-versioned write of a
+                // parameter register, so the same logical parameter may appear
+                // multiple times. Dedupe preserving insertion order of the first
+                // occurrence, and use the deduped list to know both the count and
+                // the canonical name (honors DWARF names when present).
+                let mut distinct_param_names: Vec<String> = Vec::new();
+                for p in param_names {
+                    if !distinct_param_names.iter().any(|x| x == p) {
+                        distinct_param_names.push(p.clone());
+                    }
+                }
+                let aarch64_param_count = distinct_param_names.len().min(8);
                 for reg_idx in 0..aarch64_param_count as u64 {
                     let reg = format!("x{}", reg_idx);
-                    let param = param_names[reg_idx as usize].clone();
+                    let param = distinct_param_names[reg_idx as usize].clone();
                     if !line.contains(&reg) { continue; }
                     // Replace with word-boundary awareness
                     let mut new_line = String::new();
@@ -7861,6 +7893,180 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     *line = new;
                 }
             }
+        }
+    }
+
+    // Fold compound const arithmetic at print time: `base + N + M` → `base + (N+M)`,
+    // and `base - N - M` → `base - (N+M)`, etc. The SSA tree may represent chained
+    // address computation as nested `BinOp(Add, BinOp(Add, x, c1), c2)` which emits
+    // as `x + c1 + c2` with constants unmerged. Collapse to a single constant for
+    // readability (matches Ghidra's `puVar3 + 0x18` over `puVar3 + 16 + 8`).
+    {
+        fn parse_num(s: &str) -> Option<i64> {
+            let s = s.trim();
+            if let Some(h) = s.strip_prefix("0x") { i64::from_str_radix(h, 16).ok() }
+            else if let Some(h) = s.strip_prefix("0X") { i64::from_str_radix(h, 16).ok() }
+            else { s.parse::<i64>().ok() }
+        }
+        fn fmt_num(n: i64) -> String {
+            if n >= 0 && n < 16 { format!("{}", n) }
+            else if n >= 0 { format!("0x{:x}", n) }
+            else if n > -16 { format!("{}", n) }
+            else { format!("-0x{:x}", -n) }
+        }
+        // Scan for ` OP C1 OP C2` where OP is + or -, C1/C2 are numeric literals.
+        // Returns (start, end, replacement) for the combined constant pair found.
+        // Only rewrites the numeric tail — leaves any preceding expression untouched.
+        fn find_combine(line: &str) -> Option<(usize, usize, String)> {
+            let bytes = line.as_bytes();
+            // Find any " + " or " - " followed by a number
+            let mut i = 0;
+            while i + 3 < bytes.len() {
+                let is_plus = bytes[i] == b' ' && bytes[i+1] == b'+' && bytes[i+2] == b' ';
+                let is_minus = bytes[i] == b' ' && bytes[i+1] == b'-' && bytes[i+2] == b' ';
+                if !(is_plus || is_minus) { i += 1; continue; }
+                let sign1 = if is_plus { 1 } else { -1 };
+                let num1_start = i + 3;
+                // Match number (decimal or 0xHEX)
+                let (num1_end, num1_val) = match parse_leading_num(&line[num1_start..]) {
+                    Some(x) => (num1_start + x.0, x.1),
+                    None => { i += 1; continue; }
+                };
+                // Require a following " + " or " - " immediately
+                if num1_end + 3 > bytes.len() { i += 1; continue; }
+                let after = &bytes[num1_end..];
+                let is_plus2 = after.len() >= 3 && after[0] == b' ' && after[1] == b'+' && after[2] == b' ';
+                let is_minus2 = after.len() >= 3 && after[0] == b' ' && after[1] == b'-' && after[2] == b' ';
+                if !(is_plus2 || is_minus2) { i += 1; continue; }
+                let sign2 = if is_plus2 { 1 } else { -1 };
+                let num2_start = num1_end + 3;
+                let (num2_end, num2_val) = match parse_leading_num(&line[num2_start..]) {
+                    Some(x) => (num2_start + x.0, x.1),
+                    None => { i += 1; continue; }
+                };
+                let total = sign1 * num1_val + sign2 * num2_val;
+                let replacement = if total >= 0 {
+                    format!(" + {}", fmt_num(total))
+                } else {
+                    format!(" - {}", fmt_num(-total))
+                };
+                return Some((i, num2_end, replacement));
+            }
+            None
+        }
+        fn parse_leading_num(s: &str) -> Option<(usize, i64)> {
+            let bytes = s.as_bytes();
+            if bytes.is_empty() { return None; }
+            let neg = bytes[0] == b'-';
+            let start = if neg { 1 } else { 0 };
+            if start >= bytes.len() { return None; }
+            let is_hex = start + 1 < bytes.len() && bytes[start] == b'0'
+                && (bytes[start + 1] == b'x' || bytes[start + 1] == b'X');
+            let num_start = if is_hex { start + 2 } else { start };
+            let mut end = num_start;
+            while end < bytes.len() {
+                let c = bytes[end];
+                let ok = if is_hex { c.is_ascii_hexdigit() } else { c.is_ascii_digit() };
+                if !ok { break; }
+                end += 1;
+            }
+            if end == num_start { return None; }
+            let digits = &s[num_start..end];
+            let v = if is_hex {
+                i64::from_str_radix(digits, 16).ok()?
+            } else {
+                digits.parse::<i64>().ok()?
+            };
+            Some((end, if neg { -v } else { v }))
+        }
+        for _ in 0..4 {
+            let mut changed = false;
+            for line in lines.iter_mut() {
+                while let Some((s, e, repl)) = find_combine(line) {
+                    let mut new_line = String::with_capacity(line.len());
+                    new_line.push_str(&line[..s]);
+                    new_line.push_str(&repl);
+                    new_line.push_str(&line[e..]);
+                    *line = new_line;
+                    changed = true;
+                }
+            }
+            if !changed { break; }
+        }
+        // Silence unused warnings if compiler complains
+        let _ = parse_num;
+    }
+
+    // Dead reassignment elimination (printer-level DCE for register copies).
+    // Pattern: `REG = X;` followed directly by `REG = Y;` where REG is not read
+    // between the two lines. The first assignment is dead. Common in AArch64 code
+    // where x0 is repeatedly loaded with different values before each call
+    // (`param_0 = X; param_0 = Y; param_0 = func(...);`).
+    //
+    // Preserves the last assignment and any assignment whose value is read by an
+    // intermediate Store or Call. Safety: only eliminates when the LHS is a
+    // simple identifier (no `->`, `*`, `[`) to avoid dropping a real store.
+    {
+        let is_simple_lhs = |lhs: &str| -> bool {
+            !lhs.contains("->") && !lhs.contains('*') && !lhs.contains('[')
+                && !lhs.contains('.') && !lhs.contains('(')
+                && !lhs.is_empty()
+        };
+        let line_reads = |line: &str, sym: &str| -> bool {
+            // Check if `sym` appears as a word in `line`'s RHS (anything after `=`)
+            let rhs = match line.find(" = ") {
+                Some(p) => &line[p + 3..],
+                None => line, // No assign — whole line
+            };
+            // whole-word match
+            let mut s = rhs;
+            while let Some(p) = s.find(sym) {
+                let before = if p == 0 { b' ' } else { s.as_bytes()[p - 1] };
+                let after_pos = p + sym.len();
+                let after = if after_pos < s.len() { s.as_bytes()[after_pos] } else { b' ' };
+                if !before.is_ascii_alphanumeric() && before != b'_'
+                    && !after.is_ascii_alphanumeric() && after != b'_'
+                {
+                    return true;
+                }
+                s = &s[p + sym.len()..];
+            }
+            false
+        };
+        let mut i = 0;
+        while i + 1 < lines.len() {
+            let t1 = lines[i].trim();
+            let t2 = lines[i + 1].trim();
+            if !t1.ends_with(';') || !t2.ends_with(';') {
+                i += 1;
+                continue;
+            }
+            let (lhs1, rhs1) = match t1.trim_end_matches(';').split_once(" = ") {
+                Some(p) => p,
+                None => { i += 1; continue; }
+            };
+            let (lhs2, _rhs2) = match t2.trim_end_matches(';').split_once(" = ") {
+                Some(p) => p,
+                None => { i += 1; continue; }
+            };
+            let lhs1 = lhs1.trim();
+            let lhs2 = lhs2.trim();
+            if lhs1 != lhs2 || !is_simple_lhs(lhs1) {
+                i += 1;
+                continue;
+            }
+            // Don't drop if RHS1 references LHS itself (e.g., `x = x + 1`)
+            if line_reads(rhs1, lhs1) {
+                i += 1;
+                continue;
+            }
+            // Don't drop if RHS1 looks like a call (side effect)
+            if rhs1.contains("(") && rhs1.ends_with(')') {
+                i += 1;
+                continue;
+            }
+            lines.remove(i);
+            // Do not advance i — the new line at i might also be dead
         }
     }
 
