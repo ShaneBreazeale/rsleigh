@@ -9004,6 +9004,38 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         true
     });
 
+    // `*(uintN_t*)(ident)` → `*ident` — no-offset typed deref of a plain
+    // identifier. The cast conveys nothing the analyst can't read from the
+    // surrounding context and just bloats the line. Only rewrites when the
+    // inner contents are a single identifier (no operators, no parens).
+    for line in lines.iter_mut() {
+        let mut search_from = 0usize;
+        loop {
+            let Some(star_rel) = line[search_from..].find("*(uint") else { break };
+            let star_pos = search_from + star_rel;
+            let Some(close_rel) = line[star_pos..].find("*)(") else { break };
+            let paren_open = star_pos + close_rel + 2;
+            let mut depth = 0i32;
+            let mut close: Option<usize> = None;
+            for (i, b) in line[paren_open..].bytes().enumerate() {
+                if b == b'(' { depth += 1; }
+                else if b == b')' { depth -= 1; if depth == 0 { close = Some(paren_open + i); break; } }
+            }
+            let Some(close) = close else { break };
+            let inner = &line[paren_open + 1..close];
+            let is_simple_ident = !inner.is_empty()
+                && inner.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+                && inner.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !is_simple_ident {
+                search_from = close + 1;
+                continue;
+            }
+            let replacement = format!("*{}", inner);
+            *line = format!("{}{}{}", &line[..star_pos], replacement, &line[close + 1..]);
+            search_from = star_pos + replacement.len();
+        }
+    }
+
     // Darwin AArch64 frame-pointer locals: `x29 - N` denotes a stack local
     // below the saved frame pointer (the prologue `add x29, sp, #K` establishes
     // x29 as the frame base register). These references survive both the
