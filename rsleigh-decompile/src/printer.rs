@@ -1470,6 +1470,40 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         break;
                     }
                 }
+                // `sp->field_M` (no subtraction) — sp denotes the post-prologue
+                // live stack pointer, so offset M from it names the same local
+                // as `local_M` in the frame base coordinate system. Gate on
+                // `M <= frame_size` so we only rewrite offsets inside the
+                // current frame.
+                let pat_sp_arrow = "sp->field_";
+                let mut search_from = 0usize;
+                while let Some(rel) = line[search_from..].find(pat_sp_arrow) {
+                    let pos = search_from + rel;
+                    let prev = if pos == 0 { b' ' } else { line.as_bytes()[pos - 1] };
+                    if prev.is_ascii_alphanumeric() || prev == b'_' {
+                        search_from = pos + pat_sp_arrow.len();
+                        continue;
+                    }
+                    let after_start = pos + pat_sp_arrow.len();
+                    let after = &line[after_start..];
+                    let end = after.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(after.len());
+                    if end == 0 {
+                        search_from = after_start;
+                        continue;
+                    }
+                    let Ok(off) = u64::from_str_radix(&after[..end], 16) else {
+                        search_from = after_start + end;
+                        continue;
+                    };
+                    if off > frame_size {
+                        search_from = after_start + end;
+                        continue;
+                    }
+                    let replacement = local_name(off);
+                    *line = format!("{}{}{}",
+                        &line[..pos], replacement, &line[after_start + end..]);
+                    search_from = pos + replacement.len();
+                }
                 // Bare `sp - N` (no further +/-> ) → local_0 (frame base itself)
                 for pat in [&pat_bare, &pat_hex_bare] {
                     while let Some(pos) = line.find(pat.as_str()) {
