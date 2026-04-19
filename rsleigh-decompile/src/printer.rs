@@ -8195,6 +8195,72 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // local_N->field_0 collapse: `local_N` is a stack memory slot, not a struct
+    // pointer. A `local_N->field_0 = V;` store is really `*(sp + N + 0) = V`,
+    // i.e. a plain word write to the local. Rewrite to `local_N = V;` (Ghidra
+    // emits the same form). Only collapse field_0 — non-zero field offsets
+    // name distinct stack positions, and keeping the arrow syntax preserves
+    // their relationship with neighbouring fields of the same local struct.
+    for line in lines.iter_mut() {
+        let mut search_from = 0usize;
+        while let Some(rel) = line[search_from..].find("local_") {
+            let pos = search_from + rel;
+            let prev = if pos == 0 { b' ' } else { line.as_bytes()[pos - 1] };
+            if prev.is_ascii_alphanumeric() || prev == b'_' {
+                search_from = pos + 6;
+                continue;
+            }
+            let after = &line[pos + 6..];
+            let end_digits = after.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(after.len());
+            if end_digits == 0 {
+                search_from = pos + 6;
+                continue;
+            }
+            let tail_start = pos + 6 + end_digits;
+            let tail = &line[tail_start..];
+            if !tail.starts_with("->field_0") {
+                search_from = tail_start;
+                continue;
+            }
+            // Reject if field_0 is actually `->field_0X` (e.g., field_08).
+            let suffix_byte = line.as_bytes().get(tail_start + 9).copied().unwrap_or(b' ');
+            if suffix_byte.is_ascii_hexdigit() {
+                search_from = tail_start;
+                continue;
+            }
+            // Replace `local_N->field_0` with `local_N` in place.
+            let new_line = format!("{}{}{}",
+                &line[..tail_start], "", &line[tail_start + 9..]);
+            *line = new_line;
+            // Don't advance — the next search starts from the same pos since
+            // the replacement shortened the line.
+        }
+    }
+
+    // Redundant `(uint)` / `(uint32_t)` casts on already-32-bit loads/fields.
+    // The SLEIGH pipeline emits `(uint)*lVar2` or `(uint)lVar2->field_N` for
+    // Subpiece truncation of a 64-bit load to 32-bit width, but at that point
+    // the RHS has a well-defined 32-bit-readable semantics and the cast adds
+    // noise. Strip the cast when it wraps a simple memory reference (but keep
+    // casts around expressions/signed conversions where width differs).
+    for line in lines.iter_mut() {
+        for cast in &["(uint)", "(uint32_t)"] {
+            while let Some(pos) = line.find(cast) {
+                let after = &line[pos + cast.len()..];
+                // Only strip when followed by a recognizably simple memory ref
+                // (deref, field, or identifier-prefixed expression).
+                let ok = after.starts_with("*(")
+                    || after.starts_with("*lVar") || after.starts_with("*iVar")
+                    || after.starts_with("*param_") || after.starts_with("*local_")
+                    || (after.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                        && after.contains("->field_"));
+                if !ok { break; }
+                let new_line = format!("{}{}", &line[..pos], after);
+                *line = new_line;
+            }
+        }
+    }
+
     // AArch64 atomic refcount/counter loop recognition.
     //
     // The SLEIGH semantics for LDXR/STXR decomposes a simple atomic decrement
