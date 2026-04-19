@@ -1724,6 +1724,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // any write is epilogue restore after the sp-based pattern was rewritten via
         // struct-field naming (e.g. `x30 = iVar1->lpSecurityDescriptor;`).
         if t.starts_with("x30 = ") && t.ends_with(';') { return false; }
+        // LR save to stack: `local_N = x30;` — always prologue boilerplate.
+        // Same for saving x29 to a local (frame pointer save).
+        if (t.starts_with("local_") || t.starts_with("sp["))
+            && (t.ends_with(" = x30;") || t.ends_with(" = x29;"))
+        { return false; }
         // Frame pointer computation: `iVarN = sp - N;` or `lVarN = sp - N;`
         // This is `x29 = sp` after the prologue push decremented sp — pure boilerplate.
         if (t.starts_with("iVar") || t.starts_with("lVar"))
@@ -7973,32 +7978,36 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     }
                 }
                 let aarch64_param_count = distinct_param_names.len().min(8);
+                // Rename both the 64-bit (xN) and 32-bit sub-register (wN) forms.
+                // `wN` is the lower 32 bits of `xN`; without renaming it, int-typed
+                // parameters leak to output as raw `w1`, `w2`, etc.
                 for reg_idx in 0..aarch64_param_count as u64 {
-                    let reg = format!("x{}", reg_idx);
-                    let param = distinct_param_names[reg_idx as usize].clone();
-                    if !line.contains(&reg) { continue; }
-                    // Replace with word-boundary awareness
-                    let mut new_line = String::new();
-                    let mut remaining = line.as_str();
-                    while let Some(pos) = remaining.find(&reg) {
-                        let before_ok = pos == 0
-                            || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric()
-                            && remaining.as_bytes()[pos - 1] != b'_';
-                        let after_pos = pos + reg.len();
-                        let after_ok = after_pos >= remaining.len()
-                            || (!remaining.as_bytes()[after_pos].is_ascii_alphanumeric()
-                                && remaining.as_bytes()[after_pos] != b'_');
-                        if before_ok && after_ok {
-                            new_line.push_str(&remaining[..pos]);
-                            new_line.push_str(&param);
-                            remaining = &remaining[after_pos..];
-                        } else {
-                            new_line.push_str(&remaining[..after_pos]);
-                            remaining = &remaining[after_pos..];
+                    for prefix in &['x', 'w'] {
+                        let reg = format!("{}{}", prefix, reg_idx);
+                        let param = distinct_param_names[reg_idx as usize].clone();
+                        if !line.contains(&reg) { continue; }
+                        let mut new_line = String::new();
+                        let mut remaining = line.as_str();
+                        while let Some(pos) = remaining.find(&reg) {
+                            let before_ok = pos == 0
+                                || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric()
+                                && remaining.as_bytes()[pos - 1] != b'_';
+                            let after_pos = pos + reg.len();
+                            let after_ok = after_pos >= remaining.len()
+                                || (!remaining.as_bytes()[after_pos].is_ascii_alphanumeric()
+                                    && remaining.as_bytes()[after_pos] != b'_');
+                            if before_ok && after_ok {
+                                new_line.push_str(&remaining[..pos]);
+                                new_line.push_str(&param);
+                                remaining = &remaining[after_pos..];
+                            } else {
+                                new_line.push_str(&remaining[..after_pos]);
+                                remaining = &remaining[after_pos..];
+                            }
                         }
+                        new_line.push_str(remaining);
+                        *line = new_line;
                     }
-                    new_line.push_str(remaining);
-                    *line = new_line;
                 }
             }
 
@@ -8846,6 +8855,17 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             }
         }
     }
+
+    // Final LR/FP stack-save elision — catches `local_N = x30;`, `local_N = x29;`,
+    // `sp[N] = x30;`, `sp[N] = x29;` that late passes may surface. These stores
+    // are prologue boilerplate; the restore lives in the epilogue and has already
+    // been dropped.
+    lines.retain(|line| {
+        let t = line.trim();
+        if !(t.ends_with(" = x30;") || t.ends_with(" = x29;")) { return true; }
+        if t.starts_with("local_") || t.starts_with("sp[") { return false; }
+        true
+    });
 
     // Final `(local_<hex>)` paren cleanup — runs after every other transform
     // so any late-added redundant wrappers are caught.
