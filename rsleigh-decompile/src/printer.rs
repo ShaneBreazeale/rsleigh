@@ -11780,7 +11780,13 @@ fn format_const_ctx(val: u64, size: u32, ctx: &PrintCtx) -> String {
             // Short strings at random addresses are almost always false positives
             // from float constants, flag fields, or padding bytes.
             // Real short strings are handled by the post-processor for puts("").
-            if s.is_empty() || s.len() < 2 { /* fall through to hex */ }
+            // Accept length-1 strings only when the char is a printable digit
+            // or letter — reduces false positives from random padding bytes
+            // that coincidentally form a 1-char ASCII + null pattern.
+            let accept_short_one = s.len() == 1
+                && s.chars().next().map_or(false,
+                    |c| c.is_ascii_alphanumeric());
+            if s.is_empty() || (s.len() < 2 && !accept_short_one) { /* fall through */ }
             else { return format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")); }
         }
         // Try import/global name (e.g., GOT entry for stdin/stdout)
