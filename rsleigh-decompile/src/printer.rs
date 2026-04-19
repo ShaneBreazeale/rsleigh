@@ -1421,6 +1421,19 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let pat_hex_bare = format!("sp - 0x{:x}", frame_size);
             // Helper: emit local name from hex offset (canonical form)
             let local_name = |offset: u64| -> String { format!("local_{:x}", offset) };
+            // Parenthesized bare form: `(sp - N)` — emitted by some upstream
+            // passes as the base of a FieldAccess. Rewrite to `local_0` *without*
+            // keeping the surrounding `()` so downstream output is
+            // `local_0->field_X` not `(local_0)->field_X`.
+            let pat_paren_bare = format!("(sp - {})", frame_size);
+            let pat_paren_hex_bare = format!("(sp - 0x{:x})", frame_size);
+            for line in lines.iter_mut() {
+                for pat in [&pat_paren_bare, &pat_paren_hex_bare] {
+                    while let Some(pos) = line.find(pat.as_str()) {
+                        *line = format!("{}{}{}", &line[..pos], local_name(0), &line[pos + pat.len()..]);
+                    }
+                }
+            }
             for line in lines.iter_mut() {
                 // (sp - N)->fieldM and sp - N->field_M → local_M (M is hex)
                 for pat in [&pat_field, &pat_hex_field] {
@@ -8195,6 +8208,46 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // `?` placeholder cleanup on C++ method calls. When the SSA cannot resolve
+    // the `this` pointer (x0 at call time) to a concrete expression, `Expr::Unknown`
+    // surfaces as a literal `?` in the first arg slot. For C++ methods the leading
+    // `?` is almost always the implicit `this` pointer that the analyst can infer
+    // from context, so drop it when the call target contains `::` (method syntax)
+    // AND there are other arguments. Free functions (no `::`) keep the `?` so the
+    // analyst still sees that arg0 is unresolved.
+    for line in lines.iter_mut() {
+        // Look for `NAME::METHOD(?, ...)` or `NAME::METHOD(?)` — drop the
+        // placeholder in either position.
+        let mut search_from = 0usize;
+        while let Some(rel) = line[search_from..].find("::") {
+            let abs = search_from + rel;
+            let rest = &line[abs..];
+            let Some(open_rel) = rest.find('(') else { break };
+            let open = abs + open_rel;
+            let after_paren = open + 1;
+            if line[after_paren..].starts_with("?, ") {
+                let end = after_paren + 3;
+                *line = format!("{}{}", &line[..after_paren], &line[end..]);
+            } else if line[after_paren..].starts_with("?)") {
+                *line = format!("{}{}", &line[..after_paren], &line[after_paren + 1..]);
+            }
+            search_from = after_paren;
+        }
+        // Also cover `operator NAME(?, ` (e.g., `operator new(?, ...)`)
+        for marker in &["operator new(", "operator delete("] {
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(marker) {
+                let open = search_from + rel + marker.len() - 1;
+                let after_paren = open + 1;
+                if line[after_paren..].starts_with("?, ") {
+                    let end = after_paren + 3;
+                    *line = format!("{}{}", &line[..after_paren], &line[end..]);
+                }
+                search_from = after_paren;
+            }
+        }
+    }
+
     // local_N->field_0 collapse: `local_N` is a stack memory slot, not a struct
     // pointer. A `local_N->field_0 = V;` store is really `*(sp + N + 0) = V`,
     // i.e. a plain word write to the local. Rewrite to `local_N = V;` (Ghidra
@@ -11536,24 +11589,26 @@ fn var_name(vn: &Varnode, ctx: &PrintCtx) -> String {
 }
 
 /// Decide whether an expression string needs parentheses before a `->` so that
-/// the arrow associates with the full address, not the last operand. A string
-/// needs parens if it contains a top-level binary operator outside any nested
-/// parentheses / brackets. Identifiers and simple references (e.g. `lVar1`,
-/// `*(addr)`, `DAT_X->field_0`, `name[idx]`) pass through unchanged.
+/// the arrow associates with the full address, not the last operand. True if
+/// any top-level binary operator appears outside nested `()` / `[]`. Simple
+/// identifiers, `*(addr)`, `DAT_X->field_0`, `name[idx]`, and parenthesized
+/// expressions pass through unchanged.
 fn needs_paren_for_arrow(s: &str) -> bool {
     let bytes = s.as_bytes();
     let mut depth: i32 = 0;
     let mut i = 0;
-    while i < bytes.len() {
+    while i + 2 < bytes.len() {
         let b = bytes[i];
-        if b == b'(' || b == b'[' { depth += 1; }
-        else if b == b')' || b == b']' { depth -= 1; }
-        else if depth == 0 && b == b' ' {
-            let prev = if i > 0 { bytes[i - 1] } else { b' ' };
-            let next = bytes.get(i + 1).copied().unwrap_or(b' ');
-            if matches!(next, b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|' | b'^' | b'<' | b'>' | b'?' | b':')
-                && !prev.is_ascii_digit() && prev != b',' && prev != b'('
-            {
+        if b == b'(' || b == b'[' { depth += 1; i += 1; continue; }
+        if b == b')' || b == b']' { depth -= 1; i += 1; continue; }
+        if depth == 0 && b == b' ' {
+            let op = bytes[i + 1];
+            let after_op = bytes[i + 2];
+            // Match ` OP ` where OP is one of the C binary operators.
+            let is_op_char = matches!(op,
+                b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|' | b'^' | b'?' | b':');
+            let is_shift = (op == b'<' || op == b'>') && after_op == op;
+            if (is_op_char && after_op == b' ') || is_shift {
                 return true;
             }
         }
