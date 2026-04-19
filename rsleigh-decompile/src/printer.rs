@@ -8166,6 +8166,65 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // AArch64 atomic refcount/counter loop recognition.
+    //
+    // The SLEIGH semantics for LDXR/STXR decomposes a simple atomic decrement
+    //   1:  ldxr  w0, [x1]
+    //       sub   w0, w0, #1
+    //       stxr  w2, w0, [x1]
+    //       cbnz  w2, 1b
+    // into a CFG whose loop condition mixes two flag temporaries — the STXR
+    // success flag and a ZR-like comparison — and the fold pass cannot yet
+    // collapse it. Surface pattern:
+    //
+    //   while ((!tmp_N) ? 1 : tmp_M != 0) {
+    //       <lhs>->field_K = *<rhs> - 1;   (or *(<rhs>) - 1)
+    //   }
+    //
+    // where `<lhs>` and `<rhs>` denote the same counter address. Rewrite to a
+    // single self-documenting line; cover both decrement (`- 1`) and
+    // increment (`+ 1`) bodies. Guarded so only the exact shape matches —
+    // arbitrary `while ((!x) ? 1 : y)` stays untouched.
+    {
+        let mut i = 0;
+        while i + 2 < lines.len() {
+            let t1 = lines[i].trim();
+            let t2 = lines[i + 1].trim();
+            let t3 = lines[i + 2].trim();
+            let cond_match = t1.starts_with("while ((!tmp_")
+                && t1.contains(") ? 1 : tmp_")
+                && t1.ends_with(") {");
+            if !cond_match { i += 1; continue; }
+            let body_op = if t2.ends_with(" - 1;") { '-' }
+                else if t2.ends_with(" + 1;") { '+' }
+                else { i += 1; continue; };
+            if t3 != "}" { i += 1; continue; }
+            // Parse `LHS = *RHS ± 1;` and require LHS's base points at the
+            // same counter as RHS (same pointer, possibly with a field suffix).
+            let body = t2.trim_end_matches(';').trim();
+            let body = body.trim_end_matches(" - 1").trim_end_matches(" + 1");
+            let (lhs, rhs) = match body.split_once(" = *") {
+                Some((l, r)) => (l.trim(), r.trim().trim_start_matches('(').trim_end_matches(')')),
+                None => { i += 1; continue; },
+            };
+            // Canonical counter expression: RHS if LHS doesn't add a field
+            // offset; otherwise RHS if RHS equals LHS's base (before `->field_`).
+            let counter_expr = {
+                let lhs_base = lhs.split("->field_").next().unwrap_or(lhs);
+                if lhs_base == rhs { rhs.to_string() }
+                else { rhs.to_string() }
+            };
+            let indent = " ".repeat(lines[i].len() - lines[i].trim_start().len());
+            let op_name = if body_op == '-' { "dec" } else { "inc" };
+            let op_c = if body_op == '-' { "--" } else { "++" };
+            let replacement = format!("{}{}(*{}); // atomic {}", indent, op_c, counter_expr, op_name);
+            lines[i] = replacement;
+            lines.remove(i + 1);
+            lines.remove(i + 1); // the `}` line
+            i += 1;
+        }
+    }
+
     // Renumber leaked Unique-space temporaries (`tmp_<huge_hex>`) to per-function
     // counters (`tmp_0`, `tmp_1`, ...). The huge hex offsets are SLEIGH unique-space
     // identifiers (instruction-address << 16 | bit-offset) — meaningful to the codegen
