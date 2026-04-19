@@ -8252,6 +8252,68 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // `*(uintN_t*)(base + offset) = val;` → `base->field_offset = val;`.
+    // The typed-deref form appears when the printer rejects the simpler
+    // array conversion for safety, but for plain-identifier bases the
+    // struct-field syntax is both cleaner and matches the field naming used
+    // elsewhere in the function. Only rewrites when the base is a simple
+    // identifier (lVar, local_, param_N, etc.) and the offset is a hex
+    // constant.
+    for line in lines.iter_mut() {
+        let mut search_from = 0usize;
+        loop {
+            let Some(star_rel) = line[search_from..].find("*(uint") else { break };
+            let star_pos = search_from + star_rel;
+            let Some(close_rel) = line[star_pos..].find("*)(") else { break };
+            let paren_open = star_pos + close_rel + 2;
+            // Find matching close paren for the (BASE + OFFSET) group.
+            let mut depth = 0i32;
+            let mut close: Option<usize> = None;
+            for (i, b) in line[paren_open..].bytes().enumerate() {
+                if b == b'(' { depth += 1; }
+                else if b == b')' {
+                    depth -= 1;
+                    if depth == 0 { close = Some(paren_open + i); break; }
+                }
+            }
+            let Some(close) = close else { break };
+            let inner = &line[paren_open + 1..close];
+            // Split on ` + ` — require exactly one addition.
+            let parts: Vec<&str> = inner.split(" + ").collect();
+            if parts.len() != 2 {
+                search_from = close + 1;
+                continue;
+            }
+            let base = parts[0].trim();
+            let offset = parts[1].trim();
+            // Base must be a simple identifier.
+            let base_ok = !base.is_empty()
+                && base.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+                && base.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            // Offset must parse as hex/decimal.
+            let off_val: Option<u64> = if let Some(h) = offset.strip_prefix("0x") {
+                u64::from_str_radix(h, 16).ok()
+            } else if offset.chars().all(|c| c.is_ascii_digit()) {
+                offset.parse::<u64>().ok()
+            } else { None };
+            if !base_ok || off_val.is_none() {
+                search_from = close + 1;
+                continue;
+            }
+            let off = off_val.unwrap();
+            // Only rewrite in lvalue position (followed by ` = `). Read-side
+            // `param = *(uint64_t*)(...)` is harder to collapse safely.
+            let trail = &line[close + 1..];
+            if !trail.starts_with(" = ") {
+                search_from = close + 1;
+                continue;
+            }
+            let replacement = format!("{}->field_{:x}", base, off);
+            *line = format!("{}{}{}", &line[..star_pos], replacement, &line[close + 1..]);
+            search_from = star_pos + replacement.len();
+        }
+    }
+
     // Drop gratuitous parens around bare `local_<hex>` identifiers left over
     // from earlier sp-rewrites that inherited outer parens from the original
     // expression (e.g. `(sp + 200)` → `(local_200)`). A single identifier
