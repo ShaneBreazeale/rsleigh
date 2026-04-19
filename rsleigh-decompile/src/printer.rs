@@ -6786,6 +6786,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 ("w16", "i"), ("w17", "i"), ("w18", "i"),
                 ("w19", "i"), ("w20", "i"), ("w21", "i"), ("w22", "i"),
                 ("w23", "i"), ("w24", "i"), ("w25", "i"),
+                ("w26", "i"), ("w27", "i"), ("w28", "i"),
             ]
         } else {
             &[
