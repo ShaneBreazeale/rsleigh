@@ -9557,6 +9557,14 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
             // and a UserOp expr. Emit as standalone call statement.
             if vdef.varnode.space == AddressSpaceId::Unique && vdef.size == 0 {
                 if let Expr::UserOp { func_id, inputs } = &vdef.expr {
+                    // Elide pcodeops that are pure architectural bookkeeping
+                    // — ISA/mode/interrupt/barrier state changes that the
+                    // high-level C-like output cannot act on, and that
+                    // Ghidra also hides. Keeps semantic calls like
+                    // software_interrupt visible.
+                    if is_elidable_pcodeop(ctx.arch, *func_id) {
+                        return;
+                    }
                     let name = pcodeop_name(ctx.arch, *func_id);
                     let args: Vec<String> = inputs.iter()
                         .map(|v| format_var_tracked(*v, ssa, ctx, tracker))
@@ -11824,6 +11832,29 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
 /// declaration order of `define pcodeop` lines in the slaspec for the active
 /// architecture; names shown match Ghidra's convention so the analyst can
 /// cross-reference.
+/// True when the user-pcodeop is pure architectural bookkeeping whose output
+/// is noise in decompiled code. Mirrors what Ghidra hides by default.
+fn is_elidable_pcodeop(arch: Architecture, id: u64) -> bool {
+    if matches!(arch, Architecture::ARM32) {
+        // ARM32 pcodeops that are ISA-state / hint / barrier ops.
+        return matches!(
+            id,
+            21..=28  // setUserMode, setFIQMode, setIRQMode, setSupervisorMode,
+                     // setMonitorMode, setAbortMode, setUndefinedMode, setSystemMode
+            | 29..=33 // enable/disable IRQ / FIQ / DataAbort interrupts
+            | 36      // disableDataAbortInterrupts
+            | 39      // setThreadModePrivileged
+            | 42      // ClearExclusiveLocal
+            | 43      // HintDebug
+            | 44..=45 // DataMemoryBarrier, DataSynchronizationBarrier
+            | 47..=50 // WaitForEvent, WaitForInterrupt, HintYield, ISB
+            | 51..=53 // HintPreloadData/DataForWrite/Instruction
+            | 60..=62 // SendEvent, setEndianState, setISAMode
+        );
+    }
+    false
+}
+
 fn pcodeop_name(arch: Architecture, id: u64) -> String {
     // Hardcoded mapping of the most common ARM32 user pcodeops. IDs match the
     // declaration order in slaspec/ARM/ARM_base.sinc. If rsleigh's slaspec
@@ -11856,6 +11887,44 @@ fn pcodeop_name(arch: Architecture, id: u64) -> String {
             "setFIQMode",                  // 22
             "setIRQMode",                  // 23
             "setSupervisorMode",           // 24
+            "setMonitorMode",              // 25
+            "setAbortMode",                // 26
+            "setUndefinedMode",            // 27
+            "setSystemMode",               // 28
+            "enableIRQinterrupts",         // 29
+            "enableFIQinterrupts",         // 30
+            "enableDataAbortInterrupts",   // 31
+            "disableIRQinterrupts",        // 32
+            "disableFIQinterrupts",        // 33
+            "isFIQinterruptsEnabled",      // 34
+            "isIRQinterruptsEnabled",      // 35
+            "disableDataAbortInterrupts",  // 36
+            "hasExclusiveAccess",          // 37
+            "isCurrentModePrivileged",     // 38
+            "setThreadModePrivileged",     // 39
+            "isThreadMode",                // 40
+            "jazelle_branch",              // 41
+            "ClearExclusiveLocal",         // 42
+            "HintDebug",                   // 43
+            "DataMemoryBarrier",           // 44
+            "DataSynchronizationBarrier",  // 45
+            "secureMonitorCall",           // 46
+            "WaitForEvent",                // 47
+            "WaitForInterrupt",            // 48
+            "HintYield",                   // 49
+            "InstructionSynchronizationBarrier", // 50
+            "HintPreloadData",             // 51
+            "HintPreloadDataForWrite",     // 52
+            "HintPreloadInstruction",      // 53
+            "SignedSaturate",              // 54
+            "SignedDoesSaturate",          // 55
+            "UnsignedSaturate",            // 56
+            "UnsignedDoesSaturate",        // 57
+            "Absolute",                    // 58
+            "ReverseBitOrder",             // 59
+            "SendEvent",                   // 60
+            "setEndianState",              // 61
+            "setISAMode",                  // 62
         ];
         if let Some(&name) = ARM32_PCODEOPS.get(id as usize) {
             return name.to_string();
