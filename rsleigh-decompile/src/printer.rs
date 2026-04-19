@@ -8208,6 +8208,65 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Unused-variable-declaration DCE.
+    //
+    // SSA var tracking emits one declaration per SSA version of every
+    // user-facing variable (`long lVar2;`, `int iVar5;`, etc.). After all
+    // downstream elision passes the body may no longer reference many of
+    // those names. Scan all declarations and drop any whose name never
+    // appears outside its own declaration line.
+    {
+        let mut i = 0usize;
+        while i < lines.len() {
+            let t = lines[i].trim();
+            // `TYPE name;` declaration pattern — must start with a common C
+            // type keyword, end in `;`, and have no `=` (otherwise it's an
+            // initializer and has side effects).
+            let is_decl_keyword = t.starts_with("long ") || t.starts_with("int ")
+                || t.starts_with("uint64_t ") || t.starts_with("uint32_t ")
+                || t.starts_with("uint16_t ") || t.starts_with("uint8_t ")
+                || t.starts_with("char ") || t.starts_with("short ")
+                || t.starts_with("float ") || t.starts_with("double ")
+                || t.starts_with("bool ");
+            if !is_decl_keyword || !t.ends_with(';') || t.contains('=') {
+                i += 1;
+                continue;
+            }
+            // Pull the name: `<type> name;` — after the first space.
+            let core = t.trim_end_matches(';');
+            let Some(sp) = core.find(' ') else { i += 1; continue; };
+            let name = core[sp + 1..].trim();
+            // Reject arrays / multi-part decls (contain [ ,): treat conservatively.
+            if name.contains('[') || name.contains(',') || name.is_empty() {
+                i += 1; continue;
+            }
+            // Scan all other lines for a word-boundary match on `name`.
+            let mut used = false;
+            for (j, other) in lines.iter().enumerate() {
+                if j == i { continue; }
+                let bytes = other.as_bytes();
+                let mut k = 0;
+                while k + name.len() <= bytes.len() {
+                    if &bytes[k..k + name.len()] == name.as_bytes() {
+                        let before = if k > 0 { bytes[k - 1] } else { b' ' };
+                        let after_idx = k + name.len();
+                        let after = bytes.get(after_idx).copied().unwrap_or(b' ');
+                        let word = !before.is_ascii_alphanumeric() && before != b'_'
+                            && !after.is_ascii_alphanumeric() && after != b'_';
+                        if word { used = true; break; }
+                    }
+                    k += 1;
+                }
+                if used { break; }
+            }
+            if !used {
+                lines.remove(i);
+                continue;
+            }
+            i += 1;
+        }
+    }
+
     // Cross-line DCE on return-register assignments.
     //
     // AArch64 x0 (printed as `param_0`) and x86-64 RAX are used both as the
@@ -8328,6 +8387,19 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             i += 1;
         }
     }
+
+    // Dead standalone deref statements like `*(param_0);` have no side effect
+    // once the register tracker is folded. Strip them. Runs AFTER the cross-line
+    // DCE so any bare deref that surfaced from LHS stripping also gets dropped.
+    lines.retain(|line| {
+        let t = line.trim();
+        if !t.ends_with(';') { return true; }
+        let body = t.trim_end_matches(';').trim();
+        if !body.starts_with("*(") || !body.ends_with(')') { return true; }
+        let inner = &body[2..body.len() - 1];
+        if inner.contains('(') { return true; }
+        false
+    });
 
     // `?` placeholder cleanup on C++ method calls. When the SSA cannot resolve
     // the `this` pointer (x0 at call time) to a concrete expression, `Expr::Unknown`
@@ -8546,6 +8618,19 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             }
         }
     }
+
+    // Final dead-deref pass — runs at the very end so any bare `*(x);` that
+    // survived (including ones surfaced by late cast stripping, e.g.
+    // `(uint)*(param_0);` → `*(param_0);`) is caught.
+    lines.retain(|line| {
+        let t = line.trim();
+        if !t.ends_with(';') { return true; }
+        let body = t.trim_end_matches(';').trim();
+        if !body.starts_with("*(") || !body.ends_with(')') { return true; }
+        let inner = &body[2..body.len() - 1];
+        if inner.contains('(') { return true; }
+        false
+    });
 
     for line in &lines {
         let is_blank = line.trim().is_empty();
