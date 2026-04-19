@@ -8208,6 +8208,62 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Return-type/sig consistency fix. If a function is declared
+    // `long/int func_X(...)` but every return in the body is a bare `return;`,
+    // rewrite the signature return type to `void`. The inverse (`void func_X`
+    // but body returns a value) is rarer and is best fixed upstream, but we
+    // cover it textually as well when the returned value is a plain name.
+    {
+        let mut has_value_return = false;
+        let mut has_void_return = false;
+        let mut sig_idx: Option<usize> = None;
+        let mut value_expr: Option<String> = None;
+        let flush = |sig_idx: &mut Option<usize>,
+                      hvr: &mut bool, hvo: &mut bool,
+                      ve: &mut Option<String>,
+                      lines: &mut Vec<String>| {
+            if let Some(i) = *sig_idx {
+                let line = lines[i].clone();
+                if !*hvr && *hvo && (line.starts_with("long ") || line.starts_with("int ")) {
+                    // long/int func(... → void func(...
+                    let rest = if line.starts_with("long ") { &line[5..] } else { &line[4..] };
+                    lines[i] = format!("void {}", rest);
+                } else if *hvr && !*hvo && line.starts_with("void ") && ve.is_some() {
+                    // void func(... but returns a value — promote to long.
+                    lines[i] = format!("long {}", &line[5..]);
+                }
+            }
+            *sig_idx = None; *hvr = false; *hvo = false; *ve = None;
+        };
+        let mut i = 0;
+        while i < lines.len() {
+            let t = lines[i].trim();
+            // Function signature line: starts with a return type keyword and
+            // contains `func_` or a demangled name and ends with `{`.
+            let is_sig = t.ends_with('{') && (
+                t.starts_with("long ") || t.starts_with("int ")
+                    || t.starts_with("void ") || t.starts_with("uint64_t ")
+                    || t.starts_with("uint ") || t.starts_with("char ")
+                    || t.starts_with("bool ") || t.starts_with("double ")
+                    || t.starts_with("float ")
+            ) && t.contains('(');
+            if is_sig {
+                flush(&mut sig_idx, &mut has_value_return, &mut has_void_return, &mut value_expr, &mut lines);
+                sig_idx = Some(i);
+            } else if t.starts_with("return ") && t.ends_with(';') && !t.contains('(') {
+                has_value_return = true;
+                let expr = t.trim_start_matches("return ").trim_end_matches(';').trim();
+                if value_expr.is_none() {
+                    value_expr = Some(expr.to_string());
+                }
+            } else if t == "return;" {
+                has_void_return = true;
+            }
+            i += 1;
+        }
+        flush(&mut sig_idx, &mut has_value_return, &mut has_void_return, &mut value_expr, &mut lines);
+    }
+
     // Unused-variable-declaration DCE.
     //
     // SSA var tracking emits one declaration per SSA version of every
@@ -8426,8 +8482,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             }
             search_from = after_paren;
         }
-        // Also cover `operator NAME(?, ` (e.g., `operator new(?, ...)`)
-        for marker in &["operator new(", "operator delete("] {
+        // Also cover `operator NAME(?, ...)` / `operator NAME(?)` —
+        // operators, like methods, take `this` as their first (hidden) arg.
+        for marker in &["operator new(", "operator delete(", "operator new[](",
+                        "operator delete[]("] {
             let mut search_from = 0usize;
             while let Some(rel) = line[search_from..].find(marker) {
                 let open = search_from + rel + marker.len() - 1;
@@ -8435,6 +8493,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 if line[after_paren..].starts_with("?, ") {
                     let end = after_paren + 3;
                     *line = format!("{}{}", &line[..after_paren], &line[end..]);
+                } else if line[after_paren..].starts_with("?)") {
+                    *line = format!("{}{}", &line[..after_paren], &line[after_paren + 1..]);
                 }
                 search_from = after_paren;
             }
