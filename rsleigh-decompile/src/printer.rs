@@ -1745,21 +1745,76 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             *line = format!("{}{}{}", &line[..start], replacement, &line[abs_close + 1..]);
             // Don't advance search_from — the replacement might enable more matches
         }
-        // Pattern: "NNN + RSP" → "local_NNN" (decimal offset + RSP)
-        while let Some(pos) = line.find(" + RSP") {
-            // Walk backwards to find the start of the number
-            let before = &line[..pos];
-            let num_start = before.rfind(|c: char| !c.is_ascii_digit()).map(|p| p + 1).unwrap_or(0);
-            if num_start < pos {
-                if let Ok(offset) = line[num_start..pos].parse::<u64>() {
-                    if offset > 0 && offset < 0x10000 {
-                        let replacement = format!("local_{:x}", offset);
-                        *line = format!("{}{}{}", &line[..num_start], replacement, &line[pos + 6..]);
-                        continue;
+        // Pattern: "NNN + RSP" / "NNN + ESP" → "local_NNN" (offset + stack ptr)
+        for suffix in &[" + RSP", " + ESP"] {
+            while let Some(pos) = line.find(suffix) {
+                let before = &line[..pos];
+                let num_start = before.rfind(|c: char| !c.is_ascii_hexdigit() && c != 'x')
+                    .map(|p| p + 1).unwrap_or(0);
+                if num_start < pos {
+                    let num_str = &line[num_start..pos];
+                    let parsed: Option<u64> = if let Some(h) = num_str.strip_prefix("0x") {
+                        u64::from_str_radix(h, 16).ok()
+                    } else {
+                        num_str.parse::<u64>().ok()
+                    };
+                    if let Some(offset) = parsed {
+                        if offset > 0 && offset < 0x10000 {
+                            let replacement = format!("local_{:x}", offset);
+                            *line = format!("{}{}{}", &line[..num_start], replacement,
+                                            &line[pos + suffix.len()..]);
+                            continue;
+                        }
                     }
                 }
+                break;
             }
-            break;
+        }
+        // Pattern: "RSP + NNN" / "ESP + NNN" → "local_NNN"
+        for prefix in &["RSP + ", "ESP + "] {
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(prefix) {
+                let pos = search_from + rel;
+                let prev = if pos == 0 { b' ' } else { line.as_bytes()[pos - 1] };
+                if prev.is_ascii_alphanumeric() || prev == b'_' {
+                    search_from = pos + prefix.len();
+                    continue;
+                }
+                let num_start = pos + prefix.len();
+                let after = &line[num_start..];
+                let (num_len, parsed): (usize, Option<u64>) = if after.starts_with("0x") {
+                    let rest = &after[2..];
+                    let end = rest.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(rest.len());
+                    (2 + end, u64::from_str_radix(&rest[..end], 16).ok())
+                } else {
+                    let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+                    (end, after[..end].parse::<u64>().ok())
+                };
+                if num_len == 0 || parsed.is_none() {
+                    search_from = pos + prefix.len();
+                    continue;
+                }
+                let off = parsed.unwrap();
+                if off >= 0x10000 {
+                    search_from = pos + prefix.len() + num_len;
+                    continue;
+                }
+                let replacement = if off == 0 { "local_0".to_string() }
+                    else { format!("local_{:x}", off) };
+                *line = format!("{}{}{}", &line[..pos], replacement,
+                                &line[pos + prefix.len() + num_len..]);
+                search_from = pos + replacement.len();
+            }
+        }
+        // Bare `*(RSP)` / `*(ESP)` → `local_0` (top-of-stack deref).
+        for pat in &["*(RSP)", "*(ESP)"] {
+            while let Some(pos) = line.find(pat) {
+                let before = if pos == 0 { b' ' } else { line.as_bytes()[pos - 1] };
+                if before.is_ascii_alphanumeric() || before == b'_' {
+                    break;
+                }
+                *line = format!("{}local_0{}", &line[..pos], &line[pos + pat.len()..]);
+            }
         }
     }
 
@@ -9396,6 +9451,81 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             i += 1;
         }
         if !changed { break; }
+    }
+
+    // Final RSP/ESP → local_N sweep at end of pipeline. Downstream passes
+    // (struct-field rewrite, register tracking, param rename) can re-surface
+    // stack-pointer references after the mid-pipeline pass already ran, so
+    // catch them one more time here.
+    for line in lines.iter_mut() {
+        for prefix in &["RSP + ", "ESP + "] {
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(prefix) {
+                let pos = search_from + rel;
+                let prev = if pos == 0 { b' ' } else { line.as_bytes()[pos - 1] };
+                if prev.is_ascii_alphanumeric() || prev == b'_' {
+                    search_from = pos + prefix.len();
+                    continue;
+                }
+                let after = &line[pos + prefix.len()..];
+                let (num_len, parsed): (usize, Option<u64>) = if after.starts_with("0x") {
+                    let rest = &after[2..];
+                    let end = rest.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(rest.len());
+                    (2 + end, u64::from_str_radix(&rest[..end], 16).ok())
+                } else {
+                    let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+                    (end, after[..end].parse::<u64>().ok())
+                };
+                if num_len == 0 || parsed.is_none() {
+                    search_from = pos + prefix.len();
+                    continue;
+                }
+                let off = parsed.unwrap();
+                if off >= 0x10000 {
+                    search_from = pos + prefix.len() + num_len;
+                    continue;
+                }
+                let replacement = format!("local_{:x}", off);
+                *line = format!("{}{}{}", &line[..pos], replacement,
+                                &line[pos + prefix.len() + num_len..]);
+                search_from = pos + replacement.len();
+            }
+        }
+        // `NNN + RSP` / `NNN + ESP` form as well.
+        for suffix in &[" + RSP", " + ESP"] {
+            while let Some(pos) = line.find(suffix) {
+                let before = &line[..pos];
+                let num_start = before.rfind(|c: char| !c.is_ascii_hexdigit() && c != 'x')
+                    .map(|p| p + 1).unwrap_or(0);
+                if num_start >= pos { break; }
+                let num_str = &line[num_start..pos];
+                let parsed: Option<u64> = if let Some(h) = num_str.strip_prefix("0x") {
+                    u64::from_str_radix(h, 16).ok()
+                } else {
+                    num_str.parse::<u64>().ok()
+                };
+                if let Some(off) = parsed {
+                    if off > 0 && off < 0x10000 {
+                        let replacement = format!("local_{:x}", off);
+                        *line = format!("{}{}{}", &line[..num_start], replacement,
+                                        &line[pos + suffix.len()..]);
+                        continue;
+                    }
+                }
+                break;
+            }
+        }
+        // `*RSP` / `*ESP` (no paren) → `local_0`
+        for pat in &["*RSP", "*ESP"] {
+            while let Some(pos) = line.find(pat) {
+                let before = if pos == 0 { b' ' } else { line.as_bytes()[pos - 1] };
+                if before.is_ascii_alphanumeric() || before == b'_' { break; }
+                let after_pos = pos + pat.len();
+                let after = line.as_bytes().get(after_pos).copied().unwrap_or(b' ');
+                if after.is_ascii_alphanumeric() || after == b'_' { break; }
+                *line = format!("{}local_0{}", &line[..pos], &line[after_pos..]);
+            }
+        }
     }
 
     // Final dead-deref pass — runs at the very end so any bare `*(x);` that
