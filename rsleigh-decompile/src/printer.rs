@@ -8421,13 +8421,24 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         for cast in &["(uint)", "(uint32_t)"] {
             while let Some(pos) = line.find(cast) {
                 let after = &line[pos + cast.len()..];
-                // Only strip when followed by a recognizably simple memory ref
-                // (deref, field, or identifier-prefixed expression).
-                let ok = after.starts_with("*(")
-                    || after.starts_with("*lVar") || after.starts_with("*iVar")
-                    || after.starts_with("*param_") || after.starts_with("*local_")
-                    || (after.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-                        && after.contains("->field_"));
+                // Strip when wrapped value is obviously already 32-bit-readable:
+                //  - literal `0` / small literal (useless cast)
+                //  - `*ptr` / `*(expr)` plain deref
+                //  - identifier followed by `->` (struct / field) — covers both
+                //    generic `->field_N` and DWARF-resolved names like `->st_gid`
+                //  - `(expr)->field_` form with parenthesized base
+                let is_literal = after.starts_with('0')
+                    && after.as_bytes().get(1).map_or(true,
+                        |&c| !c.is_ascii_alphanumeric() && c != b'_' && c != b'x');
+                let is_deref = after.starts_with('*');
+                let is_ident_field = after.starts_with(|c: char|
+                        c.is_ascii_alphabetic() || c == '_')
+                    && after.contains("->");
+                let is_paren_field = after.starts_with('(')
+                    && after.find("->").map_or(false,
+                        |arrow| arrow < after.find(|c: char| c == ';' || c == ',' || c == ')' && false)
+                            .unwrap_or(after.len()));
+                let ok = is_literal || is_deref || is_ident_field || is_paren_field;
                 if !ok { break; }
                 let new_line = format!("{}{}", &line[..pos], after);
                 *line = new_line;
