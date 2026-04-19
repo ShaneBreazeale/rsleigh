@@ -9004,6 +9004,54 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         true
     });
 
+    // Darwin AArch64 frame-pointer locals: `x29 - N` denotes a stack local
+    // below the saved frame pointer (the prologue `add x29, sp, #K` establishes
+    // x29 as the frame base register). These references survive both the
+    // general x29-write elision (writes only) and the sp→local pass (different
+    // base register). Rewrite textually to a consistent `local_fp<hex>` name
+    // so the analyst sees a stable identifier instead of raw `x29`.
+    for line in lines.iter_mut() {
+        for kw in &["x29 - ", "x29 + "] {
+            let sign_minus = kw.contains('-');
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(kw) {
+                let pos = search_from + rel;
+                let prev = if pos == 0 { b' ' } else { line.as_bytes()[pos - 1] };
+                if prev.is_ascii_alphanumeric() || prev == b'_' {
+                    search_from = pos + kw.len();
+                    continue;
+                }
+                let after_start = pos + kw.len();
+                let after = &line[after_start..];
+                let (num_len, val_opt): (usize, Option<u64>) = if after.starts_with("0x") {
+                    let rest = &after[2..];
+                    let end = rest.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(rest.len());
+                    (2 + end, u64::from_str_radix(&rest[..end], 16).ok())
+                } else {
+                    let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+                    (end, after[..end].parse::<u64>().ok())
+                };
+                if num_len == 0 || val_opt.is_none() {
+                    search_from = after_start;
+                    continue;
+                }
+                let v = val_opt.unwrap();
+                if v > 0x2000 {
+                    search_from = after_start + num_len;
+                    continue;
+                }
+                let replacement = if sign_minus {
+                    format!("local_fp{:x}", v)
+                } else {
+                    format!("local_fpp{:x}", v)
+                };
+                *line = format!("{}{}{}",
+                    &line[..pos], replacement, &line[after_start + num_len..]);
+                search_from = pos + replacement.len();
+            }
+        }
+    }
+
     // Final `sp->field_<hex>` → `local_<hex>` pass. Late transforms in the
     // pipeline (DWARF field renames, register tracker substitution) can
     // surface new `sp->field_N` references after the main sp→local pass has
