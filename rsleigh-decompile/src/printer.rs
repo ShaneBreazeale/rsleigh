@@ -8421,7 +8421,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             } else if let Some(p) = inner.find(" - ") {
                 (&inner[..p], '-', &inner[p + 3..])
             } else {
-                search_from = close + 1;
+                // Advance past the outer `*(` only, so a nested `*(...)`
+                // reached by a later iteration still gets matched.
+                search_from = pos + 2;
                 continue;
             };
             // Base must be simple identifier.
@@ -8430,7 +8432,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 || !base.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
                 || !base.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
             {
-                search_from = close + 1;
+                search_from = pos + 2;
                 continue;
             }
             // Offset must parse as const.
@@ -8501,6 +8503,20 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             i += 1;
         }
     }
+
+    // Self-assign elision: `lVar = lVar;` (same identifier on both sides).
+    // Emitted when SSA's register propagation inserts a no-op copy that
+    // downstream passes didn't fold.
+    lines.retain(|line| {
+        let t = line.trim();
+        let core = match t.strip_suffix(';') { Some(c) => c, None => return true };
+        if let Some((lhs, rhs)) = core.split_once(" = ") {
+            let l = lhs.trim();
+            let r = rhs.trim();
+            if !l.is_empty() && l == r { return false; }
+        }
+        true
+    });
 
     // Boolean-identity cleanup: `X == 0 == 1` → `X == 0` and `X != 0 == 1`
     // → `X != 0`. Surfaces when SLEIGH bit-test + compare-against-true gets
@@ -9335,6 +9351,51 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 &line[inner_start..close_pos],
                 &line[close_pos + 1..]);
         }
+    }
+
+    // Drop `if (X) { }` empty bodies. Runs near the end so any block emptied
+    // by earlier passes (dead-store DCE, flag elision, self-assign drop)
+    // still gets its wrapper removed. Multi-pass since nested empty ifs can
+    // cascade once an outer body becomes empty.
+    for _ in 0..4 {
+        let mut changed = false;
+        let mut i = 0usize;
+        while i < lines.len() {
+            let t = lines[i].trim();
+            // Single-line: `if (...) { }` or `} else { }`
+            if (t.starts_with("if (") || t.starts_with("} else if") || t == "} else {")
+                && t.contains('{') && t.contains('}')
+                && !t.contains("//")
+            {
+                // Extract body between { and }, ensure empty
+                if let (Some(lb), Some(rb)) = (t.rfind('{'), t.rfind('}')) {
+                    if lb < rb {
+                        let body = &t[lb + 1..rb];
+                        if body.trim().is_empty() {
+                            lines.remove(i);
+                            changed = true;
+                            continue;
+                        }
+                    }
+                }
+            }
+            // Two-line: current ends with `{`, next trim is `}` or `} else {`
+            // (the `} else {` case closes off an empty then-branch; drop the
+            // empty part and keep the else).
+            if t.ends_with("{") && (t.starts_with("if (") || t.starts_with("} else")) {
+                if let Some(next_line) = lines.get(i + 1) {
+                    let nt = next_line.trim();
+                    if nt == "}" {
+                        lines.remove(i + 1);
+                        lines.remove(i);
+                        changed = true;
+                        continue;
+                    }
+                }
+            }
+            i += 1;
+        }
+        if !changed { break; }
     }
 
     // Final dead-deref pass — runs at the very end so any bare `*(x);` that
