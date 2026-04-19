@@ -8441,6 +8441,96 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // `local_0->field_N` is the frame base plus offset N — semantically the
+    // same stack location as `local_N`. Collapse to the canonical name so the
+    // output stays consistent regardless of which SSA path produced the access.
+    // Only applies to `local_0`, since non-zero bases denote real struct
+    // pointers stored in the frame.
+    for line in lines.iter_mut() {
+        while let Some(pos) = line.find("local_0->field_") {
+            let prev = if pos == 0 { b' ' } else { line.as_bytes()[pos - 1] };
+            if prev.is_ascii_alphanumeric() || prev == b'_' { break; }
+            let after_start = pos + "local_0->field_".len();
+            let after = &line[after_start..];
+            let end = after.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(after.len());
+            if end == 0 { break; }
+            if let Ok(off) = u64::from_str_radix(&after[..end], 16) {
+                let replacement = format!("local_{:x}", off);
+                *line = format!("{}{}{}",
+                    &line[..pos], replacement, &line[after_start + end..]);
+                continue;
+            }
+            break;
+        }
+    }
+
+    // Frame-pointer-alias propagation: when a local holds the frame base
+    // (e.g. `iVar1 = local_0;`), later accesses through that alias
+    // (`iVar1->field_K`) are identical to `local_K`. Track the alias within
+    // the function, rewrite downstream field accesses, and drop the now-dead
+    // `iVar = local_0;` assignment when the original name is unused after.
+    {
+        let mut i = 0usize;
+        while i < lines.len() {
+            // Extract owned copies up front so the later `&mut lines[j]` does
+            // not conflict with the read of `lines[i]`.
+            let (lhs, rhs) = {
+                let t = lines[i].trim();
+                let core = match t.strip_suffix(';') { Some(c) => c, None => { i += 1; continue; } };
+                let pair = match core.split_once(" = ") { Some(p) => p, None => { i += 1; continue; } };
+                (pair.0.trim().to_string(), pair.1.trim().to_string())
+            };
+            if rhs != "local_0" { i += 1; continue; }
+            if lhs.is_empty() || lhs.contains('[') || lhs.contains('.')
+                || lhs.contains(' ') || lhs.contains("->")
+            { i += 1; continue; }
+            let alias_prefix = format!("{}->field_", lhs);
+            let mut rewrote_any = false;
+            let mut other_use = false;
+            // Rewrite downstream references.
+            for j in (i + 1)..lines.len() {
+                let l2 = &mut lines[j];
+                // First, rewrite all `ALIAS->field_HEX` occurrences.
+                while let Some(pos) = l2.find(alias_prefix.as_str()) {
+                    let prev = if pos == 0 { b' ' } else { l2.as_bytes()[pos - 1] };
+                    if prev.is_ascii_alphanumeric() || prev == b'_' { break; }
+                    let after_start = pos + alias_prefix.len();
+                    let after = &l2[after_start..];
+                    let end = after.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(after.len());
+                    if end == 0 { break; }
+                    if let Ok(off) = u64::from_str_radix(&after[..end], 16) {
+                        let replacement = format!("local_{:x}", off);
+                        *l2 = format!("{}{}{}",
+                            &l2[..pos], replacement, &l2[after_start + end..]);
+                        rewrote_any = true;
+                        continue;
+                    }
+                    break;
+                }
+                // Any other appearance of the bare alias name = still in use.
+                let bytes = l2.as_bytes();
+                let mut k = 0;
+                while k + lhs.len() <= bytes.len() {
+                    if &bytes[k..k + lhs.len()] == lhs.as_bytes() {
+                        let before = if k > 0 { bytes[k - 1] } else { b' ' };
+                        let after_idx = k + lhs.len();
+                        let after = bytes.get(after_idx).copied().unwrap_or(b' ');
+                        let word = !before.is_ascii_alphanumeric() && before != b'_'
+                            && !after.is_ascii_alphanumeric() && after != b'_';
+                        if word { other_use = true; break; }
+                    }
+                    k += 1;
+                }
+                if other_use { break; }
+            }
+            if rewrote_any && !other_use {
+                lines.remove(i);
+                continue;
+            }
+            i += 1;
+        }
+    }
+
     // local_N->field_0 collapse: `local_N` is a stack memory slot, not a struct
     // pointer. A `local_N->field_0 = V;` store is really `*(sp + N + 0) = V`,
     // i.e. a plain word write to the local. Rewrite to `local_N = V;` (Ghidra
