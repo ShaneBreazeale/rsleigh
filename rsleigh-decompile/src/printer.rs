@@ -628,6 +628,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // Convert pointer dereferences to array access: *(type*)(base + idx) → base[idx]
     // Also: *(base + idx) → base[idx]
     // Only convert when the base looks like a simple variable name (no operators/spaces).
+    // Skip `sp`-relative forms — those lose the scale factor on conversion, leaving
+    // ambiguous `sp[2]` that can't be safely recovered to a local name. The later
+    // sp→local pass handles `*(uint64_t*)(sp + N)` directly via `sp + N → local_N`.
     for line in &mut lines {
         // Pattern 1: *(uintN_t*)(X + Y)
         while let Some(star_pos) = line.find("*(uint") {
@@ -638,6 +641,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     if let Some(plus) = find_array_split(inner) {
                         let base = &inner[..plus];
                         let idx = &inner[plus + 3..];
+                        if base == "sp" { break; }
                         *line = format!("{}{}{}", &line[..star_pos],
                             format!("{}[{}]", base, idx), &line[close + 1..]);
                         continue;
@@ -655,6 +659,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 if let Some(plus) = find_array_split(inner) {
                     let base = &inner[..plus];
                     let idx = &inner[plus + 3..];
+                    if base == "sp" { break; }
                     *line = format!("{}{}{}", &line[..star_pos],
                         format!("{}[{}]", base, idx), &line[close + 1..]);
                     continue;
@@ -1470,6 +1475,97 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     }
                     let replacement = local_name(off);
                     let new_line = format!("{}{}{}", &line[..pos], replacement, &line[pos + pat_sp_plus.len() + num_len..]);
+                    search_from = pos + replacement.len();
+                    *line = new_line;
+                }
+                // `sp[N]` and `sp[N + M]` bracket form — emitted when a Store addr
+                // computes `Add(sp, const)` and the printer chose array-index syntax.
+                // Inside brackets the arithmetic is already byte offset, so merge
+                // additive constants directly to a single local_<off>.
+                let mut search_from = 0usize;
+                while let Some(rel) = line[search_from..].find("sp[") {
+                    let pos = search_from + rel;
+                    let prev = if pos == 0 { b' ' } else { line.as_bytes()[pos - 1] };
+                    if prev.is_ascii_alphanumeric() || prev == b'_' {
+                        search_from = pos + 3;
+                        continue;
+                    }
+                    let inner_start = pos + 3;
+                    let close = match line[inner_start..].find(']') {
+                        Some(n) => inner_start + n,
+                        None => break,
+                    };
+                    let inner = &line[inner_start..close];
+                    // Parse inner as `N`, `N + M`, `N - M` (constants only)
+                    let mut total: i64 = 0;
+                    let mut sign: i64 = 1;
+                    let mut ok = true;
+                    for (i, part) in inner.split(|c: char| c == '+' || c == '-').enumerate() {
+                        let t = part.trim();
+                        if t.is_empty() { ok = false; break; }
+                        let v = if let Some(h) = t.strip_prefix("0x") {
+                            i64::from_str_radix(h, 16).ok()
+                        } else { t.parse::<i64>().ok() };
+                        let Some(v) = v else { ok = false; break; };
+                        if i == 0 { total = v; }
+                        else { total += sign * v; }
+                        // Capture next operator char from original string
+                        // (already consumed by split — peek by scanning forward)
+                        let _ = sign; // silence
+                        // Simple reparse: find the operator between this part and next
+                        // by walking the original string — but split drops operators,
+                        // so we need a different approach. Restart with tokenizer.
+                        ok = true;
+                    }
+                    // Restart with proper tokenizer (the loop above is a scaffolding
+                    // to avoid the split-drops-operator issue).
+                    total = 0;
+                    sign = 1;
+                    ok = true;
+                    let bytes = inner.as_bytes();
+                    let mut j = 0;
+                    let mut num_buf = String::new();
+                    let parse_num_to_i64 = |s: &str| -> Option<i64> {
+                        let s = s.trim();
+                        if s.is_empty() { return None; }
+                        if let Some(h) = s.strip_prefix("0x") { i64::from_str_radix(h, 16).ok() }
+                        else { s.parse::<i64>().ok() }
+                    };
+                    while j < bytes.len() {
+                        let c = bytes[j];
+                        if c == b' ' { j += 1; continue; }
+                        if c == b'+' || c == b'-' {
+                            if !num_buf.is_empty() {
+                                match parse_num_to_i64(&num_buf) {
+                                    Some(v) => total += sign * v,
+                                    None => { ok = false; break; }
+                                }
+                                num_buf.clear();
+                            }
+                            sign = if c == b'+' { 1 } else { -1 };
+                            j += 1;
+                            continue;
+                        }
+                        if c.is_ascii_alphanumeric() || c == b'_' {
+                            num_buf.push(c as char);
+                            j += 1;
+                            continue;
+                        }
+                        ok = false;
+                        break;
+                    }
+                    if ok && !num_buf.is_empty() {
+                        match parse_num_to_i64(&num_buf) {
+                            Some(v) => total += sign * v,
+                            None => ok = false,
+                        }
+                    }
+                    if !ok || total <= 0 || (total as u64) > frame_size {
+                        search_from = close + 1;
+                        continue;
+                    }
+                    let replacement = local_name(total as u64);
+                    let new_line = format!("{}{}{}", &line[..pos], replacement, &line[close + 1..]);
                     search_from = pos + replacement.len();
                     *line = new_line;
                 }

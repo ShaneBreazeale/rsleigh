@@ -340,6 +340,57 @@ fn resolve_elf(elf: &goblin::elf::Elf, binary: &[u8], map: &mut HashMap<u64, Str
         }
     }
 
+    // AArch64 PLT stub decoder. Each entry (16 bytes typically):
+    //   adrp x16, &got_page         ; 0x90/0x10-family (bit 31 = 1 for adrp)
+    //   ldr  x17, [x16, #off]       ; 0xf940xx11
+    //   add  x16, x16, #off         ; 0x91xxxx10 (for resolver)
+    //   br   x17                    ; 0xd61f0220
+    // The GOT slot = PAGE(adrp) + ldr_offset.
+    if elf.header.e_machine == 0xB7 /* EM_AARCH64 */ {
+        for sh in &elf.section_headers {
+            let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
+            if name != ".plt" { continue; }
+            let entry_size = 16u64;
+            let plt_start = sh.sh_addr;
+            let n_entries = sh.sh_size / entry_size;
+            let file_off = sh.sh_offset as usize;
+            // PLT[0] is resolver (32 bytes often), but we scan every 16-byte slot
+            // and reject those whose first instruction isn't adrp.
+            for i in 0..n_entries.min(20000) {
+                let stub_addr = plt_start + i * entry_size;
+                let off = file_off + (i * entry_size) as usize;
+                if off + 8 > binary.len() { break; }
+                let adrp = u32::from_le_bytes(binary[off..off+4].try_into().unwrap_or([0;4]));
+                let ldr = u32::from_le_bytes(binary[off+4..off+8].try_into().unwrap_or([0;4]));
+                // ADRP: top byte 0x90..0xBF range; bit30=1 means adrp (bit30=0 is adr).
+                // Specifically: op=1, immlo=bits 30:29, fixed=10000, immhi=bits23:5, Rd=bits4:0
+                if (adrp & 0x9F000000) != 0x90000000 { continue; }
+                let rd = adrp & 0x1F;
+                if rd != 16 { continue; } // Must target x16
+                let immlo = ((adrp >> 29) & 0x3) as u64;
+                let immhi = ((adrp >> 5) & 0x7FFFF) as u64;
+                let imm21 = (immhi << 2) | immlo;
+                // Sign-extend 21-bit to 64-bit, then shift left 12
+                let sign_bit = 1u64 << 20;
+                let imm21_signed = if imm21 & sign_bit != 0 {
+                    (imm21 | !((1u64 << 21) - 1)) as i64
+                } else { imm21 as i64 };
+                let page = (stub_addr & !0xFFF).wrapping_add((imm21_signed << 12) as u64);
+                // LDR (immediate, unsigned offset, 64-bit): 0xF9400000 | imm12<<10 | Rn<<5 | Rt
+                // We expect Rn=16 (x16), Rt=17 (x17).
+                if (ldr & 0xFFC00000) != 0xF9400000 { continue; }
+                let rn = (ldr >> 5) & 0x1F;
+                let rt = ldr & 0x1F;
+                if rn != 16 || rt != 17 { continue; }
+                let imm12 = ((ldr >> 10) & 0xFFF) as u64;
+                let got_entry = page.wrapping_add(imm12 * 8); // 64-bit load → scale 8
+                if let Some(name) = got_to_name.get(&got_entry) {
+                    map.insert(stub_addr, name.clone());
+                }
+            }
+        }
+    }
+
     // Find .plt section and map PLT stub addresses to names
     // Each PLT entry is typically 16 bytes (x86-64): jmp [GOT]; push idx; jmp resolver
     for sh in &elf.section_headers {
