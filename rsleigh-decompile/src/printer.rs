@@ -12094,6 +12094,11 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
 /// True when the user-pcodeop is pure architectural bookkeeping whose output
 /// is noise in decompiled code. Mirrors what Ghidra hides by default.
 fn is_elidable_pcodeop(arch: Architecture, id: u64) -> bool {
+    if matches!(arch, Architecture::X86_64 | Architecture::X86_32) {
+        // LOCK / UNLOCK / XACQUIRE / XRELEASE — atomic bus-lock hints.
+        // Semantically important to the CPU but invisible in decompiled C.
+        return matches!(id, 17 | 18 | 19 | 20);
+    }
     if matches!(arch, Architecture::ARM32) {
         // ARM32 pcodeops that are ISA-state / hint / barrier ops.
         return matches!(
@@ -12115,6 +12120,38 @@ fn is_elidable_pcodeop(arch: Architecture, id: u64) -> bool {
 }
 
 fn pcodeop_name(arch: Architecture, id: u64) -> String {
+    if matches!(arch, Architecture::X86_64 | Architecture::X86_32) {
+        const X86_PCODEOPS: &[&str] = &[
+            "segment",      // 0
+            "in",           // 1
+            "out",          // 2
+            "sysenter",     // 3
+            "sysexit",      // 4
+            "syscall",      // 5
+            "sysret",       // 6
+            "swapgs",       // 7
+            "invlpg",       // 8
+            "invlpga",      // 9
+            "invpcid",      // 10
+            "rdtscp",       // 11
+            "mwait",        // 12
+            "mwaitx",       // 13
+            "monitor",      // 14
+            "monitorx",     // 15
+            "swi",          // 16 (INT)
+            "LOCK",         // 17
+            "UNLOCK",       // 18
+            "XACQUIRE",     // 19
+            "XRELEASE",     // 20
+            "clgi",         // 21
+            "stgi",         // 22
+            "vmload",       // 23
+            "vmmcall",      // 24
+        ];
+        if let Some(&name) = X86_PCODEOPS.get(id as usize) {
+            return name.to_string();
+        }
+    }
     // Hardcoded mapping of the most common ARM32 user pcodeops. IDs match the
     // declaration order in slaspec/ARM/ARM_base.sinc. If rsleigh's slaspec
     // shifts ids in the future, the `pcodeop_N` fallback keeps the reference
