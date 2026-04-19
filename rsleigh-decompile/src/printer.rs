@@ -8362,6 +8362,15 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         let mut search_from = 0usize;
         while let Some(rel) = line[search_from..].find("(local_") {
             let open = search_from + rel;
+            // DO NOT drop the parens when the `(` is the call syntax: the
+            // byte before `(` is an identifier char or `]`. Dropping there
+            // produces `freelocal_0` from `free(local_0)`, `func_X(local_0)`
+            // → `func_Xlocal_0`, etc.
+            let prev = if open == 0 { b' ' } else { line.as_bytes()[open - 1] };
+            if prev.is_ascii_alphanumeric() || prev == b'_' || prev == b']' {
+                search_from = open + 1;
+                continue;
+            }
             let inner_start = open + 1;
             let name_end = inner_start + "local_".len();
             let after = &line[name_end..];
@@ -9004,35 +9013,49 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         true
     });
 
-    // `*(uintN_t*)(ident)` → `*ident` — no-offset typed deref of a plain
+    // `*(TYPE*)(ident)` → `*ident` — no-offset typed deref of a plain
     // identifier. The cast conveys nothing the analyst can't read from the
-    // surrounding context and just bloats the line. Only rewrites when the
-    // inner contents are a single identifier (no operators, no parens).
+    // surrounding context and just bloats the line. Handles all signed/
+    // unsigned integer width cast forms and simple fundamental types.
     for line in lines.iter_mut() {
-        let mut search_from = 0usize;
-        loop {
-            let Some(star_rel) = line[search_from..].find("*(uint") else { break };
-            let star_pos = search_from + star_rel;
-            let Some(close_rel) = line[star_pos..].find("*)(") else { break };
-            let paren_open = star_pos + close_rel + 2;
-            let mut depth = 0i32;
-            let mut close: Option<usize> = None;
-            for (i, b) in line[paren_open..].bytes().enumerate() {
-                if b == b'(' { depth += 1; }
-                else if b == b')' { depth -= 1; if depth == 0 { close = Some(paren_open + i); break; } }
+        for prefix in &[
+            "*(uint8_t*)", "*(uint16_t*)", "*(uint32_t*)", "*(uint64_t*)",
+            "*(int8_t*)",  "*(int16_t*)",  "*(int32_t*)",  "*(int64_t*)",
+            "*(char*)", "*(short*)", "*(int*)", "*(long*)", "*(uint*)",
+        ] {
+            let mut search_from = 0usize;
+            loop {
+                let Some(rel) = line[search_from..].find(prefix) else { break };
+                let star_pos = search_from + rel;
+                let paren_open = star_pos + prefix.len() - 1; // `)` before `(`
+                // `prefix` ends in `)`; the next char is `(` opening the arg.
+                let open = star_pos + prefix.len();
+                if line.as_bytes().get(open).copied() != Some(b'(') {
+                    search_from = star_pos + prefix.len();
+                    continue;
+                }
+                let mut depth = 0i32;
+                let mut close: Option<usize> = None;
+                for (i, b) in line[open..].bytes().enumerate() {
+                    if b == b'(' { depth += 1; }
+                    else if b == b')' { depth -= 1;
+                        if depth == 0 { close = Some(open + i); break; }
+                    }
+                }
+                let Some(close) = close else { break };
+                let inner = &line[open + 1..close];
+                let is_simple_ident = !inner.is_empty()
+                    && inner.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+                    && inner.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                if !is_simple_ident {
+                    search_from = close + 1;
+                    continue;
+                }
+                let replacement = format!("*{}", inner);
+                *line = format!("{}{}{}", &line[..star_pos], replacement, &line[close + 1..]);
+                search_from = star_pos + replacement.len();
+                let _ = paren_open;
             }
-            let Some(close) = close else { break };
-            let inner = &line[paren_open + 1..close];
-            let is_simple_ident = !inner.is_empty()
-                && inner.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
-                && inner.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-            if !is_simple_ident {
-                search_from = close + 1;
-                continue;
-            }
-            let replacement = format!("*{}", inner);
-            *line = format!("{}{}{}", &line[..star_pos], replacement, &line[close + 1..]);
-            search_from = star_pos + replacement.len();
         }
     }
 
@@ -9122,6 +9145,14 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         let mut search_from = 0usize;
         while let Some(rel) = line[search_from..].find("(local_") {
             let open = search_from + rel;
+            // Skip when the `(` is a call's open paren (preceded by an
+            // identifier char) — stripping there produces garbage like
+            // `freelocal_0` from `free(local_0)`.
+            let prev = if open == 0 { b' ' } else { line.as_bytes()[open - 1] };
+            if prev.is_ascii_alphanumeric() || prev == b'_' || prev == b']' {
+                search_from = open + 1;
+                continue;
+            }
             let inner_start = open + 1;
             let name_end = inner_start + "local_".len();
             let after = &line[name_end..];
