@@ -1412,6 +1412,46 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
         // The frame size is the largest `sp - N` constant (locals live within `[sp_new, sp_new+N)`,
         // so any address inside the frame appears as `sp - K` with K ≤ N).
+        // Fallback: handle `sp->field_<hex>` with bounded offset even when no
+        // `sp - N` subtraction was detected (leaf functions that use the red
+        // zone or work directly with the entry sp without allocating a frame).
+        // Only safe for small offsets — cap at 0x1000 which is well above any
+        // realistic direct stack local.
+        // Determine effective frame size: skip trivial zero entries so a
+        // meaningless `sp - 0` doesn't suppress the fallback.
+        let effective_frame = sp_subs.iter().rev().find(|&&v| v > 0).copied().unwrap_or(0);
+        if effective_frame == 0 {
+            for line in lines.iter_mut() {
+                let mut search_from = 0usize;
+                while let Some(rel) = line[search_from..].find("sp->field_") {
+                    let pos = search_from + rel;
+                    let prev = if pos == 0 { b' ' } else { line.as_bytes()[pos - 1] };
+                    if prev.is_ascii_alphanumeric() || prev == b'_' {
+                        search_from = pos + "sp->field_".len();
+                        continue;
+                    }
+                    let after_start = pos + "sp->field_".len();
+                    let after = &line[after_start..];
+                    let end = after.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(after.len());
+                    if end == 0 {
+                        search_from = after_start;
+                        continue;
+                    }
+                    let Ok(off) = u64::from_str_radix(&after[..end], 16) else {
+                        search_from = after_start + end;
+                        continue;
+                    };
+                    if off > 0x1000 {
+                        search_from = after_start + end;
+                        continue;
+                    }
+                    let replacement = format!("local_{:x}", off);
+                    *line = format!("{}{}{}",
+                        &line[..pos], replacement, &line[after_start + end..]);
+                    search_from = pos + replacement.len();
+                }
+            }
+        }
         if let Some(&frame_size) = sp_subs.iter().next_back() {
             let pat_field = format!("sp - {}->field_", frame_size);
             let pat_hex_field = format!("sp - 0x{:x}->field_", frame_size);
@@ -8963,6 +9003,38 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         if t.starts_with("local_") || t.starts_with("sp[") { return false; }
         true
     });
+
+    // Final `sp->field_<hex>` → `local_<hex>` pass. Late transforms in the
+    // pipeline (DWARF field renames, register tracker substitution) can
+    // surface new `sp->field_N` references after the main sp→local pass has
+    // already run. Cap the accepted offset at 0x1000 so we never rewrite a
+    // `sp->field_N` that is actually indexing a struct pointer aliased to sp.
+    for line in lines.iter_mut() {
+        let mut search_from = 0usize;
+        while let Some(rel) = line[search_from..].find("sp->field_") {
+            let pos = search_from + rel;
+            let prev = if pos == 0 { b' ' } else { line.as_bytes()[pos - 1] };
+            if prev.is_ascii_alphanumeric() || prev == b'_' {
+                search_from = pos + "sp->field_".len();
+                continue;
+            }
+            let after_start = pos + "sp->field_".len();
+            let after = &line[after_start..];
+            let end = after.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(after.len());
+            if end == 0 { search_from = after_start; continue; }
+            let Ok(off) = u64::from_str_radix(&after[..end], 16) else {
+                search_from = after_start + end; continue;
+            };
+            if off > 0x1000 {
+                search_from = after_start + end;
+                continue;
+            }
+            let replacement = format!("local_{:x}", off);
+            *line = format!("{}{}{}",
+                &line[..pos], replacement, &line[after_start + end..]);
+            search_from = pos + replacement.len();
+        }
+    }
 
     // Final `(local_<hex>)` paren cleanup — runs after every other transform
     // so any late-added redundant wrappers are caught.
