@@ -8398,14 +8398,27 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // If RHS references LHS, skip (self-ref).
             if reads_var_outside_lhs(rhs, lhs) { i += 1; continue; }
 
-            // Scan forward for next touch of this LHS.
+            // Scan forward for next touch of this LHS. Track brace depth so we
+            // don't mistake a block-closing `}` (inside an if / while / for) for
+            // end-of-function. A `return lVar3;` may live inside a nested block,
+            // and the earlier bail on any `}` at line start was dropping the
+            // assignment that feeds it.
             let mut next_is_write = false;
             let mut found_read = false;
+            let mut brace_depth: i32 = 0;
             for j in (i + 1)..lines.len() {
                 let l2 = &lines[j];
-                // Stop at a function-level closing brace at zero indent.
-                if l2.starts_with('}') && !l2.starts_with("} else") {
-                    next_is_write = true; // end of function: the value was never used
+                // Update brace depth *before* treating `}` as end-of-function,
+                // so only the outermost closer triggers the end condition.
+                let opens = l2.matches('{').count() as i32;
+                let closes = l2.matches('}').count() as i32;
+                let was_depth = brace_depth;
+                brace_depth += opens - closes;
+                // End-of-function: pre-update depth was 0 and closes > 0.
+                if was_depth <= 0 && closes > 0
+                    && !l2.trim_start().starts_with("} else")
+                {
+                    next_is_write = true;
                     break;
                 }
                 // Skip pure comment lines.
@@ -8436,8 +8449,19 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     lines.remove(i);
                     continue; // don't advance — recheck new i
                 } else if rhs.ends_with(')') {
-                    // Strip LHS but keep the call for its side effect.
-                    lines[i] = format!("{}{};", leading, rhs);
+                    // Don't strip the LHS of allocation-style calls — the
+                    // return value is almost certainly used as a pointer later,
+                    // and our forward scan can miss uses hidden inside the
+                    // args of a subsequent call (`func(..., the_value, ...)`)
+                    // because the register tracker may have inlined the value
+                    // directly, leaving no textual `LHS` reference.
+                    let is_alloc_like = ["operator new", "operator new[]",
+                        "malloc(", "calloc(", "realloc(", "strdup(", "strndup(",
+                        "mmap(", "fopen(", "opendir(", "open("]
+                        .iter().any(|s| rhs.starts_with(s) || rhs.contains(s));
+                    if !is_alloc_like {
+                        lines[i] = format!("{}{};", leading, rhs);
+                    }
                 }
             }
             i += 1;
@@ -8481,6 +8505,21 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 *line = format!("{}{}", &line[..after_paren], &line[after_paren + 1..]);
             }
             search_from = after_paren;
+        }
+        // `strlen(?)` / other well-known C libc calls whose first arg is
+        // obviously a pointer — strip the lone `?` when it's the only arg so
+        // the call reads `strlen()`. Keeps `strlen(?, extra)` untouched.
+        for marker in &["strlen(", "strcpy(", "strcmp(", "strcat(", "strdup(",
+                        "puts(", "fputs(", "free(", "close("] {
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(marker) {
+                let open = search_from + rel + marker.len() - 1;
+                let after_paren = open + 1;
+                if line[after_paren..].starts_with("?)") {
+                    *line = format!("{}{}", &line[..after_paren], &line[after_paren + 1..]);
+                }
+                search_from = after_paren;
+            }
         }
         // Also cover `operator NAME(?, ...)` / `operator NAME(?)` —
         // operators, like methods, take `this` as their first (hidden) arg.
