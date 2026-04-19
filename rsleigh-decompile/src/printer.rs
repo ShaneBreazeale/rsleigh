@@ -4876,6 +4876,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     }
 
     // #WIN32_CONSTANTS: Annotate Windows API constants for malware analysis.
+    // Gate on PE magic ("MZ") so these never false-positive on ELF / Mach-O
+    // binaries — numeric literals like `2` and `3` commonly show up as
+    // enum / fd / flag values on Linux and have nothing to do with
+    // CREATE_ALWAYS / OPEN_EXISTING.
+    let is_pe = ctx.binary.map_or(false, |b| b.len() > 2 && &b[0..2] == b"MZ");
+    if is_pe {
     for line in &mut lines {
         // Process status
         *line = line.replace("== 259)", "== 259 /* STILL_ACTIVE */)");
@@ -4940,6 +4946,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 .replace(", 0x40)", ", MB_ICONINFORMATION)").replace(", 0x4)", ", MB_YESNO)");
         }
     }
+    } // end if is_pe
 
     // #HEX_MAGIC: Annotate well-known hex magic constants.
     for line in &mut lines {
