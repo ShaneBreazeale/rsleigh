@@ -2711,6 +2711,15 @@ fn collect_reg_args_from_block(stmts: &[Stmt], vars: &[VarDef], up_to: usize) ->
     for j in (0..up_to).rev() {
         if let Stmt::Assign(var_id) = &stmts[j] {
             let vdef = safe_var(vars, *var_id);
+            // Skip clobber placeholders that SSA inserts for caller-saved
+            // registers after a call (`call_return=true` with `Expr::Unknown`).
+            // Using the clobber as an arg gives `?` at the call site on
+            // architectures where the return register overlaps an arg
+            // register (ARM32 r0, AArch64 x0). The REAL argument value is
+            // the preceding Stmt::Assign with a concrete expr.
+            if vdef.call_return && matches!(&vdef.expr, Expr::Unknown) {
+                continue;
+            }
             if vdef.varnode.space == AddressSpaceId::Register
                 && arg_offsets.contains(&vdef.varnode.offset)
             {
