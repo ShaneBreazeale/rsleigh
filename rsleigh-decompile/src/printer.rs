@@ -8389,6 +8389,60 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Boolean-identity cleanup: `X == 0 == 1` → `X == 0` and `X != 0 == 1`
+    // → `X != 0`. Surfaces when SLEIGH bit-test + compare-against-true gets
+    // emitted literally. Also fold `X == 1 == 1` → `X == 1` and flip
+    // `X == 0 == 0` → `X != 0` (double-negation).
+    for line in lines.iter_mut() {
+        // Apply each rewrite repeatedly until no more matches (handles chains).
+        loop {
+            let mut changed = false;
+            for (pat, replacement) in &[
+                (" == 0 == 1", " == 0"),
+                (" != 0 == 1", " != 0"),
+                (" == 1 == 1", " == 1"),
+                (" != 1 == 1", " != 1"),
+                (" == 0 == 0", " != 0"),
+                (" != 0 == 0", " == 0"),
+            ] {
+                if line.contains(pat) {
+                    *line = line.replace(pat, replacement);
+                    changed = true;
+                }
+            }
+            if !changed { break; }
+        }
+    }
+
+    // Redundant `(uint)3` / `(uint)N` casts on bare integer constants — C
+    // implicit-conversion already handles these in every arithmetic context.
+    for line in lines.iter_mut() {
+        for pat_prefix in &["(uint)", "(uint32_t)", "(uint8_t)", "(uint16_t)",
+                            "(int)", "(long)", "(short)", "(char)"] {
+            let mut search_from = 0usize;
+            while let Some(rel) = line[search_from..].find(pat_prefix) {
+                let pos = search_from + rel;
+                let after = &line[pos + pat_prefix.len()..];
+                // Accept if followed by decimal digit or 0xHEX — plain literal.
+                let tail_len: usize = if after.starts_with("0x") {
+                    let rest = &after[2..];
+                    let end = rest.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(rest.len());
+                    if end == 0 { 0 } else { 2 + end }
+                } else if after.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+                    after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len())
+                } else { 0 };
+                if tail_len == 0 {
+                    search_from = pos + pat_prefix.len();
+                    continue;
+                }
+                // Strip the cast prefix, keep the literal.
+                *line = format!("{}{}", &line[..pos], &line[pos + pat_prefix.len()..]);
+                // Re-scan from current pos since line shifted.
+                search_from = pos;
+            }
+        }
+    }
+
     // Drop stale struct-layout comments that reference the frame-base
     // sentinel (`local_0` or raw `sp`). Their field list is the pre-collapse
     // view; downstream passes now map those fields to `local_<offset>` so
