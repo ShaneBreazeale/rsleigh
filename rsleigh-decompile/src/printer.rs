@@ -8208,6 +8208,19 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Drop stale struct-layout comments that reference the frame-base
+    // sentinel (`local_0` or raw `sp`). Their field list is the pre-collapse
+    // view; downstream passes now map those fields to `local_<offset>` so
+    // the hint is redundant and even misleading.
+    lines.retain(|line| {
+        let t = line.trim();
+        if !t.starts_with("//") { return true; }
+        if t.contains("struct layout for local_0")
+            || t.contains("struct layout for sp")
+        { return false; }
+        true
+    });
+
     // Return-type/sig consistency fix. If a function is declared
     // `long/int func_X(...)` but every return in the body is a bare `return;`,
     // rewrite the signature return type to `void`. The inverse (`void func_X`
