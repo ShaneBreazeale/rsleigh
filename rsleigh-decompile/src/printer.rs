@@ -8208,6 +8208,127 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Cross-line DCE on return-register assignments.
+    //
+    // AArch64 x0 (printed as `param_0`) and x86-64 RAX are used both as the
+    // first parameter/return register and as a scratch value holder for
+    // address computations and intermediate call args. The earlier adjacent
+    // DCE only eliminates consecutive `REG = X; REG = Y;` pairs. Real code
+    // interleaves calls and address math, leaving chains like:
+    //
+    //     param_0 = DAT_X->field_0;
+    //     lVar2 = close;
+    //     param_0 = lVar4 + 24;
+    //     param_0 = QObject::QObject();
+    //
+    // The first and third `param_0 = ...` are dead — the next write clobbers
+    // them without an intervening read. Scan each `param_0 = RHS;` (or any
+    // simple identifier LHS) and look forward in the line stream; if the
+    // next touch of that LHS is another write (and nothing between reads it),
+    // treat this line as dead. Handling:
+    //   - RHS is a pure value (no parens) → drop the line entirely.
+    //   - RHS is a call (`fn(...)`) and the next touch is a write → keep
+    //     the call for its side effect, strip the `LHS = ` prefix.
+    //   - RHS references LHS itself (`x = x + 1`): never drop.
+    {
+        let reads_var_outside_lhs = |line: &str, sym: &str| -> bool {
+            // `sym` appears as a word outside a leading `SYM = ` assignment.
+            let trimmed = line.trim_start();
+            let body = if let Some(eq_pos) = trimmed.find(" = ") {
+                let lhs = &trimmed[..eq_pos];
+                if lhs == sym { &trimmed[eq_pos + 3..] } else { trimmed }
+            } else { trimmed };
+            let bytes = body.as_bytes();
+            let mut i = 0;
+            while i + sym.len() <= bytes.len() {
+                if &bytes[i..i + sym.len()] == sym.as_bytes() {
+                    let before = if i > 0 { bytes[i - 1] } else { b' ' };
+                    let after_idx = i + sym.len();
+                    let after = bytes.get(after_idx).copied().unwrap_or(b' ');
+                    let word = !before.is_ascii_alphanumeric() && before != b'_'
+                        && !after.is_ascii_alphanumeric() && after != b'_';
+                    if word { return true; }
+                }
+                i += 1;
+            }
+            false
+        };
+        let is_simple_lhs = |lhs: &str| -> bool {
+            !lhs.contains("->") && !lhs.contains('*') && !lhs.contains('[')
+                && !lhs.contains('.') && !lhs.contains('(') && !lhs.is_empty()
+        };
+        // Only act on RHS that makes DCE safe: the value has no side effect
+        // beyond the assignment itself. A trailing `)` signals a call, which
+        // we preserve on strip-LHS instead of deleting.
+        let rhs_is_pure = |rhs: &str| -> bool { !rhs.contains('(') && !rhs.contains(')') };
+        let mut i = 0;
+        while i < lines.len() {
+            let (leading, t) = {
+                let l = &lines[i];
+                let ls_count = l.len() - l.trim_start().len();
+                (&l[..ls_count], l[ls_count..].trim_end().to_string())
+            };
+            if !t.ends_with(';') { i += 1; continue; }
+            let core = t.trim_end_matches(';');
+            let Some((lhs, rhs)) = core.split_once(" = ") else { i += 1; continue; };
+            let lhs = lhs.trim();
+            let rhs = rhs.trim();
+            if !is_simple_lhs(lhs) { i += 1; continue; }
+            // Bail if the LHS is a real function parameter (param_N where N < the
+            // function's declared param count). We still want to DCE scratch
+            // writes to x0 = param_0 inside the body, so don't bail on `param_0`
+            // universally — only stop the pass from processing it when the
+            // function genuinely rebinds a parameter to a new value that is
+            // never used further (that's legitimate noise too, so keep the pass).
+            // If RHS references LHS, skip (self-ref).
+            if reads_var_outside_lhs(rhs, lhs) { i += 1; continue; }
+
+            // Scan forward for next touch of this LHS.
+            let mut next_is_write = false;
+            let mut found_read = false;
+            for j in (i + 1)..lines.len() {
+                let l2 = &lines[j];
+                // Stop at a function-level closing brace at zero indent.
+                if l2.starts_with('}') && !l2.starts_with("} else") {
+                    next_is_write = true; // end of function: the value was never used
+                    break;
+                }
+                // Skip pure comment lines.
+                let t2 = l2.trim();
+                if t2.is_empty() || t2.starts_with("//") || t2.starts_with("/*")
+                    || t2.starts_with("*")
+                { continue; }
+                // Check for write first: `LHS = ...;`
+                let t2_trim = t2.trim_end_matches(';');
+                if let Some((l2_lhs, l2_rhs)) = t2_trim.split_once(" = ") {
+                    let l2_lhs = l2_lhs.trim();
+                    let l2_rhs = l2_rhs.trim();
+                    // If the RHS reads our LHS, that's a read even though line is a write.
+                    if reads_var_outside_lhs(l2_rhs, lhs) { found_read = true; break; }
+                    if l2_lhs == lhs {
+                        // A clean overwrite with no read in RHS.
+                        next_is_write = true;
+                        break;
+                    }
+                }
+                // Non-assignment line (standalone call, control-flow condition):
+                // treat any appearance of the LHS as a read.
+                if reads_var_outside_lhs(t2, lhs) { found_read = true; break; }
+            }
+
+            if next_is_write && !found_read {
+                if rhs_is_pure(rhs) {
+                    lines.remove(i);
+                    continue; // don't advance — recheck new i
+                } else if rhs.ends_with(')') {
+                    // Strip LHS but keep the call for its side effect.
+                    lines[i] = format!("{}{};", leading, rhs);
+                }
+            }
+            i += 1;
+        }
+    }
+
     // `?` placeholder cleanup on C++ method calls. When the SSA cannot resolve
     // the `this` pointer (x0 at call time) to a concrete expression, `Expr::Unknown`
     // surfaces as a literal `?` in the first arg slot. For C++ methods the leading
