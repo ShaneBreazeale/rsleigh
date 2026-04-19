@@ -9994,7 +9994,14 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
         }
         Expr::FieldAccess(base, offset) => {
             let base_str = format_var_tracked(*base, ssa, ctx, tracker);
-            format!("{}->field_{:x}", base_str, offset)
+            // Wrap in parens when the base contains a top-level operator so the
+            // `->` binds to the full address expression rather than the last
+            // operand (e.g. `lVar + 16->field_4` → `(lVar + 16)->field_4`).
+            if needs_paren_for_arrow(&base_str) {
+                format!("({})->field_{:x}", base_str, offset)
+            } else {
+                format!("{}->field_{:x}", base_str, offset)
+            }
         }
         Expr::Ternary(cond, then_val, else_val) => {
             let c = format_var_tracked(*cond, ssa, ctx, tracker);
@@ -10950,8 +10957,11 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
         }
         Expr::FieldAccess(base, offset) => {
             let base_str = format_var(*base, ssa, ctx);
-            // Show as ->field_XX for pointer-based access
-            format!("{}->field_{:x}", base_str, offset)
+            if needs_paren_for_arrow(&base_str) {
+                format!("({})->field_{:x}", base_str, offset)
+            } else {
+                format!("{}->field_{:x}", base_str, offset)
+            }
         }
         Expr::Phi(inputs) => {
             if inputs.len() == 1 { return format_var(inputs[0], ssa, ctx); }
@@ -11523,6 +11533,33 @@ fn var_name(vn: &Varnode, ctx: &PrintCtx) -> String {
         AddressSpaceId::Ram => format!("mem_{:x}", vn.offset),
         AddressSpaceId::Const => format_const(vn.offset, 8),
     }
+}
+
+/// Decide whether an expression string needs parentheses before a `->` so that
+/// the arrow associates with the full address, not the last operand. A string
+/// needs parens if it contains a top-level binary operator outside any nested
+/// parentheses / brackets. Identifiers and simple references (e.g. `lVar1`,
+/// `*(addr)`, `DAT_X->field_0`, `name[idx]`) pass through unchanged.
+fn needs_paren_for_arrow(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut depth: i32 = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'(' || b == b'[' { depth += 1; }
+        else if b == b')' || b == b']' { depth -= 1; }
+        else if depth == 0 && b == b' ' {
+            let prev = if i > 0 { bytes[i - 1] } else { b' ' };
+            let next = bytes.get(i + 1).copied().unwrap_or(b' ');
+            if matches!(next, b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|' | b'^' | b'<' | b'>' | b'?' | b':')
+                && !prev.is_ascii_digit() && prev != b',' && prev != b'('
+            {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 fn resolve_to_const(mut id: VarId, ssa: &SsaCfg) -> Option<(u64, u32)> {
