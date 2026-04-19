@@ -9528,6 +9528,23 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Drop bare expression statements: `NAME;` where NAME is a simple
+    // identifier (no call, no operator) — dead reads left by pointer
+    // tracking when the register/stack load's result was never consumed.
+    // Keep `break;`, `continue;`, `return;` — those are real control flow.
+    lines.retain(|line| {
+        let t = line.trim();
+        if !t.ends_with(';') { return true; }
+        let body = t.trim_end_matches(';').trim();
+        if body.is_empty() { return true; }
+        // Simple identifier: alnum/underscore, starts alpha/underscore
+        let simple = body.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+            && body.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !simple { return true; }
+        if matches!(body, "break" | "continue" | "return") { return true; }
+        false
+    });
+
     // Final dead-deref pass — runs at the very end so any bare `*(x);` that
     // survived (including ones surfaced by late cast stripping, e.g.
     // `(uint)*(param_0);` → `*(param_0);`) is caught.
