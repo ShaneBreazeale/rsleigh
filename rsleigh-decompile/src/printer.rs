@@ -9565,6 +9565,18 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                     return;
                 }
             }
+            // Skip single-use intermediate register BinOp/UnaryOp assigns —
+            // their value is inlined at the use site by `format_var`, so
+            // emitting the Stmt::Assign here would duplicate the chain.
+            // Matches Ghidra's collapsed-chain output on shift/OR sequences.
+            if vdef.use_count == 1
+                && vdef.varnode.space == AddressSpaceId::Register
+                && vdef.param_name.is_none()
+                && !vdef.call_return
+                && matches!(&vdef.expr, Expr::BinOp(_, _, _) | Expr::UnaryOp(_, _))
+            {
+                return;
+            }
             if vdef.varnode.space == AddressSpaceId::Unique { return; }
             if vdef.varnode.space == AddressSpaceId::Register && is_flag(vdef.varnode.offset) { return; }
             // Skip unnamed Phi nodes; named loop Phis render as initialization (e.g., "iVar1 = 0")
@@ -11570,6 +11582,27 @@ fn format_var(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
         let t = format_var(*then_val, ssa, ctx);
         let e = format_var(*else_val, ssa, ctx);
         return format!("({}) ? {} : {}", c, t, e);
+    }
+
+    // Inline single-use intermediate register vars whose expression is pure
+    // arithmetic or a pure unary op. Matches Ghidra's collapsed-chain output
+    // on sequences like ARM32 byte-swap (`r1 = r1<<16; r1 &= 0xff0000; r1 |=
+    // r0<<24; ...`), which otherwise surfaced as 10+ intermediate assigns.
+    //
+    // Guarded to avoid collapsing cases that carry semantic weight outside
+    // the expression tree: parameter reads (`param_name` set), call return
+    // captures, memory loads (might alias), and Unknown (uninitialized).
+    if vdef.use_count == 1
+        && vdef.varnode.space == AddressSpaceId::Register
+        && vdef.param_name.is_none()
+        && !vdef.call_return
+    {
+        match &vdef.expr {
+            Expr::BinOp(_, _, _) | Expr::UnaryOp(_, _) => {
+                return format_expr(&vdef.expr, ssa, ctx);
+            }
+            _ => {}
+        }
     }
 
     var_name(&vdef.varnode, ctx)
