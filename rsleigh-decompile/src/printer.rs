@@ -8389,6 +8389,69 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Plain-deref → struct-field rewrite: `*(IDENT + N)` → `IDENT->field_<hex>`
+    // and `*(IDENT - N)` → `(IDENT - <hex>)->field_0` (rare). Runs on BOTH
+    // sides of `=` — read-side derefs like `while (*(lVar + 64) != 0)` become
+    // `while (lVar->field_40 != 0)` matching Ghidra's struct-field output.
+    // Only fires for a simple identifier base so complex expressions stay
+    // untouched.
+    for line in lines.iter_mut() {
+        let mut search_from = 0usize;
+        loop {
+            let Some(rel) = line[search_from..].find("*(") else { break };
+            let pos = search_from + rel;
+            // Don't match `*((uintN_t*)...` — typed form handled elsewhere.
+            let open_paren = pos + 2;
+            if line.as_bytes().get(open_paren).copied() == Some(b'(') {
+                search_from = pos + 2;
+                continue;
+            }
+            // Find matching close paren.
+            let mut depth = 1i32;
+            let mut close: Option<usize> = None;
+            for (i, b) in line[open_paren..].bytes().enumerate() {
+                if b == b'(' { depth += 1; }
+                else if b == b')' { depth -= 1; if depth == 0 { close = Some(open_paren + i); break; } }
+            }
+            let Some(close) = close else { break };
+            let inner = &line[open_paren..close];
+            // Split once on ` + ` or ` - `.
+            let (base, op, off_str) = if let Some(p) = inner.find(" + ") {
+                (&inner[..p], '+', &inner[p + 3..])
+            } else if let Some(p) = inner.find(" - ") {
+                (&inner[..p], '-', &inner[p + 3..])
+            } else {
+                search_from = close + 1;
+                continue;
+            };
+            // Base must be simple identifier.
+            let base = base.trim();
+            if base.is_empty()
+                || !base.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+                || !base.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                search_from = close + 1;
+                continue;
+            }
+            // Offset must parse as const.
+            let off_str = off_str.trim();
+            let off: Option<i64> = if let Some(h) = off_str.strip_prefix("0x") {
+                i64::from_str_radix(h, 16).ok()
+            } else if off_str.chars().all(|c| c.is_ascii_digit()) {
+                off_str.parse::<i64>().ok()
+            } else { None };
+            let Some(off) = off else { search_from = close + 1; continue; };
+            if op == '-' {
+                // Keep negative offsets as-is (rare).
+                search_from = close + 1;
+                continue;
+            }
+            let replacement = format!("{}->field_{:x}", base, off);
+            *line = format!("{}{}{}", &line[..pos], replacement, &line[close + 1..]);
+            search_from = pos + replacement.len();
+        }
+    }
+
     // Call-return → store substitution: a `LHS = ?;` line immediately after
     // `param_N = <call>(...);` is nearly always the store of the call's
     // return value to stack. SSA sees `Expr::Unknown` because
