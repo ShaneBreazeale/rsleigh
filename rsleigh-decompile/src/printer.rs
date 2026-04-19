@@ -713,7 +713,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
 
         // === EPILOGUE: register restores from stack ===
         // x30 = sp->field_8; or x30 = sp[N]->field_8; (link register restore)
-        if t.starts_with("x30 = sp") && t.ends_with(';') {
+        // Also catches *(sp)->field_8 (post-indexed LDP variant)
+        if (t.starts_with("x30 = sp") || t.starts_with("x30 = *(sp)")) && t.ends_with(';') {
             return false;
         }
         // lVarN = sp[N]; or lVarN = sp[N]->field_8; (callee-saved register reload)
@@ -731,7 +732,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
 
         // === RETURN via stack (epilogue return address load) ===
         // return sp->field_10->field_8; or return sp[N]->field_8;
-        if t.starts_with("return sp") && !t.contains("func_") && !t.contains("param_")
+        // Also catches return *(sp)->field_8; (post-indexed LDP variant)
+        if (t.starts_with("return sp") || t.starts_with("return *(sp)"))
+            && !t.contains("func_") && !t.contains("param_")
             && !t.contains("malloc") && !t.contains("strlen")
         {
             return false;
@@ -1336,6 +1339,144 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // AArch64 stack locals: `sp - N + M` and `(sp - N)->fieldM` → `local_M`.
+    //
+    // ARM64 prologue `stp x29, x30, [sp, #-N]!` decrements sp by N (the frame size).
+    // The SSA preserves the entry-block sp (sp_caller); references to sp_new appear
+    // as `sp - N`. Locals at offset M from the frame base appear as either:
+    //   * `sp - N + M`            (additive form, M may be hex `0x..`)
+    //   * `sp - N->fieldM`        (struct-field form when M was a small constant)
+    //   * `sp - N + M->fieldK`    (combined: actual offset = M + K)
+    // We detect the frame size N as the largest constant subtracted from sp anywhere
+    // in the function (the frame base is the deepest sp reference; smaller `sp - K`
+    // values are intermediate offsets within the frame).
+    {
+        // Phase 1: collect all `sp - N` constants in the function output.
+        let mut sp_subs: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+        for line in lines.iter() {
+            let mut s = line.as_str();
+            while let Some(pos) = s.find("sp - ") {
+                let after = &s[pos + 5..];
+                // Parse the constant: decimal or 0xHEX, terminated by non-hex/non-digit
+                let (num_str, parsed): (&str, Option<u64>) = if after.starts_with("0x") {
+                    let rest = &after[2..];
+                    let end = rest.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(rest.len());
+                    (&rest[..end], u64::from_str_radix(&rest[..end], 16).ok())
+                } else {
+                    let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+                    (&after[..end], after[..end].parse::<u64>().ok())
+                };
+                if let Some(n) = parsed {
+                    if n > 0 { sp_subs.insert(n); }
+                }
+                s = if after.starts_with("0x") {
+                    &after[2 + num_str.len()..]
+                } else {
+                    &after[num_str.len()..]
+                };
+            }
+        }
+        // The frame size is the largest `sp - N` constant (locals live within `[sp_new, sp_new+N)`,
+        // so any address inside the frame appears as `sp - K` with K ≤ N).
+        if let Some(&frame_size) = sp_subs.iter().next_back() {
+            let pat_field = format!("sp - {}->field_", frame_size);
+            let pat_hex_field = format!("sp - 0x{:x}->field_", frame_size);
+            let pat_plus = format!("sp - {} + ", frame_size);
+            let pat_hex_plus = format!("sp - 0x{:x} + ", frame_size);
+            let pat_bare = format!("sp - {}", frame_size);
+            let pat_hex_bare = format!("sp - 0x{:x}", frame_size);
+            // Helper: emit local name from hex offset (canonical form)
+            let local_name = |offset: u64| -> String { format!("local_{:x}", offset) };
+            for line in lines.iter_mut() {
+                // (sp - N)->fieldM and sp - N->field_M → local_M (M is hex)
+                for pat in [&pat_field, &pat_hex_field] {
+                    while let Some(pos) = line.find(pat.as_str()) {
+                        let after = &line[pos + pat.len()..];
+                        let end = after.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(after.len());
+                        if end == 0 { break; }
+                        if let Ok(off) = u64::from_str_radix(&after[..end], 16) {
+                            let replacement = local_name(off);
+                            *line = format!("{}{}{}", &line[..pos], replacement, &line[pos + pat.len() + end..]);
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                // sp - N + M → local_M (M is decimal or 0xHEX)
+                for pat in [&pat_plus, &pat_hex_plus] {
+                    while let Some(pos) = line.find(pat.as_str()) {
+                        let after = &line[pos + pat.len()..];
+                        let (num_len, parsed): (usize, Option<u64>) = if after.starts_with("0x") {
+                            let rest = &after[2..];
+                            let end = rest.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(rest.len());
+                            (2 + end, u64::from_str_radix(&rest[..end], 16).ok())
+                        } else {
+                            let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+                            (end, after[..end].parse::<u64>().ok())
+                        };
+                        if num_len == 0 { break; }
+                        if let Some(off) = parsed {
+                            let replacement = local_name(off);
+                            *line = format!("{}{}{}", &line[..pos], replacement, &line[pos + pat.len() + num_len..]);
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                // Bare `sp - N` (no further +/-> ) → local_0 (frame base itself)
+                for pat in [&pat_bare, &pat_hex_bare] {
+                    while let Some(pos) = line.find(pat.as_str()) {
+                        let after_pos = pos + pat.len();
+                        let next = line.as_bytes().get(after_pos).copied().unwrap_or(b' ');
+                        // Don't match if this `sp - N` is followed by another digit/hex
+                        // (could be part of a longer constant) or by `->` (handled above)
+                        // or by ` + ` / ` - ` (handled above)
+                        if next.is_ascii_alphanumeric() || next == b'-' || next == b'+' { break; }
+                        let replacement = local_name(0);
+                        *line = format!("{}{}{}", &line[..pos], replacement, &line[after_pos..]);
+                    }
+                }
+                // `sp + M` (where SSA used the post-prologue sp directly, equivalent to
+                // sp_v1 + M = local_M). Only transform when M ≤ frame_size — a sane
+                // local lives within the frame; M > frame_size would cross into caller
+                // argument area and is left alone to avoid false positives.
+                let pat_sp_plus = "sp + ";
+                let mut search_from = 0usize;
+                while let Some(rel) = line[search_from..].find(pat_sp_plus) {
+                    let pos = search_from + rel;
+                    // Avoid matching inside a longer identifier like "lsp +"
+                    let prev = if pos == 0 { b' ' } else { line.as_bytes()[pos - 1] };
+                    if prev.is_ascii_alphanumeric() || prev == b'_' {
+                        search_from = pos + pat_sp_plus.len();
+                        continue;
+                    }
+                    let after = &line[pos + pat_sp_plus.len()..];
+                    let (num_len, parsed): (usize, Option<u64>) = if after.starts_with("0x") {
+                        let rest = &after[2..];
+                        let end = rest.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(rest.len());
+                        (2 + end, u64::from_str_radix(&rest[..end], 16).ok())
+                    } else {
+                        let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+                        (end, after[..end].parse::<u64>().ok())
+                    };
+                    if num_len == 0 || parsed.is_none() {
+                        search_from = pos + pat_sp_plus.len();
+                        continue;
+                    }
+                    let off = parsed.unwrap();
+                    if off == 0 || off > frame_size {
+                        search_from = pos + pat_sp_plus.len();
+                        continue;
+                    }
+                    let replacement = local_name(off);
+                    let new_line = format!("{}{}{}", &line[..pos], replacement, &line[pos + pat_sp_plus.len() + num_len..]);
+                    search_from = pos + replacement.len();
+                    *line = new_line;
+                }
+            }
+        }
+    }
+
     // Simplify "param_NNN[RSP ...]" and "N + RSP" patterns.
     // These are stack-relative accesses. Replace with local variable names.
     // param_48[RSP] → local_30 (decimal 48 = hex 0x30)
@@ -1437,11 +1578,48 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         if t.starts_with("*(uint64_t*)(sp)") && t.ends_with(';')
             && (t.contains("= x") || t.contains("= lVar") || t.contains("= 0"))
         { return false; }
-        // Frame pointer setup: x29 = sp + N;
-        if t.starts_with("x29 = sp") && t.ends_with(';') { return false; }
+        // Frame pointer write: x29 = <anything>; — in AArch64, x29 is always the frame
+        // pointer, never a C-level variable. Writes to it are prologue setup or epilogue
+        // restore. Elide them all so struct-field-renamed epilogue loads go away too.
+        if t.starts_with("x29 = ") && t.ends_with(';') { return false; }
+        // Link register write: x30 = <anything>; — x30 is always the return address;
+        // any write is epilogue restore after the sp-based pattern was rewritten via
+        // struct-field naming (e.g. `x30 = iVar1->lpSecurityDescriptor;`).
+        if t.starts_with("x30 = ") && t.ends_with(';') { return false; }
+        // Frame pointer computation: `iVarN = sp - N;` or `lVarN = sp - N;`
+        // This is `x29 = sp` after the prologue push decremented sp — pure boilerplate.
+        if (t.starts_with("iVar") || t.starts_with("lVar"))
+            && t.contains(" = sp - ") && t.ends_with(';')
+            && !t.contains("(") && !t.contains("[")
+        {
+            let rhs = t.split(" = sp - ").nth(1).unwrap_or("").trim_end_matches(';').trim();
+            if rhs.chars().all(|c| c.is_ascii_hexdigit() || c == 'x' || c == 'X') {
+                return false;
+            }
+        }
+        // Frame pointer adjustment: `iVarN = iVarN + N;` (sp cleanup mirror in epilogue).
+        {
+            let core = t.trim_end_matches(';');
+            if let Some((lhs, rhs)) = core.split_once(" = ") {
+                let lhs = lhs.trim();
+                let rhs = rhs.trim();
+                if (lhs.starts_with("iVar") || lhs.starts_with("lVar"))
+                    && rhs.starts_with(lhs)
+                    && (rhs[lhs.len()..].starts_with(" + ") || rhs[lhs.len()..].starts_with(" - "))
+                {
+                    let tail = rhs[lhs.len()+3..].trim();
+                    if tail.chars().all(|c| c.is_ascii_hexdigit() || c == 'x' || c == 'X') {
+                        return false;
+                    }
+                }
+            }
+        }
         // Stack allocation: sp = sp + N; sp = sp - N; sp = param_-N;
+        // After the AArch64 `sp - N → local_N` rewrite, this also catches
+        // `sp = local_0;` (the rewritten form of `sp = sp - frame_size;`).
         if t.starts_with("sp = sp ") && t.ends_with(';') { return false; }
         if t.starts_with("sp = param_") && t.ends_with(';') { return false; }
+        if t.starts_with("sp = local_") && t.ends_with(';') { return false; }
         // Return via link register: return sp[N]->field_8; (epilogue pattern)
         if t.starts_with("return sp") && t.contains("->field_8") { return false; }
         // ObjC ARC noise
@@ -7365,16 +7543,62 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         {
             return false;
         }
-        // x30 = sp[N]->field_8; or x30 = sp->field_8; (link register restore)
-        if t.starts_with("x30 = sp") && t.ends_with(';') { return false; }
-        // return sp... patterns (epilogue return address)
-        if t.starts_with("return sp") && t.ends_with(';')
+        // x29/x30 writes are always AArch64 frame pointer / link register boilerplate.
+        // This catches the case where struct field naming rewrote the RHS away from sp[].
+        if (t.starts_with("x29 = ") || t.starts_with("x30 = ")) && t.ends_with(';') {
+            return false;
+        }
+        // return sp... patterns (epilogue return address), including *(sp) variant
+        if (t.starts_with("return sp") || t.starts_with("return *(sp)")) && t.ends_with(';')
             && !t.contains("func_") && !t.contains("param_")
         {
             return false;
         }
         true
     });
+
+    // Elide dead ADRP-intermediate constants. ADRP sets a register to a page-aligned
+    // address (always a multiple of 0x1000, e.g., 0x558000). The subsequent LDR or ADD
+    // uses it to compute a GOT/string/global address. After constant folding, the LDR
+    // result is substituted inline as `DAT_00558920->...`, and the original ADRP
+    // assignment becomes dead — but survives in the printed output because it was
+    // written to a named register, not an SSA temp.
+    //
+    // Heuristic: a line of the form `xN = 0xNNN000;` (raw architectural register =
+    // page-aligned hex constant) is always ADRP residue. In clean C code, such a literal
+    // page-aligned address would never be assigned to a bare register — legitimate uses
+    // go through named locals or DAT_/string labels.
+    {
+        let looks_like_adrp_line = |t: &str| -> bool {
+            if !t.ends_with(';') { return false; }
+            let core = t.trim_end_matches(';');
+            let (lhs, rhs) = match core.split_once(" = ") {
+                Some(pair) => pair,
+                None => return false,
+            };
+            let lhs = lhs.trim();
+            let rhs = rhs.trim();
+            // LHS must be a raw AArch64 register (x0..x30, w0..w30) OR a renamed
+            // AArch64 param/local register alias (param_0..param_7, lVarN, iVarN).
+            // Raw page-aligned address literals never legitimately flow to these.
+            let is_xreg = (lhs.starts_with('x') || lhs.starts_with('w'))
+                && lhs.len() >= 2
+                && lhs[1..].chars().all(|c| c.is_ascii_digit())
+                && lhs[1..].parse::<u32>().map(|n| n <= 30).unwrap_or(false);
+            let is_param_alias = lhs.starts_with("param_")
+                && lhs[6..].chars().all(|c| c.is_ascii_digit());
+            let is_local_alias = (lhs.starts_with("lVar") || lhs.starts_with("iVar"))
+                && lhs[4..].chars().all(|c| c.is_ascii_alphanumeric());
+            if !(is_xreg || is_param_alias || is_local_alias) { return false; }
+            // RHS must be `0xHEX` ending in `000` (page-aligned, at least 0x1000)
+            if !rhs.starts_with("0x") { return false; }
+            let hex = &rhs[2..];
+            if hex.len() < 4 { return false; } // at least 0x1000
+            if !hex.chars().all(|c| c.is_ascii_hexdigit()) { return false; }
+            hex.ends_with("000")
+        };
+        lines.retain(|line| !looks_like_adrp_line(line.trim()));
+    }
 
     // Final pass: fold sequential assignments to the same variable.
     // REG = X; REG = Y op REG → REG = Y op X (after all other cleanup)
@@ -7572,11 +7796,16 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     continue;
                 }
 
-                // Replace bare x0-x7 with param_0-param_7 when used as values.
-                // Use word-boundary matching to avoid replacing inside longer names.
-                for reg_idx in 0..=7u64 {
+                // Replace bare x0-x(N-1) with param_0-param_(N-1) when used as values.
+                // N is the SSA-detected parameter count from `param_names`. Registers
+                // beyond that count (xN..x7) are NOT function parameters in this
+                // function — they were written before being read (e.g., via ADRP+LDR
+                // setting up GOT pointers). Renaming them to param_N would be wrong.
+                // If `param_names` carries DWARF names, use those instead of `param_N`.
+                let aarch64_param_count = param_names.len().min(8);
+                for reg_idx in 0..aarch64_param_count as u64 {
                     let reg = format!("x{}", reg_idx);
-                    let param = format!("param_{}", reg_idx);
+                    let param = param_names[reg_idx as usize].clone();
                     if !line.contains(&reg) { continue; }
                     // Replace with word-boundary awareness
                     let mut new_line = String::new();
@@ -7630,6 +7859,48 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         new = new.replace(&pat, &rep);
                     }
                     *line = new;
+                }
+            }
+        }
+    }
+
+    // Renumber leaked Unique-space temporaries (`tmp_<huge_hex>`) to per-function
+    // counters (`tmp_0`, `tmp_1`, ...). The huge hex offsets are SLEIGH unique-space
+    // identifiers (instruction-address << 16 | bit-offset) — meaningful to the codegen
+    // but visually noisy in output. The temp names that survive to here are
+    // multi-use Unique varnodes (single-use ones get inlined by fold.rs Pass 3),
+    // typically Phi-derived flag bits in loop conditions; renumbering preserves
+    // the substitution (so equal temps remain visibly equal) while making the
+    // names readable.
+    {
+        let mut tmp_map: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+        let mut next_idx: usize = 0;
+        // Phase 1: collect distinct tmp_HEX names (only those with long hex offsets,
+        // so we don't accidentally renumber a meaningful `tmp_0` already in use).
+        for line in lines.iter() {
+            let mut s = line.as_str();
+            while let Some(pos) = s.find("tmp_") {
+                let after = &s[pos + 4..];
+                let end = after.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(after.len());
+                if end >= 4 {
+                    let original = format!("tmp_{}", &after[..end]);
+                    tmp_map.entry(original).or_insert_with(|| {
+                        let n = next_idx;
+                        next_idx += 1;
+                        format!("tmp_{}", n)
+                    });
+                }
+                s = &after[end..];
+            }
+        }
+        // Phase 2: substitute. Iterate the map in insertion order (BTreeMap orders
+        // by key, but each new value is unique so order doesn't matter for replace).
+        if !tmp_map.is_empty() {
+            for line in lines.iter_mut() {
+                for (orig, new) in &tmp_map {
+                    if line.contains(orig.as_str()) {
+                        *line = line.replace(orig.as_str(), new.as_str());
+                    }
                 }
             }
         }

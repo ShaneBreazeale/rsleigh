@@ -1001,8 +1001,54 @@ impl<'a> ExecutionGenerator<'a> {
                             None => (quote! { pcode_ir::Varnode::constant(0, #sz) }, quote! {}),
                         }
                     }
-                    ReferencedValue::Table(_) => {
-                        (quote! { pcode_ir::Varnode::constant(0, #sz) }, quote! {})
+                    ReferencedValue::Table(table_id) => {
+                        // &table: take the address of what the subtable exports.
+                        // For `export *[const]:8 reloff` (e.g. AdrReloff in ADRP/ADR),
+                        // the subtable emits a Subpiece/Copy writing a Const into a Unique
+                        // varnode and sets export_varnode. Scan ops backward to recover it.
+                        match self.constructor.table_fields.get(&table_id.id) {
+                            Some(field) => {
+                                let cache_ref = format_ident!("{}_ref", field);
+                                let cache_exp = format_ident!("{}_exp", field);
+                                let sz_val = sz;
+                                let var_name = format_ident!("table_addrof_{}", {
+                                    let c = self.unique_counter.get();
+                                    self.unique_counter.set(c + 1);
+                                    c
+                                });
+                                (
+                                    quote! { #var_name },
+                                    quote! {
+                                        let #var_name = if let Some((_ref_space, ref_ptr, _ref_sz)) = #cache_ref {
+                                            pcode_ir::Varnode::constant(ref_ptr.offset, #sz_val)
+                                        } else if let Some(exp) = #cache_exp {
+                                            if exp.space == pcode_ir::AddressSpaceId::Unique {
+                                                let mut addr = 0u64;
+                                                for op in ops.iter().rev() {
+                                                    match op {
+                                                        pcode_ir::PcodeOp::Subpiece { out, input, .. }
+                                                        | pcode_ir::PcodeOp::Copy { out, input }
+                                                            if *out == exp
+                                                                && input.space == pcode_ir::AddressSpaceId::Const =>
+                                                        {
+                                                            addr = input.offset;
+                                                            break;
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                                pcode_ir::Varnode::constant(addr, #sz_val)
+                                            } else {
+                                                exp
+                                            }
+                                        } else {
+                                            pcode_ir::Varnode::constant(0, #sz_val)
+                                        };
+                                    },
+                                )
+                            }
+                            None => (quote! { pcode_ir::Varnode::constant(0, #sz) }, quote! {}),
+                        }
                     }
                 }
             }
