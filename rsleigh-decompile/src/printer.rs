@@ -45,12 +45,27 @@ pub fn print_c_with_try(
     // a function-level summary is cheaper and still pinpoints where exception
     // handlers live for cross-referencing with the disassembly.
     if !ctx.try_regions.is_empty() {
-        out.push_str("    /* try/catch regions:\n");
-        for tr in ctx.try_regions {
+        // For small-to-moderate sets, list every region. Above a threshold
+        // collapse to a count + first N so large main()-style functions
+        // (nekoray Qt app: 60+ entries) don't drown the body under the
+        // summary. Analyst can always get full list from objdump/Ghidra.
+        const MAX_INLINE: usize = 10;
+        out.push_str("    /* try/catch regions");
+        if ctx.try_regions.len() > MAX_INLINE {
+            out.push_str(&format!(" ({} total, showing first {}):\n",
+                                   ctx.try_regions.len(), MAX_INLINE));
+        } else {
+            out.push_str(":\n");
+        }
+        for tr in ctx.try_regions.iter().take(MAX_INLINE) {
             out.push_str(&format!(
                 "     *   try [0x{:x} .. 0x{:x}) -> catch @ 0x{:x}\n",
                 tr.start, tr.end, tr.landing_pad,
             ));
+        }
+        if ctx.try_regions.len() > MAX_INLINE {
+            out.push_str(&format!("     *   ... {} more\n",
+                                   ctx.try_regions.len() - MAX_INLINE));
         }
         out.push_str("     */\n");
     }
