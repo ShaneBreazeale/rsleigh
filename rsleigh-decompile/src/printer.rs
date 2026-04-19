@@ -8389,6 +8389,56 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Call-return → store substitution: a `LHS = ?;` line immediately after
+    // `param_N = <call>(...);` is nearly always the store of the call's
+    // return value to stack. SSA sees `Expr::Unknown` because
+    // `clobber_caller_saved` inserts a fresh placeholder var at the return
+    // register, and the subsequent Store reads that placeholder. Substitute
+    // the just-assigned `param_N` so the store shows the actual value.
+    {
+        let mut i = 0usize;
+        while i + 1 < lines.len() {
+            let t_prev = lines[i].trim();
+            let t_cur = lines[i + 1].trim();
+            // Prev line: `IDENT = <call_expr>;` — call expression ends in `)`
+            //            and the LHS is a param_N or simple ident.
+            let Some((prev_lhs, prev_rhs)) = t_prev.trim_end_matches(';').split_once(" = ") else {
+                i += 1; continue;
+            };
+            let prev_lhs = prev_lhs.trim();
+            let prev_rhs = prev_rhs.trim();
+            // Only consider call-like RHS (ends with `)` and contains `(`).
+            if !prev_rhs.ends_with(')') || !prev_rhs.contains('(') {
+                i += 1; continue;
+            }
+            // LHS must be a simple identifier.
+            if prev_lhs.is_empty()
+                || prev_lhs.contains(' ') || prev_lhs.contains('-')
+                || prev_lhs.contains('[') || prev_lhs.contains('.')
+            {
+                i += 1; continue;
+            }
+            // Current line: `SOMETHING = ?;` — strip the placeholder.
+            if !t_cur.ends_with(" = ?;") {
+                i += 1; continue;
+            }
+            // Apply substitution preserving indentation.
+            let indent = lines[i + 1].len() - lines[i + 1].trim_start().len();
+            let pad = " ".repeat(indent);
+            let new_tail = format!("{};", prev_lhs);
+            let fixed = lines[i + 1].trim_end_matches(" = ?;\n").to_string();
+            // Simpler: replace `= ?;` with `= <prev_lhs>;`
+            let orig = &lines[i + 1];
+            if let Some(eq_pos) = orig.rfind(" = ?;") {
+                lines[i + 1] = format!("{} = {};", &orig[..eq_pos], prev_lhs)
+                    .replacen("", "", 0); // no-op, just makes ownership clean
+                // preserve trailing newline if any
+                let _ = pad; let _ = new_tail; let _ = fixed;
+            }
+            i += 1;
+        }
+    }
+
     // Boolean-identity cleanup: `X == 0 == 1` → `X == 0` and `X != 0 == 1`
     // → `X != 0`. Surfaces when SLEIGH bit-test + compare-against-true gets
     // emitted literally. Also fold `X == 1 == 1` → `X == 1` and flip
