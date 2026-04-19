@@ -450,10 +450,25 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
         .collect();
 
     if func_args.is_empty() && !all_mode && !disasm_mode {
-        // List functions
+        // List functions. Hide CRT-internal / runtime glue whose names start
+        // with a single `_` (`_init`, `_fini`, `_start`, `_dl_*`, etc.) but
+        // KEEP demangled-candidate symbols starting with `_Z` / `__Z` (C++
+        // Itanium mangling) / `_GLOBAL_` (GCC static init) since those are
+        // the real program surface area.
         let funcs: Vec<(&str, u64)> = symbols.iter()
-            .filter(|(_, n)| !n.starts_with('_') && !n.starts_with("dyld")
-                && !HIDDEN.contains(&n.as_str()) && !n.is_empty())
+            .filter(|(_, n)| {
+                if n.is_empty() { return false; }
+                if n.starts_with("dyld") { return false; }
+                if HIDDEN.contains(&n.as_str()) { return false; }
+                // Allow C++ / Itanium / Swift / static-init names.
+                if n.starts_with("_Z") || n.starts_with("__Z")
+                    || n.starts_with("_GLOBAL_") || n.starts_with("$s")
+                    || n.starts_with("_$s")
+                { return true; }
+                // Hide other single-underscore runtime glue.
+                if n.starts_with('_') { return false; }
+                true
+            })
             .map(|(a, n)| (n.as_str(), *a))
             .collect();
 
@@ -1834,6 +1849,35 @@ fn run_callgraph(binary_path: &str, data: &[u8]) {
     })).unwrap());
 }
 
+/// Demangle a C++/Swift symbol name for display, falling back to the raw
+/// name when demangling fails. Strips the parameter list tail to keep the
+/// one-line listing compact: `QObject::connect(QObject const*, ...)` →
+/// `QObject::connect`. `.cold.NN` / `.part.NN` / `.constprop.N` suffixes
+/// (GCC IPA clones) are preserved so the analyst can distinguish variants.
+fn demangle_symbol(name: &str) -> String {
+    // Keep GCC/clang IPA suffixes intact on the original-name fallback.
+    let (core, suffix) = match name.find('.') {
+        Some(p) if name[p..].starts_with(".cold")
+            || name[p..].starts_with(".part")
+            || name[p..].starts_with(".constprop")
+            || name[p..].starts_with(".isra")
+            || name[p..].starts_with(".lto_priv")
+        => (&name[..p], &name[p..]),
+        _ => (name, ""),
+    };
+    if !(core.starts_with("_Z") || core.starts_with("__Z")) {
+        return name.to_string();
+    }
+    let Ok(sym) = cpp_demangle::Symbol::new(core.as_bytes()) else { return name.to_string(); };
+    let Ok(demangled) = sym.demangle(&cpp_demangle::DemangleOptions::default()) else { return name.to_string(); };
+    // Trim parameter list — matching rsleigh-decompile::imports::demangle_name.
+    let pretty = if let Some(paren) = demangled.find('(') {
+        let before = &demangled[..paren];
+        if !before.is_empty() && !before.ends_with('>') { before.to_string() } else { demangled }
+    } else { demangled };
+    if suffix.is_empty() { pretty } else { format!("{}{}", pretty, suffix) }
+}
+
 /// Compute MD5 hash of data, return lowercase hex string.
 fn compute_md5(data: &[u8]) -> String {
     use md5::{Digest, Md5};
@@ -2523,14 +2567,18 @@ fn parse_binary(obj: &goblin::Object, _data: &[u8]) -> Option<(rsleigh_api::Arch
             for sym in elf.syms.iter() {
                 if sym.st_type() == goblin::elf::sym::STT_FUNC && sym.st_value != 0 {
                     if let Some(name) = elf.strtab.get_at(sym.st_name) {
-                        if !name.is_empty() { syms.push((sym.st_value, name.to_string())); }
+                        if !name.is_empty() {
+                            syms.push((sym.st_value, demangle_symbol(name)));
+                        }
                     }
                 }
             }
             for sym in elf.dynsyms.iter() {
                 if sym.st_type() == goblin::elf::sym::STT_FUNC && sym.st_value != 0 {
                     if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
-                        if !name.is_empty() { syms.push((sym.st_value, name.to_string())); }
+                        if !name.is_empty() {
+                            syms.push((sym.st_value, demangle_symbol(name)));
+                        }
                     }
                 }
             }
