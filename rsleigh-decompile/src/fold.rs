@@ -422,7 +422,7 @@ fn eval_expr(expr: &Expr, vars: &[VarDef], env: &std::collections::HashMap<u32, 
     if depth > 20 { return None; }
     match expr {
         Expr::Const(val, _) => Some(*val & mask),
-        Expr::Unknown | Expr::Load(_) | Expr::Phi(_) | Expr::FieldAccess(_, _) | Expr::Ternary(_, _, _) => None,
+        Expr::Unknown | Expr::Load(_) | Expr::Phi(_) | Expr::FieldAccess(_, _) | Expr::Ternary(_, _, _) | Expr::UserOp { .. } => None,
         Expr::Var(id) => {
             if let Some(&val) = env.get(&id.0) {
                 Some(val & mask)
@@ -1493,8 +1493,14 @@ fn eliminate_dead(ssa: &mut SsaCfg) {
                         && vdef.use_count == 0
                     { dead_indices.push(i); continue; }
 
-                    // Dead uniques
-                    if vdef.varnode.space == AddressSpaceId::Unique && vdef.use_count == 0 {
+                    // Dead uniques — but preserve UserOp placeholders (void
+                    // CallOther / SLEIGH user pcodeops). They have side
+                    // effects outside the SSA model (e.g. software_interrupt)
+                    // and removing them drops critical analyst info.
+                    if vdef.varnode.space == AddressSpaceId::Unique
+                        && vdef.use_count == 0
+                        && !matches!(&vdef.expr, Expr::UserOp { .. })
+                    {
                         dead_indices.push(i); continue;
                     }
 
@@ -3046,6 +3052,7 @@ pub(crate) fn recount_uses(ssa: &mut SsaCfg) {
             Expr::UnaryOp(_, i) | Expr::Load(i) | Expr::FieldAccess(i, _) => use_counts[i.0 as usize] += 1,
             Expr::Phi(inputs) => { for i in inputs { use_counts[i.0 as usize] += 1; } }
             Expr::Ternary(c, t, e) => { use_counts[c.0 as usize] += 1; use_counts[t.0 as usize] += 1; use_counts[e.0 as usize] += 1; }
+            Expr::UserOp { inputs, .. } => { for i in inputs { use_counts[i.0 as usize] += 1; } }
             Expr::Const(_, _) | Expr::Unknown => {}
         }
     }

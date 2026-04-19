@@ -135,6 +135,11 @@ pub enum Expr {
     /// Conditional select: cond != 0 ? then_val : else_val
     /// Generated from AArch64 CSEL-family intra-instruction CBranch patterns.
     Ternary(VarId, VarId, VarId),
+    /// User-defined pcodeop / CALLOTHER. Corresponds to SLEIGH
+    /// `define pcodeop` declarations (e.g. `software_interrupt`,
+    /// `supervisor_call`). `func_id` is the SLEIGH user-function index;
+    /// printer maps well-known IDs to readable names.
+    UserOp { func_id: u64, inputs: Vec<VarId> },
     Unknown,
 }
 

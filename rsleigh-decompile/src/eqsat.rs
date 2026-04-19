@@ -174,7 +174,7 @@ pub fn ssa_to_egg(
         let vdef = &vars[v];
         match &vdef.expr {
             Expr::Const(val, _) => Some(expr.add(Mba::Num(*val as i64))),
-            Expr::Unknown | Expr::Load(_) | Expr::Phi(_) | Expr::FieldAccess(_, _) | Expr::Ternary(_, _, _) => {
+            Expr::Unknown | Expr::Load(_) | Expr::Phi(_) | Expr::FieldAccess(_, _) | Expr::Ternary(_, _, _) | Expr::UserOp { .. } => {
                 // Base variable — assign an index
                 let idx = var_map.len();
                 var_map.push(VarId(v as u32));

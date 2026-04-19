@@ -637,6 +637,29 @@ fn process_op(
             }
             stmts.push(Stmt::Store { addr: addr_var, val: val_var });
         }
+        PcodeOp::CallOther { func_id, inputs, out: None } => {
+            // Void user-pcodeop (e.g. `software_interrupt(0x71)` on ARM swi).
+            // Emit as a statement even though there's no output varnode — the
+            // side effect itself is meaningful (it changes machine state the
+            // decompiler cannot model, so surfacing the call keeps the
+            // analyst informed).
+            let resolved: Vec<VarId> = inputs.iter()
+                .map(|vn| resolve_input(ssa, current, vn))
+                .collect();
+            // Allocate a synthetic var to hold the UserOp expr so the printer
+            // can process it through the usual Stmt::Assign path.
+            let placeholder_vn = Varnode {
+                space: AddressSpaceId::Unique,
+                offset: u64::MAX - func_id,
+                size: 0,
+            };
+            let var_id = ssa.new_var(
+                placeholder_vn,
+                Expr::UserOp { func_id, inputs: resolved },
+                0,
+            );
+            stmts.push(Stmt::Assign(var_id));
+        }
         ref op => {
             if let Some(out_vn) = get_output(op) {
                 let expr = if let PcodeOp::Load { ptr, .. } = op {
@@ -731,6 +754,12 @@ fn relink_expr(expr: &Expr, relink: &HashMap<VarId, VarId>) -> Expr {
         }
         Expr::Phi(inputs) => {
             Expr::Phi(inputs.iter().map(|i| *relink.get(i).unwrap_or(i)).collect())
+        }
+        Expr::UserOp { func_id, inputs } => {
+            Expr::UserOp {
+                func_id: *func_id,
+                inputs: inputs.iter().map(|i| *relink.get(i).unwrap_or(i)).collect(),
+            }
         }
         _ => expr.clone(),
     }
@@ -968,6 +997,12 @@ fn build_expr(ssa: &mut SsaCfg, current: &mut HashMap<Varnode, VarId>, op: &Pcod
         PcodeOp::FloatRound { input, .. } => unary!(FloatRound, input),
         PcodeOp::Popcount { input, .. } => unary!(Popcount, input),
         PcodeOp::Lzcount { input, .. } => unary!(Lzcount, input),
+        PcodeOp::CallOther { func_id, inputs, .. } => {
+            let resolved: Vec<VarId> = inputs.iter()
+                .map(|vn| resolve_input(ssa, current, vn))
+                .collect();
+            Expr::UserOp { func_id: *func_id, inputs: resolved }
+        }
         PcodeOp::Subpiece { input, lsb, out: _ } => {
             let i = resolve_input(ssa, current, input);
             if *lsb == 0 {
@@ -1134,6 +1169,7 @@ fn collect_expr_refs(expr: &Expr) -> Vec<VarId> {
         Expr::UnaryOp(_, i) | Expr::Load(i) | Expr::FieldAccess(i, _) => vec![*i],
         Expr::Phi(inputs) => inputs.clone(),
         Expr::Ternary(c, t, e) => vec![*c, *t, *e],
+        Expr::UserOp { inputs, .. } => inputs.clone(),
         Expr::Const(_, _) | Expr::Unknown => vec![],
     }
 }

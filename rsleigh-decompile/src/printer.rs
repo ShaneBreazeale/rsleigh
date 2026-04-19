@@ -9553,6 +9553,18 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
     match stmt {
         StructuredStmt::Assign { lhs, .. } => {
             let vdef = ssa.var(*lhs);
+            // Void user-pcodeop sentinel: Unique-space placeholder with size 0
+            // and a UserOp expr. Emit as standalone call statement.
+            if vdef.varnode.space == AddressSpaceId::Unique && vdef.size == 0 {
+                if let Expr::UserOp { func_id, inputs } = &vdef.expr {
+                    let name = pcodeop_name(ctx.arch, *func_id);
+                    let args: Vec<String> = inputs.iter()
+                        .map(|v| format_var_tracked(*v, ssa, ctx, tracker))
+                        .collect();
+                    out.push_str(&format!("{}{}({});\n", pad, name, args.join(", ")));
+                    return;
+                }
+            }
             if vdef.varnode.space == AddressSpaceId::Unique { return; }
             if vdef.varnode.space == AddressSpaceId::Register && is_flag(vdef.varnode.offset) { return; }
             // Skip unnamed Phi nodes; named loop Phis render as initialization (e.g., "iVar1 = 0")
@@ -11764,8 +11776,59 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
             let e = format_var(*else_val, ssa, ctx);
             format!("({}) ? {} : {}", c, t, e)
         }
+        Expr::UserOp { func_id, inputs } => {
+            let name = pcodeop_name(ctx.arch, *func_id);
+            let args: Vec<String> = inputs.iter()
+                .map(|v| format_var(*v, ssa, ctx))
+                .collect();
+            format!("{}({})", name, args.join(", "))
+        }
         Expr::Unknown => "?".to_string(),
     }
+}
+
+/// Map SLEIGH user-function id → readable name. The id is the zero-based
+/// declaration order of `define pcodeop` lines in the slaspec for the active
+/// architecture; names shown match Ghidra's convention so the analyst can
+/// cross-reference.
+fn pcodeop_name(arch: Architecture, id: u64) -> String {
+    // Hardcoded mapping of the most common ARM32 user pcodeops. IDs match the
+    // declaration order in slaspec/ARM/ARM_base.sinc. If rsleigh's slaspec
+    // shifts ids in the future, the `pcodeop_N` fallback keeps the reference
+    // intact for the analyst.
+    if matches!(arch, Architecture::ARM32) {
+        const ARM32_PCODEOPS: &[&str] = &[
+            "coprocessor_function",        // 0
+            "coprocessor_function2",       // 1
+            "coprocessor_load",            // 2
+            "coprocessor_load2",           // 3
+            "coprocessor_loadlong",        // 4
+            "coprocessor_loadlong2",       // 5
+            "coprocessor_moveto",          // 6
+            "coprocessor_moveto2",         // 7
+            "coprocessor_movefromRt",      // 8
+            "coprocessor_movefromRt2",     // 9
+            "coprocessor_movefrom2",       // 10
+            "coprocessor_store",           // 11
+            "coprocessor_store2",          // 12
+            "coprocessor_storelong",       // 13
+            "coprocessor_storelong2",      // 14
+            "software_interrupt",          // 15
+            "software_bkpt",               // 16
+            "software_udf",                // 17
+            "software_hlt",                // 18
+            "software_hvc",                // 19
+            "software_smc",                // 20
+            "setUserMode",                 // 21
+            "setFIQMode",                  // 22
+            "setIRQMode",                  // 23
+            "setSupervisorMode",           // 24
+        ];
+        if let Some(&name) = ARM32_PCODEOPS.get(id as usize) {
+            return name.to_string();
+        }
+    }
+    format!("pcodeop_{}", id)
 }
 
 fn format_const_ctx(val: u64, size: u32, ctx: &PrintCtx) -> String {
