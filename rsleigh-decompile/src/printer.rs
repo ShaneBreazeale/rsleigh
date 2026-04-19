@@ -8864,7 +8864,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // noise. Strip the cast when it wraps a simple memory reference (but keep
     // casts around expressions/signed conversions where width differs).
     for line in lines.iter_mut() {
-        for cast in &["(uint)", "(uint32_t)"] {
+        for cast in &["(uint)", "(uint32_t)", "(uint16_t)", "(uint8_t)"] {
             while let Some(pos) = line.find(cast) {
                 let after = &line[pos + cast.len()..];
                 // Strip when wrapped value is obviously already 32-bit-readable:
