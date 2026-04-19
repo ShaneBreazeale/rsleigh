@@ -81,6 +81,8 @@ fn main() {
         eprintln!("  rsleigh <binary> --disasm <func>   Disassemble with P-code");
         eprintln!("  rsleigh <binary> --sigs <file.json> Load extra signatures");
         eprintln!("  rsleigh <binary> --yara             Generate YARA detection rule");
+        eprintln!("  rsleigh <binary> --imphash          Compute imphash (Mandiant) for PE");
+        eprintln!("  rsleigh <binary> --hashes           Print sha256, md5, imphash, size");
         eprintln!("  rsleigh old.bin --diff new.bin      Diff decompilation (show changes)");
         eprintln!("  rsleigh <binary> --taint            Taint analysis (trace user input to sinks)");
         eprintln!("  rsleigh <binary> --summary          AI summary (one-line per function)");
@@ -103,6 +105,8 @@ fn main() {
     let all_mode = args.iter().any(|a| a == "--all");
     let disasm_mode = args.iter().any(|a| a == "--disasm");
     let yara_mode = args.iter().any(|a| a == "--yara");
+    let imphash_mode = args.iter().any(|a| a == "--imphash");
+    let hashes_mode = args.iter().any(|a| a == "--hashes");
     let summary_mode = args.iter().any(|a| a == "--summary");
     let xrefs_mode = args.iter().any(|a| a == "--xrefs");
     let search_mode = args.iter().any(|a| a == "--search");
@@ -122,6 +126,39 @@ fn main() {
             Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
         };
         generate_yara_rule(binary_path, &data);
+        return;
+    }
+
+    if imphash_mode {
+        let data = match std::fs::read(binary_path) {
+            Ok(d) => d,
+            Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
+        };
+        match compute_imphash(&data) {
+            Some(h) => println!("{}", h),
+            None => {
+                eprintln!("imphash: not a PE binary with imports");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if hashes_mode {
+        let data = match std::fs::read(binary_path) {
+            Ok(d) => d,
+            Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
+        };
+        let sha256 = compute_sha256(&data);
+        let md5 = compute_md5(&data);
+        let imphash = compute_imphash(&data);
+        println!("file:    {}", binary_path);
+        println!("size:    {}", data.len());
+        println!("md5:     {}", md5);
+        println!("sha256:  {}", sha256);
+        if let Some(h) = imphash {
+            println!("imphash: {}", h);
+        }
         return;
     }
 
@@ -1795,6 +1832,76 @@ fn run_callgraph(binary_path: &str, data: &[u8]) {
         "function_count": graph.len(),
         "callgraph": final_graph,
     })).unwrap());
+}
+
+/// Compute MD5 hash of data, return lowercase hex string.
+fn compute_md5(data: &[u8]) -> String {
+    use md5::{Digest, Md5};
+    let mut h = Md5::new();
+    h.update(data);
+    h.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Compute SHA-256 hash of data, return lowercase hex string.
+fn compute_sha256(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(data);
+    h.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Mandiant imphash: MD5 of the comma-joined, lowercased `dll.function`
+/// entries built from the PE import table. DLL extensions are stripped to
+/// a known short set; ordinal-only imports are encoded as `ord<N>`.
+///
+/// Returns None for non-PE binaries or PE files with no imports.
+///
+/// Spec: github.com/mandiant/pefile (imphash()).
+fn compute_imphash(data: &[u8]) -> Option<String> {
+    use md5::{Digest, Md5};
+    let obj = goblin::Object::parse(data).ok()?;
+    let pe = match obj {
+        goblin::Object::PE(pe) => pe,
+        _ => return None,
+    };
+    if pe.imports.is_empty() { return None; }
+
+    // Mandiant's normalization:
+    //  - lowercase DLL name
+    //  - strip extension if it's one of:
+    //      .dll, .ocx, .sys, .drv, .cpl, .exe
+    //  - function name: lowercase as-is; ordinal → "ord<num>"
+    let strip_exts = [".dll", ".ocx", ".sys", ".drv", ".cpl", ".exe"];
+    let mut entries: Vec<String> = Vec::new();
+    for imp in &pe.imports {
+        let mut dll = imp.dll.to_ascii_lowercase();
+        for ext in &strip_exts {
+            if dll.ends_with(ext) {
+                dll.truncate(dll.len() - ext.len());
+                break;
+            }
+        }
+        // goblin's pe.imports gives named symbols directly; ordinals come
+        // through as names like "Ordinal_123" or empty. Use the Import's
+        // name field: if it looks like an ordinal placeholder, rewrite.
+        let name = imp.name.to_ascii_lowercase();
+        let fn_name = if name.starts_with("ordinal_") {
+            // "ordinal_123" → "ord123"
+            format!("ord{}", &name[8..])
+        } else if name.is_empty() {
+            // Truly unnamed ordinal — fall back to ordinal field
+            format!("ord{}", imp.ordinal)
+        } else {
+            name
+        };
+        entries.push(format!("{}.{}", dll, fn_name));
+    }
+
+    // Mandiant preserves import-table order (NOT sorted). Deduplication: no.
+    let joined = entries.join(",");
+    let mut h = Md5::new();
+    h.update(joined.as_bytes());
+    Some(h.finalize().iter().map(|b| format!("{:02x}", b)).collect())
 }
 
 fn generate_yara_rule(binary_path: &str, data: &[u8]) {

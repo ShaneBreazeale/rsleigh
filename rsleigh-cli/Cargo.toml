@@ -15,3 +15,5 @@ rsleigh-decompile = { path = "../rsleigh-decompile" }
 goblin = "0.9"
 serde_json = "1"
 wasmparser = "0.225"
+md-5 = "0.10"
+sha2 = "0.10"
