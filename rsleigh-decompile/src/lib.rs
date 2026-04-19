@@ -6,6 +6,7 @@ pub mod dominators;
 pub mod structure;
 pub mod printer;
 pub mod imports;
+pub mod eh_frame;
 pub mod dwarf;
 pub mod pdb_info;
 pub mod signatures;
@@ -163,8 +164,17 @@ pub fn decompile_with_binary(
             Some(f.param_names.first()?.clone()))).and(None)) // DWARF doesn't have func name easily
         .unwrap_or_else(|| format!("func_{:x}", func_addr));
 
+    // Resolve try/catch regions from .eh_frame LSDA (C++ only; empty otherwise).
+    let try_regions_map = if let Some(bin) = binary {
+        eh_frame::parse_eh_frame(bin)
+    } else {
+        std::collections::HashMap::new()
+    };
+    let empty_regions: Vec<eh_frame::TryRegion> = Vec::new();
+    let try_regions = try_regions_map.get(&func_addr).unwrap_or(&empty_regions);
+
     let structured = structure::recover_structure(&ssa, &cfg);
-    printer::print_c(&structured, &ssa, arch, binary, &import_map, &local_var_names, &struct_fields, &func_name)
+    printer::print_c_with_try(&structured, &ssa, arch, binary, &import_map, &local_var_names, &struct_fields, &func_name, try_regions)
 }
 
 /// Learned type information for a function, extracted after decompilation.

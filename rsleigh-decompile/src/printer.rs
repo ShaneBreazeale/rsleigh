@@ -20,11 +20,40 @@ pub fn print_c(
     struct_fields: &HashMap<u64, String>,
     func_name: &str,
 ) -> String {
+    print_c_with_try(stmts, ssa, arch, binary, imports, local_names, struct_fields, func_name, &[])
+}
+
+pub fn print_c_with_try(
+    stmts: &[StructuredStmt],
+    ssa: &SsaCfg,
+    arch: Architecture,
+    binary: Option<&[u8]>,
+    imports: &HashMap<u64, String>,
+    local_names: &HashMap<String, String>,
+    struct_fields: &HashMap<u64, String>,
+    func_name: &str,
+    try_regions: &[crate::eh_frame::TryRegion],
+) -> String {
     let mut out = String::new();
-    let ctx = PrintCtx { arch, binary, imports };
+    let ctx = PrintCtx { arch, binary, imports, try_regions };
 
     // Generate function signature from SSA analysis
     generate_function_signature(&mut out, ssa, func_name);
+
+    // Emit a summary of try/catch regions (from .eh_frame LSDA) as a comment
+    // block at the top of the body. Ghidra inlines per-statement comments;
+    // a function-level summary is cheaper and still pinpoints where exception
+    // handlers live for cross-referencing with the disassembly.
+    if !ctx.try_regions.is_empty() {
+        out.push_str("    /* try/catch regions:\n");
+        for tr in ctx.try_regions {
+            out.push_str(&format!(
+                "     *   try [0x{:x} .. 0x{:x}) -> catch @ 0x{:x}\n",
+                tr.start, tr.end, tr.landing_pad,
+            ));
+        }
+        out.push_str("     */\n");
+    }
 
     let filtered = filter_boilerplate(stmts, ssa);
     let mut tracker = RegTracker::new();
@@ -8281,6 +8310,7 @@ struct PrintCtx<'a> {
     arch: Architecture,
     binary: Option<&'a [u8]>,
     imports: &'a HashMap<u64, String>,
+    try_regions: &'a [crate::eh_frame::TryRegion],
 }
 
 /// Remove prologue/epilogue boilerplate from the top level.
