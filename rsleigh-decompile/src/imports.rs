@@ -339,6 +339,23 @@ fn resolve_elf(elf: &goblin::elf::Elf, binary: &[u8], map: &mut HashMap<u64, Str
             }
         }
     }
+    // Also pick up R_*_GLOB_DAT relocations from dynrels — these bind
+    // global-data symbols (e.g. `__stack_chk_guard`, vtable pointers)
+    // to their GOT slot, so a raw load of that slot can resolve to the
+    // symbol name. Skip empty / numeric-only names.
+    // R_X86_64_GLOB_DAT=6, R_AARCH64_GLOB_DAT=1025, R_ARM_GLOB_DAT=21.
+    for reloc in elf.dynrelas.iter() {
+        let is_glob_dat = matches!(reloc.r_type, 6 | 1025 | 21);
+        if !is_glob_dat { continue; }
+        if let Some(sym) = elf.dynsyms.get(reloc.r_sym) {
+            if let Some(name) = elf.dynstrtab.get_at(sym.st_name) {
+                if !name.is_empty() {
+                    let clean = demangle_name(name);
+                    map.entry(reloc.r_offset).or_insert(clean);
+                }
+            }
+        }
+    }
 
     // AArch64 PLT stub decoder. Each entry (16 bytes typically):
     //   adrp x16, &got_page         ; 0x90/0x10-family (bit 31 = 1 for adrp)
