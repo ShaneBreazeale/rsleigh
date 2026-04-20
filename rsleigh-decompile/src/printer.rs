@@ -9713,6 +9713,117 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         false
     });
 
+    // Promote `lVarN` / `iVarN` → `puVarN` when textual context proves
+    // the var is a pointer. Triggers on any occurrence of `NAME->`,
+    // `*NAME`, or `NAME[` elsewhere in the output. Complements SSA-level
+    // InferredType::Pointer propagation which often misses x19-x28
+    // callee-saved register chains.
+    {
+        use std::collections::HashSet;
+        let mut pointer_vars: HashSet<String> = HashSet::new();
+        for l in &lines {
+            // Scan each line for every lVar{N} / iVar{N} match.
+            let mut i = 0;
+            let bytes = l.as_bytes();
+            while i + 4 < bytes.len() {
+                // Match lVar or iVar prefix.
+                let is_lvar = i + 4 <= bytes.len() && &bytes[i..i + 4] == b"lVar";
+                let is_ivar = i + 4 <= bytes.len() && &bytes[i..i + 4] == b"iVar";
+                // Don't remap `iVar` since it's often a genuine integer.
+                if !is_lvar {
+                    i += 1;
+                    continue;
+                }
+                let _ = is_ivar;
+                // Ensure no alphanum/underscore before.
+                let before_ok = i == 0
+                    || !matches!(bytes[i - 1],
+                        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
+                if !before_ok {
+                    i += 1;
+                    continue;
+                }
+                // Read digits.
+                let mut j = i + 4;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j == i + 4 {
+                    i += 1;
+                    continue;
+                }
+                // Check context after name: `->`, `[`, or prefixed by `*`.
+                let name = &l[i..j];
+                let after = &l[j..];
+                // Pointerish contexts:
+                //  - NAME-> or NAME[
+                //  - *NAME (direct single-star deref, not **)
+                //  - *(NAME)  / *(NAME  (paren-wrapped deref)
+                //  - *(NAME + K) / *(NAME - K)
+                let prev1 = if i >= 1 { Some(l.as_bytes()[i - 1]) } else { None };
+                let prev2 = if i >= 2 { Some(l.as_bytes()[i - 2]) } else { None };
+                let star_deref = prev1 == Some(b'*') && prev2 != Some(b'*');
+                let paren_star_deref =
+                    prev1 == Some(b'(') && prev2 == Some(b'*');
+                let pointerish = after.starts_with("->")
+                    || after.starts_with('[')
+                    || star_deref
+                    || paren_star_deref;
+                if pointerish {
+                    pointer_vars.insert(name.to_string());
+                }
+                i = j;
+            }
+        }
+        if !pointer_vars.is_empty() {
+            // Also retype the decl from `long puVarN;` → `void *puVarN;`.
+            let decl_regexes: Vec<(String, String)> = pointer_vars
+                .iter()
+                .map(|n| {
+                    let new = format!("pu{}", &n[1..]);
+                    (format!("long {};", new), format!("void *{};", new))
+                })
+                .collect();
+            for l in &mut lines {
+                for name in &pointer_vars {
+                    // Whole-word rename lVar{N} → puVar{N}.
+                    let new = format!("pu{}", &name[1..]);
+                    let mut out = String::with_capacity(l.len());
+                    let bytes = l.as_bytes();
+                    let nb = name.as_bytes();
+                    let mut pos = 0;
+                    while pos < bytes.len() {
+                        if pos + nb.len() <= bytes.len() && &bytes[pos..pos + nb.len()] == nb {
+                            let before_ok = pos == 0
+                                || !matches!(bytes[pos - 1],
+                                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
+                            let after_idx = pos + nb.len();
+                            let after_ok = after_idx >= bytes.len()
+                                || !matches!(bytes[after_idx],
+                                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
+                            if before_ok && after_ok {
+                                out.push_str(&new);
+                                pos = after_idx;
+                                continue;
+                            }
+                        }
+                        out.push(bytes[pos] as char);
+                        pos += 1;
+                    }
+                    *l = out;
+                }
+                // Post-rename: if the line is `    long puVarN;` (decl),
+                // retype it to `    void *puVarN;`.
+                for (old_decl, new_decl) in &decl_regexes {
+                    if l.trim() == old_decl.as_str() {
+                        let indent = l.len() - l.trim_start().len();
+                        *l = format!("{}{}", &l[..indent], new_decl);
+                    }
+                }
+            }
+        }
+    }
+
     // Unused local declaration elimination. A decl line has form
     // `    TYPE NAME;` (or `TYPE NAME[N];`) and sits near the top of
     // the function body at non-zero indent. If NAME never appears in
