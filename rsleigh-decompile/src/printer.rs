@@ -9919,14 +9919,50 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 } else { None }
             });
             if let Some(nm) = name {
-                // Count uses elsewhere. Match as whole word.
                 let pat = &nm;
-                let uses = lines.iter().enumerate().filter(|(i, other)| {
-                    if *i == idx { return false; }
-                    // Trim trailing ';' and other struct decls
+                // Count uses elsewhere. Distinguish LHS-only (write) from
+                // RHS / embedded (read). Write-only vars are safe to drop
+                // along with their write lines.
+                let mut read_uses = 0usize;
+                let mut write_lines: Vec<usize> = Vec::new();
+                for (i, other) in lines.iter().enumerate() {
+                    if i == idx { continue; }
                     let ot = other.as_str();
+                    // Detect top-level `NAME = ...;` LHS write.
+                    let trimmed = ot.trim();
+                    let is_lhs_write = if let Some(eq) = trimmed.find(" = ") {
+                        let lhs = &trimmed[..eq];
+                        let root = lhs.split("->").next().unwrap_or(lhs).trim();
+                        root == pat.as_str()
+                    } else { false };
+                    if is_lhs_write {
+                        write_lines.push(i);
+                        // Also count RHS identifier references on the SAME line.
+                        if let Some(eq) = trimmed.find(" = ") {
+                            let rhs = &trimmed[eq + 3..];
+                            // Only count if RHS contains the name as whole word.
+                            let mut pos = 0usize;
+                            while let Some(p) = rhs[pos..].find(pat.as_str()) {
+                                let abs = pos + p;
+                                let before_ok = abs == 0
+                                    || !matches!(rhs.as_bytes()[abs - 1],
+                                        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
+                                let after = abs + pat.len();
+                                let after_ok = after >= rhs.len()
+                                    || !matches!(rhs.as_bytes()[after],
+                                        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
+                                if before_ok && after_ok {
+                                    read_uses += 1;
+                                    break;
+                                }
+                                pos = abs + 1;
+                            }
+                        }
+                        continue;
+                    }
+                    // Any other occurrence counts as a read.
                     let mut pos = 0usize;
-                    while let Some(p) = ot[pos..].find(pat) {
+                    while let Some(p) = ot[pos..].find(pat.as_str()) {
                         let abs = pos + p;
                         let before_ok = abs == 0
                             || !matches!(ot.as_bytes()[abs - 1],
@@ -9936,17 +9972,19 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                             || !matches!(ot.as_bytes()[after],
                                 b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
                         if before_ok && after_ok {
-                            return true;
+                            read_uses += 1;
                         }
                         pos = abs + 1;
                     }
-                    false
-                }).count();
-                if uses == 0 {
+                }
+                if read_uses == 0 {
                     to_remove.push(idx);
+                    to_remove.extend(write_lines);
                 }
             }
         }
+        to_remove.sort_unstable();
+        to_remove.dedup();
         for idx in to_remove.into_iter().rev() {
             lines.remove(idx);
         }
@@ -10053,6 +10091,41 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 }
                 j += 1;
             }
+        }
+    }
+
+    // Empty if body elimination (late pass — runs after uninit-read
+    // elimination leaves orphan `if (cond) {}` pairs). Pattern:
+    //     if (cond) {
+    //     }
+    // Strip the header + both braces when body is entirely blank.
+    // Don't touch `if {} else`.
+    {
+        let mut j = 0;
+        while j + 2 < lines.len() {
+            let a = lines[j].trim().to_string();
+            if a.starts_with("if (") && a.ends_with("{") {
+                let open_indent = lines[j].len() - lines[j].trim_start().len();
+                let mut k = j + 1;
+                let mut all_blank = true;
+                while k < lines.len() {
+                    let bt = lines[k].trim();
+                    if bt == "}" {
+                        let close_indent = lines[k].len() - lines[k].trim_start().len();
+                        if close_indent == open_indent { break; }
+                    }
+                    if !bt.is_empty() { all_blank = false; break; }
+                    k += 1;
+                }
+                if all_blank && k < lines.len() && lines[k].trim() == "}" {
+                    let nxt = lines.get(k + 1).map(|l| l.trim()).unwrap_or("");
+                    if !nxt.starts_with("else") {
+                        lines.drain(j..=k);
+                        continue;
+                    }
+                }
+            }
+            j += 1;
         }
     }
 
