@@ -1,0 +1,13 @@
+[package]
+name = "rsleigh-fid"
+version = "0.1.0"
+edition = "2021"
+description = "Function ID database — Ghidra FID-compatible function fingerprinting in pure Rust"
+
+[dependencies]
+rsleigh-api = { path = "../rsleigh-api" }
+pcode-ir = { path = "../pcode-ir" }
+goblin = "0.9"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+flate2 = "1"
+byteorder = "1"
