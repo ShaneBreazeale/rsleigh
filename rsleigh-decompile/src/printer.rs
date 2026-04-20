@@ -9952,43 +9952,107 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
-    // Callee-saved register save elision. Pattern:
-    //   local_N = lVarK;                  ← save unassigned register
-    //   local_N->field_K = lVarL;         ← optional subsequent field writes
-    // where lVarK / lVarL have no prior top-level assignment in the body.
-    // These are prologue callee-saved spills that leaked through fold.
+    // Callee-saved register save elision + uninit-read drop. Pattern:
+    //   local_N = lVarK;                       ← save unassigned register
+    //   local_N = puVarK->field_K;             ← uninit reg deref
+    //   local_N->field_K = lVarL;              ← subsequent field write
+    //   local_N = puVarK;                      ← save uninit reg
+    // Drop any `local_N = RHS;` where every identifier token in the RHS
+    // is uninitialized relative to linear order (no earlier top-level
+    // assignment defines it). Catches prologue spills + phantom reads
+    // that fold couldn't eliminate.
     {
-        // Collect every "lhs = rhs;" at top-level to figure out which lVarN
-        // have a definition somewhere. If a name is only on the RHS and
-        // never on the LHS, treat it as uninitialized.
-        let mut assigned: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // First: precompute the set of identifiers whose FIRST definition
+        // occurs in the function. A name is "ever-defined" if it appears
+        // as a top-level LHS anywhere in the output.
+        let mut ever_defined: std::collections::HashSet<String> = std::collections::HashSet::new();
         for l in &lines {
             let t = l.trim();
             if let Some(eq) = t.find(" = ") {
                 let lhs = &t[..eq];
-                if lhs.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !lhs.is_empty() {
-                    assigned.insert(lhs.to_string());
+                let root = lhs.split("->").next().unwrap_or(lhs).trim();
+                if !root.is_empty()
+                    && root.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    ever_defined.insert(root.to_string());
                 }
             }
         }
+        // Incremental linear scan: `assigned` grows as we walk forward.
+        let mut assigned: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let _ = &ever_defined; // referenced below
+        // Identifier token regex in RHS: strings of [A-Za-z0-9_]+ that
+        // don't start with a digit. For a token to be "initialized" it must
+        // be in `assigned`, be a param_N, or be a literal/keyword.
+        let is_identish = |tok: &str| -> bool {
+            !tok.is_empty()
+                && tok.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !tok.chars().next().unwrap().is_ascii_digit()
+        };
+        let is_safe_ident = |tok: &str, assigned: &std::collections::HashSet<String>| -> bool {
+            assigned.contains(tok)
+                || tok.starts_with("param_")
+                || tok.starts_with("fparam_")
+                || tok.starts_with("DAT_")
+                || tok.starts_with("PTR_")
+                || tok.starts_with("FUN_")
+                || tok.starts_with("func_")
+                || matches!(tok, "sp" | "lr" | "fp" | "pc" | "x29" | "x30"
+                    | "true" | "false" | "NULL" | "nullptr")
+        };
         let mut j = 0;
         while j < lines.len() {
-            let t = lines[j].trim();
-            let indent = lines[j].len() - lines[j].trim_start().len();
-            if indent == 0 && t.starts_with("local_") && t.ends_with(';') {
+            let line_owned = lines[j].clone();
+            let t = line_owned.trim();
+            let indent = line_owned.len() - line_owned.trim_start().len();
+            let is_target = indent == 0
+                && t.ends_with(';')
+                && (t.starts_with("local_")
+                    || t.starts_with("puVar")
+                    || t.starts_with("lVar")
+                    || t.starts_with("iVar"));
+            let mut dropped = false;
+            if is_target {
                 if let Some(eq) = t.find(" = ") {
-                    let rhs = &t[eq + 3..t.len() - 1].trim();
-                    let is_bare_var = !rhs.is_empty()
-                        && rhs.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                        && (rhs.starts_with("lVar") || rhs.starts_with("iVar")
-                            || rhs.starts_with("puVar") || rhs.starts_with("uVar"));
-                    if is_bare_var && !assigned.contains(*rhs) {
+                    let rhs = &t[eq + 3..t.len() - 1];
+                    let mut all_uninit = true;
+                    let mut any_ident = false;
+                    let mut buf = String::new();
+                    let mut push = |buf: &mut String, any: &mut bool, all: &mut bool| {
+                        let tok = std::mem::take(buf);
+                        if is_identish(&tok) {
+                            *any = true;
+                            if is_safe_ident(&tok, &assigned) {
+                                *all = false;
+                            }
+                        }
+                    };
+                    for c in rhs.chars() {
+                        if c.is_ascii_alphanumeric() || c == '_' {
+                            buf.push(c);
+                        } else {
+                            push(&mut buf, &mut any_ident, &mut all_uninit);
+                        }
+                    }
+                    push(&mut buf, &mut any_ident, &mut all_uninit);
+                    if any_ident && all_uninit {
                         lines.remove(j);
-                        continue;
+                        dropped = true;
                     }
                 }
             }
-            j += 1;
+            if !dropped {
+                if let Some(eq) = t.find(" = ") {
+                    let lhs = &t[..eq];
+                    let root = lhs.split("->").next().unwrap_or(lhs).trim();
+                    if !root.is_empty()
+                        && root.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    {
+                        assigned.insert(root.to_string());
+                    }
+                }
+                j += 1;
+            }
         }
     }
 
