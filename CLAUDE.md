@@ -86,9 +86,25 @@ rsleigh/
 │       ├── structure.rs        ← if/else, while/do-while loop recovery from dominators
 │       ├── analysis.rs         ← FunctionMeta, VulnFinding, CallGraphEntry (serde::Serialize)
 │       └── cpp_class.rs        ← C++ class/vtable/hierarchy recovery (MSVC + GCC RTTI)
+├── rsleigh-fid/                ← Function ID: body fingerprinting against bundled DBs
+│   ├── data/
+│   │   ├── MANIFEST.tsv        ← source URL + SHA256 for each bundled .fidb
+│   │   ├── glibc-{x86_64,aarch64}.fidb      ← Debian 12 libc 2.36 (2221/2330)
+│   │   ├── libstdcxx-{x86_64,aarch64}.fidb  ← Debian 12 libstdc++ 12.2 (3463/3375)
+│   │   ├── musl-{x86_64,aarch64}.fidb       ← Alpine 3.21 musl 1.2.5 (1083/1140)
+│   │   └── qt_signatures.tsv.gz  (in rsleigh-decompile/data/; 23K Qt5 sigs)
+│   └── src/
+│       ├── hash.rs             ← xxh3 full + specific (callee-aware) hash quad
+│       ├── mask.rs             ← per-arch operand masking (x86/AArch64/ARM32/MIPS/RISC-V)
+│       ├── db.rs               ← compact gzipped binary FID format w/ hash indices
+│       ├── ingest.rs           ← fingerprint() drives rsleigh-api Decoder
+│       ├── lib.rs              ← identify() unique-match + C++ ABI variant resolver
+│       └── bin/gen.rs          ← rsleigh-fid-gen CLI for building .fidb
 ├── rsleigh-cli/                ← CLI: decompile any binary to C pseudocode
 ├── scripts/
-│   └── extract-ghidra-sigs.py  ← extract signatures from Ghidra .gdt archives
+│   ├── extract-ghidra-sigs.py  ← extract signatures from Ghidra .gdt archives
+│   ├── extract-qt-sigs.py      ← extract Qt5 .so dynsym → signatures.tsv rows
+│   └── build-fid-dbs.sh        ← reproducible distro-pkg fetch → .fidb builder
 ├── rsleigh-generate/           ← CLI: parse slaspecs, write generated crate source
 ├── generated/                  ← Output crates (gitignored /out/ dirs)
 │   ├── x86-{shared,subtables,instr-00..07,root}/       (64-bit)
@@ -119,6 +135,8 @@ rsleigh <binary> <func> [func2..]      # decompile functions (name or 0xAddr)
 rsleigh <binary> --all                 # decompile all (two-pass type propagation)
 rsleigh <binary> --disasm <func>       # disassemble with P-code
 rsleigh <binary> --sigs extra.json     # load additional signatures
+rsleigh <binary> --fid file.fidb       # additional FID database (repeatable)
+rsleigh <binary> --no-fid-auto         # disable bundled glibc/musl/libstdc++ DBs
 rsleigh <binary> --json                # JSON output
 rsleigh <binary> --search <query>       # find functions by string/pattern
 rsleigh <binary> --search --api <name> # find functions calling specific API
@@ -355,6 +373,11 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - **MIPS PIC indirect call resolution:** GP-relative GOT tracing with GP invariance detection (lui+addiu+addu t9 pattern), addiu t9 adjustment accumulation; 423→98 unresolved (77% resolved)
 - **Memory SSA:** two-phase stack slot store/load forwarding with fixed-point worklist and memory Phi insertion at join points; restores values passed through stack (e.g., strlen(input))
 - **Pseudocode quality (14-point audit):** CDQ+IDIV simplification, Zext deferral, smart array base validation, call return tracking, format string preservation, variadic arg trimming, return-fold protection, AArch64 stack/prologue noise elimination, 6-arch return type inference, heuristic struct field naming, cast removal, assignment folding, ADD-zero suppression, register auto-naming, for-loop init recovery, loop counter naming, named expression substitution
+- **Function ID database (rsleigh-fid):** Ghidra-FID-style body fingerprinting in pure Rust. xxh3 full + callee-aware specific hash over operand-masked instruction bytes; per-arch mask tables (x86 opcode+ModR/M keep, fixed-width class masks for AArch64/ARM32/MIPS/RISC-V). Bundled blobs (287KB, 13,612 entries): glibc 2.36, libstdc++ 12.2, musl 1.2.5 for x86_64 + aarch64, auto-loaded based on target arch. `rsleigh-fid-gen` builds .fidb from ELF/Mach-O/PE/`.a`. `identify()` accepts C++ ABI ctor/dtor variants (C1/C2/C3, D0/D1/D2 share bodies by spec). `scripts/build-fid-dbs.sh` = reproducible distro-pkg fetch + SHA256-pinned MANIFEST.
+- **Qt5 signature database (23,274 entries):** auto-loaded alongside libc TSV. `scripts/extract-qt-sigs.py` walks libQt5Core/Gui/Widgets/Network/DBus/Svg/XcbQpa/X11Extras dynsyms, demangles via `c++filt -n`, maps param types to rsleigh TSV codes. Return types default to void (Itanium doesn't mangle return for non-template funcs); rsleigh's own return-inference fills from use sites.
+- **AArch64 AAPCS64 full param recovery:** x0-x7 (int) + v0-v7 (float/SIMD, aka s0-s7/d0-d7/q0-q7) all map to `param_N` / `fparam_N` with typed signatures. Previously only x0 was recovered — wrappers now show full 4-param signatures.
+- **AArch64 stack-canary recognition:** text-level pattern detector in post_process strips the `RET = A ^ B;` XOR, adjacent reload, and intervening dead stores, replacing the trailing `return RET;` with `return;`. Works without ADRP-resolved `__stack_chk_guard` symbol.
+- **R_*_GLOB_DAT import resolution:** `resolve_elf` now walks GLOB_DAT dynrelas (R_X86_64_GLOB_DAT=6, R_AARCH64_GLOB_DAT=1025, R_ARM_GLOB_DAT=21) so data-symbol GOT slots (`__stack_chk_guard`, vtable pointers, QObject::staticMetaObject) resolve to names instead of leaking as DAT_XXXX.
 
 ---
 
