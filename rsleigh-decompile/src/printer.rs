@@ -861,6 +861,118 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // AArch64/ARM32 stack-canary XOR epilogue elision.
+    // Matches the trailing pattern:
+    //   NAMEA = CANARY_LVAR;
+    //   NAMEB = NAMEA ^ GLOBAL->field_0;
+    //   return NAMEB;   ← or   return NAMEB + K;
+    // When we find it, drop the three lines. Also strip the preamble
+    // "lVarX = DAT_NNN->field_0; local_K = lVarX->field_0;" pair if its
+    // GLOBAL matches the epilogue's global — that's the canary save.
+    {
+        // Helper: tokenize an identifier at line start.
+        let take_lhs = |line: &str| -> Option<String> {
+            let t = line.trim();
+            if let Some(eq) = t.find(" = ") {
+                let lhs = &t[..eq];
+                if !lhs.is_empty()
+                    && lhs.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    return Some(lhs.to_string());
+                }
+            }
+            None
+        };
+        // Scan from the last return upward. If the three lines above it
+        // form the canary pattern, strip them.
+        if lines.len() >= 3 {
+            // Find the closing return near the end.
+            let mut ret_idx = None;
+            for k in (0..lines.len()).rev() {
+                let t = lines[k].trim();
+                if t.starts_with("return ") && t.ends_with(';') {
+                    ret_idx = Some(k);
+                    break;
+                }
+                if t == "}" || t.is_empty() { continue; }
+                if !t.is_empty() { break; }
+            }
+            if let Some(r) = ret_idx {
+                let ret_t = lines[r].trim();
+                let ret_expr = ret_t["return ".len()..ret_t.len() - 1].trim();
+                let ret_var = ret_expr.split(&[' ', '+', '-'][..]).next().unwrap_or("").to_string();
+                // Search up to 8 lines above for `RET_VAR = X ^ Y;`.
+                let mut xor_idx: Option<usize> = None;
+                let lo = r.saturating_sub(8);
+                for k in (lo..r).rev() {
+                    let t = lines[k].trim();
+                    if !t.contains(" ^ ") { continue; }
+                    if let Some(lhs) = take_lhs(t) {
+                        if lhs == ret_var { xor_idx = Some(k); break; }
+                    }
+                }
+                if let Some(xi) = xor_idx {
+                    // Search up another 6 lines for the canary reload `X = IDENT;`
+                    // where X is one of the xor operands. Optional — strip if found.
+                    let mut reload_idx: Option<usize> = None;
+                    let xor_t = lines[xi].trim();
+                    let operands: Vec<&str> = xor_t
+                        .split(" ^ ")
+                        .flat_map(|p| p.split(&[' ', '=', ';'][..]))
+                        .filter(|s| !s.is_empty()
+                            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+                        .collect();
+                    let lo2 = xi.saturating_sub(6);
+                    for k in (lo2..xi).rev() {
+                        let t = lines[k].trim();
+                        if let Some(lhs) = take_lhs(t) {
+                            if operands.contains(&lhs.as_str()) {
+                                // RHS must be a simple IDENT ";"
+                                if let Some(eq) = t.find(" = ") {
+                                    let rhs = t[eq + 3..].trim_end_matches(';').trim();
+                                    if !rhs.is_empty()
+                                        && rhs.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                                    {
+                                        reload_idx = Some(k);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Strip: replace return with bare `return;`, remove xor line and
+                    // (optional) reload line.
+                    let indent_end = lines[r].len() - lines[r].trim_start().len();
+                    lines[r] = format!("{}return;", &lines[r][..indent_end]);
+                    // Remove in descending index order to preserve offsets.
+                    let mut to_remove: Vec<usize> = vec![xi];
+                    if let Some(ri) = reload_idx { to_remove.push(ri); }
+                    to_remove.sort_unstable_by(|a, b| b.cmp(a));
+                    for idx in to_remove { lines.remove(idx); }
+                }
+            }
+        }
+        // Strip canary save pair: `lVarN = DAT_XXXXXXXX->field_0;` followed by
+        // `local_K = lVarN->field_0;` (both at top-level indent).
+        let mut j = 0;
+        while j + 1 < lines.len() {
+            let a = lines[j].trim();
+            let b = lines[j + 1].trim();
+            let a_dat_load = a.contains("DAT_") && a.contains("->field_0;") && a.contains(" = ");
+            if a_dat_load {
+                if let Some(a_lhs) = take_lhs(a) {
+                    let want = format!("{}->field_0", a_lhs);
+                    if b.contains(" = ") && b.contains(&want) && b.starts_with("local_") {
+                        lines.remove(j);
+                        lines.remove(j); // index shifts down
+                        continue;
+                    }
+                }
+            }
+            j += 1;
+        }
+    }
+
     // Normalize FS_OFFSET canary accesses → __stack_chk_guard
     // The TLS canary at FS:0x28 may appear as FS_OFFSET->field28, FS_OFFSET->_IO_write_ptr,
     // or other names depending on DWARF struct info loaded
@@ -9580,6 +9692,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         false
     });
 
+    // First: materialize `result` from `lines` (blank-line dedup preserved).
     for line in &lines {
         let is_blank = line.trim().is_empty();
         if is_blank && prev_blank { continue; }
@@ -9587,6 +9700,122 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         result.push('\n');
         prev_blank = is_blank;
     }
+
+    // Final canary-epilogue strip. Runs after register-rename passes so
+    // the return-var form is post-rename (e.g. `fparam_2` not `x1`).
+    // Pattern:
+    //   IDENT = ANYTHING;          ← optional canary reload
+    //   IDENT2 = IDENT ^ ...;       ← XOR check (assigned result ignored)
+    //   [dead stores]
+    //   return IDENT;               ← returns the un-XOR'd canary reload,
+    //                                 OR the XOR result (rare)
+    // Rule: if the returned identifier appears in a chain that ends at a
+    // `X = Y ^ Z;` with no side-effect between, strip the XOR + reload
+    // + drop the return operand.
+    {
+        let take_lhs = |line: &str| -> Option<String> {
+            let t = line.trim();
+            if let Some(eq) = t.find(" = ") {
+                let lhs = &t[..eq];
+                if !lhs.is_empty()
+                    && lhs.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    return Some(lhs.to_string());
+                }
+            }
+            None
+        };
+        let mut lines2: Vec<String> = result.lines().map(|s| s.to_string()).collect();
+        let mut ret_idx = None;
+        for k in (0..lines2.len()).rev() {
+            let t = lines2[k].trim();
+            if t.starts_with("return ") && t.ends_with(';') {
+                ret_idx = Some(k);
+                break;
+            }
+            if t == "}" || t.is_empty() { continue; }
+            break;
+        }
+        if let Some(r) = ret_idx {
+            let ret_t = lines2[r].trim();
+            let ret_expr = ret_t["return ".len()..ret_t.len() - 1].trim();
+            let ret_var = ret_expr.split(&[' ', '+', '-'][..]).next().unwrap_or("").to_string();
+            let is_ident = !ret_var.is_empty()
+                && ret_var.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if is_ident {
+                let lo = r.saturating_sub(8);
+                let mut xor_idx: Option<usize> = None;
+                let mut xor_lhs: Option<String> = None;
+                for k in (lo..r).rev() {
+                    let t = lines2[k].trim();
+                    if !t.contains(" ^ ") { continue; }
+                    if let Some(lhs) = take_lhs(t) {
+                        // Either (a) xor lhs IS ret_var (result-return pattern),
+                        // or (b) xor consumes ret_var (check-then-return pattern).
+                        if lhs == ret_var || t.contains(&format!(" {}", ret_var)) || t.contains(&format!("{} ", ret_var)) {
+                            xor_idx = Some(k);
+                            xor_lhs = Some(lhs);
+                            break;
+                        }
+                    }
+                }
+                if let Some(xi) = xor_idx {
+                    // Strip dead stores between xor and return (assignments to
+                    // registers x30/x29 or similar dead prolog leaks).
+                    let mut to_remove: Vec<usize> = vec![xi];
+                    for k in (xi + 1)..r {
+                        let t = lines2[k].trim();
+                        if t.is_empty() { continue; }
+                        if let Some(_) = take_lhs(t) {
+                            to_remove.push(k);
+                        } else {
+                            // Abort: non-assignment between xor and return is risky.
+                            to_remove.clear();
+                            break;
+                        }
+                    }
+                    // Also strip a preceding reload line whose lhs is either
+                    // ret_var, xor_lhs, or an operand of the xor expression.
+                    let xor_line = lines2[xi].trim().to_string();
+                    let operands: std::collections::HashSet<String> = xor_line
+                        .split(" ^ ")
+                        .flat_map(|p| p.split(&[' ', '=', ';', '(', ')'][..]))
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty()
+                            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+                        .collect();
+                    let xl = xor_lhs.unwrap_or_default();
+                    let lo2 = xi.saturating_sub(6);
+                    for k in (lo2..xi).rev() {
+                        let t = lines2[k].trim();
+                        if let Some(lhs) = take_lhs(t) {
+                            if lhs == ret_var || lhs == xl || operands.contains(&lhs) {
+                                if let Some(eq) = t.find(" = ") {
+                                    let rhs = t[eq + 3..].trim_end_matches(';').trim();
+                                    let simple = !rhs.is_empty()
+                                        && rhs.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                                    if simple {
+                                        to_remove.push(k);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if !to_remove.is_empty() {
+                        let indent_end = lines2[r].len() - lines2[r].trim_start().len();
+                        lines2[r] = format!("{}return;", &lines2[r][..indent_end]);
+                        to_remove.sort_unstable_by(|a, b| b.cmp(a));
+                        to_remove.dedup();
+                        for idx in to_remove { lines2.remove(idx); }
+                        result = lines2.join("\n");
+                        if !result.ends_with('\n') { result.push('\n'); }
+                    }
+                }
+            }
+        }
+    }
+
     *out = result;
 }
 

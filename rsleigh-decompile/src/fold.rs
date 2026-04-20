@@ -32,6 +32,10 @@ const SYSV_FLOAT_ARG_REGS: &[u64] = &[4608, 4672, 4736, 4800, 4864, 4928, 4992, 
 /// Windows x64 ABI float argument register offsets (XMM0-XMM3).
 const WIN64_FLOAT_ARG_REGS: &[u64] = &[4608, 4672, 4736, 4800];
 
+/// AArch64 AAPCS64 float/SIMD arg regs (v0-v7 aka s0-s7, d0-d7, q0-q7).
+/// SLEIGH offsets: 20480 + 32*N for N in 0..8.
+const AARCH64_FLOAT_ARG_REGS: &[u64] = &[20480, 20512, 20544, 20576, 20608, 20640, 20672, 20704];
+
 // Active argument register offsets — set by fold_with_cc() based on binary format.
 // Uses thread_local to avoid unsafe static mut.
 std::thread_local! {
@@ -82,7 +86,7 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
             CallingConv::SysV => SYSV_FLOAT_ARG_REGS,
             CallingConv::Win64 => WIN64_FLOAT_ARG_REGS,
             CallingConv::Cdecl32 => &[],
-            CallingConv::AArch64 => &[],  // AArch64 float params in d0-d7 — defer for now
+            CallingConv::AArch64 => AARCH64_FLOAT_ARG_REGS,
             CallingConv::Arm32 => &[],    // ARM32 float params in s0-s15 — defer
         };
     });
@@ -3592,11 +3596,12 @@ fn name_parameters(ssa: &mut SsaCfg) {
         ssa.vars[*v].param_name = Some(name.clone());
     }
 
-    // Pass 2: For optimized code, also check for arg registers used as function inputs
-    // that weren't marked Unknown. Scan ALL vars for arg register reads that have no
-    // prior definition in the function (i.e., they come from the caller).
-    if param_idx == 0 {
+    // Pass 2: Scan ALL vars for arg-register reads that have no prior
+    // definition (caller-supplied). Run even when Pass 1 named x0/RDI —
+    // wrapper funcs often forward x1-x7 without Pass 1-visible patterns.
+    {
         let mut to_name: Vec<(usize, String)> = Vec::new();
+        // Iterate in the AAPCS/SysV order so indices line up with position.
         for &offset in arg_reg_offsets().iter() {
             if named_offsets.contains(&offset) { continue; }
             for v in 0..ssa.vars.len() {
