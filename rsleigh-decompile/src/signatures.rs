@@ -240,6 +240,8 @@ static SIGNATURE_MAP: LazyLock<HashMap<&'static str, &'static FuncSig>> = LazyLo
     }
     // Load embedded compressed signature database (36K+ sigs, ~320KB gzipped)
     load_embedded_tsv(&mut map);
+    // Load Qt5 library signatures (23K+ sigs from libQt5Core/Gui/Widgets/...)
+    load_embedded_qt_tsv(&mut map);
     // Load curated JSON signatures (overrides TSV where present — hand-tuned types)
     load_embedded_json(&mut map);
     map
@@ -298,6 +300,46 @@ fn load_embedded_tsv(map: &mut HashMap<&'static str, &'static FuncSig>) {
 
         let variadic = parts[3] == "1";
 
+        let sig = FuncSig {
+            name: leak_str(name),
+            ret,
+            params: Box::leak(params.into_boxed_slice()),
+            variadic,
+        };
+        let sig_ref: &'static FuncSig = Box::leak(Box::new(sig));
+        map.insert(sig_ref.name, sig_ref);
+    }
+}
+
+/// Load Qt5 library signatures extracted from libQt5*.so dynsym tables.
+/// Format identical to signatures.tsv.gz; names are Itanium-mangled (_Z...).
+fn load_embedded_qt_tsv(map: &mut HashMap<&'static str, &'static FuncSig>) {
+    use flate2::read::GzDecoder;
+    use std::io::Read;
+
+    let compressed = include_bytes!("../data/qt_signatures.tsv.gz");
+    let mut decoder = GzDecoder::new(&compressed[..]);
+    let mut text = String::new();
+    if decoder.read_to_string(&mut text).is_err() {
+        return;
+    }
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 4 { continue; }
+        let name = parts[0];
+        if map.contains_key(name) { continue; }
+        let ret = tsv_type_code(parts[1]);
+        let params: Vec<SigParam> = if parts[2].is_empty() {
+            Vec::new()
+        } else {
+            parts[2].split(',').map(|p| {
+                let mut it = p.splitn(2, ':');
+                let pname = it.next().unwrap_or("arg");
+                let ptype = tsv_type_code(it.next().unwrap_or("i"));
+                SigParam { name: leak_str(pname), ty: ptype }
+            }).collect()
+        };
+        let variadic = parts[3] == "1";
         let sig = FuncSig {
             name: leak_str(name),
             ret,
