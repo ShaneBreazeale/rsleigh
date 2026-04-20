@@ -10094,6 +10094,19 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Drop `X = ?;` noise lines (Unknown-expr assignments leaking from
+    // SSA with no useful semantics). LHS must be a simple identifier
+    // (not a store target like `*(addr) = ?;`).
+    {
+        lines.retain(|l| {
+            let t = l.trim();
+            if !t.ends_with("= ?;") { return true; }
+            let head = t.trim_end_matches("= ?;").trim();
+            if head.is_empty() { return true; }
+            !head.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        });
+    }
+
     // Empty if body elimination (late pass — runs after uninit-read
     // elimination leaves orphan `if (cond) {}` pairs). Pattern:
     //     if (cond) {
