@@ -245,6 +245,86 @@ fn emit_region(
                         .find(|(_, header)| *header == current)
                         .map(|(src, _)| *src);
 
+                    // Do-while detection: header terminator is CBranch
+                    // (an inner conditional inside the loop body), the
+                    // back-edge comes from a DIFFERENT CBranch block that
+                    // tests loop exit. Emit body = header stmts + nested
+                    // if-else from header's CBranch successors + latch
+                    // stmts; cond = latch's CBranch.
+                    if let Some(back_src) = back_source {
+                        if back_src != current && back_src.0 < ssa.blocks.len() {
+                            let latch = &ssa.blocks[back_src.0];
+                            if let SsaTerminator::CBranch {
+                                cond: latch_cond,
+                                taken: latch_taken,
+                                fallthrough: latch_fall,
+                            } = &latch.terminator
+                            {
+                                let (exit, dw_negate) = if *latch_taken == current {
+                                    (*latch_fall, false)
+                                } else if *latch_fall == current {
+                                    (*latch_taken, true)
+                                } else {
+                                    (BlockId(0), false)
+                                };
+                                if (*latch_taken == current || *latch_fall == current)
+                                    && exit.0 < cfg.blocks.len()
+                                {
+                                    let mut body = Vec::new();
+                                    // 1. Emit header block's statements.
+                                    emit_block_stmts(&ssa.blocks[current.0], &mut body, consumed);
+                                    // 2. Header's CBranch → nested if inside body.
+                                    //    Protect exit + latch from recursion overrun.
+                                    let exit_was_emitted = emitted[exit.0];
+                                    emitted[exit.0] = true;
+                                    let back_was_emitted = emitted[back_src.0];
+                                    emitted[back_src.0] = true;
+                                    // Post-dominator of header is latch (= back_src)
+                                    // for this shape; protect it so recursion stops.
+                                    let h_taken = *taken;
+                                    let h_fall = *fallthrough;
+                                    let h_cond = *cond;
+                                    let merge = back_src;
+                                    let mut then_body = Vec::new();
+                                    let mut else_body = Vec::new();
+                                    if h_taken != merge {
+                                        emit_region(ssa, cfg, dom, pdom, back_edges,
+                                                    h_taken, emitted, &mut then_body,
+                                                    depth + 1, None, consumed);
+                                    }
+                                    if h_fall != merge {
+                                        emit_region(ssa, cfg, dom, pdom, back_edges,
+                                                    h_fall, emitted, &mut else_body,
+                                                    depth + 1, None, consumed);
+                                    }
+                                    body.push(StructuredStmt::IfElse {
+                                        cond: h_cond,
+                                        then_body,
+                                        else_body,
+                                    });
+                                    // 3. Emit latch's statements (its CBranch is the loop cond).
+                                    if !back_was_emitted {
+                                        emit_block_stmts(&ssa.blocks[back_src.0], &mut body, consumed);
+                                    }
+                                    emitted[exit.0] = exit_was_emitted;
+                                    emitted[back_src.0] = true;
+                                    emitted[current.0] = true;
+                                    if body_always_returns(&body) {
+                                        out.extend(body);
+                                    } else {
+                                        out.push(StructuredStmt::DoWhile {
+                                            cond: *latch_cond,
+                                            negate: dw_negate,
+                                            body,
+                                        });
+                                    }
+                                    current = exit;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+
                     let (body_start, exit, negate) = if can_reach(cfg, *taken, current, emitted)
                         || back_source.is_some()
                             && can_reach_limited(cfg, *taken, back_source.unwrap(), cfg.blocks.len())
