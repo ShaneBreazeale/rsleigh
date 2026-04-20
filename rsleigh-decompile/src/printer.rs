@@ -9713,6 +9713,74 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         false
     });
 
+    // Unused local declaration elimination. A decl line has form
+    // `    TYPE NAME;` (or `TYPE NAME[N];`) and sits near the top of
+    // the function body at non-zero indent. If NAME never appears in
+    // any other line of the output, drop the decl.
+    {
+        let type_tokens: &[&str] = &[
+            "long", "int", "short", "char", "bool", "float", "double",
+            "void *", "int *", "short *", "char *", "long *",
+            "unsigned int", "unsigned short", "unsigned long",
+            "int8_t", "int16_t", "int32_t", "int64_t",
+            "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+            "size_t", "ssize_t", "ptrdiff_t",
+        ];
+        // Walk once, collect (idx, name) candidates. Then check usage in
+        // the remaining lines. Remove in descending index.
+        let mut to_remove: Vec<usize> = Vec::new();
+        for (idx, l) in lines.iter().enumerate() {
+            let t = l.trim();
+            if !t.ends_with(';') { continue; }
+            let indent = l.len() - l.trim_start().len();
+            if indent == 0 { continue; }
+            // Strip trailing ';'
+            let head = &t[..t.len() - 1];
+            let name = type_tokens.iter().find_map(|ty| {
+                let prefix = format!("{} ", ty);
+                if head.starts_with(&prefix) {
+                    let rest = head[prefix.len()..].trim();
+                    // Allow optional array suffix `NAME[N]`.
+                    let nm = rest.split('[').next()?.trim();
+                    if !nm.is_empty() && nm.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                        Some(nm.to_string())
+                    } else { None }
+                } else { None }
+            });
+            if let Some(nm) = name {
+                // Count uses elsewhere. Match as whole word.
+                let pat = &nm;
+                let uses = lines.iter().enumerate().filter(|(i, other)| {
+                    if *i == idx { return false; }
+                    // Trim trailing ';' and other struct decls
+                    let ot = other.as_str();
+                    let mut pos = 0usize;
+                    while let Some(p) = ot[pos..].find(pat) {
+                        let abs = pos + p;
+                        let before_ok = abs == 0
+                            || !matches!(ot.as_bytes()[abs - 1],
+                                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
+                        let after = abs + pat.len();
+                        let after_ok = after >= ot.len()
+                            || !matches!(ot.as_bytes()[after],
+                                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
+                        if before_ok && after_ok {
+                            return true;
+                        }
+                        pos = abs + 1;
+                    }
+                    false
+                }).count();
+                if uses == 0 {
+                    to_remove.push(idx);
+                }
+            }
+        }
+        for idx in to_remove.into_iter().rev() {
+            lines.remove(idx);
+        }
+    }
+
     // Callee-saved register save elision. Pattern:
     //   local_N = lVarK;                  ← save unassigned register
     //   local_N->field_K = lVarL;         ← optional subsequent field writes
