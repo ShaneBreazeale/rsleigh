@@ -67,6 +67,148 @@ fn parse_args() -> Result<Args, String> {
     })
 }
 
+fn ingest_any(data: &[u8], arch: Architecture) -> Vec<(String, u64, Vec<u8>)> {
+    match goblin::Object::parse(data) {
+        Ok(goblin::Object::Elf(_)) => ingest_elf(data, arch),
+        Ok(goblin::Object::Mach(m)) => ingest_macho(data, arch, m),
+        Ok(goblin::Object::PE(pe)) => ingest_pe(data, arch, pe),
+        Ok(goblin::Object::Archive(a)) => ingest_archive(data, arch, a),
+        _ => Vec::new(),
+    }
+}
+
+fn ingest_macho(data: &[u8], _arch: Architecture, mach: goblin::mach::Mach) -> Vec<(String, u64, Vec<u8>)> {
+    use goblin::mach::Mach;
+    let mo = match mach {
+        Mach::Binary(m) => m,
+        Mach::Fat(fat) => match fat.into_iter().next() {
+            Some(Ok(goblin::mach::SingleArch::MachO(m))) => m,
+            _ => return Vec::new(),
+        },
+    };
+    // Build vm→file mapping from segments.
+    let mut segs: Vec<(u64, u64, u64, u64)> = Vec::new();
+    for seg in mo.segments.iter() {
+        segs.push((seg.vmaddr, seg.vmaddr + seg.vmsize, seg.fileoff, seg.filesize));
+    }
+    let va_to_off = |va: u64, sz: u64| -> Option<(usize, usize)> {
+        for (s, e, o, f) in &segs {
+            if va >= *s && va + sz <= *e {
+                let d = va - s;
+                if d + sz > *f {
+                    return None;
+                }
+                return Some(((o + d) as usize, sz as usize));
+            }
+        }
+        None
+    };
+    // Sort N_SECT symbols by address to derive sizes from gaps.
+    let mut syms: Vec<(u64, String)> = Vec::new();
+    if let Ok(it) = mo.symbols.as_ref().ok_or(()).map(|s| s.iter()) {
+        for r in it {
+            if let Ok((name, nlist)) = r {
+                if nlist.is_stab() { continue; }
+                if (nlist.n_type & goblin::mach::symbols::N_TYPE) != goblin::mach::symbols::N_SECT {
+                    continue;
+                }
+                if nlist.n_value == 0 || name.is_empty() {
+                    continue;
+                }
+                let n = if let Some(s) = name.strip_prefix('_') { s } else { name };
+                syms.push((nlist.n_value, n.to_string()));
+            }
+        }
+    }
+    syms.sort_by_key(|s| s.0);
+    let mut out = Vec::new();
+    for i in 0..syms.len() {
+        let (va, ref name) = syms[i];
+        let size_guess = if i + 1 < syms.len() {
+            (syms[i + 1].0 - va).min(4096)
+        } else {
+            512
+        };
+        if size_guess < 16 {
+            continue;
+        }
+        if let Some((o, l)) = va_to_off(va, size_guess) {
+            if o + l <= data.len() {
+                out.push((name.clone(), va, data[o..o + l].to_vec()));
+            }
+        }
+    }
+    out
+}
+
+fn ingest_pe(data: &[u8], _arch: Architecture, pe: goblin::pe::PE) -> Vec<(String, u64, Vec<u8>)> {
+    // PE/COFF lacks a per-symbol size field; fall back to sorting exports
+    // by RVA and deriving body length from the next export.
+    let image_base = pe.image_base as u64;
+    let sections = pe.sections;
+    let rva_to_off = |rva: u64, sz: u64| -> Option<(usize, usize)> {
+        for s in &sections {
+            let vs = s.virtual_address as u64;
+            let ve = vs + s.virtual_size.max(s.size_of_raw_data) as u64;
+            if rva >= vs && rva + sz <= ve {
+                let d = rva - vs;
+                let fstart = s.pointer_to_raw_data as u64 + d;
+                if fstart as usize + sz as usize > data.len() {
+                    return None;
+                }
+                return Some((fstart as usize, sz as usize));
+            }
+        }
+        None
+    };
+    let mut exps: Vec<(u64, String)> = pe
+        .exports
+        .iter()
+        .filter_map(|e| e.name.map(|n| (e.rva as u64, n.to_string())))
+        .collect();
+    exps.sort_by_key(|e| e.0);
+    let mut out = Vec::new();
+    for i in 0..exps.len() {
+        let (rva, ref name) = exps[i];
+        let size_guess = if i + 1 < exps.len() {
+            (exps[i + 1].0 - rva).min(4096)
+        } else {
+            512
+        };
+        if size_guess < 16 {
+            continue;
+        }
+        if let Some((o, l)) = rva_to_off(rva, size_guess) {
+            out.push((name.clone(), image_base + rva, data[o..o + l].to_vec()));
+        }
+    }
+    out
+}
+
+fn ingest_archive(data: &[u8], arch: Architecture, archive: goblin::archive::Archive) -> Vec<(String, u64, Vec<u8>)> {
+    let mut out = Vec::new();
+    for (name, member, _) in archive.summarize() {
+        let start = member.offset as usize;
+        let end = start + member.size();
+        if end > data.len() {
+            continue;
+        }
+        let member_data = &data[start..end];
+        // Each archive member is typically an ELF relocatable object.
+        let before = out.len();
+        if let Ok(goblin::Object::Elf(_)) = goblin::Object::parse(member_data) {
+            out.extend(ingest_elf(member_data, arch));
+        } else if let Ok(goblin::Object::Mach(m)) = goblin::Object::parse(member_data) {
+            out.extend(ingest_macho(member_data, arch, m));
+        }
+        let added = out.len() - before;
+        if added > 0 {
+            eprintln!("  [{}]: +{}", name, added);
+        }
+    }
+    out
+}
+
 fn ingest_elf(data: &[u8], arch: Architecture) -> Vec<(String, u64, Vec<u8>)> {
     use goblin::elf::{Elf, sym::STT_FUNC};
     let elf = match Elf::parse(data) {
@@ -147,7 +289,7 @@ fn main() -> ExitCode {
             }
         };
         let before = funcs.len();
-        funcs.extend(ingest_elf(&data, args.arch));
+        funcs.extend(ingest_any(&data, args.arch));
         eprintln!(
             "{}: {} funcs",
             Path::new(path).file_name().unwrap().to_string_lossy(),
