@@ -12322,7 +12322,16 @@ fn format_var(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
         }
     }
 
-    var_name(&vdef.varnode, ctx)
+    let name = var_name(&vdef.varnode, ctx);
+    // Rename lVar/iVar → puVar when the register is inferred as Pointer.
+    // Keeps parity with Ghidra's "pointer-to-undefined-8" naming for 64-bit
+    // vars that survive into final output without explicit typing.
+    if vdef.inferred_type == crate::ir::InferredType::Pointer {
+        if let Some(num) = name.strip_prefix("lVar").or_else(|| name.strip_prefix("iVar")) {
+            return format!("puVar{}", num);
+        }
+    }
+    name
 }
 
 /// Format a Store value expression, resolving register operands to their
@@ -13364,11 +13373,11 @@ fn typed_name(size: u32, ty: InferredType) -> &'static str {
             _ => "int",
         },
         InferredType::Pointer => match size {
-            1 => "char",
-            2 => "short",
-            4 => "int",
-            8 => "long",
-            _ => "void",
+            1 => "char *",
+            2 => "short *",
+            4 => "int *",
+            8 => "void *",
+            _ => "void *",
         },
         InferredType::Bool => "bool",
         InferredType::Unsigned => size_to_type(size),
