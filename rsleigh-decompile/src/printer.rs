@@ -273,11 +273,28 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // Hide address loads: REG = large_address (data/code pointer, not a useful value)
             if let Some(eq_pos) = lt.find(" = 0x") {
                 let lhs_candidate = &lt[..eq_pos];
-                let is_reg_lhs = lhs_candidate.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                // x86 uppercase regs (RAX, EBX, R9D, ...).
+                let is_x86_reg = lhs_candidate.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
                     && lhs_candidate.len() >= 2 && lhs_candidate.len() <= 3;
-                if is_reg_lhs && lt.ends_with(';') {
-                    let hex_val = &lt[eq_pos + 3..lt.len() - 1]; // "0x..." without ";"
-                    if hex_val.len() > 6 { // addresses are > 6 hex digits
+                // AArch64 / ARM32 lowercase regs (x0..x30, w0..w30, r0..r15,
+                // s/d/q 0..31, sp, lr, fp, pc).
+                let is_arm_reg = {
+                    let s = lhs_candidate;
+                    s.len() >= 2 && s.len() <= 3
+                        && matches!(s.as_bytes()[0], b'x' | b'w' | b'r' | b's' | b'd' | b'q')
+                        && s[1..].chars().all(|c| c.is_ascii_digit())
+                };
+                let is_reg_lhs = is_x86_reg || is_arm_reg;
+                // ADRP/GOT page-address leaks: local_N / lVarN / uVarN / iVarN.
+                let is_local_lhs = (lhs_candidate.starts_with("local_")
+                    || lhs_candidate.starts_with("lVar")
+                    || lhs_candidate.starts_with("uVar")
+                    || lhs_candidate.starts_with("iVar"))
+                    && lhs_candidate.chars().skip(4).all(|c| c.is_ascii_alphanumeric() || c == '_');
+                if (is_reg_lhs || is_local_lhs) && lt.ends_with(';') {
+                    let hex_val = &lt[eq_pos + 3..lt.len() - 1];
+                    let indent = lines[i].len() - lines[i].trim_start().len();
+                    if hex_val.len() > 4 && (is_reg_lhs || indent == 0) {
                         lines.remove(i);
                         continue;
                     }
@@ -2908,11 +2925,15 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                             search_from = abs_pos + escaped.len();
                             continue;
                         }
-                        // Try import/symbol name
-                        if let Some(name) = ctx.imports.get(&val) {
-                            new_line = format!("{}{}{}", &new_line[..abs_pos], name, &new_line[hex_end..]);
-                            search_from = abs_pos + name.len();
-                            continue;
+                        // Try import/symbol name. Skip page-aligned values:
+                        // those are ADRP page bases on AArch64 that sometimes
+                        // collide with GOT slot addresses of unrelated imports.
+                        if val & 0xFFF != 0 {
+                            if let Some(name) = ctx.imports.get(&val) {
+                                new_line = format!("{}{}{}", &new_line[..abs_pos], name, &new_line[hex_end..]);
+                                search_from = abs_pos + name.len();
+                                continue;
+                            }
                         }
                     }
                 }
@@ -9692,6 +9713,37 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         false
     });
 
+    // Final ADRP page-address leak strip (runs after stack-slot rename
+    // converts `*(sp + 8) = 0x...` → `local_8 = 0x...`). Drops any
+    // `local_N = 0xHHHHH;` or `lVarN = 0xHHHHH;` at top indent when the
+    // hex RHS is >= 5 digits — these are ADRP/GOT literal-address leaks
+    // from the prologue that have no semantic value post-folding.
+    {
+        let mut j = 0;
+        while j < lines.len() {
+            let lt = lines[j].trim();
+            let indent = lines[j].len() - lines[j].trim_start().len();
+            if indent == 0 && lt.ends_with(';') {
+                if let Some(eq_pos) = lt.find(" = 0x") {
+                    let lhs = &lt[..eq_pos];
+                    let is_local = (lhs.starts_with("local_")
+                        || lhs.starts_with("lVar")
+                        || lhs.starts_with("uVar")
+                        || lhs.starts_with("iVar"))
+                        && lhs.chars().skip(4).all(|c| c.is_ascii_alphanumeric() || c == '_');
+                    if is_local {
+                        let hex_val = &lt[eq_pos + 3..lt.len() - 1];
+                        if hex_val.len() > 4 {
+                            lines.remove(j);
+                            continue;
+                        }
+                    }
+                }
+            }
+            j += 1;
+        }
+    }
+
     // First: materialize `result` from `lines` (blank-line dedup preserved).
     for line in &lines {
         let is_blank = line.trim().is_empty();
@@ -12648,9 +12700,14 @@ fn format_const_ctx(val: u64, size: u32, ctx: &PrintCtx) -> String {
             if s.is_empty() || (s.len() < 2 && !accept_short_one) { /* fall through */ }
             else { return format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")); }
         }
-        // Try import/global name (e.g., GOT entry for stdin/stdout)
-        if let Some(name) = ctx.imports.get(&val) {
-            return name.clone();
+        // Try import/global name (e.g., GOT entry for stdin/stdout).
+        // Skip when val is page-aligned (low 12 bits zero): those are ADRP
+        // page bases on AArch64, not real import targets — even if one
+        // happens to collide with a GOT slot for e.g. `close`.
+        if val & 0xFFF != 0 {
+            if let Some(name) = ctx.imports.get(&val) {
+                return name.clone();
+            }
         }
         // Try MSVC RTTI vtable resolution for PE binaries
         if let Some(binary) = ctx.binary {
@@ -12675,8 +12732,10 @@ fn format_const_ctx_load(val: u64, size: u32, ctx: &PrintCtx) -> String {
     if val == 0 { return "0".to_string(); }
     if val < 10 { return format!("{}", val); }
     if size >= 4 && val > 0x200 {
-        if let Some(name) = ctx.imports.get(&val) {
-            return name.clone();
+        if val & 0xFFF != 0 {
+            if let Some(name) = ctx.imports.get(&val) {
+                return name.clone();
+            }
         }
         if let Some(binary) = ctx.binary {
             if let Some(vtable_name) = crate::imports::resolve_pe_vtable(val, binary) {
