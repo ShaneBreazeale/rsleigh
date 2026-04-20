@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Function ID database — Ghidra FID-compatible function fingerprinting in pure Rust"
 
+[[bin]]
+name = "rsleigh-fid-gen"
+path = "src/bin/gen.rs"
+
 [dependencies]
 rsleigh-api = { path = "../rsleigh-api" }
 pcode-ir = { path = "../pcode-ir" }

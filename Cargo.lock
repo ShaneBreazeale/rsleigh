@@ -713,6 +713,7 @@ dependencies = [
  "pcode-ir",
  "rsleigh-api",
  "rsleigh-decompile",
+ "rsleigh-fid",
  "serde_json",
  "sha2",
  "wasmparser",

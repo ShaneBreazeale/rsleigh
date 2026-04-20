@@ -407,6 +407,9 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
         None => { eprintln!("Error: unsupported binary format"); std::process::exit(1); }
     };
 
+    // Apply FID databases (if --fid passed) to rename anonymous funcs.
+    apply_fid_to_symbols(&data, arch, &segs, &mut symbols, args);
+
     // For stripped PE binaries: discover functions from entry point + CALL targets
     if symbols.is_empty() {
         if let goblin::Object::PE(pe) = &obj {
@@ -435,15 +438,19 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
     }
 
     // Determine which functions to process
-    // Skip --flag arguments and their values (e.g., --sigs path.json)
-    let sigs_arg_idx = args.iter().position(|a| a == "--sigs");
+    // Skip --flag arguments and their values (e.g., --sigs path.json, --fid file.fidb)
+    let value_flag_positions: std::collections::HashSet<usize> = args
+        .iter()
+        .enumerate()
+        .filter_map(|(i, a)| {
+            if a == "--sigs" || a == "--fid" { Some(i + 1) } else { None }
+        })
+        .collect();
     let func_args: Vec<&str> = args[2..].iter().enumerate()
         .filter(|(i, a)| {
             if a.starts_with("--") { return false; }
-            // Skip the value after --sigs
-            if let Some(si) = sigs_arg_idx {
-                if *i + 2 == si + 1 { return false; }
-            }
+            // Index in the full args array is i + 2.
+            if value_flag_positions.contains(&(*i + 2)) { return false; }
             true
         })
         .map(|(_, a)| a.as_str())
@@ -1876,6 +1883,74 @@ fn demangle_symbol(name: &str) -> String {
         if !before.is_empty() && !before.ends_with('>') { before.to_string() } else { demangled }
     } else { demangled };
     if suffix.is_empty() { pretty } else { format!("{}{}", pretty, suffix) }
+}
+
+/// Load FID databases from `--fid <path>` args and apply fingerprint
+/// matches to anonymous `func_*` / `sub_*` / `FUN_*` symbols.
+fn apply_fid_to_symbols(
+    data: &[u8],
+    arch: rsleigh_api::Architecture,
+    segs: &[(u64, u64, u64)],
+    symbols: &mut [(u64, String)],
+    args: &[String],
+) {
+    let mut dbs: Vec<rsleigh_fid::FidDb> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--fid" {
+            if let Some(p) = args.get(i + 1) {
+                match std::fs::File::open(p).and_then(|f| rsleigh_fid::FidDb::read(f).map_err(Into::into)) {
+                    Ok(db) => {
+                        eprintln!("[fid] loaded {} entries from {}", db.entries.len(), p);
+                        dbs.push(db);
+                    }
+                    Err(e) => eprintln!("[fid] skip {}: {}", p, e),
+                }
+                i += 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    if dbs.is_empty() {
+        return;
+    }
+    let va_slice = |va: u64| -> Option<&[u8]> {
+        for (vstart, vend, foff) in segs {
+            if va >= *vstart && va < *vend {
+                let rel = (va - vstart) as usize;
+                let fstart = *foff as usize + rel;
+                let vsize = (vend - va) as usize;
+                let end = fstart.saturating_add(vsize).min(data.len());
+                if fstart < data.len() {
+                    return Some(&data[fstart..end]);
+                }
+            }
+        }
+        None
+    };
+    let mut hits = 0usize;
+    for (addr, name) in symbols.iter_mut() {
+        let anon = name.starts_with("func_")
+            || name.starts_with("sub_")
+            || name.starts_with("FUN_");
+        if !anon {
+            continue;
+        }
+        let Some(body) = va_slice(*addr) else { continue };
+        // Cap body at 4KB — most real funcs are well under this.
+        let body = &body[..body.len().min(4096)];
+        for db in &dbs {
+            if let Some(matched) = rsleigh_fid::identify(arch, body, *addr, db) {
+                *name = matched.to_string();
+                hits += 1;
+                break;
+            }
+        }
+    }
+    if hits > 0 {
+        eprintln!("[fid] matched {} anonymous symbols", hits);
+    }
 }
 
 /// Compute MD5 hash of data, return lowercase hex string.

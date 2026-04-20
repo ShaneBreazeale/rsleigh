@@ -18,3 +18,31 @@ pub mod ingest;
 
 pub use db::{FidDb, FidEntry};
 pub use hash::FidHashQuad;
+
+/// Convenience: fingerprint a function body and return matching name(s)
+/// from the database. Prefers `specific_hash` (callee-aware) matches;
+/// falls back to `full_hash` if specific yields nothing.
+///
+/// Returns `None` if the body is too small to fingerprint, or if no
+/// match exists. Returns `Some(&name)` when exactly one entry matches
+/// (unambiguous rename). Multi-match caller should use `FidDb` directly
+/// and apply additional disambiguation (e.g. library preference).
+pub fn identify<'a>(
+    arch: rsleigh_api::Architecture,
+    body: &[u8],
+    addr: u64,
+    db: &'a FidDb,
+) -> Option<&'a str> {
+    let hq = ingest::fingerprint(arch, body, addr, |_| None)?;
+    // Specific hash will only match when the callee graph lines up —
+    // without cross-function fingerprints during match, fall back to full.
+    let by_spec = db.match_specific(hq.specific);
+    if by_spec.len() == 1 {
+        return Some(&db.entries[by_spec[0]].name);
+    }
+    let by_full = db.match_full(hq.full);
+    if by_full.len() == 1 {
+        return Some(&db.entries[by_full[0]].name);
+    }
+    None
+}
