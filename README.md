@@ -2,7 +2,7 @@
 
 A pure-Rust backend that compiles Ghidra's SLEIGH architecture specs into native decoders, then decompiles the resulting P-code to C-like pseudocode. No JVM, no C++ FFI.
 
-## Honest framing
+## Why?
 
 This started as the disassembly + decompilation backend for [Spectra](https://github.com/ShaneBreazeale/spectra), my reverse engineering tool. I wanted to drop the Ghidra JVM daemon, so I wrote a SLEIGH compiler and decompiler in Rust and am open-sourcing the backend.
 
