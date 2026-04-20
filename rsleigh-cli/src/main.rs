@@ -1895,6 +1895,13 @@ fn apply_fid_to_symbols(
     args: &[String],
 ) {
     let mut dbs: Vec<rsleigh_fid::FidDb> = Vec::new();
+    // Auto-load bundled glibc/musl/libstdc++ DBs unless --no-fid-auto.
+    if !args.iter().any(|a| a == "--no-fid-auto") {
+        for (lib, db) in rsleigh_fid::bundled_dbs(arch) {
+            eprintln!("[fid] bundled {}: {} entries", lib, db.entries.len());
+            dbs.push(db);
+        }
+    }
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--fid" {
@@ -1915,6 +1922,8 @@ fn apply_fid_to_symbols(
     if dbs.is_empty() {
         return;
     }
+    let quiet_banner = args.iter().any(|a| a == "--fid-quiet");
+    let _ = quiet_banner;
     let va_slice = |va: u64| -> Option<&[u8]> {
         for (vstart, vend, foff) in segs {
             if va >= *vstart && va < *vend {

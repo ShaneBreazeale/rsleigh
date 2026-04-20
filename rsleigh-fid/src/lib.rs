@@ -19,6 +19,32 @@ pub mod ingest;
 pub use db::{FidDb, FidEntry};
 pub use hash::FidHashQuad;
 
+/// Load all bundled FID databases matching the given architecture.
+/// Returns a list of (library_name, db) pairs. Empty if no bundled
+/// DBs ship for the architecture (e.g. ARM32, MIPS32, RISC-V today).
+pub fn bundled_dbs(arch: rsleigh_api::Architecture) -> Vec<(&'static str, FidDb)> {
+    let mut out = Vec::new();
+    let blobs: &[(&str, &[u8])] = match arch {
+        rsleigh_api::Architecture::X86_64 => &[
+            ("glibc", include_bytes!("../data/glibc-x86_64.fidb")),
+            ("libstdcxx", include_bytes!("../data/libstdcxx-x86_64.fidb")),
+            ("musl", include_bytes!("../data/musl-x86_64.fidb")),
+        ],
+        rsleigh_api::Architecture::AArch64 => &[
+            ("glibc", include_bytes!("../data/glibc-aarch64.fidb")),
+            ("libstdcxx", include_bytes!("../data/libstdcxx-aarch64.fidb")),
+            ("musl", include_bytes!("../data/musl-aarch64.fidb")),
+        ],
+        _ => &[],
+    };
+    for (name, bytes) in blobs {
+        if let Ok(db) = FidDb::read(std::io::Cursor::new(bytes)) {
+            out.push((*name, db));
+        }
+    }
+    out
+}
+
 /// Convenience: fingerprint a function body and return matching name(s)
 /// from the database. Prefers `specific_hash` (callee-aware) matches;
 /// falls back to `full_hash` if specific yields nothing.

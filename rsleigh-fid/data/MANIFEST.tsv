@@ -1,0 +1,7 @@
+package	version	arch	source_url	sha256	fidb	entries
+libc6	2.36-9+deb12u13	amd64	http://ftp.debian.org/debian/pool/main/g/glibc/libc6_2.36-9+deb12u13_amd64.deb	3d8072c73b017e907bbf44b7db870687888a991961d74f1ecbba6b9458f32a2c	glibc-x86_64.fidb	2221
+libc6	2.36-9+deb12u13	arm64	http://ftp.debian.org/debian/pool/main/g/glibc/libc6_2.36-9+deb12u13_arm64.deb	03c3909c47a6df9f6f05357474efefca9bc30212069135a7c354fa78a1ec2415	glibc-aarch64.fidb	2330
+libstdc++6	12.2.0-14+deb12u1	amd64	http://ftp.debian.org/debian/pool/main/g/gcc-12/libstdc++6_12.2.0-14+deb12u1_amd64.deb	5cd3171216d4ab0fc911cfe9c35509bf2dd8f47761c43b7f6a4296701551a24d	libstdcxx-x86_64.fidb	3463
+libstdc++6	12.2.0-14+deb12u1	arm64	http://ftp.debian.org/debian/pool/main/g/gcc-12/libstdc++6_12.2.0-14+deb12u1_arm64.deb	26e138c677a985775331373828a6c286c551ff397cb735d00e2383cb273d1cb2	libstdcxx-aarch64.fidb	3375
+musl	1.2.5-r11	x86_64	https://dl-cdn.alpinelinux.org/alpine/v3.21/main/x86_64/musl-1.2.5-r11.apk	61e84757a8bfbc0d7fa8f4ce6de9cd4d791714369d78f6a08e5b03510fb2a623	musl-x86_64.fidb	1083
+musl	1.2.5-r11	aarch64	https://dl-cdn.alpinelinux.org/alpine/v3.21/main/aarch64/musl-1.2.5-r11.apk	721010e6bff908878d9c527428598661be59dde0d9f013f8431d01fd4dd16652	musl-aarch64.fidb	1140
