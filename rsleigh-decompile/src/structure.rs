@@ -302,11 +302,19 @@ fn emit_region(
                     continue;
                 }
 
-                // if/else: check if taken and fallthrough reconverge
+                // if/else: check if taken and fallthrough reconverge.
+                // The post-dominator is the merge point; bound branch recursion
+                // at it by temporarily marking it emitted. Without this guard,
+                // branch bodies over-run into post-merge code, collapsing
+                // sibling ifs into nested form.
                 let merge = pdom[current.0];
 
                 let mut then_body = Vec::new();
                 let mut else_body = Vec::new();
+
+                let merge_valid = merge.0 < emitted.len();
+                let merge_was_emitted = if merge_valid { emitted[merge.0] } else { true };
+                if merge_valid { emitted[merge.0] = true; }
 
                 if *taken != merge {
                     emit_region(ssa, cfg, dom, pdom, back_edges, *taken, emitted, &mut then_body, depth + 1, None, consumed);
@@ -314,6 +322,8 @@ fn emit_region(
                 if *fallthrough != merge {
                     emit_region(ssa, cfg, dom, pdom, back_edges, *fallthrough, emitted, &mut else_body, depth + 1, None, consumed);
                 }
+
+                if merge_valid { emitted[merge.0] = merge_was_emitted; }
 
                 if else_body.is_empty() {
                     out.push(StructuredStmt::IfElse {
