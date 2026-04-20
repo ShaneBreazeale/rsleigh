@@ -9713,6 +9713,46 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         false
     });
 
+    // Callee-saved register save elision. Pattern:
+    //   local_N = lVarK;                  ← save unassigned register
+    //   local_N->field_K = lVarL;         ← optional subsequent field writes
+    // where lVarK / lVarL have no prior top-level assignment in the body.
+    // These are prologue callee-saved spills that leaked through fold.
+    {
+        // Collect every "lhs = rhs;" at top-level to figure out which lVarN
+        // have a definition somewhere. If a name is only on the RHS and
+        // never on the LHS, treat it as uninitialized.
+        let mut assigned: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for l in &lines {
+            let t = l.trim();
+            if let Some(eq) = t.find(" = ") {
+                let lhs = &t[..eq];
+                if lhs.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !lhs.is_empty() {
+                    assigned.insert(lhs.to_string());
+                }
+            }
+        }
+        let mut j = 0;
+        while j < lines.len() {
+            let t = lines[j].trim();
+            let indent = lines[j].len() - lines[j].trim_start().len();
+            if indent == 0 && t.starts_with("local_") && t.ends_with(';') {
+                if let Some(eq) = t.find(" = ") {
+                    let rhs = &t[eq + 3..t.len() - 1].trim();
+                    let is_bare_var = !rhs.is_empty()
+                        && rhs.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        && (rhs.starts_with("lVar") || rhs.starts_with("iVar")
+                            || rhs.starts_with("puVar") || rhs.starts_with("uVar"));
+                    if is_bare_var && !assigned.contains(*rhs) {
+                        lines.remove(j);
+                        continue;
+                    }
+                }
+            }
+            j += 1;
+        }
+    }
+
     // Final ADRP page-address leak strip (runs after stack-slot rename
     // converts `*(sp + 8) = 0x...` → `local_8 = 0x...`). Drops any
     // `local_N = 0xHHHHH;` or `lVarN = 0xHHHHH;` at top indent when the
