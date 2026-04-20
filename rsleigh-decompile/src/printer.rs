@@ -9713,6 +9713,66 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         false
     });
 
+    // Stack-slot struct-field illusion fix. `local_{N}` is a stack-frame
+    // slot pointer; when the SSA emits an offset-from-pointer access it
+    // prints as `local_N->field_K` even though that address is really
+    // another adjacent slot. Rewrite to the correct `local_{N-K}` name
+    // (N and K are hex byte offsets; stack frames grow downward so
+    // adding K to local_N yields a slot K bytes higher, i.e. with a
+    // numerically smaller offset from the frame pointer).
+    {
+        let mut j = 0;
+        while j < lines.len() {
+            let l = lines[j].clone();
+            let bytes = l.as_bytes();
+            let mut out = String::with_capacity(l.len());
+            let mut i = 0;
+            while i + 7 < bytes.len() {
+                if &bytes[i..i + 6] == b"local_" {
+                    // Boundary check before `local_`.
+                    let before_ok = i == 0
+                        || !matches!(bytes[i - 1],
+                            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
+                    if before_ok {
+                        // Parse the N hex digits.
+                        let n_start = i + 6;
+                        let mut n_end = n_start;
+                        while n_end < bytes.len() && bytes[n_end].is_ascii_hexdigit() {
+                            n_end += 1;
+                        }
+                        if n_end > n_start && l[n_end..].starts_with("->field_") {
+                            let field_start = n_end + "->field_".len();
+                            let mut k_end = field_start;
+                            while k_end < bytes.len() && bytes[k_end].is_ascii_hexdigit() {
+                                k_end += 1;
+                            }
+                            if k_end > field_start {
+                                let n_str = &l[n_start..n_end];
+                                let k_str = &l[field_start..k_end];
+                                if let (Ok(n), Ok(k)) =
+                                    (u64::from_str_radix(n_str, 16),
+                                     u64::from_str_radix(k_str, 16))
+                                {
+                                    if k <= n {
+                                        let new_name = format!("local_{:x}", n - k);
+                                        out.push_str(&new_name);
+                                        i = k_end;
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+            out.push_str(&l[i..]);
+            lines[j] = out;
+            j += 1;
+        }
+    }
+
     // Promote `lVarN` / `iVarN` → `puVarN` when textual context proves
     // the var is a pointer. Triggers on any occurrence of `NAME->`,
     // `*NAME`, or `NAME[` elsewhere in the output. Complements SSA-level
