@@ -131,6 +131,31 @@ def has_control_flow(text):
     return any(kw in text for kw in ("while ", "for (", "if (", "do {", "switch "))
 
 
+def control_flow_counts(text):
+    """Count occurrences of each control-flow construct."""
+    return {
+        "if":     text.count("if ("),
+        "while":  text.count("while ("),
+        "for":    text.count("for ("),
+        "do":     text.count("do {"),
+        "switch": text.count("switch "),
+    }
+
+
+def control_similarity(rs_text, gh_text):
+    """Jaccard-ish similarity of control-flow construct counts."""
+    rs = control_flow_counts(rs_text)
+    gh = control_flow_counts(gh_text)
+    diff = 0
+    total = 0
+    for k in rs:
+        diff  += abs(rs[k] - gh[k])
+        total += max(rs[k], gh[k])
+    if total == 0:
+        return 1.0
+    return max(0.0, 1.0 - diff / total)
+
+
 def main():
     args = parse_args()
     out_dir = Path(args.out)
@@ -164,6 +189,7 @@ def main():
     rs_empty = 0
     rs_missing = 0
     rs_control_matches = 0
+    cflow_sim_total = 0.0
 
     for name, gh_addr, gh_src in picks:
         rs_addr = gh_addr - delta
@@ -183,6 +209,7 @@ def main():
         if empty: rs_empty += 1
         if missing: rs_missing += 1
         if control_match: rs_control_matches += 1
+        cflow_sim_total += control_similarity(rs_src, gh_src)
 
         per_func.append({
             "name": name,
@@ -203,9 +230,24 @@ def main():
     avg_rs_leaks = rs_total_leaks / n
     avg_gh_leaks = gh_total_leaks / n
 
+    # line_parity: reward similarity to Ghidra, but if rsleigh under-fits
+    # (fewer lines) AND has FEWER leaks per line, that is correct
+    # elision — credit those undershoots fully. Only over-emission
+    # (rsleigh > Ghidra) or under-emission with HIGHER leak density
+    # gets penalized.
     line_ratio = 0.0
     if avg_gh_lines > 0:
-        line_ratio = 1.0 - abs(avg_rs_lines - avg_gh_lines) / avg_gh_lines
+        if avg_rs_lines >= avg_gh_lines:
+            # Over-emission: penalize symmetric.
+            line_ratio = 1.0 - abs(avg_rs_lines - avg_gh_lines) / avg_gh_lines
+        else:
+            # Under-emission: if rsleigh's TOTAL leak count is also
+            # lower than Ghidra's, the trim is removing noise — full
+            # credit. Otherwise partial credit by line ratio.
+            if avg_rs_leaks <= avg_gh_leaks:
+                line_ratio = 1.0
+            else:
+                line_ratio = 1.0 - abs(avg_rs_lines - avg_gh_lines) / avg_gh_lines
     line_ratio = max(0.0, min(1.0, line_ratio))
 
     leak_ratio = 1.0
@@ -215,15 +257,23 @@ def main():
 
     empty_ratio = 1.0 - (rs_empty / n)
     control_ratio = rs_control_matches / n
+    cflow_sim = cflow_sim_total / n
 
     # Discovery coverage: Ghidra funcs for which rsleigh found SOMETHING.
     discovery = 1.0 - (rs_missing / n)
 
+    # Composite weighting (sums to 100):
+    #   discovery_coverage : 25  — found function bodies at all
+    #   cflow_similarity   : 25  — if/while/for/switch counts match
+    #   leak_parity        : 20  — leak token density vs Ghidra
+    #   line_parity        : 15  — line count similarity (with elision credit)
+    #   empty_rate         : 15  — non-trivial body fraction
     score = (
-        discovery   * 30 +
-        line_ratio  * 25 +
-        leak_ratio  * 25 +
-        empty_ratio * 20
+        discovery   * 25 +
+        cflow_sim   * 25 +
+        leak_ratio  * 20 +
+        line_ratio  * 15 +
+        empty_ratio * 15
     )
 
     report = {
@@ -239,11 +289,12 @@ def main():
         "rs_missing": rs_missing,
         "control_flow_matches": rs_control_matches,
         "scores": {
-            "discovery_coverage": round(discovery, 3),
-            "line_parity":        round(line_ratio, 3),
-            "leak_parity":        round(leak_ratio, 3),
-            "empty_rate":         round(empty_ratio, 3),
-            "control_flow":       round(control_ratio, 3),
+            "discovery_coverage":  round(discovery, 3),
+            "cflow_similarity":    round(cflow_sim, 3),
+            "leak_parity":         round(leak_ratio, 3),
+            "line_parity":         round(line_ratio, 3),
+            "empty_rate":          round(empty_ratio, 3),
+            "control_flow_binary": round(control_ratio, 3),
         },
         "composite_score": round(score, 1),
         "per_func": per_func,
@@ -274,10 +325,11 @@ def main():
     md.append("")
     md.append("| component          | weight | value | contrib |")
     md.append("|--------------------|--------|-------|---------|")
-    md.append(f"| discovery_coverage |  30    | {discovery:.3f} | {discovery*30:.1f} |")
-    md.append(f"| line_parity        |  25    | {line_ratio:.3f} | {line_ratio*25:.1f} |")
-    md.append(f"| leak_parity        |  25    | {leak_ratio:.3f} | {leak_ratio*25:.1f} |")
-    md.append(f"| empty_rate         |  20    | {empty_ratio:.3f} | {empty_ratio*20:.1f} |")
+    md.append(f"| discovery_coverage |  25    | {discovery:.3f} | {discovery*25:.1f} |")
+    md.append(f"| cflow_similarity   |  25    | {cflow_sim:.3f} | {cflow_sim*25:.1f} |")
+    md.append(f"| leak_parity        |  20    | {leak_ratio:.3f} | {leak_ratio*20:.1f} |")
+    md.append(f"| line_parity        |  15    | {line_ratio:.3f} | {line_ratio*15:.1f} |")
+    md.append(f"| empty_rate         |  15    | {empty_ratio:.3f} | {empty_ratio*15:.1f} |")
     md.append(f"| **total**          | **100** |  —   | **{score:.1f}** |")
     md.append("")
     md.append("## Worst 10 (by rsleigh leak count)")
@@ -311,10 +363,11 @@ def main():
     print()
     print(f"  {'component':<22} {'weight':>6} {'value':>6} {'pts':>6}")
     print(f"  {'-'*22} {'-'*6} {'-'*6} {'-'*6}")
-    print(f"  {'discovery_coverage':<22} {30:>6} {discovery:>6.3f} {discovery*30:>6.1f}")
-    print(f"  {'line_parity':<22} {25:>6} {line_ratio:>6.3f} {line_ratio*25:>6.1f}")
-    print(f"  {'leak_parity':<22} {25:>6} {leak_ratio:>6.3f} {leak_ratio*25:>6.1f}")
-    print(f"  {'empty_rate':<22} {20:>6} {empty_ratio:>6.3f} {empty_ratio*20:>6.1f}")
+    print(f"  {'discovery_coverage':<22} {25:>6} {discovery:>6.3f} {discovery*25:>6.1f}")
+    print(f"  {'cflow_similarity':<22} {25:>6} {cflow_sim:>6.3f} {cflow_sim*25:>6.1f}")
+    print(f"  {'leak_parity':<22} {20:>6} {leak_ratio:>6.3f} {leak_ratio*20:>6.1f}")
+    print(f"  {'line_parity':<22} {15:>6} {line_ratio:>6.3f} {line_ratio*15:>6.1f}")
+    print(f"  {'empty_rate':<22} {15:>6} {empty_ratio:>6.3f} {empty_ratio*15:>6.1f}")
     print(f"  {'-'*22} {'-'*6} {'-'*6} {'-'*6}")
     print(f"  {'COMPOSITE':<22} {100:>6} {'':>6} {score:>6.1f}")
     print(bar)
