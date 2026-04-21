@@ -8138,6 +8138,125 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // While → for conversion. Detect:
+    //     INIT;                                      ← `var = 0;` or `var = K;`
+    //     while (cond involving var) {
+    //         ...body...
+    //         INCREMENT;                             ← `var++`, `var += N`, `var = var + N`
+    //     }
+    // Rewrite as `for (INIT; cond; INCREMENT) { ...body... }`.
+    {
+        let mut j = 0;
+        while j + 2 < lines.len() {
+            let wl = lines[j].clone();
+            let wt = wl.trim();
+            if !(wt.starts_with("while (") && wt.ends_with("{")) {
+                j += 1;
+                continue;
+            }
+            let open_indent = wl.len() - wl.trim_start().len();
+            // Find matching `}` at same indent and last non-blank line inside body.
+            let mut depth = 1;
+            let mut close_idx = None;
+            let mut last_stmt_idx = None;
+            for k in (j + 1)..lines.len() {
+                let t = lines[k].trim();
+                if t.ends_with("{") { depth += 1; continue; }
+                if t == "}" {
+                    let ci = lines[k].len() - lines[k].trim_start().len();
+                    depth -= 1;
+                    if depth == 0 && ci == open_indent { close_idx = Some(k); break; }
+                    continue;
+                }
+                if depth == 1 && !t.is_empty() {
+                    last_stmt_idx = Some(k);
+                }
+            }
+            let (close, last_stmt) = match (close_idx, last_stmt_idx) {
+                (Some(c), Some(l)) => (c, l),
+                _ => { j += 1; continue; }
+            };
+            // Parse INCREMENT: `var++;` or `var += N;` or `var = var + N;`
+            let inc_text = lines[last_stmt].trim().trim_end_matches(';').trim();
+            let inc_var = if let Some(v) = inc_text.strip_suffix("++") {
+                Some(v.trim().to_string())
+            } else if let Some(v) = inc_text.strip_suffix("--") {
+                Some(v.trim().to_string())
+            } else if let Some((lhs, rhs)) = inc_text.split_once(" += ") {
+                let lhs = lhs.trim();
+                if rhs.trim().chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == 'x') {
+                    Some(lhs.to_string())
+                } else { None }
+            } else if let Some((lhs, rhs)) = inc_text.split_once(" -= ") {
+                let lhs = lhs.trim();
+                if rhs.trim().chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == 'x') {
+                    Some(lhs.to_string())
+                } else { None }
+            } else if let Some((lhs, rhs)) = inc_text.split_once(" = ") {
+                let lhs = lhs.trim();
+                let rhs = rhs.trim();
+                if rhs.starts_with(&format!("{} + ", lhs))
+                    || rhs.starts_with(&format!("{} - ", lhs))
+                {
+                    Some(lhs.to_string())
+                } else { None }
+            } else {
+                None
+            };
+            let inc_var = match inc_var {
+                Some(v) if !v.is_empty()
+                    && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => v,
+                _ => { j += 1; continue; }
+            };
+            // The while cond must reference inc_var.
+            let cond_start = wt.find('(').unwrap() + 1;
+            let cond_end = wt.rfind(')').unwrap_or(wt.len());
+            let cond_str = &wt[cond_start..cond_end];
+            // Word-boundary contains: cond references inc_var.
+            let var_re = {
+                let bytes = cond_str.as_bytes();
+                let needle = inc_var.as_bytes();
+                let mut found = false;
+                let mut p = 0;
+                while p + needle.len() <= bytes.len() {
+                    if &bytes[p..p + needle.len()] == needle {
+                        let lhs_ok = p == 0
+                            || !matches!(bytes[p - 1],
+                                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
+                        let after = p + needle.len();
+                        let rhs_ok = after >= bytes.len()
+                            || !matches!(bytes[after],
+                                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
+                        if lhs_ok && rhs_ok { found = true; break; }
+                    }
+                    p += 1;
+                }
+                found
+            };
+            if !var_re { j += 1; continue; }
+            // Find INIT line directly before the while: `IDENT = ...;` at
+            // outer indent that assigns inc_var.
+            if j == 0 { j += 1; continue; }
+            let init_idx = j - 1;
+            let init_line = lines[init_idx].trim();
+            let init_match = init_line.starts_with(&format!("{} = ", inc_var))
+                && init_line.ends_with(';');
+            if !init_match { j += 1; continue; }
+            let init_str = init_line.trim_end_matches(';').to_string();
+
+            // Build the for-loop. Drop init line, replace while with for,
+            // drop the trailing increment statement.
+            let pad = " ".repeat(open_indent);
+            let new_for = format!("{}for ({}; {}; {}) {{",
+                pad, init_str, cond_str.trim(), inc_text.trim());
+            lines[j] = new_for;
+            lines.remove(last_stmt);   // drop increment
+            lines.remove(init_idx);    // drop init (j shifts -1)
+            // Skip past converted block; close index shifted -1 too.
+            j = close.saturating_sub(1);
+        }
+    }
+
     // For-loop init recovery: for (; var op expr; var++) → for (var = 0; var op expr; var++)
     // When a for-loop has an empty init, check if the loop variable was initialized to 0
     // in a preceding statement (which was elided as a dead store).
