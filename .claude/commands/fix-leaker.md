@@ -65,6 +65,12 @@ Run it. **Must fail.** If it passes, bug already fixed or assertion wrong.
 
 Commit: `test: failing regression for <bug_slug> (<metric>)`.
 
+**No exceptions for "trivial" fixes.** Constant-widening, byte-check
+relaxation, enum variant addition, and opcode-table updates all require
+tests. If the code being changed isn't unit-testable, that's a blocker
+to fix first, not a license to skip. File a `candidate: enables-testing`
+entry in `.opt/ideas.md` and write an integration test in the meantime.
+
 ### Phase 4 — Fix
 
 - Minimal diff, scoped to `fold.rs` / `ssa.rs`.
@@ -144,10 +150,15 @@ notes:    <one line or empty>
 ├── ssa.diff
 ├── bench.before.json
 ├── bench.after.json
-├── wins.md            # append-only
-├── failed.md          # append-only
-└── ideas.md           # parking lot
+├── wins.md            # append-only — full-protocol wins
+├── failed.md          # append-only — aborted attempts
+├── debt.md            # append-only — wins that skipped protocol,
+│                      #   retroactive test landed after the fact
+└── ideas.md           # parking lot for out-of-scope observations
 ```
+
+**Ledger discipline:** wins.md, failed.md, debt.md are disjoint.
+Don't cross-file entries. Mixing categories corrupts the ledger.
 
 ## Campaign mode (opt-in, multi-commit)
 
