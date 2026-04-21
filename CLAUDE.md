@@ -137,6 +137,8 @@ rsleigh <binary> --disasm <func>       # disassemble with P-code
 rsleigh <binary> --sigs extra.json     # load additional signatures
 rsleigh <binary> --fid file.fidb       # additional FID database (repeatable)
 rsleigh <binary> --no-fid-auto         # disable bundled glibc/musl/libstdc++ DBs
+rsleigh <binary> --pcode-json <func>   # raw decoded P-code (debug)
+rsleigh <binary> --ssa-json <func>     # post-fold SSA state (debug)
 rsleigh <binary> --json                # JSON output
 rsleigh <binary> --search <query>       # find functions by string/pattern
 rsleigh <binary> --search --api <name> # find functions calling specific API
@@ -419,12 +421,14 @@ Wired into Spectra via `rsleigh-api` + `rsleigh-decompile`:
 
 ## Ghidra Comparison Setup
 
-Ghidra 11.3.1 is installed at `~/ghidra_install/ghidra_11.3.1_PUBLIC/`.
+Ghidra installs (try in order — `bench-compare.sh` does this auto):
+- `~/tools/ghidra_11.4.3_PUBLIC/` ← use for `ghidra-export-decompile.py` (Jython OK)
+- `~/tools/ghidra_12.0.4_PUBLIC/` ← needs PyGhidra (`pip install pyghidra`); script will fail otherwise
 
 ```bash
 export JAVA_HOME=$(brew --prefix openjdk@21)/libexec/openjdk.jdk/Contents/Home
 export PATH="$JAVA_HOME/bin:$PATH"
-export GHIDRA_HOME=~/ghidra_install/ghidra_11.3.1_PUBLIC
+export GHIDRA_HOME=~/tools/ghidra_11.4.3_PUBLIC
 ```
 
 Headless function counting:
@@ -436,6 +440,33 @@ $GHIDRA_HOME/support/analyzeHeadless /tmp/ghidra_proj proj \
 **Current score: rsleigh 15 — Ghidra 6** on PE/Mach-O/ELF/ARM32 binaries (21 compared).
 Stripped ELF: eh_frame + RTTI vtable + prologue scanning now competitive.
 ARM32 binaries: BL/Thumb scanning + condition recovery tested.
+
+## Bench: rsleigh vs Ghidra
+
+```bash
+scripts/bench-compare.sh <binary> [--sample N]   # full run (Ghidra + score)
+scripts/bench-score.py --binary X --rsleigh Y \
+  --ghidra cached.json --sample 50 --out DIR     # re-score only (no Ghidra rerun)
+```
+
+Ghidra path + JDK path auto-resolved. Composite score weights: discovery 25,
+cflow_similarity 25, leak_parity 20, line_parity 15 (elision-aware), empty_rate 15.
+`line_parity` gives full credit when rsleigh has fewer lines AND fewer leaks.
+Latest scores: bed (Go) 89.8, plm (AArch64 C++) 81.4 — both EXCELLENT.
+
+## macOS gotchas
+
+- Apple `c++filt` strips leading `_` by default → use `c++filt -n` for Itanium `_Z...`.
+- No `timeout` cmd → use `gtimeout` (brew coreutils) or Bash `run_in_background`.
+- `pip3` aliased to `uv` → install via `uv pip install --system` or in a venv.
+- `cargo test -p test-harness` has pre-existing stack overflow in unit tests; iterate
+  via `cargo test -p rsleigh-decompile --release` (26 tests, ~0.1s).
+
+## Debugging fold/structure passes
+
+- Insert temp `eprintln!("[tag] ...")` in fold.rs/structure.rs → run targeted func →
+  inspect prefix → remove. `--ssa-json <addr>` shows post-fold state without instrumentation.
+- For new SSA passes: gate on `CallingConv::*` or arch when behavior is target-specific.
 
 ## License
 
