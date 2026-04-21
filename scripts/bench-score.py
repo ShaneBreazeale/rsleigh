@@ -170,7 +170,8 @@ def main():
 
     # Adjust rsleigh addresses to Ghidra's image base.
     delta = detect_base_delta(ghidra, args.rsleigh, args.binary)
-    print(f"[score] image-base delta: 0x{delta:x}")
+    if not args.worst_leakers:
+        print(f"[score] image-base delta: 0x{delta:x}")
 
     # Build Ghidra function index
     gh_items = []
