@@ -235,11 +235,7 @@ fn infer_go_header_params(ssa: &mut SsaCfg) {
     };
     let is_length_like = |p: &str, param_vars: &std::collections::BTreeMap<String, Vec<usize>>, ssa: &SsaCfg| -> bool {
         let vars = match param_vars.get(p) { Some(v) => v, None => return false };
-        // Scan expressions that reference this param as an operand in a
-        // comparison BinOp. Integer length usage in Go almost always
-        // involves a signed-or-unsigned compare against 0 or a counter.
-        for (idx, v) in ssa.vars.iter().enumerate() {
-            let _ = idx;
+        for v in ssa.vars.iter() {
             if let Expr::BinOp(kind, l, r) = &v.expr {
                 if matches!(kind,
                     BinOpKind::Less | BinOpKind::LessEq
@@ -252,13 +248,56 @@ fn infer_go_header_params(ssa: &mut SsaCfg) {
                 }
             }
         }
-        // Or the param is passed as-is as a later arg (len of memcpy, etc.) —
-        // detectable by checking if a call stmt's args contain this var.
         for blk in &ssa.blocks {
             for stmt in &blk.stmts {
                 if let Stmt::Call { args, .. } = stmt {
                     for a in args {
                         if vars.contains(&(a.0 as usize)) { return true; }
+                    }
+                }
+            }
+        }
+        false
+    };
+
+    // Reject: param_(i+1) compared against a value derived from param_i.
+    // Real strings/slices have len that is independent of data; if the
+    // "len" candidate is being compared to `*(data + 0x10)` style load
+    // of the data param, we are looking at array indexing, not a slice
+    // header.
+    let len_is_bound_by_data = |a_name: &str, b_name: &str,
+                                param_vars: &std::collections::BTreeMap<String, Vec<usize>>,
+                                ssa: &SsaCfg| -> bool {
+        let a_vars = match param_vars.get(a_name) { Some(v) => v, None => return false };
+        let b_vars = match param_vars.get(b_name) { Some(v) => v, None => return false };
+        let a_derived = closure_from(a_vars, ssa);
+        // Scan comparisons; if both sides derive from a (data) and b
+        // (length), reject. Loads from a's offsets count as a-derived.
+        let mut load_chain: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        load_chain.extend(a_derived.iter().copied());
+        for (idx, v) in ssa.vars.iter().enumerate() {
+            match &v.expr {
+                Expr::Load(p) if a_derived.contains(&(p.0 as usize)) => { load_chain.insert(idx); }
+                Expr::FieldAccess(p, _) if a_derived.contains(&(p.0 as usize)) => { load_chain.insert(idx); }
+                _ => {}
+            }
+        }
+        // Now expand load_chain transitively via Var/BinOp/UnaryOp.
+        let load_chain = closure_from(&load_chain.iter().copied().collect::<Vec<_>>(), ssa);
+
+        for v in ssa.vars.iter() {
+            if let Expr::BinOp(kind, l, r) = &v.expr {
+                if matches!(kind,
+                    BinOpKind::Less | BinOpKind::LessEq
+                    | BinOpKind::SLess | BinOpKind::SLessEq
+                    | BinOpKind::Eq | BinOpKind::NotEq)
+                {
+                    let l_b = b_vars.contains(&(l.0 as usize));
+                    let r_b = b_vars.contains(&(r.0 as usize));
+                    let l_a = load_chain.contains(&(l.0 as usize));
+                    let r_a = load_chain.contains(&(r.0 as usize));
+                    if (l_b && r_a) || (r_b && l_a) {
+                        return true;
                     }
                 }
             }
@@ -278,6 +317,13 @@ fn infer_go_header_params(ssa: &mut SsaCfg) {
         let a_ptr = is_pointer_like(a_name, &param_vars, ssa);
         let b_len = is_length_like(b_name, &param_vars, ssa);
         if !(a_ptr && b_len) { i += 1; continue; }
+
+        // Reject if the apparent length is bound by a value derived
+        // from the apparent data pointer — that's array indexing into
+        // a struct, not a real slice/string header.
+        if len_is_bound_by_data(a_name, b_name, &param_vars, ssa) {
+            i += 1; continue;
+        }
 
         let mut stride = 2;
         let mut is_slice = false;

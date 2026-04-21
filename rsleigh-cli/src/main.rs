@@ -862,28 +862,30 @@ fn decode_func(
         if is_small || is_lea8 || is_lea32 {
             let scan_start = if is_small { 10 } else if is_lea8 { 15 } else { 18 };
             let scan_max = max.min(8192);
+            // Walk forward looking for the NEXT Go preamble (= next
+            // function boundary). Don't stop on RET — Go funcs have
+            // early returns, panic exits, and morestack tails BEFORE
+            // the real function end. Use the next-preamble pattern as
+            // the only firm boundary.
+            let mut found_boundary = false;
             for i in scan_start..scan_max {
-                if bytes[i] == 0xc3 {
-                    ext = ext.max(i + 1);
-                    break;
-                }
-                // Next Go preamble = next function boundary.
-                let next_small = bytes[i] == 0x49 && i + 4 < scan_max
+                let next_small = bytes[i] == 0x49 && i + 3 < scan_max
                     && bytes[i+1] == 0x3b && bytes[i+2] == 0x66 && bytes[i+3] == 0x10;
-                let next_lea8 = bytes[i] == 0x4c && i + 5 < scan_max
+                let next_lea8 = bytes[i] == 0x4c && i + 8 < scan_max
                     && bytes[i+1] == 0x8d && bytes[i+2] == 0x64 && bytes[i+3] == 0x24
-                    && bytes[i+5] == 0x4d && i + 8 < scan_max
+                    && bytes[i+5] == 0x4d
                     && bytes[i+6] == 0x3b && bytes[i+7] == 0x66 && bytes[i+8] == 0x10;
-                let next_lea32 = bytes[i] == 0x4c && i + 8 < scan_max
+                let next_lea32 = bytes[i] == 0x4c && i + 11 < scan_max
                     && bytes[i+1] == 0x8d && bytes[i+2] == 0xa4 && bytes[i+3] == 0x24
-                    && bytes[i+8] == 0x4d && i + 11 < scan_max
+                    && bytes[i+8] == 0x4d
                     && bytes[i+9] == 0x3b && bytes[i+10] == 0x66 && bytes[i+11] == 0x10;
                 if next_small || next_lea8 || next_lea32 {
                     ext = ext.max(i);
+                    found_boundary = true;
                     break;
                 }
             }
-            if ext == decode_max { ext = scan_max; }
+            if !found_boundary { ext = scan_max; }
         }
         ext
     };
