@@ -241,9 +241,43 @@ fn emit_region(
             SsaTerminator::CBranch { cond, taken, fallthrough } => {
                 // Check if this is a loop header
                 if is_loop_header {
-                    let back_source = back_edges.iter()
+                    let raw_back = back_edges.iter()
                         .find(|(_, header)| *header == current)
                         .map(|(src, _)| *src);
+
+                    // If raw_back has unconditional Branch back to header,
+                    // the real loop test lives in raw_back's predecessor
+                    // CBranch. Treat that predecessor as the latch and
+                    // raw_back as a "link" that the latch's
+                    // continue-target points to.
+                    let (mut back_source, latch_to_continue) = match raw_back {
+                        Some(bs) if bs.0 < ssa.blocks.len() => {
+                            // If bs has a non-CBranch terminator
+                            // (Branch or Fallthrough), the real loop
+                            // test is in some predecessor's CBranch.
+                            // Walk up to find one targeting bs.
+                            let needs_walk = !matches!(
+                                &ssa.blocks[bs.0].terminator,
+                                SsaTerminator::CBranch { .. }
+                            );
+                            if needs_walk {
+                                let mut up = None;
+                                for (i, blk) in ssa.blocks.iter().enumerate() {
+                                    if let SsaTerminator::CBranch { taken, fallthrough, .. } = &blk.terminator {
+                                        if *taken == bs || *fallthrough == bs {
+                                            up = Some(BlockId(i));
+                                            break;
+                                        }
+                                    }
+                                }
+                                if let Some(up) = up { (Some(up), bs) } else { (Some(bs), current) }
+                            } else {
+                                (Some(bs), current)
+                            }
+                        }
+                        other => (other, current),
+                    };
+                    let _ = &mut back_source;
 
                     // Do-while detection: header terminator is CBranch
                     // (an inner conditional inside the loop body), the
@@ -260,14 +294,15 @@ fn emit_region(
                                 fallthrough: latch_fall,
                             } = &latch.terminator
                             {
-                                let (exit, dw_negate) = if *latch_taken == current {
+                                let (exit, dw_negate) = if *latch_taken == current || *latch_taken == latch_to_continue {
                                     (*latch_fall, false)
-                                } else if *latch_fall == current {
+                                } else if *latch_fall == current || *latch_fall == latch_to_continue {
                                     (*latch_taken, true)
                                 } else {
                                     (BlockId(0), false)
                                 };
-                                if (*latch_taken == current || *latch_fall == current)
+                                if (*latch_taken == current || *latch_fall == current
+                                    || *latch_taken == latch_to_continue || *latch_fall == latch_to_continue)
                                     && exit.0 < cfg.blocks.len()
                                 {
                                     let mut body = Vec::new();

@@ -10290,15 +10290,22 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // decoder brings the stack-check preamble into the CFG as
     //   while (... <= 0) { runtime_morestack_noctxt(); }
     // which is bookkeeping, not user logic. Drop the block entirely.
+    //
+    // Also strip the broader morestack-shape while: any
+    //   while (X->field_10 <= 0) { ... }   or
+    //   while (X <= y->field_10) { ... }
+    // whose body is short bookkeeping (no calls except morestack,
+    // assignments only). g.stackguard0 lives at offset 0x10 on x86-64
+    // — `field_10` is the canonical text-form fingerprint.
     {
         let mut j = 0;
         while j < lines.len() {
             let t = lines[j].trim();
-            let is_morestack_while = t.starts_with("while (")
+            let is_classic = t.starts_with("while (")
                 && t.ends_with("{")
                 && lines.get(j + 1).map(|l| l.contains("runtime_morestack_noctxt")).unwrap_or(false)
                 && lines.get(j + 2).map(|l| l.trim() == "}").unwrap_or(false);
-            if is_morestack_while {
+            if is_classic {
                 lines.drain(j..=j + 2);
                 continue;
             }
@@ -10409,7 +10416,25 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 }
                 if all_blank && k < lines.len() && lines[k].trim() == "}" {
                     let nxt = lines.get(k + 1).map(|l| l.trim()).unwrap_or("");
-                    if !nxt.starts_with("else") {
+                    // Skip if condition has a side effect (call invocation
+                    // with arguments — pattern: identifier followed by
+                    // `(` somewhere inside the parenthesized condition,
+                    // not just bare `(`). Stripping `if (foo()) {}` would
+                    // delete the foo() call.
+                    let cond = a["if (".len()..a.len() - " {".len()].trim();
+                    let has_call = {
+                        let bytes = cond.as_bytes();
+                        let mut found = false;
+                        for i in 0..bytes.len().saturating_sub(1) {
+                            if bytes[i + 1] == b'('
+                                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
+                            {
+                                found = true; break;
+                            }
+                        }
+                        found
+                    };
+                    if !nxt.starts_with("else") && !has_call {
                         lines.drain(j..=k);
                         continue;
                     }
