@@ -6117,6 +6117,17 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 (0x48, "nMaxFileTitle", "DWORD"), (0x50, "lpstrInitialDir", "LPCWSTR"),
                 (0x58, "lpstrTitle", "LPCWSTR"), (0x60, "Flags", "DWORD"),
             ]),
+            // Go runtime header types (Go 1.17+). Used by the matcher
+            // when offset sets line up exactly.
+            ("GoSlice", &[
+                (0x00, "data", "void *"), (0x08, "len", "long"), (0x10, "cap", "long"),
+            ]),
+            ("GoIface", &[
+                (0x00, "tab", "void *"), (0x08, "data", "void *"),
+            ]),
+            ("GoString", &[
+                (0x00, "data", "char *"), (0x08, "len", "long"),
+            ]),
         ];
 
         let mut param_fields: HashMap<String, std::collections::BTreeSet<u64>> = HashMap::new();
@@ -6369,16 +6380,45 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 "BITMAP", "SYSTEM_INFO", "MEMORY_BASIC_INFORMATION", "SOCKADDR_IN",
                 "CRITICAL_SECTION", "OVERLAPPED", "RECT", "POINT", "EXCEPTION_RECORD",
                 "CONTEXT", "FILETIME", "LARGE_INTEGER"];
+            // Detect Go binary once — relaxes threshold for Go-specific
+            // 2-field header types (GoIface, GoString).
+            let is_go = ctx.binary.map_or(false, |b| {
+                goblin::Object::parse(b).ok().map_or(false, |obj| match &obj {
+                    goblin::Object::Elf(elf) => elf.section_headers.iter().any(|sh| {
+                        elf.shdr_strtab.get_at(sh.sh_name) == Some(".gopclntab")
+                    }),
+                    _ => false,
+                })
+            });
+            let go_small_types = ["GoIface", "GoString"];
+            let go_full_types = ["GoSlice", "GoIface", "GoString"];
+
             let mut best_match: Option<(&str, usize)> = None;
             for (struct_name, struct_fields) in known_structs {
-                // Skip Win32 structs for ELF and POSIX structs for PE
                 if !is_pe && win32_only_structs.contains(struct_name) { continue; }
                 if is_pe && posix_structs.contains(struct_name) { continue; }
+                // Skip Go types on non-Go binaries; require exact fit
+                // on Go binaries.
+                let is_go_struct = go_full_types.contains(struct_name);
+                if is_go_struct && !is_go { continue; }
 
                 let struct_offsets: std::collections::BTreeSet<u64> = struct_fields.iter().map(|(o, _, _)| *o).collect();
                 let matching = fields.intersection(&struct_offsets).count();
-                // Require at least 3 matching fields and >50% of observed fields match
-                if matching >= 3 && matching * 2 >= fields.len() {
+
+                let min_match = if is_go_struct && go_small_types.contains(struct_name) {
+                    2
+                } else {
+                    3
+                };
+                // Require exact subset match (no extra fields outside
+                // struct layout) for Go 2-field types to avoid false
+                // positives. Full threshold: matching >= N and 50% cover.
+                let extra = fields.difference(&struct_offsets).count();
+                let go_exact_ok = is_go_struct && go_small_types.contains(struct_name) && extra == 0;
+                let generic_ok = matching >= min_match && matching * 2 >= fields.len();
+                if (go_exact_ok && matching >= 2) || (!is_go_struct && generic_ok)
+                    || (is_go_struct && !go_small_types.contains(struct_name) && generic_ok)
+                {
                     if best_match.map_or(true, |(_, best)| matching > best) {
                         best_match = Some((struct_name, matching));
                     }

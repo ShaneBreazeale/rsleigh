@@ -824,28 +824,61 @@ fn decode_func(
         .unwrap_or(fa + max as u64);
     let decode_max = ((next_func - fa) as usize).min(max);
 
-    // Go stack-check preamble extension: if the first two instructions
-    // are `CMP RSP, [R14+0x10]; JBE morestack`, extend decode_max so the
-    // linear sweep continues into the real body (which is typically 10
-    // bytes past fa). Discovery may have planted a FUN_ symbol at fa+10
-    // that shrank next_func.
+    // Go stack-check preamble extension. Three known shapes on amd64:
+    //   A. Small frame (0-128 bytes):
+    //        49 3b 66 10        cmp rsp, [r14+0x10]
+    //        0f 86 rr rr rr rr  jbe morestack
+    //   B. Medium frame via LEA (uses RSP-N as comparison value):
+    //        4c 8d 64 24 ii     lea r12, [rsp-ii]
+    //        4d 3b 66 10        cmp r12, [r14+0x10]
+    //        0f 86 rr rr rr rr  jbe morestack
+    //   C. Large frame (>32K) uses 32-bit displacement in LEA:
+    //        4c 8d a4 24 ii ii ii ii  lea r12, [rsp-iiiiiiii]
+    //        4d 3b 66 10
+    //        0f 86 rr rr rr rr
+    //
+    // Function-discovery (CALL-target scan) plants a spurious FUN_
+    // symbol at the byte past the JBE because morestack never returns
+    // to the JBE; it jumps back to the function entry. Extend decode_max
+    // past that FUN_ boundary when a preamble is detected.
     let extended_max = {
-        let mut ext = decode_max;
-        if bytes.len() >= 10 && bytes[0] == 0x49 && bytes[1] == 0x3b
+        let is_small = bytes.len() >= 10
+            && bytes[0] == 0x49 && bytes[1] == 0x3b
             && bytes[2] == 0x66 && bytes[3] == 0x10
-            && bytes[4] == 0x0f && bytes[5] == 0x86
-        {
-            // Scan forward for a RET (0xc3) or until 4096 bytes / data end.
-            let scan_max = max.min(4096);
-            for i in 10..scan_max {
+            && bytes[4] == 0x0f && bytes[5] == 0x86;
+        let is_lea8 = bytes.len() >= 15
+            && bytes[0] == 0x4c && bytes[1] == 0x8d
+            && bytes[2] == 0x64 && bytes[3] == 0x24
+            && bytes[5] == 0x4d && bytes[6] == 0x3b
+            && bytes[7] == 0x66 && bytes[8] == 0x10
+            && bytes[9] == 0x0f && bytes[10] == 0x86;
+        let is_lea32 = bytes.len() >= 18
+            && bytes[0] == 0x4c && bytes[1] == 0x8d
+            && bytes[2] == 0xa4 && bytes[3] == 0x24
+            && bytes[8] == 0x4d && bytes[9] == 0x3b
+            && bytes[10] == 0x66 && bytes[11] == 0x10
+            && bytes[12] == 0x0f && bytes[13] == 0x86;
+        let mut ext = decode_max;
+        if is_small || is_lea8 || is_lea32 {
+            let scan_start = if is_small { 10 } else if is_lea8 { 15 } else { 18 };
+            let scan_max = max.min(8192);
+            for i in scan_start..scan_max {
                 if bytes[i] == 0xc3 {
                     ext = ext.max(i + 1);
                     break;
                 }
-                // Also stop at next Go preamble in case we overshoot.
-                if i + 4 < scan_max && bytes[i] == 0x49 && bytes[i+1] == 0x3b
-                    && bytes[i+2] == 0x66 && bytes[i+3] == 0x10
-                {
+                // Next Go preamble = next function boundary.
+                let next_small = bytes[i] == 0x49 && i + 4 < scan_max
+                    && bytes[i+1] == 0x3b && bytes[i+2] == 0x66 && bytes[i+3] == 0x10;
+                let next_lea8 = bytes[i] == 0x4c && i + 5 < scan_max
+                    && bytes[i+1] == 0x8d && bytes[i+2] == 0x64 && bytes[i+3] == 0x24
+                    && bytes[i+5] == 0x4d && i + 8 < scan_max
+                    && bytes[i+6] == 0x3b && bytes[i+7] == 0x66 && bytes[i+8] == 0x10;
+                let next_lea32 = bytes[i] == 0x4c && i + 8 < scan_max
+                    && bytes[i+1] == 0x8d && bytes[i+2] == 0xa4 && bytes[i+3] == 0x24
+                    && bytes[i+8] == 0x4d && i + 11 < scan_max
+                    && bytes[i+9] == 0x3b && bytes[i+10] == 0x66 && bytes[i+11] == 0x10;
+                if next_small || next_lea8 || next_lea32 {
                     ext = ext.max(i);
                     break;
                 }
