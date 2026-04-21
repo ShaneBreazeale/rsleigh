@@ -1902,6 +1902,63 @@ fn recover_conditions(ssa: &mut SsaCfg) {
         }
     }
 
+    // Pass 1a': Flag-subexpression rewrite. Compound conditions
+    // (BoolAnd / BoolOr) leak raw `OF != SF` / `OV == NG` when the
+    // flag pair appears as a sub-operand and recover_conditions only
+    // rewrote the top-level CBranch cond. Walk every var; when its
+    // expr is NotEq/Eq with (OF|OV|SBORROW, SF|NG) operands in either
+    // order, rewrite to IntSLess/IntSLessEq over the underlying
+    // compare operands.
+    {
+        let is_of = |id: VarId, ssa: &SsaCfg| -> bool {
+            is_flag_ref(id, 523, ssa) || is_flag_ref(id, 259, ssa)
+        };
+        let is_sf = |id: VarId, ssa: &SsaCfg| -> bool {
+            is_flag_ref(id, 519, ssa) || is_flag_ref(id, 256, ssa)
+        };
+        let mut rewrites: Vec<(usize, Expr, InferredType)> = Vec::new();
+        for (idx, v) in ssa.vars.iter().enumerate() {
+            let (is_pair, kind, l, r) = match &v.expr {
+                Expr::BinOp(BinOpKind::NotEq, l, r) => {
+                    let pair = (is_of(*l, ssa) && is_sf(*r, ssa))
+                        || (is_sf(*l, ssa) && is_of(*r, ssa));
+                    (pair, BinOpKind::SLess, *l, *r)
+                }
+                Expr::BinOp(BinOpKind::Eq, l, r) => {
+                    let pair = (is_of(*l, ssa) && is_sf(*r, ssa))
+                        || (is_sf(*l, ssa) && is_of(*r, ssa));
+                    (pair, BinOpKind::SLessEq, *l, *r)
+                }
+                _ => (false, BinOpKind::Eq, VarId(0), VarId(0)),
+            };
+            if !is_pair { continue; }
+            // Extract CMP operands from either flag var's definition.
+            let extract_ab = |flag_var: VarId| -> Option<(VarId, VarId)> {
+                match &ssa.vars[flag_var.0 as usize].expr {
+                    Expr::BinOp(_, a, b) => Some((*a, *b)),
+                    _ => None,
+                }
+            };
+            let ab = extract_ab(l).or_else(|| extract_ab(r));
+            if let Some((a, b)) = ab {
+                let (final_l, final_r) = match kind {
+                    BinOpKind::SLess => (a, b),
+                    BinOpKind::SLessEq => (b, a),
+                    _ => (a, b),
+                };
+                rewrites.push((
+                    idx,
+                    Expr::BinOp(kind, final_l, final_r),
+                    InferredType::Bool,
+                ));
+            }
+        }
+        for (idx, expr, ty) in rewrites {
+            ssa.vars[idx].expr = expr;
+            ssa.vars[idx].inferred_type = ty;
+        }
+    }
+
     // Pass 1b: Sub(a, b) used bare as a CBranch condition → NotEq(a, b).
     // Handles `if (x - 1)` → `if (x != 1)` for non-flag-derived conditions.
     let mut sub_cond: Vec<(usize, VarId, VarId)> = Vec::new(); // (bi, a, b)
