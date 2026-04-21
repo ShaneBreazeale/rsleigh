@@ -1120,11 +1120,17 @@ fn simba_simplify_1var(
     let c0 = f0;
     let c1 = f1.wrapping_sub(f0) & mask;
 
-    // Verify
-    env.clear(); env.insert(base.0, 0x42);
-    let f_test = eval_expr(&vars[var_idx].expr, vars, &env, mask, 0)?;
-    let expected = c0.wrapping_add(c1.wrapping_mul(0x42)) & mask;
-    if f_test != expected { return None; }
+    // Verify against several test points. 0x42 alone is not enough:
+    // bit-masking expressions like `(x & 0xFF00FF00FF00FF00) >> 8`
+    // all collapse to 0 for small x, giving c0=c1=0 and a false
+    // Const(0) conclusion. The all-ones point exercises every bit
+    // lane and flushes out any non-linearity.
+    for probe in [0x42u64, u64::MAX, 0xAAAAAAAAAAAAAAAA, 0x0123456789ABCDEF] {
+        env.clear(); env.insert(base.0, probe & mask);
+        let f_test = eval_expr(&vars[var_idx].expr, vars, &env, mask, 0)?;
+        let expected = c0.wrapping_add(c1.wrapping_mul(probe & mask)) & mask;
+        if f_test != expected { return None; }
+    }
 
     let neg1 = mask;
 
