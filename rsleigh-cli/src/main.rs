@@ -419,11 +419,29 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
             eprintln!("[go] .gopclntab: {} symbols", go_syms.len());
             let existing: std::collections::HashSet<u64> =
                 symbols.iter().map(|(a, _)| *a).collect();
-            for (pc, name) in go_syms {
-                if !existing.contains(&pc) {
-                    symbols.push((pc, name));
+            let pclntab_set: std::collections::HashSet<u64> =
+                go_syms.keys().copied().collect();
+            for (pc, name) in &go_syms {
+                if !existing.contains(pc) {
+                    symbols.push((*pc, name.clone()));
                 }
             }
+            // Drop anonymous FUN_* / func_* entries that sit inside a
+            // Go function's stack-check preamble. Go funcs begin with
+            //   4 bytes: CMP RSP, [R14+0x10]
+            //   6 bytes: JBE rel32 morestack
+            // so real body starts at entry+10. The prior function-
+            // discovery pass treats the body as a separate function via
+            // CALL-target scan. Remove those spurious entries.
+            symbols.retain(|(a, n)| {
+                let is_anon = n.starts_with("FUN_")
+                    || n.starts_with("func_")
+                    || n.starts_with("sub_");
+                if !is_anon { return true; }
+                // Check any pclntab entry E where E + 1..=16 == a.
+                let base = a.saturating_sub(16);
+                !(base..*a).any(|candidate| pclntab_set.contains(&candidate))
+            });
         }
     }
 
@@ -806,6 +824,37 @@ fn decode_func(
         .unwrap_or(fa + max as u64);
     let decode_max = ((next_func - fa) as usize).min(max);
 
+    // Go stack-check preamble extension: if the first two instructions
+    // are `CMP RSP, [R14+0x10]; JBE morestack`, extend decode_max so the
+    // linear sweep continues into the real body (which is typically 10
+    // bytes past fa). Discovery may have planted a FUN_ symbol at fa+10
+    // that shrank next_func.
+    let extended_max = {
+        let mut ext = decode_max;
+        if bytes.len() >= 10 && bytes[0] == 0x49 && bytes[1] == 0x3b
+            && bytes[2] == 0x66 && bytes[3] == 0x10
+            && bytes[4] == 0x0f && bytes[5] == 0x86
+        {
+            // Scan forward for a RET (0xc3) or until 4096 bytes / data end.
+            let scan_max = max.min(4096);
+            for i in 10..scan_max {
+                if bytes[i] == 0xc3 {
+                    ext = ext.max(i + 1);
+                    break;
+                }
+                // Also stop at next Go preamble in case we overshoot.
+                if i + 4 < scan_max && bytes[i] == 0x49 && bytes[i+1] == 0x3b
+                    && bytes[i+2] == 0x66 && bytes[i+3] == 0x10
+                {
+                    ext = ext.max(i);
+                    break;
+                }
+            }
+            if ext == decode_max { ext = scan_max; }
+        }
+        ext
+    };
+    let decode_max = extended_max;
     let mut insts = Vec::new();
     let mut io = 0;
     while io < decode_max {
