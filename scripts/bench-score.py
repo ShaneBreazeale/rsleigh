@@ -50,6 +50,10 @@ def parse_args():
     p.add_argument("--ghidra",  required=True, help="ghidra_output.json")
     p.add_argument("--sample",  type=int, default=50)
     p.add_argument("--out",     required=True)
+    p.add_argument("--worst-leakers", action="store_true",
+                   help="emit worst-leakers JSON (for /fix-leaker loop)")
+    p.add_argument("-n", type=int, default=10,
+                   help="number of worst leakers to emit with --worst-leakers")
     return p.parse_args()
 
 
@@ -302,6 +306,36 @@ def main():
 
     with open(out_dir / "report.json", "w") as f:
         json.dump(report, f, indent=2)
+
+    if args.worst_leakers:
+        # Classify each per-func entry by primary failure mode.
+        def classify(f):
+            if f["missing"]: return "missing"
+            if f["empty"]:   return "empty"
+            line_gap = f["gh_lines"] - f["rs_lines"]
+            leak_gap = f["rs_leaks"] - f["gh_leaks"]
+            if leak_gap > 5: return "leak"
+            if line_gap > 15: return "line-gap"
+            if not f["control_match"]: return "cflow"
+            return "noise"
+        ranked = []
+        for f in per_func:
+            mode = classify(f)
+            score = 0
+            if mode == "missing": score = 1000
+            elif mode == "empty": score = 500
+            elif mode == "leak": score = max(0, f["rs_leaks"] - f["gh_leaks"])
+            elif mode == "line-gap": score = max(0, f["gh_lines"] - f["rs_lines"])
+            elif mode == "cflow": score = 50
+            ranked.append({**f, "failure_mode": mode, "severity": score})
+        ranked.sort(key=lambda x: -x["severity"])
+        out = {
+            "binary": args.binary,
+            "delta":  f"0x{delta:x}",
+            "targets": ranked[: args.n],
+        }
+        print(json.dumps(out, indent=2))
+        return
 
     # Markdown
     md = []
