@@ -821,7 +821,8 @@ const ARM32_CALLER_SAVED: &[u64] = &[
 /// Register offset of the return register per calling convention.
 fn return_reg_offset(cc: CallingConv) -> u64 {
     match cc {
-        CallingConv::SysV | CallingConv::Win64 | CallingConv::Cdecl32 => 0, // RAX/EAX
+        CallingConv::SysV | CallingConv::Win64 | CallingConv::Cdecl32
+        | CallingConv::GoAmd64 => 0, // RAX/EAX
         CallingConv::AArch64 => 16384, // x0
         CallingConv::Arm32 => 32,      // r0
     }
@@ -830,7 +831,7 @@ fn return_reg_offset(cc: CallingConv) -> u64 {
 /// Size in bytes of the return register per calling convention.
 fn return_reg_size(cc: CallingConv) -> u32 {
     match cc {
-        CallingConv::SysV | CallingConv::Win64 => 8,
+        CallingConv::SysV | CallingConv::Win64 | CallingConv::GoAmd64 => 8,
         CallingConv::Cdecl32 => 4,
         CallingConv::AArch64 => 8,
         CallingConv::Arm32 => 4,
@@ -840,7 +841,7 @@ fn return_reg_size(cc: CallingConv) -> u32 {
 fn caller_saved_offsets(cc: CallingConv) -> &'static [u64] {
     match cc {
         CallingConv::Win64 => WIN64_CALLER_SAVED,
-        CallingConv::SysV => SYSV64_CALLER_SAVED,
+        CallingConv::SysV | CallingConv::GoAmd64 => SYSV64_CALLER_SAVED,
         CallingConv::AArch64 => AARCH64_CALLER_SAVED,
         CallingConv::Cdecl32 => X86_32_CALLER_SAVED,
         CallingConv::Arm32 => ARM32_CALLER_SAVED,

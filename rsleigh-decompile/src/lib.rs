@@ -24,6 +24,12 @@ use rsleigh_api::Architecture;
 /// Detect calling convention from binary format and architecture.
 fn detect_cc(arch: Architecture, binary: Option<&[u8]>) -> fold::CallingConv {
     if let Some(binary) = binary {
+        // Go binaries carry a `.gopclntab` section. On amd64 use Go
+        // internal ABI (RAX, RBX, RCX, RDI, RSI, R8-R11). Other arches
+        // fall back to their platform convention for now.
+        if arch == Architecture::X86_64 && is_go_binary(binary) {
+            return fold::CallingConv::GoAmd64;
+        }
         if let Ok(goblin::Object::PE(pe)) = goblin::Object::parse(binary) {
             return if pe.is_64 {
                 fold::CallingConv::Win64
@@ -37,6 +43,19 @@ fn detect_cc(arch: Architecture, binary: Option<&[u8]>) -> fold::CallingConv {
         Architecture::ARM32 => fold::CallingConv::Arm32,
         Architecture::AArch64 => fold::CallingConv::AArch64,
         _ => fold::CallingConv::SysV,
+    }
+}
+
+fn is_go_binary(binary: &[u8]) -> bool {
+    let Ok(obj) = goblin::Object::parse(binary) else { return false; };
+    match &obj {
+        goblin::Object::Elf(elf) => elf.section_headers.iter().any(|sh| {
+            elf.shdr_strtab.get_at(sh.sh_name) == Some(".gopclntab")
+        }),
+        goblin::Object::PE(pe) => pe.sections.iter().any(|s| {
+            s.name().ok() == Some(".gopclntab")
+        }),
+        _ => false,
     }
 }
 

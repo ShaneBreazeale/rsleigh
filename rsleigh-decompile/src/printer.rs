@@ -10094,6 +10094,53 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Strip Go runtime.morestack_noctxt calls + their while-wrapper. The
+    // decoder brings the stack-check preamble into the CFG as
+    //   while (... <= 0) { runtime_morestack_noctxt(); }
+    // which is bookkeeping, not user logic. Drop the block entirely.
+    {
+        let mut j = 0;
+        while j < lines.len() {
+            let t = lines[j].trim();
+            let is_morestack_while = t.starts_with("while (")
+                && t.ends_with("{")
+                && lines.get(j + 1).map(|l| l.contains("runtime_morestack_noctxt")).unwrap_or(false)
+                && lines.get(j + 2).map(|l| l.trim() == "}").unwrap_or(false);
+            if is_morestack_while {
+                lines.drain(j..=j + 2);
+                continue;
+            }
+            // Bare call inside an if or top-level.
+            if t == "runtime_morestack_noctxt();" {
+                lines.remove(j);
+                continue;
+            }
+            j += 1;
+        }
+    }
+
+    // Strip `return ?;` — Unknown return value adds no info.
+    for l in &mut lines {
+        if l.trim() == "return ?;" {
+            let indent = l.len() - l.trim_start().len();
+            *l = format!("{}return;", &l[..indent]);
+        }
+    }
+
+    // Strip `return RSP;` / `return ESP;` / `return SP;` etc. — stack
+    // pointer leaking as return value (Go func epilogue often ends with
+    // `add rsp, N; ret` which the return-detector mis-picks). Replace
+    // with bare `return;` regardless of function signature.
+    for l in &mut lines {
+        let t = l.trim();
+        if t == "return RSP;" || t == "return ESP;" || t == "return SP;"
+            || t == "return sp;" || t == "return x31;"
+        {
+            let indent = l.len() - l.trim_start().len();
+            *l = format!("{}return;", &l[..indent]);
+        }
+    }
+
     // Drop `X = ?;` noise lines (Unknown-expr assignments leaking from
     // SSA with no useful semantics). LHS must be a simple identifier
     // (not a store target like `*(addr) = ?;`).

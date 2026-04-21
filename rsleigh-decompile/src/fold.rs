@@ -36,6 +36,18 @@ const WIN64_FLOAT_ARG_REGS: &[u64] = &[4608, 4672, 4736, 4800];
 /// SLEIGH offsets: 20480 + 32*N for N in 0..8.
 const AARCH64_FLOAT_ARG_REGS: &[u64] = &[20480, 20512, 20544, 20576, 20608, 20640, 20672, 20704];
 
+/// Go internal ABI (ABIInternal, Go 1.17+) integer argument registers on
+/// amd64: RAX, RBX, RCX, RDI, RSI, R8, R9, R10, R11. R14 carries the
+/// goroutine pointer and RDX carries the closure context (skipped here —
+/// they are implicit params, not user args).
+const GO_AMD64_ARG_REGS: &[u64] = &[0, 24, 8, 56, 48, 128, 136, 144, 152];
+/// Go amd64 float arg regs: X0-X14 (XMM0-XMM14) — 15 regs.
+/// SLEIGH XMM0 = 4608, stride 64.
+const GO_AMD64_FLOAT_ARG_REGS: &[u64] = &[
+    4608, 4672, 4736, 4800, 4864, 4928, 4992, 5056,
+    5120, 5184, 5248, 5312, 5376, 5440, 5504,
+];
+
 // Active argument register offsets — set by fold_with_cc() based on binary format.
 // Uses thread_local to avoid unsafe static mut.
 std::thread_local! {
@@ -62,6 +74,7 @@ pub enum CallingConv {
     Cdecl32,  // x86-32 cdecl — stack-based
     AArch64,  // AAPCS64 — x0-x7
     Arm32,    // AAPCS — r0-r3
+    GoAmd64,  // Go internal ABI v1.17+ — RAX, RBX, RCX, RDI, RSI, R8-R11
 }
 
 /// Fold expressions: inline temps, eliminate dead code, recover conditions.
@@ -79,6 +92,7 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
             CallingConv::Cdecl32 => &[],
             CallingConv::AArch64 => AARCH64_ARG_REGS,
             CallingConv::Arm32 => ARM32_ARG_REGS,
+            CallingConv::GoAmd64 => GO_AMD64_ARG_REGS,
         };
     });
     FLOAT_ARG_REG_OFFSETS_TLS.with(|r| {
@@ -87,7 +101,8 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
             CallingConv::Win64 => WIN64_FLOAT_ARG_REGS,
             CallingConv::Cdecl32 => &[],
             CallingConv::AArch64 => AARCH64_FLOAT_ARG_REGS,
-            CallingConv::Arm32 => &[],    // ARM32 float params in s0-s15 — defer
+            CallingConv::Arm32 => &[],
+            CallingConv::GoAmd64 => GO_AMD64_FLOAT_ARG_REGS,
         };
     });
     // Collect call arguments FIRST, before any optimization.
