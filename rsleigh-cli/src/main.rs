@@ -104,6 +104,8 @@ fn main() {
     let json_mode = args.iter().any(|a| a == "--json");
     let all_mode = args.iter().any(|a| a == "--all");
     let disasm_mode = args.iter().any(|a| a == "--disasm");
+    let pcode_json_mode = args.iter().any(|a| a == "--pcode-json");
+    let ssa_json_mode = args.iter().any(|a| a == "--ssa-json");
     let yara_mode = args.iter().any(|a| a == "--yara");
     let imphash_mode = args.iter().any(|a| a == "--imphash");
     let hashes_mode = args.iter().any(|a| a == "--hashes");
@@ -644,6 +646,95 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                 }
             } else {
                 eprintln!("Function '{}' not found", name);
+            }
+        }
+        return;
+    }
+
+    // --pcode-json and --ssa-json: dump intermediate state for one or
+    // more functions. Useful for bench debugging — see exactly what
+    // P-code the lifter produced and what SSA fold did with it.
+    let pcode_json = args.iter().any(|a| a == "--pcode-json");
+    let ssa_json = args.iter().any(|a| a == "--ssa-json");
+    if pcode_json || ssa_json {
+        for name in &targets {
+            let func_addr = if let Some(hex) = name.strip_prefix("0x").or_else(|| name.strip_prefix("0X")) {
+                u64::from_str_radix(hex, 16).ok()
+            } else {
+                symbols.iter().find(|(_, n)| n == name).map(|(a, _)| *a)
+            };
+            let Some(func_addr) = func_addr else {
+                eprintln!("Function '{}' not found", name); continue;
+            };
+            let insts = decode_func(func_addr, &symbols, &segs, &data, &mut dec);
+            if insts.is_empty() {
+                eprintln!("// {} — no instructions", name);
+                continue;
+            }
+            let func_name = symbols.iter()
+                .find(|(a, _)| *a == func_addr)
+                .map(|(_, n)| n.clone())
+                .unwrap_or_else(|| format!("func_{:x}", func_addr));
+            if pcode_json {
+                let entries: Vec<serde_json::Value> = insts.iter()
+                    .map(|(a, inst)| serde_json::json!({
+                        "address":     format!("0x{:x}", a),
+                        "disassembly": inst.disassembly,
+                        "length":      inst.len,
+                        "ops":         inst.ops.iter()
+                            .map(|op| serde_json::json!({ "op": format!("{:?}", op) }))
+                            .collect::<Vec<_>>(),
+                    }))
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                    "function":     func_name,
+                    "address":      format!("0x{:x}", func_addr),
+                    "instructions": entries,
+                })).unwrap());
+            }
+            if ssa_json {
+                let cfg = rsleigh_decompile::cfg::build_cfg(&insts);
+                let cc = match arch {
+                    rsleigh_api::Architecture::X86_64 if rsleigh_decompile::go_pclntab::parse(&data).keys().next().is_some()
+                        => rsleigh_decompile::fold::CallingConv::GoAmd64,
+                    rsleigh_api::Architecture::X86_32 | rsleigh_api::Architecture::MIPS32
+                        => rsleigh_decompile::fold::CallingConv::Cdecl32,
+                    rsleigh_api::Architecture::ARM32   => rsleigh_decompile::fold::CallingConv::Arm32,
+                    rsleigh_api::Architecture::AArch64 => rsleigh_decompile::fold::CallingConv::AArch64,
+                    _ => rsleigh_decompile::fold::CallingConv::SysV,
+                };
+                let mut ssa = rsleigh_decompile::ssa::build_ssa_with_cc(&cfg, cc);
+                rsleigh_decompile::fold::fold_with_cc(&mut ssa, cc);
+                let blocks: Vec<serde_json::Value> = ssa.blocks.iter().enumerate()
+                    .map(|(bi, blk)| {
+                        let stmts: Vec<serde_json::Value> = blk.stmts.iter()
+                            .map(|s| serde_json::json!({ "stmt": format!("{:?}", s) }))
+                            .collect();
+                        serde_json::json!({
+                            "id":         bi,
+                            "addr":       format!("0x{:x}", blk.addr),
+                            "stmts":      stmts,
+                            "terminator": format!("{:?}", blk.terminator),
+                        })
+                    })
+                    .collect();
+                let vars: Vec<serde_json::Value> = ssa.vars.iter().enumerate()
+                    .map(|(vi, v)| serde_json::json!({
+                        "id":           vi,
+                        "varnode":      format!("{:?}", v.varnode),
+                        "expr":         format!("{:?}", v.expr),
+                        "size":         v.size,
+                        "param_name":   v.param_name,
+                        "inferred":     format!("{:?}", v.inferred_type),
+                        "call_return":  v.call_return,
+                    }))
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                    "function": func_name,
+                    "address":  format!("0x{:x}", func_addr),
+                    "blocks":   blocks,
+                    "vars":     vars,
+                })).unwrap());
             }
         }
         return;
