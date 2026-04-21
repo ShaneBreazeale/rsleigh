@@ -13,9 +13,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # --- Hardcoded toolchain paths (resolve Ghidra once, never hunt again) ---
 GHIDRA_CANDIDATES=(
-  "$HOME/tools/ghidra_12.0.4_PUBLIC"
   "$HOME/tools/ghidra_11.4.3_PUBLIC"
   "$HOME/ghidra_install/ghidra_11.3.1_PUBLIC"
+  "$HOME/tools/ghidra_12.0.4_PUBLIC"
   "/opt/ghidra"
 )
 GHIDRA_HOME=""

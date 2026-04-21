@@ -8,3 +8,5 @@ generated/*/out/
 hs_err_pid*.log
 rsleigh-decompile/data/ghidra_*.json
 .opt/
+results/
+scripts/__pycache__/

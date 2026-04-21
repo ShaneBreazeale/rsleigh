@@ -3129,13 +3129,13 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         while i < lines.len() {
             let lt = lines[i].trim().to_string();
             // Match: IDENTIFIER = "...";
-            if lt.contains(" = \"") && lt.ends_with("\";") && !lt.starts_with("if ") && !lt.starts_with("while ") {
+            if lt.contains(" = \"") && lt.ends_with("\";") && !lt.starts_with("if ") && !lt.starts_with("while ") && !lt.starts_with("*(") {
                 let mut merged = String::new();
                 let mut end = i;
                 let mut count = 0;
                 for j in i..lines.len() {
                     let jt = lines[j].trim();
-                    if jt.contains(" = \"") && jt.ends_with("\";") && !jt.starts_with("if ") {
+                    if jt.contains(" = \"") && jt.ends_with("\";") && !jt.starts_with("if ") && !jt.starts_with("*(") {
                         if let Some(q1) = jt.find('"') {
                             if let Some(q2) = jt.rfind('"') {
                                 if q2 > q1 {
