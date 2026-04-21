@@ -7,6 +7,7 @@ pub mod structure;
 pub mod printer;
 pub mod imports;
 pub mod eh_frame;
+pub mod go_pclntab;
 pub mod dwarf;
 pub mod pdb_info;
 pub mod signatures;

@@ -195,7 +195,7 @@ fn main() {
         let bp = binary_path.clone();
         let args_clone = args.clone();
         let t = std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
+            .stack_size(256 * 1024 * 1024)
             .spawn(move || {
                 if summary_mode {
                     run_summary(&bp, &data);
@@ -254,7 +254,7 @@ fn main() {
             .collect();
         let old_path = binary_path.clone();
         let t = std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
+            .stack_size(256 * 1024 * 1024)
             .spawn(move || diff_binaries(&old_path, &new_path, &func_filter))
             .unwrap();
         if let Err(e) = t.join() { eprintln!("Panic: {:?}", e); }
@@ -409,6 +409,23 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
 
     // Apply FID databases (if --fid passed) to rename anonymous funcs.
     apply_fid_to_symbols(&data, arch, &segs, &mut symbols, args);
+
+    // Go `.gopclntab` name recovery. Stripped Go binaries carry full
+    // runtime symbol info in this section; merge into symbols list so
+    // anonymous func_* entries get their real names (main.main, etc.).
+    {
+        let go_syms = rsleigh_decompile::go_pclntab::parse(&data);
+        if !go_syms.is_empty() {
+            eprintln!("[go] .gopclntab: {} symbols", go_syms.len());
+            let existing: std::collections::HashSet<u64> =
+                symbols.iter().map(|(a, _)| *a).collect();
+            for (pc, name) in go_syms {
+                if !existing.contains(&pc) {
+                    symbols.push((pc, name));
+                }
+            }
+        }
+    }
 
     // For stripped PE binaries: discover functions from entry point + CALL targets
     if symbols.is_empty() {

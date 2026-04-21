@@ -305,7 +305,6 @@ fn find_matching_angle(s: &str, start: usize) -> Option<usize> {
 pub fn resolve_imports(binary: &[u8]) -> HashMap<u64, String> {
     let mut map = HashMap::new();
     let Ok(obj) = goblin::Object::parse(binary) else {
-        // Fallback: try manual PE import parsing for malformed binaries
         if binary.len() > 0x40 && &binary[0..2] == b"MZ" {
             resolve_pe_manual(binary, &mut map);
         }
@@ -318,8 +317,14 @@ pub fn resolve_imports(binary: &[u8]) -> HashMap<u64, String> {
             resolve_macho(macho, binary, &mut map);
         }
         goblin::Object::PE(pe) => resolve_pe(pe, binary, &mut map),
-        _ => {
-        }
+        _ => {}
+    }
+
+    // Go `.gopclntab` names — inject so call targets + function
+    // signatures resolve on stripped Go binaries. PLT/JUMP_SLOT entries
+    // from the main pass take priority via entry().or_insert.
+    for (pc, name) in crate::go_pclntab::parse(binary) {
+        map.entry(pc).or_insert(name);
     }
 
     map
