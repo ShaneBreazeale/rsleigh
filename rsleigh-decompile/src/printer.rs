@@ -10184,6 +10184,44 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
+    // Strip sort-suffix from Go-header param names per function.
+    // Function-local scope: if only one instance of `s_data_N` exists in
+    // this output, rename to `s_data`. Multiple → keep numbered so user
+    // can distinguish. Applies to all s_/slice_ prefixes.
+    {
+        use std::collections::HashMap;
+        let prefixes: [&str; 5] = ["s_data_", "s_len_", "slice_data_", "slice_len_", "slice_cap_"];
+        let mut occurrence: HashMap<&str, Vec<u32>> = HashMap::new();
+        for pref in &prefixes { occurrence.insert(pref, Vec::new()); }
+        for line in &lines {
+            for pref in &prefixes {
+                let mut rest = line.as_str();
+                while let Some(p) = rest.find(pref) {
+                    let after = &rest[p + pref.len()..];
+                    let n_end = after.chars().take_while(|c| c.is_ascii_digit()).count();
+                    if n_end > 0 {
+                        if let Ok(n) = after[..n_end].parse::<u32>() {
+                            let v = occurrence.get_mut(pref).unwrap();
+                            if !v.contains(&n) { v.push(n); }
+                        }
+                    }
+                    rest = &rest[p + pref.len() + n_end..];
+                }
+            }
+        }
+        for l in &mut lines {
+            for pref in &prefixes {
+                let nums = occurrence.get(pref).unwrap();
+                if nums.len() == 1 {
+                    let n = nums[0];
+                    let pat = format!("{}{}", pref, n);
+                    let rep = pref.trim_end_matches('_');
+                    *l = l.replace(&pat, rep);
+                }
+            }
+        }
+    }
+
     // Strip `return RSP;` / `return ESP;` / `return SP;` etc. — stack
     // pointer leaking as return value (Go func epilogue often ends with
     // `add rsp, N; ret` which the return-detector mis-picks). Replace
@@ -10470,20 +10508,42 @@ fn generate_function_signature(out: &mut String, ssa: &SsaCfg, func_name: &str) 
     // Deduplicate and sort by param index (param_0, param_1, ...)
     let mut seen = std::collections::HashSet::new();
     params.retain(|p| seen.insert(p.0.clone()));
+    // Go-header rename attaches the original param index as a trailing
+    // underscore-number suffix (e.g. `s_data_0`, `slice_len_1`). Extract
+    // for ordering so the renamed params keep their slot.
+    let param_slot = |name: &str| -> u32 {
+        if let Some(rest) = name.strip_prefix("param_").or_else(|| name.strip_prefix("fparam_")) {
+            return rest.parse::<u32>().unwrap_or(999);
+        }
+        for pat in &["s_data_", "s_len_", "slice_data_", "slice_len_", "slice_cap_"] {
+            if let Some(rest) = name.strip_prefix(pat) {
+                if let Ok(n) = rest.parse::<u32>() {
+                    return n;
+                }
+            }
+        }
+        999
+    };
     params.sort_by(|a, b| {
-        let idx_a = a.0.strip_prefix("param_")
-            .or_else(|| a.0.strip_prefix("fparam_"))
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(999);
-        let idx_b = b.0.strip_prefix("param_")
-            .or_else(|| b.0.strip_prefix("fparam_"))
-            .and_then(|s| s.parse::<u32>().ok())
-            .unwrap_or(999);
+        let idx_a = param_slot(&a.0);
+        let idx_b = param_slot(&b.0);
         let is_float_a = a.0.starts_with("fparam_");
         let is_float_b = b.0.starts_with("fparam_");
         is_float_a.cmp(&is_float_b).then(idx_a.cmp(&idx_b)).then(a.0.cmp(&b.0))
     });
 
+    // Strip the `_N` sort suffix from Go-header names for display. Kept
+    // only to preserve slot order in the sort above.
+    let display_name = |n: &str| -> String {
+        for pat in &["s_data_", "s_len_", "slice_data_", "slice_len_", "slice_cap_"] {
+            if let Some(rest) = n.strip_prefix(pat) {
+                if rest.parse::<u32>().is_ok() {
+                    return pat.trim_end_matches('_').to_string();
+                }
+            }
+        }
+        n.to_string()
+    };
     // Format parameter list — use display_type > signature > InferredType
     let param_strs: Vec<String> = params.iter().enumerate().map(|(i, (name, size, ty, disp))| {
         let type_name = if let Some(d) = disp {
@@ -10498,7 +10558,13 @@ fn generate_function_signature(out: &mut String, ssa: &SsaCfg, func_name: &str) 
         } else {
             inferred_type_to_c(*ty, *size)
         };
-        format!("{} {}", type_name, name)
+        // Override type for Go-header names.
+        let type_name = if name.starts_with("s_data_") { "char *" }
+            else if name.starts_with("slice_data_") { "void *" }
+            else if name.starts_with("s_len_") || name.starts_with("slice_len_") { "long" }
+            else if name.starts_with("slice_cap_") { "long" }
+            else { type_name };
+        format!("{} {}", type_name, display_name(name))
     }).collect();
 
     let params_str = if param_strs.is_empty() {

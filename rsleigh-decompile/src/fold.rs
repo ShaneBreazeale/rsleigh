@@ -141,6 +141,181 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
     infer_types(ssa);
     // Recognize struct field access patterns after all folding is done
     recognize_field_access(ssa);
+    // Go-specific: detect adjacent-register string/slice/iface parameter
+    // pairs and retag their names. Runs last so the prior passes have
+    // converged type info.
+    if matches!(cc, CallingConv::GoAmd64) {
+        infer_go_header_params(ssa);
+    }
+}
+
+/// Go amd64 adjacent-register header detection. Go ABI passes strings,
+/// slices, and interfaces as separate register operands:
+///   string = (data, len)          — 2 regs
+///   slice  = (data, len, cap)     — 3 regs
+///   iface  = (tab, data)          — 2 regs
+///
+/// Heuristic: param_i is a pointer (Pointer-typed or used as Load
+/// address) AND param_(i+1) is used as an integer upper bound (operand
+/// of IntLess/IntLessEqual/IntSLess/IntSLessEqual, or as a size arg).
+/// Rename the pair; if param_(i+2) also appears to be a capacity-style
+/// int, treat as slice.
+fn infer_go_header_params(ssa: &mut SsaCfg) {
+    // Build a map param_name -> VarIds that carry it.
+    let mut param_vars: std::collections::BTreeMap<String, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (i, v) in ssa.vars.iter().enumerate() {
+        if let Some(n) = v.param_name.as_ref() {
+            if n.starts_with("param_") {
+                param_vars.entry(n.clone()).or_default().push(i);
+            }
+        }
+    }
+    // Sort numerically by param index.
+    let mut indexed: Vec<(u32, String)> = param_vars.keys()
+        .filter_map(|n| n.strip_prefix("param_").and_then(|s| s.parse::<u32>().ok()).map(|i| (i, n.clone())))
+        .collect();
+    indexed.sort();
+    if indexed.is_empty() { return; }
+
+    // Classify each param.
+    // Build transitive "derived from param" closure. A VarId Y is
+    // derived-from(X) if X ∈ roots, or Y's expr is Var(Z)/BinOp(_, Z, _)
+    // /BinOp(_, _, Z)/UnaryOp(_, Z) with Z ∈ closure.
+    let closure_from = |roots: &[usize], ssa: &SsaCfg| -> std::collections::HashSet<usize> {
+        let mut set: std::collections::HashSet<usize> = roots.iter().copied().collect();
+        let mut changed = true;
+        let mut guard = 0;
+        while changed && guard < 8 {
+            changed = false;
+            guard += 1;
+            for (idx, v) in ssa.vars.iter().enumerate() {
+                if set.contains(&idx) { continue; }
+                let parents: &[VarId] = match &v.expr {
+                    Expr::Var(a) => std::slice::from_ref(a),
+                    Expr::UnaryOp(_, a) => std::slice::from_ref(a),
+                    Expr::BinOp(_, a, b) => { if set.contains(&(a.0 as usize)) || set.contains(&(b.0 as usize)) {
+                        set.insert(idx); changed = true; } continue; }
+                    _ => continue,
+                };
+                if parents.iter().any(|p| set.contains(&(p.0 as usize))) {
+                    set.insert(idx); changed = true;
+                }
+            }
+        }
+        set
+    };
+
+    let is_pointer_like = |p: &str, param_vars: &std::collections::BTreeMap<String, Vec<usize>>, ssa: &SsaCfg| -> bool {
+        let vars = match param_vars.get(p) { Some(v) => v, None => return false };
+        for &vi in vars {
+            if ssa.vars[vi].inferred_type == InferredType::Pointer {
+                return true;
+            }
+        }
+        let derived = closure_from(vars, ssa);
+        for blk in &ssa.blocks {
+            for stmt in &blk.stmts {
+                match stmt {
+                    Stmt::Store { addr, .. } => {
+                        if derived.contains(&(addr.0 as usize)) { return true; }
+                    }
+                    Stmt::Assign(vid) => {
+                        match &ssa.vars[vid.0 as usize].expr {
+                            Expr::Load(ptr) if derived.contains(&(ptr.0 as usize)) => return true,
+                            Expr::FieldAccess(base, _) if derived.contains(&(base.0 as usize)) => return true,
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        false
+    };
+    let is_length_like = |p: &str, param_vars: &std::collections::BTreeMap<String, Vec<usize>>, ssa: &SsaCfg| -> bool {
+        let vars = match param_vars.get(p) { Some(v) => v, None => return false };
+        // Scan expressions that reference this param as an operand in a
+        // comparison BinOp. Integer length usage in Go almost always
+        // involves a signed-or-unsigned compare against 0 or a counter.
+        for (idx, v) in ssa.vars.iter().enumerate() {
+            let _ = idx;
+            if let Expr::BinOp(kind, l, r) = &v.expr {
+                if matches!(kind,
+                    BinOpKind::Less | BinOpKind::LessEq
+                    | BinOpKind::SLess | BinOpKind::SLessEq
+                    | BinOpKind::Eq | BinOpKind::NotEq)
+                {
+                    if vars.contains(&(l.0 as usize)) || vars.contains(&(r.0 as usize)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        // Or the param is passed as-is as a later arg (len of memcpy, etc.) —
+        // detectable by checking if a call stmt's args contain this var.
+        for blk in &ssa.blocks {
+            for stmt in &blk.stmts {
+                if let Stmt::Call { args, .. } = stmt {
+                    for a in args {
+                        if vars.contains(&(a.0 as usize)) { return true; }
+                    }
+                }
+            }
+        }
+        false
+    };
+
+    // Walk adjacent pairs. Each detected header uses the FIRST param's
+    // original numeric index as suffix so signature sort keeps order
+    // and multiple string/slice params don't collide.
+    let mut i = 0;
+    while i + 1 < indexed.len() {
+        let (ai, a_name) = &indexed[i];
+        let (bi, b_name) = &indexed[i + 1];
+        if *bi != *ai + 1 { i += 1; continue; }
+
+        let a_ptr = is_pointer_like(a_name, &param_vars, ssa);
+        let b_len = is_length_like(b_name, &param_vars, ssa);
+        if !(a_ptr && b_len) { i += 1; continue; }
+
+        let mut stride = 2;
+        let mut is_slice = false;
+        if i + 2 < indexed.len() {
+            let (ci, c_name) = &indexed[i + 2];
+            if *ci == *bi + 1 && is_length_like(c_name, &param_vars, ssa) {
+                stride = 3;
+                is_slice = true;
+            }
+        }
+
+        let suffix_data = *ai;
+        let suffix_len = *bi;
+        let (data_name, len_name) = if is_slice {
+            (format!("slice_data_{}", suffix_data),
+             format!("slice_len_{}", suffix_len))
+        } else {
+            (format!("s_data_{}", suffix_data),
+             format!("s_len_{}", suffix_len))
+        };
+
+        rename_param(ssa, a_name, &data_name);
+        rename_param(ssa, b_name, &len_name);
+        if is_slice {
+            let (ci, c_name) = &indexed[i + 2];
+            let cap_name = format!("slice_cap_{}", *ci);
+            rename_param(ssa, c_name, &cap_name);
+        }
+        i += stride;
+    }
+}
+
+fn rename_param(ssa: &mut SsaCfg, old: &str, new: &str) {
+    for v in &mut ssa.vars {
+        if v.param_name.as_deref() == Some(old) {
+            v.param_name = Some(new.to_string());
+        }
+    }
 }
 
 fn count_live_stmts(ssa: &SsaCfg) -> usize {
