@@ -9821,8 +9821,24 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         }
                     }
                 }
-                out.push(bytes[i] as char);
-                i += 1;
+                // Append byte at i. If non-ASCII (high bit set), advance
+                // by full UTF-8 char width so `out.push_str(&l[i..])` at
+                // end stays on a char boundary.
+                let b = bytes[i];
+                if b < 0x80 {
+                    out.push(b as char);
+                    i += 1;
+                } else {
+                    let width = match b {
+                        0xC0..=0xDF => 2,
+                        0xE0..=0xEF => 3,
+                        0xF0..=0xF7 => 4,
+                        _ => 1,
+                    };
+                    let end = (i + width).min(bytes.len());
+                    out.push_str(&l[i..end]);
+                    i = end;
+                }
             }
             out.push_str(&l[i..]);
             lines[j] = out;
