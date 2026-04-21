@@ -933,21 +933,25 @@ fn decode_func(
     // to the JBE; it jumps back to the function entry. Extend decode_max
     // past that FUN_ boundary when a preamble is detected.
     let extended_max = {
+        // Go preamble compares RSP against g.stackguard0 (at offset 0x10)
+        // OR g.preempt (at 0x18, used for cooperative preemption). Both
+        // bytes are valid for the ModR/M displacement after `[R14+disp8]`.
+        let is_stackguard_off = |b: u8| b == 0x10 || b == 0x18;
         let is_small = bytes.len() >= 10
             && bytes[0] == 0x49 && bytes[1] == 0x3b
-            && bytes[2] == 0x66 && bytes[3] == 0x10
+            && bytes[2] == 0x66 && is_stackguard_off(bytes[3])
             && bytes[4] == 0x0f && bytes[5] == 0x86;
         let is_lea8 = bytes.len() >= 15
             && bytes[0] == 0x4c && bytes[1] == 0x8d
             && bytes[2] == 0x64 && bytes[3] == 0x24
             && bytes[5] == 0x4d && bytes[6] == 0x3b
-            && bytes[7] == 0x66 && bytes[8] == 0x10
+            && bytes[7] == 0x66 && is_stackguard_off(bytes[8])
             && bytes[9] == 0x0f && bytes[10] == 0x86;
         let is_lea32 = bytes.len() >= 18
             && bytes[0] == 0x4c && bytes[1] == 0x8d
             && bytes[2] == 0xa4 && bytes[3] == 0x24
             && bytes[8] == 0x4d && bytes[9] == 0x3b
-            && bytes[10] == 0x66 && bytes[11] == 0x10
+            && bytes[10] == 0x66 && is_stackguard_off(bytes[11])
             && bytes[12] == 0x0f && bytes[13] == 0x86;
         let mut ext = decode_max;
         if is_small || is_lea8 || is_lea32 {
@@ -961,15 +965,18 @@ fn decode_func(
             let mut found_boundary = false;
             for i in scan_start..scan_max {
                 let next_small = bytes[i] == 0x49 && i + 3 < scan_max
-                    && bytes[i+1] == 0x3b && bytes[i+2] == 0x66 && bytes[i+3] == 0x10;
+                    && bytes[i+1] == 0x3b && bytes[i+2] == 0x66
+                    && (bytes[i+3] == 0x10 || bytes[i+3] == 0x18);
                 let next_lea8 = bytes[i] == 0x4c && i + 8 < scan_max
                     && bytes[i+1] == 0x8d && bytes[i+2] == 0x64 && bytes[i+3] == 0x24
                     && bytes[i+5] == 0x4d
-                    && bytes[i+6] == 0x3b && bytes[i+7] == 0x66 && bytes[i+8] == 0x10;
+                    && bytes[i+6] == 0x3b && bytes[i+7] == 0x66
+                    && (bytes[i+8] == 0x10 || bytes[i+8] == 0x18);
                 let next_lea32 = bytes[i] == 0x4c && i + 11 < scan_max
                     && bytes[i+1] == 0x8d && bytes[i+2] == 0xa4 && bytes[i+3] == 0x24
                     && bytes[i+8] == 0x4d
-                    && bytes[i+9] == 0x3b && bytes[i+10] == 0x66 && bytes[i+11] == 0x10;
+                    && bytes[i+9] == 0x3b && bytes[i+10] == 0x66
+                    && (bytes[i+11] == 0x10 || bytes[i+11] == 0x18);
                 if next_small || next_lea8 || next_lea32 {
                     ext = ext.max(i);
                     found_boundary = true;
