@@ -114,7 +114,7 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
 
     // Name parameters FIRST so propagate_register_constants won't
     // overwrite param VarIds with constants from other code paths.
-    name_parameters(ssa);
+    name_parameters_with_cc(ssa, cc);
 
     for _round in 0..8 {
         let before = count_live_stmts(ssa);
@@ -133,7 +133,7 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
         // expanding the Phi expression. This prevents #PHI_CLEANUP from
         // destroying loop variable semantics (e.g., "return phi(0, count+1)" → "return 0").
         name_loop_phis(ssa);
-        name_parameters(ssa); // Re-run to catch params exposed by folding
+        name_parameters_with_cc(ssa, cc); // Re-run to catch params exposed by folding
         let after = count_live_stmts(ssa);
         if before == after { break; }
     }
@@ -3788,6 +3788,10 @@ fn resolve_copy(id: VarId, copy_map: &[Option<VarId>]) -> VarId {
 // to stack variables are parameter setup. Name them param_0, param_1, etc.
 
 fn name_parameters(ssa: &mut SsaCfg) {
+    name_parameters_with_cc(ssa, CallingConv::SysV)
+}
+
+fn name_parameters_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
     if ssa.blocks.is_empty() { return; }
     let entry = ssa.entry.0;
     if entry >= ssa.blocks.len() { return; }
@@ -3832,27 +3836,76 @@ fn name_parameters(ssa: &mut SsaCfg) {
         ssa.vars[*v].param_name = Some(name.clone());
     }
 
-    // Pass 2: Scan ALL vars for arg-register reads that have no prior
-    // definition (caller-supplied). Run even when Pass 1 named x0/RDI —
-    // wrapper funcs often forward x1-x7 without Pass 1-visible patterns.
+    // Pass 2: Scan vars for arg-register reads with no prior def.
+    //
+    // Two modes:
+    //   - Default (SysV / Win64 / AArch64 / Arm32): scan ALL vars,
+    //     name first matching arg-reg per offset. Permissive — multi-
+    //     arg C++ funcs need this.
+    //   - GoAmd64: restrict to entry-reachable blocks (entry + 3 hops
+    //     past morestack JBE) and stop at first ABI-position gap.
+    //     Go aggressively reuses arg regs as scratch deeper in the
+    //     function, so deep reads don't indicate params.
     {
-        let mut to_name: Vec<(usize, String)> = Vec::new();
-        // Iterate in the AAPCS/SysV order so indices line up with position.
-        for &offset in arg_reg_offsets().iter() {
-            if named_offsets.contains(&offset) { continue; }
-            for v in 0..ssa.vars.len() {
-                let vdef = &ssa.vars[v];
-                if vdef.varnode.space == AddressSpaceId::Register
-                    && vdef.varnode.offset == offset
-                    && vdef.param_name.is_none()
-                {
-                    if matches!(&vdef.expr, Expr::Unknown | Expr::Phi(_)) {
-                        to_name.push((v, format!("param_{}", param_idx)));
-                        named_offsets.insert(offset);
-                        param_idx += 1;
-                        break;
+        let go_strict = matches!(cc, CallingConv::GoAmd64);
+
+        // Build entry-reachable block set (used only when go_strict).
+        let early_vars: std::collections::HashSet<usize> = if go_strict {
+            let entry_idx = ssa.entry.0;
+            let mut early_blocks: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            let mut frontier: Vec<usize> = vec![entry_idx];
+            for _ in 0..3 {
+                let mut next = Vec::new();
+                for b in frontier.drain(..) {
+                    if !early_blocks.insert(b) { continue; }
+                    if b >= ssa.blocks.len() { continue; }
+                    match &ssa.blocks[b].terminator {
+                        SsaTerminator::Branch(t) | SsaTerminator::Fallthrough(t) => next.push(t.0),
+                        SsaTerminator::CBranch { taken, fallthrough, .. } => {
+                            next.push(taken.0);
+                            next.push(fallthrough.0);
+                        }
+                        _ => {}
                     }
                 }
+                frontier = next;
+            }
+            let mut s: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            for &b in &early_blocks {
+                if b < ssa.blocks.len() {
+                    for stmt in &ssa.blocks[b].stmts {
+                        if let Stmt::Assign(vid) = stmt {
+                            s.insert(vid.0 as usize);
+                        }
+                    }
+                }
+            }
+            s
+        } else {
+            std::collections::HashSet::new()
+        };
+
+        let mut to_name: Vec<(usize, String)> = Vec::new();
+        for &offset in arg_reg_offsets().iter() {
+            if named_offsets.contains(&offset) { continue; }
+            let mut found: Option<usize> = None;
+            for v in 0..ssa.vars.len() {
+                let vdef = &ssa.vars[v];
+                if vdef.varnode.space != AddressSpaceId::Register { continue; }
+                if vdef.varnode.offset != offset { continue; }
+                if vdef.param_name.is_some() { continue; }
+                if !matches!(&vdef.expr, Expr::Unknown | Expr::Phi(_)) { continue; }
+                if go_strict && !early_vars.contains(&v) { continue; }
+                found = Some(v);
+                break;
+            }
+            if let Some(v) = found {
+                to_name.push((v, format!("param_{}", param_idx)));
+                named_offsets.insert(offset);
+                param_idx += 1;
+            } else if go_strict {
+                // Gap in ABI sequence under Go strict mode — stop.
+                break;
             }
         }
         for (v, name) in to_name {
