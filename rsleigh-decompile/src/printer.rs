@@ -8311,21 +8311,38 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 }
             }
 
-            // Fix "param_-N" artifacts: negative param offsets from stack-relative
-            // address computation. Replace with "sp - N" or remove.
-            for line in &mut lines {
-                if line.contains("param_-") {
-                    // Replace param_-N with (sp - N) in expressions
-                    let mut new = line.clone();
-                    for n in (1..=256).rev() {
-                        let pat = format!("param_-{}", n);
-                        let rep = format!("(sp - {})", n);
-                        new = new.replace(&pat, &rep);
-                    }
-                    *line = new;
+        }
+    }
+
+    // Arch-agnostic: fix "param_-" identifier artifacts. Appears on
+    // AArch64 (`param_-N` with numeric N = stack offset) AND on x86-64
+    // Go binaries where SSA emits `param_-IDENT` because the leading
+    // token is an empty-suffix `param_`. Patch both shapes.
+    for line in &mut lines {
+        if !line.contains("param_-") { continue; }
+        let mut new = line.clone();
+        for n in (1..=256).rev() {
+            let pat = format!("param_-{}", n);
+            let rep = format!("(sp - {})", n);
+            new = new.replace(&pat, &rep);
+        }
+        if new.contains("param_-") {
+            let mut out = String::with_capacity(new.len());
+            let bytes = new.as_bytes();
+            let mut i = 0;
+            while i + 7 < bytes.len() {
+                if &bytes[i..i + 7] == b"param_-" {
+                    out.push('-');
+                    i += 7;
+                } else {
+                    out.push(bytes[i] as char);
+                    i += 1;
                 }
             }
+            out.push_str(&new[i..]);
+            new = out;
         }
+        *line = new;
     }
 
     // Fold compound const arithmetic at print time: `base + N + M` → `base + (N+M)`,
