@@ -6379,7 +6379,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 "SERVICE_STATUS", "SERVICE_TABLE_ENTRYW", "MSG", "PAINTSTRUCT", "LOGFONTW",
                 "BITMAP", "SYSTEM_INFO", "MEMORY_BASIC_INFORMATION", "SOCKADDR_IN",
                 "CRITICAL_SECTION", "OVERLAPPED", "RECT", "POINT", "EXCEPTION_RECORD",
-                "CONTEXT", "FILETIME", "LARGE_INTEGER"];
+                "CONTEXT", "FILETIME", "LARGE_INTEGER", "SECURITY_ATTRIBUTES"];
             // Detect Go binary once — relaxes threshold for Go-specific
             // 2-field header types (GoIface, GoString).
             let is_go = ctx.binary.map_or(false, |b| {
