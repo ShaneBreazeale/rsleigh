@@ -8235,13 +8235,29 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             };
             if !var_re { j += 1; continue; }
             // Find INIT line directly before the while: `IDENT = ...;` at
-            // outer indent that assigns inc_var.
+            // outer indent that assigns inc_var. Scan backward up to 5
+            // lines; allow intervening lines that don't reference inc_var.
             if j == 0 { j += 1; continue; }
-            let init_idx = j - 1;
+            let mut init_idx: Option<usize> = None;
+            let lo = j.saturating_sub(5);
+            for k in (lo..j).rev() {
+                let line_k = lines[k].trim();
+                // Stop if we cross a block boundary.
+                if line_k.ends_with("{") || line_k == "}" { break; }
+                if line_k.starts_with(&format!("{} = ", inc_var)) && line_k.ends_with(';') {
+                    init_idx = Some(k);
+                    break;
+                }
+                // Reject if intervening line references inc_var as LHS.
+                if line_k.contains(&format!("{} = ", inc_var))
+                    || line_k.contains(&format!("{} +=", inc_var))
+                    || line_k.contains(&format!("{} -=", inc_var))
+                {
+                    break;
+                }
+            }
+            let init_idx = match init_idx { Some(i) => i, None => { j += 1; continue; } };
             let init_line = lines[init_idx].trim();
-            let init_match = init_line.starts_with(&format!("{} = ", inc_var))
-                && init_line.ends_with(';');
-            if !init_match { j += 1; continue; }
             let init_str = init_line.trim_end_matches(';').to_string();
 
             // Build the for-loop. Drop init line, replace while with for,
