@@ -4467,6 +4467,23 @@ pub fn rewrite_conditional_phi_to_ternary(ssa: &mut SsaCfg, cfg: &Cfg) {
             .collect();
 
         for (phi_v, inputs) in phi_stmts {
+            // First pass: if every input resolves (via Var chain) to
+            // the same leaf OR to the same varnode (register slot), all
+            // paths render identically in the printer — collapse the
+            // Phi to `Var(first_input)`. This covers `phi(x, x)` cases
+            // that the SSA-level same-input dedup missed because the
+            // inputs have distinct VarIds but identical render.
+            let first_leaf = phi_resolve_var_chain(inputs[0], &ssa.vars, 8);
+            let first_vn = ssa.vars[first_leaf.0 as usize].varnode;
+            let all_same_render = inputs.iter().all(|&inp| {
+                let leaf = phi_resolve_var_chain(inp, &ssa.vars, 8);
+                leaf == first_leaf || ssa.vars[leaf.0 as usize].varnode == first_vn
+            });
+            if all_same_render {
+                ssa.vars[phi_v.0 as usize].expr = Expr::Var(inputs[0]);
+                continue;
+            }
+
             // Group preds by which SSA input they feed.
             let mut groups: Vec<(VarId, Vec<BlockId>)> = Vec::new();
             for (i, &p) in pred_list.iter().enumerate() {
@@ -4510,8 +4527,35 @@ pub fn rewrite_conditional_phi_to_ternary(ssa: &mut SsaCfg, cfg: &Cfg) {
                 continue;
             };
 
-            ssa.vars[phi_v.0 as usize].expr = Expr::Ternary(cond, then_val, else_val);
+            // Collapse `Ternary(c, x, x)` when both arms would render
+            // identically in the printer. Same VarId trivially. Same
+            // leaf after Var-chain trivially. Same leaf VARNODE
+            // (register offset + size) because the printer names
+            // locations by varnode, so `(c) ? lVar1 : lVar1` rendering
+            // is the signal regardless of SSA-version differences —
+            // emitting the ternary adds no information vs `lVar1`.
+            let t_leaf = phi_resolve_var_chain(then_val, &ssa.vars, 8);
+            let e_leaf = phi_resolve_var_chain(else_val, &ssa.vars, 8);
+            let same_leaf = t_leaf == e_leaf;
+            let same_location = {
+                let t_vn = ssa.vars[t_leaf.0 as usize].varnode;
+                let e_vn = ssa.vars[e_leaf.0 as usize].varnode;
+                t_vn == e_vn
+            };
+            if same_leaf || same_location {
+                ssa.vars[phi_v.0 as usize].expr = Expr::Var(then_val);
+            } else {
+                ssa.vars[phi_v.0 as usize].expr = Expr::Ternary(cond, then_val, else_val);
+            }
         }
+    }
+}
+
+fn phi_resolve_var_chain(id: VarId, vars: &[VarDef], depth: u32) -> VarId {
+    if depth == 0 { return id; }
+    match &vars[id.0 as usize].expr {
+        Expr::Var(inner) => phi_resolve_var_chain(*inner, vars, depth - 1),
+        _ => id,
     }
 }
 
