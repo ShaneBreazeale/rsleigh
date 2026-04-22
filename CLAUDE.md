@@ -36,9 +36,11 @@ comparison, CTF binary validation, fuzz (5000 random byte sequences, zero panics
 Spectra API contract tests (decoder/decompile/analysis/multi-arch), Spectra native
 backend integration tests (10 tests covering end-to-end pipeline),
 pseudocode quality regression tests (14 audit fixes), rsleigh-cli
-per-fixture regression tests (9 integration tests covering flag-subexpr
+per-fixture regression tests (12 integration tests covering flag-subexpr
 recovery, Go preamble, STACKSTR pointer writes, bswap64 SiMBA, setne
-sub-register write, thunk misdetection, REP-STOSB DF seed).
+sub-register write, thunk misdetection, REP-STOSB DF seed, and
+phi-ternary rewrite — no phi() leaks, conditional ternaries emit,
+self-identity ternaries collapse).
 See `docs/TESTING.md` for the full test suite documentation.
 
 **Decompiler output (real binary, with DWARF debug info):**
@@ -222,6 +224,11 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - Multi-predecessor blocks inherit from first processed predecessor
 - Blocks re-processed when predecessor exit vars change (fixes back-edges)
 - Phi insertion at join points from converged exit maps
+- **Deterministic Phi creation:** varnodes sorted by `(space, offset, size)`
+  before iterating, so Phi VarId allocation is stable across runs on the same
+  binary. HashMap iteration order previously made `rsleigh <binary> <func>`
+  non-deterministic, which surfaced as semantically different ternary arms
+  after the Phi→Ternary rewrite landed.
 - **Sub-register Zext deferral:** groups P-code ops by instruction address; when
   `IntZext(EAX→RAX)` precedes an address calculation that reads RAX within the same
   instruction, the Zext write is deferred to preserve the original pointer value
@@ -254,6 +261,19 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
   (e.g., BoolAnd(BoolNot(ZF), IntEq(OF,SF)) → `a > b`)
 - **ARM32 condition recovery:** flag register offsets (NG=96, ZR=97, CY=98, OV=99) →
   CMP operand tracing → comparison operators (==, !=, <, >, <=, >=)
+- **Phi → Ternary at 2-way merges:** `rewrite_conditional_phi_to_ternary`
+  (runs after fold loop + signature propagation) rewrites `Expr::Phi(inputs)`
+  at non-loop-header blocks to `Expr::Ternary(cond, then, else)` when the
+  merge has a dominating `CBranch` and preds cleanly partition between its
+  arms. Printer already renders `Ternary` as `(cond) ? t : e` — no new stmt
+  kind needed. Same pass also collapses `Phi(x, x)` / `Ternary(c, x, x)`
+  via leaf VarId or varnode equivalence (two SSA versions of the same
+  register slot render identically in the printer, so the conditional is
+  pure noise). Replaces the old lossy `#PHI_CLEANUP` that picked first
+  operand regardless of which path was live. 2851 rewrites fire on
+  clang-apply-replacements.exe; composites flat across bed/plm/git-repack/
+  nano/clang-ar. 3+ way compound merges (e.g. `(a && b) ? 1 : 0`) still
+  skipped — parked in `.opt/ideas.md` for nested-ternary follow-up.
 - **x86 DF (direction flag) ABI-default seeding:** DF at register offset 522 is
   guaranteed 0 on function entry by SysV/Win64/Cdecl32/GoAmd64. REP STOSB/MOVSB
   expands to `RDI += 1 - 2*DF` per iteration; uninitialized DF used to leak
