@@ -11662,6 +11662,11 @@ fn resolve_to_named_var(id: VarId, ssa: &SsaCfg, depth: u32) -> Option<String> {
 
 /// Format a VarId with register tracking — resolves register copies to their source.
 fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> String {
+    // Shares depth budget with `format_var` (they call each other).
+    let _guard = match FormatVarGuard::enter() {
+        Some(g) => g,
+        None => return "<deep>".to_string(),
+    };
     let vdef = ssa.var(id);
 
     // If this variable has a parameter name (from stack param detection or ABI naming),
