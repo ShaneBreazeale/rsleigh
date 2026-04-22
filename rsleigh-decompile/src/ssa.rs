@@ -318,8 +318,15 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
             }
         }
 
+        // Sort varnodes deterministically so Phi creation order is stable.
+        // HashMap iteration is non-deterministic, which cascades into VarId
+        // assignment and downstream passes that depend on statement ordering.
+        let mut sorted_vns: Vec<Varnode> = all_varnodes.keys().copied().collect();
+        sorted_vns.sort_by_key(|vn| (vn.space, vn.offset, vn.size));
+
         let mut phi_stmts = Vec::new();
-        for (vn, entries) in &all_varnodes {
+        for vn in &sorted_vns {
+            let entries = &all_varnodes[vn];
             if entries.len() < 2 {
                 continue;
             }

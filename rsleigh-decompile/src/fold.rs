@@ -4413,3 +4413,149 @@ fn refs_varid(id: VarId, target: VarId, vars: &[VarDef], depth: u32) -> bool {
         _ => false,
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Phi → Ternary rewrite for conditional (non-loop) merges.
+//
+// Rewrites `Expr::Phi(inputs)` at a non-loop-header block whose inputs
+// can be grouped into exactly two distinct values reachable through a
+// dominating CBranch. This produces `Expr::Ternary(cond, then, else)`
+// which the printer already renders as `(cond) ? t : e` — bypassing
+// every register-elision filter that fought pred-exit SSA destruction.
+//
+// See `.opt/campaigns/phi-ternary-merge.md` for campaign context.
+// ─────────────────────────────────────────────────────────────────────
+
+use crate::dominators::compute_dominators;
+
+pub fn rewrite_conditional_phi_to_ternary(ssa: &mut SsaCfg, cfg: &Cfg) {
+    if cfg.blocks.is_empty() { return; }
+    let dom = compute_dominators(cfg);
+    let preds = cfg.predecessors();
+
+    // Mark back-edge targets (loop headers). These carry loop-Phi
+    // accumulators and must be skipped.
+    let n = cfg.blocks.len();
+    let mut is_back_target = vec![false; n];
+    for block in &cfg.blocks {
+        for succ in cfg.successors(block.id) {
+            if phi_dom_dominates(&dom, succ.0, block.id.0) {
+                is_back_target[succ.0] = true;
+            }
+        }
+    }
+
+    for merge_bid in 0..ssa.blocks.len() {
+        if merge_bid >= n { break; }
+        if is_back_target[merge_bid] { continue; }
+        let pred_list = match preds.get(merge_bid) {
+            Some(p) if p.len() >= 2 => p.clone(),
+            _ => continue,
+        };
+
+        // Collect Phi stmts at this block.
+        let phi_stmts: Vec<(VarId, Vec<VarId>)> = ssa.blocks[merge_bid].stmts.iter()
+            .filter_map(|s| match s {
+                Stmt::Assign(v) => match &ssa.vars[v.0 as usize].expr {
+                    Expr::Phi(inputs) if inputs.len() == pred_list.len() => {
+                        Some((*v, inputs.clone()))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+
+        for (phi_v, inputs) in phi_stmts {
+            // Group preds by which SSA input they feed.
+            let mut groups: Vec<(VarId, Vec<BlockId>)> = Vec::new();
+            for (i, &p) in pred_list.iter().enumerate() {
+                let input = inputs[i];
+                if let Some(g) = groups.iter_mut().find(|(v, _)| *v == input) {
+                    g.1.push(p);
+                } else {
+                    groups.push((input, vec![p]));
+                }
+            }
+            if groups.len() != 2 { continue; }
+
+            let (val_a, preds_a) = groups[0].clone();
+            let (val_b, preds_b) = groups[1].clone();
+
+            // Nearest common dominator of all preds.
+            let all_preds: Vec<BlockId> = preds_a.iter().chain(preds_b.iter()).copied().collect();
+            let Some(common_dom) = phi_nearest_common_dom(&dom, &all_preds) else { continue; };
+            if common_dom.0 >= ssa.blocks.len() { continue; }
+
+            let (cond, taken, fallthrough) = match &ssa.blocks[common_dom.0].terminator {
+                SsaTerminator::CBranch { cond, taken, fallthrough } => {
+                    (*cond, *taken, *fallthrough)
+                }
+                _ => continue,
+            };
+
+            // Classify each pred group by which CBranch arm dominates it.
+            let group_under = |ps: &[BlockId], arm: BlockId| -> bool {
+                ps.iter().all(|p| phi_dom_dominates(&dom, arm.0, p.0))
+            };
+            let (then_val, else_val) = if group_under(&preds_a, taken)
+                && group_under(&preds_b, fallthrough)
+            {
+                (val_a, val_b)
+            } else if group_under(&preds_a, fallthrough)
+                && group_under(&preds_b, taken)
+            {
+                (val_b, val_a)
+            } else {
+                continue;
+            };
+
+            ssa.vars[phi_v.0 as usize].expr = Expr::Ternary(cond, then_val, else_val);
+        }
+    }
+}
+
+fn phi_dom_dominates(dom: &[BlockId], a: usize, b: usize) -> bool {
+    if a == b { return true; }
+    if a >= dom.len() || b >= dom.len() { return false; }
+    let mut cur = b;
+    for _ in 0..dom.len() {
+        let d = dom[cur].0;
+        if d == a { return true; }
+        if d == cur { return false; } // reached root
+        cur = d;
+    }
+    false
+}
+
+fn phi_nearest_common_dom(dom: &[BlockId], blocks: &[BlockId]) -> Option<BlockId> {
+    if blocks.is_empty() { return None; }
+    let mut cd = blocks[0];
+    for &b in &blocks[1..] {
+        cd = phi_common_dom_pair(dom, cd, b)?;
+    }
+    Some(cd)
+}
+
+fn phi_common_dom_pair(dom: &[BlockId], a: BlockId, b: BlockId) -> Option<BlockId> {
+    let mut chain_a: std::collections::HashSet<BlockId> = Default::default();
+    let mut cur = a;
+    for _ in 0..dom.len() {
+        chain_a.insert(cur);
+        if cur.0 >= dom.len() { break; }
+        let d = dom[cur.0];
+        if d == cur { break; }
+        cur = d;
+    }
+    let mut cur = b;
+    for _ in 0..dom.len() {
+        if chain_a.contains(&cur) { return Some(cur); }
+        if cur.0 >= dom.len() { return None; }
+        let d = dom[cur.0];
+        if d == cur {
+            return if chain_a.contains(&cur) { Some(cur) } else { None };
+        }
+        cur = d;
+    }
+    None
+}
