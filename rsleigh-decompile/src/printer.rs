@@ -3059,54 +3059,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         *line = line.replace("__TMC_END__", "stdout");
     }
 
-    // #PHI: Remove phi() noise from output
-    for line in &mut lines {
-        // Remove ", phi(...)" from call arguments
-        while let Some(pos) = line.find(", phi(") {
-            let start = pos;
-            let after = &line[pos + 6..];
-            let mut depth = 1;
-            let mut end = pos + 6;
-            for (i, c) in after.char_indices() {
-                if c == '(' { depth += 1; }
-                if c == ')' { depth -= 1; if depth == 0 { end = pos + 6 + i + 1; break; } }
-            }
-            if depth == 0 {
-                *line = format!("{}{}", &line[..start], &line[end..]);
-            } else {
-                break;
-            }
-        }
-        // Also handle phi(...) as first arg: "func(phi(...), ...)" → "func(...)"
-        while let Some(pos) = line.find("phi(") {
-            let before = &line[..pos];
-            if before.ends_with('(') || before.ends_with(", ") {
-                let after = &line[pos + 4..];
-                let mut depth = 1;
-                let mut end = pos + 4;
-                for (i, c) in after.char_indices() {
-                    if c == '(' { depth += 1; }
-                    if c == ')' { depth -= 1; if depth == 0 { end = pos + 4 + i + 1; break; } }
-                }
-                if depth == 0 {
-                    let mut replacement = line[..pos].to_string();
-                    let rest = &line[end..];
-                    if rest.starts_with(", ") {
-                        replacement.push_str(&rest[2..]);
-                    } else if rest.starts_with(',') {
-                        replacement.push_str(&rest[1..].trim_start());
-                    } else {
-                        replacement.push_str(rest);
-                    }
-                    *line = replacement;
-                } else {
-                    break;
-                }
-            } else {
-                break;
-            }
-        }
-    }
+    // Formerly: #PHI inline cleanup. Now redundant — fold's
+    // `rewrite_conditional_phi_to_ternary` converts conditional Phis to
+    // `Expr::Ternary(cond, t, e)` which renders as `(cond) ? t : e`
+    // directly, and loop-carried Phis render via `resolve_to_named_var`
+    // as `iVar1`. Verified across 5 fixtures (bed, plm, git-repack,
+    // nano, clang-ar) — `grep 'phi('` returns 0 on full `--all` output.
 
     // #ARRAY: Fix array index syntax: RDX[name] → name[RDX]
     // When a register or expression is used as the base and a symbol name as the "index",
@@ -5868,33 +5826,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
     }
 
-    // #PHI_CLEANUP: Remove phi() artifacts from output.
-    // Pattern: "return phi(...);" → "return 0;" (use first arg, which is the common value)
-    for line in &mut lines {
-        let t = line.trim();
-        if t.starts_with("return phi(") && t.ends_with(");") {
-            let inner = &t["return phi(".len()..t.len() - 2];
-            // Use the first argument of the phi
-            if let Some(comma) = inner.find(',') {
-                let first = inner[..comma].trim();
-                let pad = " ".repeat(line.len() - line.trim_start().len());
-                *line = format!("{}return {};", pad, first);
-            }
-        }
-        // Also clean up inline phi() in expressions
-        if line.contains("phi(") && !line.contains("return phi(") {
-            // Replace phi(X, Y) with X (first operand)
-            while let Some(pos) = line.find("phi(") {
-                let after = &line[pos + 4..];
-                if let Some(close) = after.find(')') {
-                    let inner = &after[..close];
-                    let first = inner.split(',').next().unwrap_or("?").trim();
-                    let old = format!("phi({})", inner);
-                    *line = line.replace(&old, first);
-                } else { break; }
-            }
-        }
-    }
+    // Formerly: #PHI_CLEANUP. Removed — `rewrite_conditional_phi_to_ternary`
+    // in fold eliminates conditional-merge Phis by rewriting to
+    // `Expr::Ternary`. Loop-carried Phis render via name. No `phi(`
+    // strings can leak into output (verified on 5 fixtures full --all).
 
     // #INCREMENT: Simplify "var = var + 1" to "var++" and "var = var - 1" to "var--"
     for line in &mut lines {
