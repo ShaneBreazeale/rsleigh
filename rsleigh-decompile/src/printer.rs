@@ -110,17 +110,37 @@ pub fn print_c_with_try(
         })
         .collect();
     if body_lines.is_empty() {
-        // For empty thunks: check if any SSA block has an Indirect terminator
-        // with a known target address. Also check Branch to blocks outside the function.
-        let func_addr = func_name.strip_prefix("func_")
-            .and_then(|hex| u64::from_str_radix(hex, 16).ok());
-        for block in &ssa.blocks {
-            match &block.terminator {
-                SsaTerminator::Branch(bid) | SsaTerminator::Fallthrough(bid) => {
-                    if let Some(target_block) = ssa.blocks.get(bid.0) {
-                        let addr = target_block.addr;
-                        // Skip if target is within the function (internal block)
-                        if addr != 0 && func_addr.map_or(true, |fa| addr != fa) {
+        // Real thunks have NO call — just a jump. If any block contains a
+        // Call statement or Call terminator, the function has a real body;
+        // its output was elided upstream and emitting a fake
+        // `return func_<addr>(); // thunk` would erase the real calls.
+        let has_calls = ssa.blocks.iter().any(|b| {
+            matches!(b.terminator, SsaTerminator::Call { .. })
+                || b.stmts.iter().any(|s| matches!(s, Stmt::Call { .. }))
+        });
+        if !has_calls {
+            // For empty thunks: check if any SSA block has an Indirect terminator
+            // with a known target address. Also check Branch to blocks outside
+            // the function. `Branch(BlockId)` always targets a block within the
+            // SSA graph, so the target address matches one of `ssa.blocks` —
+            // skip when that's the case (internal edge), accept only when the
+            // branch points to an address not in our block set.
+            let internal_addrs: std::collections::HashSet<u64> =
+                ssa.blocks.iter().map(|b| b.addr).collect();
+            let func_addr = func_name.strip_prefix("func_")
+                .and_then(|hex| u64::from_str_radix(hex, 16).ok());
+            for block in &ssa.blocks {
+                match &block.terminator {
+                    SsaTerminator::Branch(bid) | SsaTerminator::Fallthrough(bid) => {
+                        if let Some(target_block) = ssa.blocks.get(bid.0) {
+                            let addr = target_block.addr;
+                            // Skip self-loops and any in-function edge.
+                            if addr == 0
+                                || func_addr.map_or(false, |fa| addr == fa)
+                                || internal_addrs.contains(&addr)
+                            {
+                                continue;
+                            }
                             let target_name = imports.get(&addr)
                                 .cloned()
                                 .unwrap_or_else(|| format!("func_{:x}", addr));
@@ -128,8 +148,8 @@ pub fn print_c_with_try(
                             break;
                         }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
         }
     }
