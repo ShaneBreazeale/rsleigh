@@ -12988,7 +12988,41 @@ fn format_call_target(target: &CallTarget, _ssa: &SsaCfg, ctx: &PrintCtx) -> Str
 
 // ---- Variable formatting ----
 
+thread_local! {
+    static FORMAT_VAR_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+const FORMAT_VAR_MAX_DEPTH: u32 = 256;
+
+struct FormatVarGuard;
+
+impl FormatVarGuard {
+    fn enter() -> Option<Self> {
+        FORMAT_VAR_DEPTH.with(|d| {
+            let cur = d.get();
+            if cur >= FORMAT_VAR_MAX_DEPTH { return None; }
+            d.set(cur + 1);
+            Some(FormatVarGuard)
+        })
+    }
+}
+
+impl Drop for FormatVarGuard {
+    fn drop(&mut self) {
+        FORMAT_VAR_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
 fn format_var(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
+    // Stack overflow guard: pathological deep Var/BinOp/Phi/Ternary
+    // chains can blow even a 256MB-stacked thread on tightly coiled
+    // SSA. Cap the recursion depth and emit a placeholder past the
+    // limit. Real expressions rarely exceed depth 30; the cap of 256
+    // is loose enough that legit code never trips it.
+    let _guard = match FormatVarGuard::enter() {
+        Some(g) => g,
+        None => return "<deep>".to_string(),
+    };
     let vdef = ssa.var(id);
 
     // Use parameter name if available
