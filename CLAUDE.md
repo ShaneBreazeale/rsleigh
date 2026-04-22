@@ -35,7 +35,10 @@ sequences, bug probes, compiled code patterns, Ghidra differential, decompiler
 comparison, CTF binary validation, fuzz (5000 random byte sequences, zero panics),
 Spectra API contract tests (decoder/decompile/analysis/multi-arch), Spectra native
 backend integration tests (10 tests covering end-to-end pipeline),
-pseudocode quality regression tests (14 audit fixes).
+pseudocode quality regression tests (14 audit fixes), rsleigh-cli
+per-fixture regression tests (9 integration tests covering flag-subexpr
+recovery, Go preamble, STACKSTR pointer writes, bswap64 SiMBA, setne
+sub-register write, thunk misdetection, REP-STOSB DF seed).
 See `docs/TESTING.md` for the full test suite documentation.
 
 **Decompiler output (real binary, with DWARF debug info):**
@@ -222,6 +225,12 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
 - **Sub-register Zext deferral:** groups P-code ops by instruction address; when
   `IntZext(EAX→RAX)` precedes an address calculation that reads RAX within the same
   instruction, the Zext write is deferred to preserve the original pointer value
+- **Sub-register write propagation (both directions):** writing to a larger parent
+  (RAX 8-byte) also updates the 4-byte alias at the same offset. Writing to a
+  smaller child (AL/AX) blends back into any 4/8-byte parent via
+  `Zext(child, parent_size)`. Fixes the x86 bool-return idiom
+  (`xor eax, eax; setne al; ret`) — before, the stale `Const(0)` from the XOR
+  survived through return; after, AL propagates to EAX.
 - **Forward-edge predecessor priority:** prevents loop back-edge values from contaminating
   merge points; entry block protected from re-processing
 - **ESP_OFFSET fix:** corrected register offset (was 16=EDX, should be 32=ESP) — root cause
@@ -245,6 +254,11 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
   (e.g., BoolAnd(BoolNot(ZF), IntEq(OF,SF)) → `a > b`)
 - **ARM32 condition recovery:** flag register offsets (NG=96, ZR=97, CY=98, OV=99) →
   CMP operand tracing → comparison operators (==, !=, <, >, <=, >=)
+- **x86 DF (direction flag) ABI-default seeding:** DF at register offset 522 is
+  guaranteed 0 on function entry by SysV/Win64/Cdecl32/GoAmd64. REP STOSB/MOVSB
+  expands to `RDI += 1 - 2*DF` per iteration; uninitialized DF used to leak
+  `(uint8_t)DF` into output. Fold now rewrites uninit DF reads to `Const(0, 1)`
+  at entry for x86 CCs only (AArch64/ARM32 excluded — offset 522 unrelated).
 - Call argument collection (runs BEFORE fold to prevent DCE of arg registers):
   x86-64 SysV, Windows x64 (auto-detected from PE), x86-32 cdecl/thiscall (stack-pushed)
 - Division-by-constant (multiply+shift → `x / 7`) and modulo (`x - (x/D)*D` → `x % D`)
@@ -272,7 +286,11 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
   - Phase 1: Pattern-based — cancellation (`a-(a-b)→b`), absorption, double negation
   - Phase 2: SiMBA linear algebra — Möbius inversion recovers coefficients over
     boolean basis {1,a,b,a&b,...} from 2^N evaluations (1-4 variables);
-    bottom-up tree walking enables cascade simplification of deep expressions
+    bottom-up tree walking enables cascade simplification of deep expressions.
+    1-var probe set covers `u64::MAX`, alternating `0xAAAA...AA`, and
+    `0x0123456789ABCDEF` in addition to small probes — without the wide probes,
+    bit-masking expressions like `(x & 0xFF00FF00FF00FF00) >> 8` (bswap64 half)
+    evaluate to 0 for every small probe and get wrongly folded to `Const(0)`.
   - Phase 3: Equality saturation via `egg` crate — 40+ rewrite rules explore all
     equivalent MBA forms, extract cheapest (50ms/10K nodes per expression);
     panic-safe wrapper suppresses egg crate panics on malformed expressions
@@ -341,6 +359,18 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
   stack cookie detection, dynamic resolve pattern recognition
 - **YARA rule generation:** auto-generates YARA rules from binary patterns and string signatures
 - **Diff decompilation:** side-by-side comparison of two binaries highlighting changed functions
+- **STACKSTR pointer-write guard:** the stack-string merge pass (3+ consecutive
+  `X = "...";` → `// stack string: "..."`) now skips lines whose LHS begins with
+  `*(` — those are global pointer-table writes like
+  `*(uint64_t*)(DAT_00602948) = "gone";`, not stack-slot inits. Without the
+  guard, Ghidra-parity pointer-table setup got collapsed into a single comment.
+- **Thunk misdetection guard:** the "empty body → emit
+  `return target(); // thunk`" heuristic now requires BOTH (a) zero body lines
+  AND (b) no Call stmt/terminator anywhere in the function AND (c) the branch
+  target is an address NOT in `ssa.blocks` (covers self-loops and any in-function
+  edge). `Branch(BlockId)` always targets a block in the SSA graph, so a
+  self-loop terminator used to emit `return func_<self_addr>(); // thunk` and
+  erase real calls.
 
 ### Peephole Optimizer (`pcode-ir/src/lib.rs`)
 
@@ -452,7 +482,13 @@ scripts/bench-score.py --binary X --rsleigh Y \
 Ghidra path + JDK path auto-resolved. Composite score weights: discovery 25,
 cflow_similarity 25, leak_parity 20, line_parity 15 (elision-aware), empty_rate 15.
 `line_parity` gives full credit when rsleigh has fewer lines AND fewer leaks.
-Latest scores: bed (Go) 89.8, plm (AArch64 C++) 81.4 — both EXCELLENT.
+Latest scores: bed (Go) 89.7, plm (AArch64 C++) 84.3, git-repack (AArch64 C) 92.2,
+nano (ARM32 static stripped) 80.8, clang-apply-replacements (PE x86-64 MSVC C++) 90.1.
+
+**Bench noise band:** composite score has ~0.2 spread across repeat runs on the
+same build (sample of 50 funcs has some non-determinism). When evaluating a
+single-shot fix, treat `<1%` composite movement on any fixture as noise; real
+regressions are usually `>1%` or show up on two+ runs.
 
 ## macOS gotchas
 
@@ -467,6 +503,22 @@ Latest scores: bed (Go) 89.8, plm (AArch64 C++) 81.4 — both EXCELLENT.
 - Insert temp `eprintln!("[tag] ...")` in fold.rs/structure.rs → run targeted func →
   inspect prefix → remove. `--ssa-json <addr>` shows post-fold state without instrumentation.
 - For new SSA passes: gate on `CallingConv::*` or arch when behavior is target-specific.
+- **printer.rs post_process is multi-pass.** Lines not present at entry can be
+  synthesized mid-pipeline — e.g. `sp = (((sp - 8) - 12) - 0x10);` only appears
+  AFTER the `mult_addr → sp` rename (line ~2243). Any strip that needs to catch
+  the final form must run either inside that same ARM32 retain block (before
+  rename, matching `mult_addr = (`) OR at the very end right before
+  `*out = result`. Early post_process retains do not see renamed forms.
+- **`cargo build` may report `0 crates compiled` when rtk caches aggressively.**
+  Use `/opt/homebrew/bin/cargo build -p rsleigh-cli --release` to force the
+  real cargo binary + re-examine timestamps. `cargo clean -p rsleigh-decompile`
+  before rebuild if in doubt.
+- **/fix-leaker single-shot protocol:** declare a failing regression test FIRST,
+  commit test + fix together. 3-attempt cap per target; log aborted attempts to
+  `.opt/failed.md`. Campaign mode (`.opt/campaigns/<slug>.md`) is opt-in for
+  arcs that need bounded temporary regression — declare hypothesis, budget,
+  horizon upfront; auto-revert if numbers miss at horizon. Do not move
+  goalposts mid-arc.
 
 ## License
 
