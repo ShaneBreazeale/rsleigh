@@ -112,6 +112,22 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
     collect_call_arguments(ssa);
     recount_uses(ssa);
 
+    // Seed x86 ABI-default flag values for uninitialized reads. DF (x86
+    // direction flag, register offset 522) is guaranteed 0 on function
+    // entry by SysV and Win64. Without this, REP STOSB/MOVSB/SCASB expand
+    // to `1 - 2*DF` in the per-iteration advance, leaking `(uint8_t)DF`
+    // into output and breaking memset-style recognition.
+    if matches!(cc, CallingConv::SysV | CallingConv::Win64 | CallingConv::Cdecl32 | CallingConv::GoAmd64) {
+        for v in ssa.vars.iter_mut() {
+            if matches!(v.expr, Expr::Unknown)
+                && v.varnode.space == AddressSpaceId::Register
+                && v.varnode.offset == 522
+            {
+                v.expr = Expr::Const(0, v.size);
+            }
+        }
+    }
+
     // Name parameters FIRST so propagate_register_constants won't
     // overwrite param VarIds with constants from other code paths.
     name_parameters_with_cc(ssa, cc);
