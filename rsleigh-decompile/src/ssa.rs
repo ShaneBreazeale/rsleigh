@@ -689,6 +689,34 @@ fn process_op(
                     let sub_vn = Varnode { space: out_vn.space, offset: out_vn.offset, size: 4 };
                     current.insert(sub_vn, var_id);
                 }
+                // Reverse sub-register propagation: writing to a SMALLER register
+                // (e.g. AL = 1 byte from `setne al`) must also invalidate the
+                // parent aliases (EAX 4, RAX 8) so subsequent reads of the parent
+                // see the updated low bits instead of a stale pre-write value.
+                // x86 bool-return idiom is the canonical case:
+                //   xor eax, eax   (EAX = 0)
+                //   setne al       (AL = bool — must propagate to EAX)
+                //   ret            (returns EAX — should see AL, not 0)
+                // Zext approximation holds when the bool is the sole signal; the
+                // general case `(old & ~mask) | Zext(new)` is expressible but rare
+                // enough in real code that pure Zext covers the observed idioms.
+                if out_vn.space == AddressSpaceId::Register
+                    && (out_vn.size == 1 || out_vn.size == 2)
+                {
+                    for parent_size in [4u32, 8u32] {
+                        if parent_size <= out_vn.size { continue; }
+                        let parent_vn = Varnode {
+                            space: out_vn.space,
+                            offset: out_vn.offset,
+                            size: parent_size,
+                        };
+                        if current.contains_key(&parent_vn) {
+                            let zext = Expr::UnaryOp(UnaryOpKind::Zext, var_id);
+                            let parent_id = ssa.new_var(parent_vn, zext, parent_size);
+                            current.insert(parent_vn, parent_id);
+                        }
+                    }
+                }
                 stmts.push(Stmt::Assign(var_id));
             }
         }
