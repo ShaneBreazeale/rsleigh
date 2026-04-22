@@ -189,6 +189,13 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                     matches!(op, PcodeOp::CBranch { dest, .. } if dest.space == AddressSpaceId::Const)
                 });
 
+                // CSEL-style intra-instruction CBranch must have at least
+                // one op AFTER the branch (else no else-path exists and
+                // slicing `[cb_idx+1..last_idx]` panics). If the CBranch
+                // is the last op of the instruction, fall through to the
+                // regular per-op path below.
+                let cbranch_idx = cbranch_idx.filter(|&i| i + 1 < inst_ops.len());
+
                 if let Some(cb_idx) = cbranch_idx {
                     // Get the CBranch condition varnode
                     let cond_vn = if let PcodeOp::CBranch { cond, .. } = inst_ops[cb_idx] {
