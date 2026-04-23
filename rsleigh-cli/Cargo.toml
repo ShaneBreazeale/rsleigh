@@ -1,18 +1,23 @@
 [package]
 name = "rsleigh-cli"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 description = "CLI decompiler — turn any binary into C-like pseudocode"
+keywords = ["decompiler", "reverse-engineering", "disassembler", "cli"]
+categories = ["command-line-utilities", "development-tools"]
 
 [[bin]]
 name = "rsleigh"
 path = "src/main.rs"
 
 [dependencies]
-pcode-ir = { path = "../pcode-ir" }
-rsleigh-api = { path = "../rsleigh-api" }
-rsleigh-decompile = { path = "../rsleigh-decompile" }
-rsleigh-fid = { path = "../rsleigh-fid" }
+pcode-ir = { path = "../pcode-ir", version = "0.2.0" }
+rsleigh-api = { path = "../rsleigh-api", version = "0.2.0" }
+rsleigh-decompile = { path = "../rsleigh-decompile", version = "0.2.0" }
+rsleigh-fid = { path = "../rsleigh-fid", version = "0.2.0" }
 goblin = "0.9"
 serde_json = "1"
 wasmparser = "0.225"

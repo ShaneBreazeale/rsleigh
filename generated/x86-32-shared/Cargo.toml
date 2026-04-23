@@ -1,7 +1,12 @@
 [package]
-name = "x86-32-shared"
-version = "0.1.0"
-edition = "2021"
+name = "rsleigh-gen-x86-32-shared"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "rsleigh generated decoder for x86-32 — shared types (internal, do not depend on directly; use rsleigh-api)"
+include = ["src/**", "out/**", "Cargo.toml"]
 
 [dependencies]
-pcode-ir = { path = "../../pcode-ir" }
+pcode-ir = { path = "../../pcode-ir", version = "0.2.0" }

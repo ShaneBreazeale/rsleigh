@@ -1,13 +1,18 @@
 [package]
-name = "x86-32-root"
-version = "0.1.0"
-edition = "2021"
+name = "rsleigh-gen-x86-32-root"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "rsleigh generated decoder for x86-32 — instruction decoder root (internal, do not depend on directly; use rsleigh-api)"
+include = ["src/**", "out/**", "Cargo.toml"]
 
 [dependencies]
-pcode-ir = { path = "../../pcode-ir" }
-x86-32-shared = { path = "../x86-32-shared" }
-x86-32-subtables = { path = "../x86-32-subtables" }
-x86-32-instr-00 = { path = "../x86-32-instr-00" }
-x86-32-instr-01 = { path = "../x86-32-instr-01" }
-x86-32-instr-02 = { path = "../x86-32-instr-02" }
-x86-32-instr-03 = { path = "../x86-32-instr-03" }
+pcode-ir = { path = "../../pcode-ir", version = "0.2.0" }
+x86-32-shared = { package = "rsleigh-gen-x86-32-shared", path = "../x86-32-shared", version = "0.2.0" }
+x86-32-subtables = { package = "rsleigh-gen-x86-32-subtables", path = "../x86-32-subtables", version = "0.2.0" }
+x86-32-instr-00 = { package = "rsleigh-gen-x86-32-instr-00", path = "../x86-32-instr-00", version = "0.2.0" }
+x86-32-instr-01 = { package = "rsleigh-gen-x86-32-instr-01", path = "../x86-32-instr-01", version = "0.2.0" }
+x86-32-instr-02 = { package = "rsleigh-gen-x86-32-instr-02", path = "../x86-32-instr-02", version = "0.2.0" }
+x86-32-instr-03 = { package = "rsleigh-gen-x86-32-instr-03", path = "../x86-32-instr-03", version = "0.2.0" }

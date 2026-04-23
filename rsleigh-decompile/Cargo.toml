@@ -1,12 +1,17 @@
 [package]
 name = "rsleigh-decompile"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 description = "P-code decompiler — turns rsleigh P-code IR into C-like pseudocode"
+keywords = ["decompiler", "pcode", "reverse-engineering", "sleigh", "ghidra"]
+categories = ["development-tools"]
 
 [dependencies]
-pcode-ir = { path = "../pcode-ir" }
-rsleigh-api = { path = "../rsleigh-api" }
+pcode-ir = { path = "../pcode-ir", version = "0.2.0" }
+rsleigh-api = { path = "../rsleigh-api", version = "0.2.0" }
 goblin = "0.9"
 gimli = "0.31"
 object = "0.36"

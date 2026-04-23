@@ -3,70 +3,6 @@
 version = 4
 
 [[package]]
-name = "aarch64-instr-00"
-version = "0.1.0"
-dependencies = [
- "aarch64-shared",
- "aarch64-subtables",
- "pcode-ir",
-]
-
-[[package]]
-name = "aarch64-instr-01"
-version = "0.1.0"
-dependencies = [
- "aarch64-shared",
- "aarch64-subtables",
- "pcode-ir",
-]
-
-[[package]]
-name = "aarch64-instr-02"
-version = "0.1.0"
-dependencies = [
- "aarch64-shared",
- "aarch64-subtables",
- "pcode-ir",
-]
-
-[[package]]
-name = "aarch64-instr-03"
-version = "0.1.0"
-dependencies = [
- "aarch64-shared",
- "aarch64-subtables",
- "pcode-ir",
-]
-
-[[package]]
-name = "aarch64-root"
-version = "0.1.0"
-dependencies = [
- "aarch64-instr-00",
- "aarch64-instr-01",
- "aarch64-instr-02",
- "aarch64-instr-03",
- "aarch64-shared",
- "aarch64-subtables",
- "pcode-ir",
-]
-
-[[package]]
-name = "aarch64-shared"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
-]
-
-[[package]]
-name = "aarch64-subtables"
-version = "0.1.0"
-dependencies = [
- "aarch64-shared",
- "pcode-ir",
-]
-
-[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -77,50 +13,6 @@ name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
-
-[[package]]
-name = "arm32-instr-00"
-version = "0.1.0"
-dependencies = [
- "arm32-shared",
- "arm32-subtables",
- "pcode-ir",
-]
-
-[[package]]
-name = "arm32-instr-01"
-version = "0.1.0"
-dependencies = [
- "arm32-shared",
- "arm32-subtables",
- "pcode-ir",
-]
-
-[[package]]
-name = "arm32-root"
-version = "0.1.0"
-dependencies = [
- "arm32-instr-00",
- "arm32-instr-01",
- "arm32-shared",
- "arm32-subtables",
- "pcode-ir",
-]
-
-[[package]]
-name = "arm32-shared"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
-]
-
-[[package]]
-name = "arm32-subtables"
-version = "0.1.0"
-dependencies = [
- "arm32-shared",
- "pcode-ir",
-]
 
 [[package]]
 name = "autocfg"
@@ -464,50 +356,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mips-instr-00"
-version = "0.1.0"
-dependencies = [
- "mips-shared",
- "mips-subtables",
- "pcode-ir",
-]
-
-[[package]]
-name = "mips-instr-01"
-version = "0.1.0"
-dependencies = [
- "mips-shared",
- "mips-subtables",
- "pcode-ir",
-]
-
-[[package]]
-name = "mips-root"
-version = "0.1.0"
-dependencies = [
- "mips-instr-00",
- "mips-instr-01",
- "mips-shared",
- "mips-subtables",
- "pcode-ir",
-]
-
-[[package]]
-name = "mips-shared"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
-]
-
-[[package]]
-name = "mips-subtables"
-version = "0.1.0"
-dependencies = [
- "mips-shared",
- "pcode-ir",
-]
-
-[[package]]
 name = "msvc-demangler"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -574,7 +422,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "pcode-ir"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "pdb"
@@ -648,52 +496,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "riscv-instr-00"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
- "riscv-shared",
- "riscv-subtables",
-]
-
-[[package]]
-name = "riscv-instr-01"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
- "riscv-shared",
- "riscv-subtables",
-]
-
-[[package]]
-name = "riscv-root"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
- "riscv-instr-00",
- "riscv-instr-01",
- "riscv-shared",
- "riscv-subtables",
-]
-
-[[package]]
-name = "riscv-shared"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
-]
-
-[[package]]
-name = "riscv-subtables"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
- "riscv-shared",
-]
-
-[[package]]
 name = "rsleigh"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bitvec",
  "ethnum",
@@ -707,20 +511,20 @@ dependencies = [
 
 [[package]]
 name = "rsleigh-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
- "aarch64-root",
- "arm32-root",
- "mips-root",
  "pcode-ir",
- "riscv-root",
- "x86-32-root",
- "x86-root",
+ "rsleigh-gen-aarch64-root",
+ "rsleigh-gen-arm32-root",
+ "rsleigh-gen-mips-root",
+ "rsleigh-gen-riscv-root",
+ "rsleigh-gen-x86-32-root",
+ "rsleigh-gen-x86-root",
 ]
 
 [[package]]
 name = "rsleigh-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cpp_demangle 0.4.5",
  "goblin",
@@ -736,7 +540,7 @@ dependencies = [
 
 [[package]]
 name = "rsleigh-decompile"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cpp_demangle 0.5.1",
  "egg",
@@ -756,7 +560,7 @@ dependencies = [
 
 [[package]]
 name = "rsleigh-fid"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "byteorder",
  "flate2",
@@ -767,8 +571,372 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsleigh-gen-aarch64-instr-00"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-aarch64-shared",
+ "rsleigh-gen-aarch64-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-aarch64-instr-01"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-aarch64-shared",
+ "rsleigh-gen-aarch64-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-aarch64-instr-02"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-aarch64-shared",
+ "rsleigh-gen-aarch64-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-aarch64-instr-03"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-aarch64-shared",
+ "rsleigh-gen-aarch64-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-aarch64-root"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-aarch64-instr-00",
+ "rsleigh-gen-aarch64-instr-01",
+ "rsleigh-gen-aarch64-instr-02",
+ "rsleigh-gen-aarch64-instr-03",
+ "rsleigh-gen-aarch64-shared",
+ "rsleigh-gen-aarch64-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-aarch64-shared"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+]
+
+[[package]]
+name = "rsleigh-gen-aarch64-subtables"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-aarch64-shared",
+]
+
+[[package]]
+name = "rsleigh-gen-arm32-instr-00"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-arm32-shared",
+ "rsleigh-gen-arm32-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-arm32-instr-01"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-arm32-shared",
+ "rsleigh-gen-arm32-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-arm32-root"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-arm32-instr-00",
+ "rsleigh-gen-arm32-instr-01",
+ "rsleigh-gen-arm32-shared",
+ "rsleigh-gen-arm32-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-arm32-shared"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+]
+
+[[package]]
+name = "rsleigh-gen-arm32-subtables"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-arm32-shared",
+]
+
+[[package]]
+name = "rsleigh-gen-mips-instr-00"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-mips-shared",
+ "rsleigh-gen-mips-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-mips-instr-01"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-mips-shared",
+ "rsleigh-gen-mips-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-mips-root"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-mips-instr-00",
+ "rsleigh-gen-mips-instr-01",
+ "rsleigh-gen-mips-shared",
+ "rsleigh-gen-mips-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-mips-shared"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+]
+
+[[package]]
+name = "rsleigh-gen-mips-subtables"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-mips-shared",
+]
+
+[[package]]
+name = "rsleigh-gen-riscv-instr-00"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-riscv-shared",
+ "rsleigh-gen-riscv-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-riscv-instr-01"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-riscv-shared",
+ "rsleigh-gen-riscv-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-riscv-root"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-riscv-instr-00",
+ "rsleigh-gen-riscv-instr-01",
+ "rsleigh-gen-riscv-shared",
+ "rsleigh-gen-riscv-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-riscv-shared"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+]
+
+[[package]]
+name = "rsleigh-gen-riscv-subtables"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-riscv-shared",
+]
+
+[[package]]
+name = "rsleigh-gen-x86-32-instr-00"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-x86-32-shared",
+ "rsleigh-gen-x86-32-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-x86-32-instr-01"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-x86-32-shared",
+ "rsleigh-gen-x86-32-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-x86-32-instr-02"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-x86-32-shared",
+ "rsleigh-gen-x86-32-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-x86-32-instr-03"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-x86-32-shared",
+ "rsleigh-gen-x86-32-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-x86-32-root"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-x86-32-instr-00",
+ "rsleigh-gen-x86-32-instr-01",
+ "rsleigh-gen-x86-32-instr-02",
+ "rsleigh-gen-x86-32-instr-03",
+ "rsleigh-gen-x86-32-shared",
+ "rsleigh-gen-x86-32-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-x86-32-shared"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+]
+
+[[package]]
+name = "rsleigh-gen-x86-32-subtables"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-x86-32-shared",
+]
+
+[[package]]
+name = "rsleigh-gen-x86-instr-00"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-x86-shared",
+ "rsleigh-gen-x86-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-x86-instr-01"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-x86-shared",
+ "rsleigh-gen-x86-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-x86-instr-02"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-x86-shared",
+ "rsleigh-gen-x86-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-x86-instr-03"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-x86-shared",
+ "rsleigh-gen-x86-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-x86-instr-04"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-x86-shared",
+ "rsleigh-gen-x86-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-x86-instr-05"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-x86-shared",
+ "rsleigh-gen-x86-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-x86-instr-06"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-x86-shared",
+ "rsleigh-gen-x86-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-x86-instr-07"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-x86-shared",
+ "rsleigh-gen-x86-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-x86-root"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-x86-instr-00",
+ "rsleigh-gen-x86-instr-01",
+ "rsleigh-gen-x86-instr-02",
+ "rsleigh-gen-x86-instr-03",
+ "rsleigh-gen-x86-instr-04",
+ "rsleigh-gen-x86-instr-05",
+ "rsleigh-gen-x86-instr-06",
+ "rsleigh-gen-x86-instr-07",
+ "rsleigh-gen-x86-shared",
+ "rsleigh-gen-x86-subtables",
+]
+
+[[package]]
+name = "rsleigh-gen-x86-shared"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+]
+
+[[package]]
+name = "rsleigh-gen-x86-subtables"
+version = "0.2.0"
+dependencies = [
+ "pcode-ir",
+ "rsleigh-gen-x86-shared",
+]
+
+[[package]]
 name = "rsleigh-generate"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rsleigh",
 ]
@@ -942,17 +1110,17 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 name = "test-harness"
 version = "0.1.0"
 dependencies = [
- "aarch64-root",
- "arm32-root",
  "goblin",
- "mips-root",
  "pcode-ir",
- "riscv-root",
  "rsleigh-api",
  "rsleigh-decompile",
+ "rsleigh-gen-aarch64-root",
+ "rsleigh-gen-arm32-root",
+ "rsleigh-gen-mips-root",
+ "rsleigh-gen-riscv-root",
+ "rsleigh-gen-x86-root",
  "serde",
  "serde_json",
- "x86-root",
 ]
 
 [[package]]
@@ -1147,174 +1315,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05f360fc0b24296329c78fda852a1e9ae82de9cf7b27dae4b7f62f118f77b9ed"
 dependencies = [
  "tap",
-]
-
-[[package]]
-name = "x86-32-instr-00"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
- "x86-32-shared",
- "x86-32-subtables",
-]
-
-[[package]]
-name = "x86-32-instr-01"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
- "x86-32-shared",
- "x86-32-subtables",
-]
-
-[[package]]
-name = "x86-32-instr-02"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
- "x86-32-shared",
- "x86-32-subtables",
-]
-
-[[package]]
-name = "x86-32-instr-03"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
- "x86-32-shared",
- "x86-32-subtables",
-]
-
-[[package]]
-name = "x86-32-root"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
- "x86-32-instr-00",
- "x86-32-instr-01",
- "x86-32-instr-02",
- "x86-32-instr-03",
- "x86-32-shared",
- "x86-32-subtables",
-]
-
-[[package]]
-name = "x86-32-shared"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
-]
-
-[[package]]
-name = "x86-32-subtables"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
- "x86-32-shared",
-]
-
-[[package]]
-name = "x86-instr-00"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
- "x86-shared",
- "x86-subtables",
-]
-
-[[package]]
-name = "x86-instr-01"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
- "x86-shared",
- "x86-subtables",
-]
-
-[[package]]
-name = "x86-instr-02"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
- "x86-shared",
- "x86-subtables",
-]
-
-[[package]]
-name = "x86-instr-03"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
- "x86-shared",
- "x86-subtables",
-]
-
-[[package]]
-name = "x86-instr-04"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
- "x86-shared",
- "x86-subtables",
-]
-
-[[package]]
-name = "x86-instr-05"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
- "x86-shared",
- "x86-subtables",
-]
-
-[[package]]
-name = "x86-instr-06"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
- "x86-shared",
- "x86-subtables",
-]
-
-[[package]]
-name = "x86-instr-07"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
- "x86-shared",
- "x86-subtables",
-]
-
-[[package]]
-name = "x86-root"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
- "x86-instr-00",
- "x86-instr-01",
- "x86-instr-02",
- "x86-instr-03",
- "x86-instr-04",
- "x86-instr-05",
- "x86-instr-06",
- "x86-instr-07",
- "x86-shared",
- "x86-subtables",
-]
-
-[[package]]
-name = "x86-shared"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
-]
-
-[[package]]
-name = "x86-subtables"
-version = "0.1.0"
-dependencies = [
- "pcode-ir",
- "x86-shared",
 ]
 
 [[package]]

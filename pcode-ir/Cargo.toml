@@ -1,10 +1,13 @@
 [package]
 name = "pcode-ir"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 description = "P-code intermediate representation types for SLEIGH-generated decoders"
-license = "Apache-2.0"
-repository = "https://github.com/ShaneBreazeale/rsleigh"
+keywords = ["pcode", "ir", "sleigh", "ghidra", "no-std"]
+categories = ["no-std", "data-structures"]
 
 # Zero runtime dependencies by design.
 # The generated code should only depend on pcode-ir.

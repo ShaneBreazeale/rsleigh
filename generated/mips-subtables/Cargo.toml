@@ -1,7 +1,12 @@
 [package]
-name = "mips-subtables"
-version = "0.1.0"
-edition = "2021"
+name = "rsleigh-gen-mips-subtables"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "rsleigh generated decoder for mips — subtable tables (internal, do not depend on directly; use rsleigh-api)"
+include = ["src/**", "out/**", "Cargo.toml"]
 [dependencies]
-pcode-ir = { path = "../../pcode-ir" }
-mips-shared = { path = "../mips-shared" }
+pcode-ir = { path = "../../pcode-ir", version = "0.2.0" }
+mips-shared = { package = "rsleigh-gen-mips-shared", path = "../mips-shared", version = "0.2.0" }

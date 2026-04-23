@@ -1,7 +1,13 @@
 [package]
 name = "rsleigh-generate"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "rsleigh codegen CLI — parses Ghidra .slaspec files and emits Rust decoder crates"
+keywords = ["sleigh", "codegen", "disassembler", "ghidra", "parser-generator"]
+categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
-rsleigh = { path = ".." }
+rsleigh = { path = "..", version = "0.2.0" }

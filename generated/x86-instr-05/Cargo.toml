@@ -1,9 +1,14 @@
 [package]
-name = "x86-instr-05"
-version = "0.1.0"
-edition = "2021"
+name = "rsleigh-gen-x86-instr-05"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "rsleigh generated decoder for x86 — instructions batch 05 (internal, do not depend on directly; use rsleigh-api)"
+include = ["src/**", "out/**", "Cargo.toml"]
 
 [dependencies]
-pcode-ir = { path = "../../pcode-ir" }
-x86-shared = { path = "../x86-shared" }
-x86-subtables = { path = "../x86-subtables" }
+pcode-ir = { path = "../../pcode-ir", version = "0.2.0" }
+x86-shared = { package = "rsleigh-gen-x86-shared", path = "../x86-shared", version = "0.2.0" }
+x86-subtables = { package = "rsleigh-gen-x86-subtables", path = "../x86-subtables", version = "0.2.0" }

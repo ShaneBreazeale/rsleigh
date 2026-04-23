@@ -1,7 +1,21 @@
 [package]
 name = "rsleigh"
-version = "0.1.0"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "SLEIGH (.slaspec) parser and Rust decoder/P-code emitter codegen — Ghidra-compatible disassembly in pure Rust"
+readme = "README.md"
+keywords = ["sleigh", "pcode", "decoder", "disassembler", "ghidra"]
+categories = ["development-tools", "parser-implementations"]
+
+[workspace.package]
+version = "0.2.0"
 edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/ShaneBreazeale/rsleigh"
+authors = ["Shane Breazeale"]
 
 [workspace]
 members = [

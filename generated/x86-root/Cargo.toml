@@ -1,17 +1,22 @@
 [package]
-name = "x86-root"
-version = "0.1.0"
-edition = "2021"
+name = "rsleigh-gen-x86-root"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "rsleigh generated decoder for x86 — instruction decoder root (internal, do not depend on directly; use rsleigh-api)"
+include = ["src/**", "out/**", "Cargo.toml"]
 
 [dependencies]
-pcode-ir = { path = "../../pcode-ir" }
-x86-shared = { path = "../x86-shared" }
-x86-subtables = { path = "../x86-subtables" }
-x86-instr-00 = { path = "../x86-instr-00" }
-x86-instr-01 = { path = "../x86-instr-01" }
-x86-instr-02 = { path = "../x86-instr-02" }
-x86-instr-03 = { path = "../x86-instr-03" }
-x86-instr-04 = { path = "../x86-instr-04" }
-x86-instr-05 = { path = "../x86-instr-05" }
-x86-instr-06 = { path = "../x86-instr-06" }
-x86-instr-07 = { path = "../x86-instr-07" }
+pcode-ir = { path = "../../pcode-ir", version = "0.2.0" }
+x86-shared = { package = "rsleigh-gen-x86-shared", path = "../x86-shared", version = "0.2.0" }
+x86-subtables = { package = "rsleigh-gen-x86-subtables", path = "../x86-subtables", version = "0.2.0" }
+x86-instr-00 = { package = "rsleigh-gen-x86-instr-00", path = "../x86-instr-00", version = "0.2.0" }
+x86-instr-01 = { package = "rsleigh-gen-x86-instr-01", path = "../x86-instr-01", version = "0.2.0" }
+x86-instr-02 = { package = "rsleigh-gen-x86-instr-02", path = "../x86-instr-02", version = "0.2.0" }
+x86-instr-03 = { package = "rsleigh-gen-x86-instr-03", path = "../x86-instr-03", version = "0.2.0" }
+x86-instr-04 = { package = "rsleigh-gen-x86-instr-04", path = "../x86-instr-04", version = "0.2.0" }
+x86-instr-05 = { package = "rsleigh-gen-x86-instr-05", path = "../x86-instr-05", version = "0.2.0" }
+x86-instr-06 = { package = "rsleigh-gen-x86-instr-06", path = "../x86-instr-06", version = "0.2.0" }
+x86-instr-07 = { package = "rsleigh-gen-x86-instr-07", path = "../x86-instr-07", version = "0.2.0" }

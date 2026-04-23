@@ -1,9 +1,14 @@
 [package]
-name = "aarch64-instr-00"
-version = "0.1.0"
-edition = "2021"
+name = "rsleigh-gen-aarch64-instr-00"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "rsleigh generated decoder for aarch64 — instructions batch 00 (internal, do not depend on directly; use rsleigh-api)"
+include = ["src/**", "out/**", "Cargo.toml"]
 
 [dependencies]
-pcode-ir = { path = "../../pcode-ir" }
-aarch64-shared = { path = "../aarch64-shared" }
-aarch64-subtables = { path = "../aarch64-subtables" }
+pcode-ir = { path = "../../pcode-ir", version = "0.2.0" }
+aarch64-shared = { package = "rsleigh-gen-aarch64-shared", path = "../aarch64-shared", version = "0.2.0" }
+aarch64-subtables = { package = "rsleigh-gen-aarch64-subtables", path = "../aarch64-subtables", version = "0.2.0" }
