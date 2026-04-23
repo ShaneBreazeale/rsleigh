@@ -16,6 +16,7 @@ pub mod analysis;
 pub mod cpp_class;
 mod signatures_libc;
 mod signatures_win32;
+mod signatures_python;
 
 use std::path::Path;
 use pcode_ir::Instruction;

@@ -64,6 +64,16 @@ pub enum SigType {
     HResult,    // HRESULT = long (COM return code)
     Word,       // WORD = unsigned short
     Byte,       // BYTE = unsigned char
+    // Python C API typedefs
+    PyObjectPtr,      // PyObject *
+    ConstPyObjectPtr, // const PyObject *
+    PyObjectPtrPtr,   // PyObject **
+    PyTypeObjectPtr,  // PyTypeObject *
+    PyFrameObjectPtr, // PyFrameObject *
+    PySsizeT,         // Py_ssize_t
+    PyHashT,          // Py_hash_t
+    PyCFunction,      // PyCFunction (fn ptr, passed as pointer)
+    PyRichCmpOp,      // Py_LT/LE/EQ/NE/GT/GE — int enum
 }
 
 impl SigType {
@@ -112,6 +122,15 @@ impl SigType {
             SigType::ScHandle => "SC_HANDLE",
             SigType::Ntstatus => "NTSTATUS",
             SigType::HResult => "HRESULT",
+            SigType::PyObjectPtr => "PyObject *",
+            SigType::ConstPyObjectPtr => "const PyObject *",
+            SigType::PyObjectPtrPtr => "PyObject **",
+            SigType::PyTypeObjectPtr => "PyTypeObject *",
+            SigType::PyFrameObjectPtr => "PyFrameObject *",
+            SigType::PySsizeT => "Py_ssize_t",
+            SigType::PyHashT => "Py_hash_t",
+            SigType::PyCFunction => "PyCFunction",
+            SigType::PyRichCmpOp => "int",
         }
     }
 
@@ -133,6 +152,14 @@ impl SigType {
             | SigType::HIcon | SigType::HBrush | SigType::HDc | SigType::HBitmap
             | SigType::HFont | SigType::HMenu | SigType::HInstance
             | SigType::ScHandle => InferredType::Pointer,
+            // Python scalars
+            SigType::PySsizeT => InferredType::Signed,
+            SigType::PyHashT => InferredType::Signed,
+            SigType::PyRichCmpOp => InferredType::Signed,
+            // Python pointers
+            SigType::PyObjectPtr | SigType::ConstPyObjectPtr | SigType::PyObjectPtrPtr
+            | SigType::PyTypeObjectPtr | SigType::PyFrameObjectPtr
+            | SigType::PyCFunction => InferredType::Pointer,
             // Pointers
             SigType::CharPtr | SigType::ConstCharPtr | SigType::VoidPtr
             | SigType::ConstVoidPtr | SigType::FilePtr | SigType::WCharPtr
@@ -236,6 +263,9 @@ static SIGNATURE_MAP: LazyLock<HashMap<&'static str, &'static FuncSig>> = LazyLo
         map.insert(sig.name, sig);
     }
     for sig in crate::signatures_win32::WIN32_SIGNATURES {
+        map.insert(sig.name, sig);
+    }
+    for sig in crate::signatures_python::PYTHON_SIGNATURES {
         map.insert(sig.name, sig);
     }
     // Load embedded compressed signature database (36K+ sigs, ~320KB gzipped)
@@ -685,6 +715,42 @@ mod tests {
     fn lookup_win32() {
         let sig = lookup("VirtualAlloc").expect("VirtualAlloc should exist");
         assert_eq!(sig.name, "VirtualAlloc");
+    }
+
+    #[test]
+    fn lookup_python_richcompare() {
+        let sig = lookup("PyObject_RichCompare").expect("PyObject_RichCompare should exist");
+        assert_eq!(sig.ret, SigType::PyObjectPtr);
+        assert_eq!(sig.params.len(), 3);
+        assert_eq!(sig.params[0].ty, SigType::PyObjectPtr);
+        assert_eq!(sig.params[1].ty, SigType::PyObjectPtr);
+        assert_eq!(sig.params[2].ty, SigType::PyRichCmpOp);
+    }
+
+    #[test]
+    fn python_coverage() {
+        // Representative sample — one from each protocol the sig pack covers.
+        for name in [
+            "PyObject_GetAttr", "PyObject_RichCompare", "PyObject_Call",
+            "PyNumber_Add", "PyNumber_Remainder",
+            "PyLong_FromLong", "PyLong_AsLongLong",
+            "PyFloat_FromDouble",
+            "PyBytes_FromStringAndSize", "PyBytes_AsString",
+            "PyUnicode_FromString", "PyUnicode_AsUTF8", "PyUnicode_Join",
+            "PyDict_New", "PyDict_GetItem", "PyDict_SetItemString",
+            "PyList_New", "PyList_Append",
+            "PyTuple_New", "PyTuple_Pack",
+            "PySet_New", "PySet_Add",
+            "PySlice_New",
+            "PySequence_Contains", "PyMapping_HasKey",
+            "PyErr_SetString", "PyErr_Occurred",
+            "PyImport_ImportModule", "PyModule_Create2",
+            "PyType_Ready", "PyType_GenericNew",
+            "PyArg_ParseTuple", "Py_BuildValue",
+            "PyEval_GetBuiltins",
+        ] {
+            assert!(lookup(name).is_some(), "missing python sig: {}", name);
+        }
     }
 
     #[test]

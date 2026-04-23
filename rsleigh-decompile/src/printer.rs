@@ -10762,6 +10762,16 @@ fn sigtype_to_cast(ty: crate::signatures::SigType) -> Option<&'static str> {
         SigType::FilePtr => Some("FILE *"),
         SigType::Fd | SigType::SockFd => None, // int — no cast needed
         SigType::Void => None,
+        // Python C API
+        SigType::PyObjectPtr => Some("PyObject *"),
+        SigType::ConstPyObjectPtr => Some("const PyObject *"),
+        SigType::PyObjectPtrPtr => Some("PyObject **"),
+        SigType::PyTypeObjectPtr => Some("PyTypeObject *"),
+        SigType::PyFrameObjectPtr => Some("PyFrameObject *"),
+        SigType::PySsizeT => Some("Py_ssize_t"),
+        SigType::PyHashT => Some("Py_hash_t"),
+        SigType::PyCFunction => Some("PyCFunction"),
+        SigType::PyRichCmpOp => None, // int
     }
 }
 
