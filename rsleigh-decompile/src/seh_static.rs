@@ -642,6 +642,75 @@ pub struct ImagePatch {
     pub handler_va: u64,
 }
 
+/// Enumerate a jump-table at `table_va` with entry stride `scale` (usually
+/// 8 on x86-64; 4 is possible for 32-bit-relative tables).  Reads entries
+/// until one of:
+///   * the target falls outside the executable address range,
+///   * the entry is NULL,
+///   * 256 entries have been yielded (sanity cap).
+///
+/// v1 treats the entries as absolute 64-bit pointers.  RIP-relative
+/// 32-bit-signed tables (common in MSVC `/Gm-` switch lowering) are
+/// handled separately by computing `table_va + i32(entry)`; this variant
+/// is tried when the naive read does not produce in-range targets.
+fn enumerate_jump_table(
+    pe: &goblin::pe::PE,
+    image: &[u8],
+    table_va: u64,
+    scale: u64,
+) -> Vec<u64> {
+    let base = pe.image_base as u64;
+    // Accumulate executable ranges once.
+    let mut text: Vec<(u64, u64)> = Vec::new();
+    for sec in &pe.sections {
+        if (sec.characteristics & 0x20000000) != 0 {
+            let va = base + sec.virtual_address as u64;
+            text.push((va, va + sec.virtual_size as u64));
+        }
+    }
+    let in_text = |va: u64| text.iter().any(|(lo, hi)| va >= *lo && va < *hi);
+    let va_to_fo = |va: u64| -> Option<usize> {
+        for sec in &pe.sections {
+            let sva = base + sec.virtual_address as u64;
+            let vsz = sec.virtual_size as u64;
+            if va >= sva && va < sva + vsz {
+                return Some(sec.pointer_to_raw_data as usize + (va - sva) as usize);
+            }
+        }
+        None
+    };
+
+    const MAX_ENTRIES: u64 = 256;
+
+    // Attempt 1: absolute pointers.
+    let mut out = Vec::new();
+    let stride = if scale == 0 { 8 } else { scale };
+    if stride == 8 {
+        for i in 0..MAX_ENTRIES {
+            let entry_va = table_va.wrapping_add(i * stride);
+            let Some(fo) = va_to_fo(entry_va) else { break; };
+            if fo + 8 > image.len() { break; }
+            let v = u64::from_le_bytes(image[fo..fo + 8].try_into().unwrap());
+            if v == 0 || !in_text(v) { break; }
+            out.push(v);
+        }
+        if !out.is_empty() { return out; }
+    }
+
+    // Attempt 2: MSVC-style `(table_va as i32-relative)` 32-bit entries.
+    // Each slot is an i32 delta from the table base.  Stride = 4.
+    for i in 0..MAX_ENTRIES {
+        let entry_va = table_va.wrapping_add(i * 4);
+        let Some(fo) = va_to_fo(entry_va) else { break; };
+        if fo + 4 > image.len() { break; }
+        let off = i32::from_le_bytes(image[fo..fo + 4].try_into().unwrap()) as i64;
+        let target = (table_va as i64).wrapping_add(off) as u64;
+        if target == 0 || !in_text(target) { break; }
+        out.push(target);
+    }
+    out
+}
+
 /// Abstract register value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RegVal {
@@ -805,7 +874,53 @@ pub fn extract_handler_patches(image: &[u8], handler_va: u64) -> Vec<ImagePatch>
                     // No `break`: continue linear decode for the fall-through.
                 }
                 FlowControl::IndirectBranch => {
-                    // Can't follow statically; terminate this path.
+                    // Try to resolve via the abstract interpreter.
+                    // Three cases we handle in v2.5:
+                    //
+                    //   (a) `jmp reg` where reg is a tracked Imm/Addr
+                    //   (b) `jmp [rip + disp]` (IAT / GOT / absolute ptr)
+                    //   (c) `jmp [base + idx*scale + disp]` where base is
+                    //       a tracked Addr — enumerate table entries.
+                    let mut resolved = Vec::<u64>::new();
+                    if insn.op_count() == 1 {
+                        match insn.op_kind(0) {
+                            OpKind::Register => {
+                                // (a) jmp <reg>
+                                if let Some(ri) = reg_idx(insn.op_register(0)) {
+                                    if let Some(t) = regs[ri].as_concrete() {
+                                        resolved.push(t);
+                                    }
+                                }
+                            }
+                            OpKind::Memory => {
+                                if insn.is_ip_rel_memory_operand() {
+                                    // (b) jmp [rip + disp]
+                                    let ptr_va = insn.ip_rel_memory_address();
+                                    if let Some(t) = read_u64(ptr_va) {
+                                        resolved.push(t);
+                                    }
+                                } else if insn.memory_base() != Register::None {
+                                    // (c) indexed: [base + index*scale + disp]
+                                    let base = insn.memory_base();
+                                    let base_va = reg_idx(base)
+                                        .and_then(|i| regs[i].as_concrete())
+                                        .map(|v| v.wrapping_add(insn.memory_displacement64()));
+                                    if let Some(table_va) = base_va {
+                                        resolved.extend(enumerate_jump_table(
+                                            &pe, image, table_va,
+                                            insn.memory_index_scale() as u64,
+                                        ));
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    // Push every resolved target onto the worklist, then end
+                    // this linear path (the jmp itself transfers control).
+                    for t in resolved {
+                        worklist.push((t, regs));
+                    }
                     break;
                 }
                 _ => {}
@@ -1379,6 +1494,33 @@ mod tests {
         assert_eq!(patches[0].bytes, vec![0x90]);
         assert_eq!(patches[1].target_va, 0x00400011);
         assert_eq!(patches[1].bytes, vec![0x90]);
+    }
+
+    /// Smoke test: the indirect-branch resolver must not panic or hang on
+    /// MSVC-built binaries where jump tables and IAT thunks are common.
+    /// Tries a couple of well-known locations; skips if neither exists.
+    #[test]
+    fn indirect_branch_resolver_smokes_on_msvc_binaries() {
+        for candidate in [
+            "/tmp/clang-ar/clang-apply-replacements.exe",
+            "/Users/shane/repos/qbridge/node_modules/7zip-bin/win/x64/7za.exe",
+        ] {
+            let p = std::path::Path::new(candidate);
+            if !p.exists() { continue; }
+            let bytes = match std::fs::read(p) { Ok(b) => b, Err(_) => continue };
+            // A poor man's benchmark on a real handler surface; we're only
+            // asserting that no handler-body path causes the enumerator
+            // to explode into runaway iteration.
+            let t0 = std::time::Instant::now();
+            let patches = extract_all_patches(&bytes);
+            let elapsed = t0.elapsed();
+            assert!(elapsed.as_secs() < 30,
+                "extract_all_patches on {:?} took {:?} — jump-table resolver may be unbounded",
+                p.file_name(), elapsed);
+            // MSVC binaries rarely emit SEH-driven SMC; the set should be
+            // small but the function must return normally.
+            let _ = patches;
+        }
     }
 
     #[test]
