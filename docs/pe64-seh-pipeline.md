@@ -1,0 +1,159 @@
+# PE64 SEH Static Analysis Pipeline
+
+rsleigh includes a Windows structured-exception-handling (SEH) analysis
+layer that models at static-analysis time what the OS exception dispatcher
+does at runtime.  The pipeline is the backbone of static unpacking for
+SEH-SMC-based obfuscators (PyVMProtect, Themida-like schemes, custom
+exception-driven packers) and also improves ordinary function discovery
+on any MSVC-built PE64 binary.
+
+No dynamic execution, no Windows VM, no debugger.  Pure data-flow over
+the PE image plus `.pdata`.
+
+## Pipeline stages
+
+```
+     PE64 bytes
+        │
+        ▼
+ ┌───────────────────┐
+ │ parse .pdata      │  RUNTIME_FUNCTION entries
+ │  + UNWIND_INFO    │  → handler VAs, scope_table VAs,
+ │  + CHAININFO +    │    UNW_FLAG_{EH,UH,CHAIN}INFO
+ │   chain-low-bit   │
+ └─────┬─────────────┘
+       │   SehRecord {func_begin, func_end, handler, scope_table, ...}
+       ▼
+ ┌───────────────────┐        ┌───────────────────┐
+ │ handler body      │        │ SCOPE_TABLE       │
+ │ analyser          │        │ parser            │
+ │ (iced-x86,        │        │ {begin,end,       │
+ │  control-flow     │        │  handler/filter,  │
+ │  aware)           │        │  jump_target}     │
+ └─────┬─────────────┘        └─────┬─────────────┘
+       │                            │
+       ▼                            ▼
+ HandlerAnalysis                ScopeRecord list
+ {redirects_rip,                    │
+  skips_rip, calls_wpm,             │  nested recursion
+  calls_vprotect,                   │  up to depth 8
+  uses_rep_movs,                    │
+  resumption_va, …}                 │
+       │                            │
+       └──────┬─────────────────────┘
+              ▼
+     ┌────────────────────┐
+     │ patch extractor    │  worklist abstract interpreter:
+     │ (control-flow      │    tracks RegVal lattice
+     │  aware)            │    (Top | Imm(u64) | Addr(u64))
+     └────────┬───────────┘
+              ▼
+     ImagePatch {target_va, bytes, handler_va}
+              │
+              ▼
+     ┌────────────────────┐
+     │ apply_patches to   │  mutates a cloned copy of the image
+     │ working image      │  in place; OOB ignored
+     └────────┬───────────┘
+              ▼
+     ┌────────────────────┐
+     │ smc_fixpoint       │  re-extract + re-apply + re-discover
+     │ (caller-supplied   │  until no new patch and no new
+     │  discovery oracle) │  function appears, or max_iters
+     └────────────────────┘
+```
+
+Public API lives at `rsleigh_decompile::seh_static`.  The CLI exposes the
+full-discovery fixpoint as `rsleigh <bin> --seh-fixpoint`.
+
+## Feature / target matrix
+
+The table below lists which pipeline features benefit which target
+categories.  "Yes" means the stage is exercised and surfaces useful data;
+"—" means the stage is inert for that target (not a regression, just no
+new signal).
+
+| Pipeline stage | Python C-ext (.pyd/.so) | MSVC C/C++ PE64 | SEH-SMC packer | Non-Windows |
+| --- | :---: | :---: | :---: | :---: |
+| PyMethodDef scanner              | **Yes** | —       | —       | —       |
+| Python C API signature pack      | **Yes** | — (unless linking python3xx) | **Yes** (PyVMProtect class) | **Yes** (Python ext on ELF) |
+| MSVC push-reg prologue           | **Yes** | **Yes** | **Yes** | —       |
+| Underscore-filter relaxation     | **Yes** | **Yes** | **Yes** | **Yes** |
+| SEH handler enumeration (.pdata) | **Yes** | **Yes** | **Yes** | —       |
+| Handler-body classifier          | —       | — (rarely SMC) | **Yes** | —       |
+| SCOPE_TABLE parser               | **Yes** (MSVC-linked) | **Yes** | **Yes** | —       |
+| Nested scope-table BFS           | **Yes** | **Yes** | **Yes** | —       |
+| Chained-entry low-bit encoding   | —       | Rare    | Possible | —       |
+| Control-flow-aware patch interp  | —       | — (no SMC) | **Yes** | —       |
+| Patch extractor + apply          | —       | —       | **Yes** | —       |
+| `smc_fixpoint`                   | —       | —       | **Yes** | —       |
+
+## Worked examples
+
+Numbers from commodity hardware, cold cache.
+
+### crackmev3.pyd — PyVMProtect v4 sample
+
+Before the pipeline landed:
+
+```
+1 functions:
+  0x1800150f0  PyInit_crackmev3
+```
+
+After:
+
+```
+68 functions
+  (+ 7 exports via underscore-filter relaxation)
+  (+ 1 via PyMethodDef: _ttokwy5gsm @ 0x180014cf0)
+  (+ 6 unique SEH handlers)
+  (+ 54 scope-table filter / resume blocks)
+```
+
+SEH fixpoint: **1 iteration, 0 patches, converged.**
+v4 does not use SEH-driven SMC; the v1 baseline is locked into a test to
+catch any future false-positive patch emission.
+
+### clang-apply-replacements.exe — real LLVM tool
+
+Previously-captured bench set Ghidra total at **4045** functions.
+rsleigh now discovers **4570** — Ghidra +525.
+
+```
+3509 SEH records
+8 unique handler addresses      (C_specific_handler and friends)
+19 scope-table addrs surfaced   (all __try filter / resume blocks)
+```
+
+One handler flagged as making IAT calls to `RtlUnwindEx` (the MSVC
+personality function) — exactly what is expected of a legitimate
+exception path.  No SMC candidates.
+
+### 7za.exe — 7-Zip CLI
+
+```
+6438 functions discovered
+5077 SEH records (mostly unwind-only — compression code is almost
+      entirely try/finally-free)
+2 unique handler addresses
+3 scope-table addrs surfaced
+```
+
+## Known limitations (v2)
+
+1. **Indirect branches** in handler bodies terminate the interpreter on
+   that path.  Jump-table dispatch inside a handler hides downstream SMC.
+2. **WriteProcessMemory / VirtualProtect** call sites are flagged but not
+   evaluated — arguments are not symbolically propagated back to source
+   bytes.
+3. **RtlAddFunctionTable** / dynamic handler registration is not
+   modelled.  Handlers installed at runtime do not appear in `.pdata`
+   and thus miss the enumeration.
+4. **DispatcherContext** (R9) field reads (`ControlPc` at +0, `TargetIp`
+   at +0x20) are not currently tracked; obfuscators that fetch the real
+   fault address from R9 rather than the ExceptionRecord bypass the
+   `reads_exception_info` signal.
+
+Those are fertile ground for v3 when a real SEH-SMC fixture lands in the
+corpus.
