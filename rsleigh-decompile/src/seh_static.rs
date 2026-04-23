@@ -864,6 +864,128 @@ pub fn extract_all_patches(image: &[u8]) -> Vec<ImagePatch> {
     out
 }
 
+/// Result of running the SMC-fixpoint loop.
+#[derive(Debug, Clone)]
+pub struct FixpointResult {
+    /// The patched image (a clone of the input, mutated).
+    pub image: Vec<u8>,
+    /// Every patch applied, in the order it first appeared. Deduplicated by
+    /// (target_va, bytes).
+    pub patches: Vec<ImagePatch>,
+    /// Function start VAs that became visible only after patches were
+    /// applied.  Union over all iterations; deduplicated.  Callers can feed
+    /// this straight into their function symbol table.
+    pub newly_discovered_fns: Vec<u64>,
+    /// Iterations executed before a fixpoint (or `max_iters`) was reached.
+    pub iterations: usize,
+    /// True when the loop terminated because no new patches and no new
+    /// discovered functions were produced by the last iteration.
+    pub converged: bool,
+}
+
+/// Iterate "extract patches → apply → re-enumerate" until nothing new
+/// appears or `max_iters` is hit.  This is the backbone of SMC-aware static
+/// lifting: each round may uncover handlers that only exist after a
+/// previous round's patch reveals their prologue, register them as
+/// discoverable functions, and generate further patches of their own.
+///
+/// The loop is bounded in two ways:
+///   * a hard iteration cap (default 16 via `smc_fixpoint`);
+///   * a convergence test on (patches, discovered_fns) — if neither set
+///     grew, the current image is a fixpoint with respect to the static
+///     SEH pipeline.
+///
+/// `discover_fn` is a callback that re-runs function discovery on a
+/// (possibly mutated) image and returns the set of function VAs it found.
+/// The seh_static crate does not want to depend on rsleigh-cli's discovery
+/// code, so the caller supplies it.  A minimal implementation is:
+///
+/// ```ignore
+/// |bytes| {
+///     // whatever rsleigh-cli does under the hood
+///     ::rsleigh_cli::discover_all(bytes)
+/// }
+/// ```
+///
+/// For tests or simple callers that only care about SEH-derived functions,
+/// use [`smc_fixpoint_seh_only`] which re-enumerates SEH handlers +
+/// scope-table addresses at every step.
+pub fn smc_fixpoint<F>(
+    image: &[u8],
+    max_iters: usize,
+    mut discover_fn: F,
+) -> FixpointResult
+where
+    F: FnMut(&[u8]) -> Vec<u64>,
+{
+    let mut working = image.to_vec();
+    let mut applied: Vec<ImagePatch> = Vec::new();
+    let mut applied_set: std::collections::HashSet<(u64, Vec<u8>)> = std::collections::HashSet::new();
+    let mut discovered: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+    // Seed discovery with pre-patch function set so we report deltas only.
+    let baseline: std::collections::BTreeSet<u64> = discover_fn(&working).into_iter().collect();
+
+    let mut iter = 0usize;
+    let converged = loop {
+        if iter >= max_iters { break false; }
+        iter += 1;
+
+        // 1. Extract patches from the current image.
+        let fresh = extract_all_patches(&working);
+        let mut new_this_round: Vec<ImagePatch> = Vec::new();
+        for p in fresh {
+            let key = (p.target_va, p.bytes.clone());
+            if applied_set.insert(key) {
+                new_this_round.push(p);
+            }
+        }
+
+        // 2. Apply them (if any).
+        let applied_count = if new_this_round.is_empty() {
+            0
+        } else {
+            let n = apply_patches(&mut working, &new_this_round);
+            applied.extend(new_this_round.into_iter());
+            n
+        };
+
+        // 3. Re-run discovery on the (possibly patched) image.
+        let now: std::collections::BTreeSet<u64> = discover_fn(&working).into_iter().collect();
+        let prev_size = discovered.len();
+        for va in now.difference(&baseline) {
+            discovered.insert(*va);
+        }
+        let discovered_grew = discovered.len() > prev_size;
+
+        // 4. Convergence check.
+        if applied_count == 0 && !discovered_grew {
+            break true;
+        }
+    };
+
+    FixpointResult {
+        image: working,
+        patches: applied,
+        newly_discovered_fns: discovered.into_iter().collect(),
+        iterations: iter,
+        converged,
+    }
+}
+
+/// Convenience wrapper that re-enumerates only the SEH-surface functions
+/// at each step (handlers + scope table entries).  Suitable for tests and
+/// callers that do not have access to the full rsleigh-cli discovery
+/// pipeline.
+pub fn smc_fixpoint_seh_only(image: &[u8], max_iters: usize) -> FixpointResult {
+    smc_fixpoint(image, max_iters, |img| {
+        let mut v = handler_addresses(&parse_pe64_seh(img));
+        v.extend(scope_table_addresses(img));
+        v.sort_unstable();
+        v.dedup();
+        v
+    })
+}
+
 /// Apply `patches` to a mutable in-memory image representation.  The `image`
 /// slice here is the *raw* PE bytes (file image).  Returns the number of
 /// patches successfully written.
@@ -959,6 +1081,49 @@ mod tests {
             assert!(!a.is_smc_candidate(),
                 "handler {:#x} wrongly flagged as SMC: {:?}", va, a);
         }
+    }
+
+    #[test]
+    fn crackmev3_fixpoint_converges_with_zero_patches() {
+        // crackmev3 v4 has zero SMC. The fixpoint loop must converge on
+        // the first iteration: no patches, no new functions from re-enum.
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let fixture  = manifest.parent().unwrap()
+            .join("test-harness/fixtures/crackmev3.pyd");
+        if !fixture.exists() {
+            eprintln!("skipping: crackmev3.pyd not staged");
+            return;
+        }
+        let bytes = std::fs::read(&fixture).unwrap();
+        let r = smc_fixpoint_seh_only(&bytes, 16);
+        assert!(r.converged, "expected convergence on a no-SMC fixture");
+        assert_eq!(r.patches.len(), 0);
+        assert_eq!(r.newly_discovered_fns.len(), 0);
+        assert_eq!(r.iterations, 1);
+        assert_eq!(r.image, bytes, "image must be unchanged");
+    }
+
+    #[test]
+    fn fixpoint_stops_at_max_iters() {
+        // Pathological discover_fn that always claims to find a new fn.
+        // Fixpoint should bail at max_iters and report converged=false.
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let fixture  = manifest.parent().unwrap()
+            .join("test-harness/fixtures/crackmev3.pyd");
+        if !fixture.exists() {
+            eprintln!("skipping: crackmev3.pyd not staged");
+            return;
+        }
+        let bytes = std::fs::read(&fixture).unwrap();
+        let mut counter = 0u64;
+        let r = smc_fixpoint(&bytes, 4, |_| {
+            counter = counter.wrapping_add(1);
+            // Always return a brand-new VA to force non-convergence.
+            vec![0x180_0000_0000 + counter]
+        });
+        assert!(!r.converged, "expected non-convergence under adversarial oracle");
+        assert_eq!(r.iterations, 4);
+        assert!(r.newly_discovered_fns.len() >= 4);
     }
 
     #[test]

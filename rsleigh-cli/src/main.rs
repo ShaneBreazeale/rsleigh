@@ -90,6 +90,7 @@ fn main() {
         eprintln!("  rsleigh <binary> --search <query>   Find functions by string/pattern");
         eprintln!("  rsleigh <binary> --search --api <name>  Find functions calling API");
         eprintln!("  rsleigh <binary> --search --const <hex> Find functions with constant");
+        eprintln!("  rsleigh <binary> --seh-fixpoint      Apply SEH-driven SMC patches until fixpoint, report new functions");
         eprintln!("  rsleigh <binary> --vulnscan          Scan for vulnerability patterns");
         eprintln!("  rsleigh <binary> --all --compact     Token-efficient output (no decls/blanks)");
         eprintln!("  rsleigh <binary> --all --brief       Calls + strings only (minimal tokens)");
@@ -121,6 +122,32 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
     let callgraph_mode = args.iter().any(|a| a == "--callgraph");
+    let seh_fixpoint_mode = args.iter().any(|a| a == "--seh-fixpoint");
+
+    if seh_fixpoint_mode {
+        let data = match std::fs::read(binary_path) {
+            Ok(d) => d,
+            Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
+        };
+        // Use SEH-only discovery for the fixpoint — full function discovery
+        // depends on this same binary and could recurse; the SEH surface is
+        // what we care about here anyway.
+        let result = rsleigh_decompile::seh_static::smc_fixpoint_seh_only(&data, 16);
+        println!("iterations: {}  converged: {}", result.iterations, result.converged);
+        println!("patches applied: {}", result.patches.len());
+        for p in &result.patches {
+            let preview: String = p.bytes.iter().take(16)
+                .map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+            let more = if p.bytes.len() > 16 { " .." } else { "" };
+            println!("  patch @ {:#x}  len={:4}  from handler {:#x}  [{}{}]",
+                     p.target_va, p.bytes.len(), p.handler_va, preview, more);
+        }
+        println!("newly discovered functions: {}", result.newly_discovered_fns.len());
+        for va in &result.newly_discovered_fns {
+            println!("  {:#x}", va);
+        }
+        return;
+    }
 
     if yara_mode {
         let data = match std::fs::read(binary_path) {
