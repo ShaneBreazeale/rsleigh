@@ -49,6 +49,8 @@ fn main() {
         if a.calls_wpm           { tags.push("WriteProcessMemory"); }
         if a.calls_vprotect      { tags.push("VirtualProtect"); }
         if a.uses_rep_movs       { tags.push("REP_MOVS"); }
+        if a.registers_runtime_tables { tags.push("RtlAddFunctionTable"); }
+        if a.reads_dispatcher_context { tags.push("DISP_CTX"); }
         let smc = if a.is_smc_candidate() { "  [SMC]" } else { "" };
         let rip = a.resumption_va.map(|r| format!(" resume={:#x}", r)).unwrap_or_default();
         let calls = if a.iat_calls.is_empty() { String::new() }

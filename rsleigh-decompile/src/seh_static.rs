@@ -400,6 +400,16 @@ pub struct HandlerAnalysis {
     /// Number of x86-64 instructions scanned before a RET or trap stopped
     /// us (mostly for diagnostics).
     pub insn_count: usize,
+    /// Handler calls `RtlAddFunctionTable` (or related) to register new
+    /// RUNTIME_FUNCTION entries at runtime.  Entries registered this way
+    /// do not appear in the PE `.pdata` and are therefore invisible to
+    /// static enumeration — a clear "stop here, bench on a live run"
+    /// signal for callers.
+    pub registers_runtime_tables: bool,
+    /// Handler reads `DispatcherContext->ControlPc` (+0x00) or
+    /// `TargetIp` (+0x20) via R9.  Some obfuscators prefer to fetch the
+    /// faulting address from DispatcherContext rather than ExceptionRecord.
+    pub reads_dispatcher_context: bool,
 }
 
 impl HandlerAnalysis {
@@ -410,6 +420,7 @@ impl HandlerAnalysis {
             || self.calls_wpm
             || self.calls_vprotect
             || self.uses_rep_movs
+            || self.registers_runtime_tables
     }
 }
 
@@ -572,6 +583,16 @@ pub fn analyse_handler(image: &[u8], handler_va: u64) -> Option<HandlerAnalysis>
                     a.reads_exception_info = true;
                 }
             }
+            // DispatcherContext via R9 — ControlPc at +0x00, TargetIp at +0x20.
+            if insn.op_kind(i) == OpKind::Memory
+                && insn.memory_base() == Register::R9
+                && i > 0
+            {
+                let disp = insn.memory_displacement64();
+                if disp == 0x00 || disp == 0x20 {
+                    a.reads_dispatcher_context = true;
+                }
+            }
         }
 
         // ---- REP MOVSB / REP MOVSD / REP MOVSQ ---------------------------
@@ -596,6 +617,9 @@ pub fn analyse_handler(image: &[u8], handler_va: u64) -> Option<HandlerAnalysis>
                     "VirtualProtect" | "VirtualProtectEx"
                         | "NtProtectVirtualMemory" | "ZwProtectVirtualMemory"
                         => a.calls_vprotect = true,
+                    "RtlAddFunctionTable" | "RtlInstallFunctionTableCallback"
+                        | "RtlDeleteFunctionTable"
+                        => a.registers_runtime_tables = true,
                     _ => {}
                 }
             }
@@ -1045,6 +1069,48 @@ pub fn extract_handler_patches(image: &[u8], handler_va: u64) -> Vec<ImagePatch>
             continue;
         }
 
+        // ---- IAT CALL: WriteProcessMemory / NtWriteVirtualMemory -------
+        //   Win64 ABI: rcx=hProc, rdx=dst, r8=src, r9=size, [rsp+0x28]=&out
+        //   If rdx/r8/r9 are all tracked as concrete values AND src lies
+        //   inside the image, copy `size` bytes from src → emit patch at dst.
+        //
+        //   Same shape used by NtWriteVirtualMemory / ZwWriteVirtualMemory
+        //   (rcx=hProc, rdx=dst, r8=src, r9=size, +shadow for &bytes).
+        if op == Mnemonic::Call
+            && insn.op_count() == 1
+            && insn.op_kind(0) == OpKind::Memory
+            && insn.is_ip_rel_memory_operand()
+        {
+            let tgt = insn.ip_rel_memory_address();
+            let name = pe.imports.iter()
+                .find(|imp| base + imp.offset as u64 == tgt)
+                .map(|imp| imp.name.to_string())
+                .unwrap_or_default();
+            if matches!(name.as_str(),
+                "WriteProcessMemory" | "NtWriteVirtualMemory"
+                | "ZwWriteVirtualMemory")
+            {
+                let dst = regs[reg_idx(Register::RDX).unwrap()].as_concrete();
+                let src = regs[reg_idx(Register::R8 ).unwrap()].as_concrete();
+                let cnt = regs[reg_idx(Register::R9 ).unwrap()].as_concrete();
+                if let (Some(d), Some(s), Some(c)) = (dst, src, cnt) {
+                    if c > 0 && c <= 0x100000 {
+                        if let Some(body) = read_bytes(s, c as usize) {
+                            if patch_set.insert((d, body.clone())) {
+                                patches.push(ImagePatch { target_va: d, bytes: body, handler_va });
+                            }
+                        }
+                    }
+                }
+            }
+            // Calls clobber volatile regs per Win64 ABI.
+            for r in [Register::RAX, Register::RCX, Register::RDX,
+                      Register::R8, Register::R9, Register::R10, Register::R11] {
+                if let Some(i) = reg_idx(r) { regs[i] = RegVal::Top; }
+            }
+            continue;
+        }
+
         // ---- REP MOVSB / MOVSQ ------------------------------------------
         //   rep movsb  ; dst=rdi, src=rsi, count=rcx
         //   rep movsq  ; count in qwords
@@ -1362,6 +1428,24 @@ mod tests {
         assert!(!r.converged, "expected non-convergence under adversarial oracle");
         assert_eq!(r.iterations, 4);
         assert!(r.newly_discovered_fns.len() >= 4);
+    }
+
+    #[test]
+    fn crackmev3_no_runtime_handler_registration_or_dispctx() {
+        // v4 of the sample reads ExceptionRecord but not DispatcherContext,
+        // and does not register runtime function tables. Lock that in.
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let fixture  = manifest.parent().unwrap()
+            .join("test-harness/fixtures/crackmev3.pyd");
+        if !fixture.exists() { return; }
+        let bytes = std::fs::read(&fixture).unwrap();
+        let analyses = analyse_all_handlers(&bytes);
+        for (va, a) in &analyses {
+            assert!(!a.registers_runtime_tables,
+                "handler {:#x} wrongly flagged registers_runtime_tables", va);
+            assert!(!a.reads_dispatcher_context,
+                "handler {:#x} wrongly flagged reads_dispatcher_context", va);
+        }
     }
 
     #[test]
