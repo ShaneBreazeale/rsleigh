@@ -167,6 +167,35 @@ runtime type objects (`PyExc_SystemError`, `PyMethod_Type`,
 `"handle_user_exception"` embedded as a rodata literal for
 exception messages).
 
+### NumPy 2.4.4 core extensions — production scientific library
+
+Tested against the `win_amd64` wheel:
+
+| Binary | Size | Total | Named (real) |
+| --- | ---: | ---: | ---: |
+| `_multiarray_umath.pyd`  | 3.7 MB  |  361 |  **347** |
+| `_simd.pyd`              | 832 KB  | 1628 | **1619** |
+| `_generator.pyd`         | 585 KB  |  109 |  **100** |
+| `mtrand.pyd`             | 489 KB  |   85 |   **76** |
+| `_pocketfft_umath.pyd`   | 276 KB  |   10 |    1 |
+| **total**                | 5.8 MB  | **2193** | **2143** |
+
+"Named" here means a symbolic Python method or attribute name (e.g.
+`ndarray.shape`, `ndarray.tolist`, `ndarray.__array_interface__`,
+SIMD-per-dtype kernels) rather than an anonymous `FUN_xxxxx`.
+
+Without the PyMethodDef scanner these five binaries would list one
+function each (`PyInit_*`).  With it, 2143 real names become
+available for direct decomp, cross-referencing, and symbol-aware
+function-signature propagation.
+
+The `_multiarray_umath.pyd` sample in particular covers the bulk of
+the user-visible `numpy.ndarray` surface — `ndim`, `shape`, `dtype`,
+`real`, `imag`, `T`, `flat`, `tolist`, `item`, `tobytes`, `astype`,
+`byteswap`, `copy`, `resize`, `__array__`, `__array_wrap__`,
+`__sizeof__`, `__array_interface__`, `__array_struct__`,
+`__array_priority__`, `device`, …
+
 ### 7za.exe — 7-Zip CLI
 
 ```
