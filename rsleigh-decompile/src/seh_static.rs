@@ -410,6 +410,11 @@ pub struct HandlerAnalysis {
     /// `TargetIp` (+0x20) via R9.  Some obfuscators prefer to fetch the
     /// faulting address from DispatcherContext rather than ExceptionRecord.
     pub reads_dispatcher_context: bool,
+    /// The set of `EXCEPTION_RECORD::ExceptionCode` values the handler
+    /// case-splits on — recovered by spotting `cmp <reg_holding_exccode>,
+    /// imm` or `cmp dword [rcx+0], imm` in the handler body. Dedup'd,
+    /// sorted ascending.  Empty if no such comparison was found.
+    pub exc_code_triggers: Vec<u32>,
 }
 
 impl HandlerAnalysis {
@@ -483,6 +488,11 @@ pub fn analyse_handler(image: &[u8], handler_va: u64) -> Option<HandlerAnalysis>
     // Simple scalar tracking: last-seen 64-bit immediate per register. Lets
     // us resolve `mov rax, imm64; mov [r8+0xf8], rax` → concrete Rip write.
     let mut imm64_of: [Option<u64>; 16] = [None; 16];
+    // Parallel "symbolic tag" per register for ExceptionRecord field
+    // tracking.  Handler entry has rcx = pointer to EXCEPTION_RECORD.
+    //   0 = none, 1 = ExcRecordPtr, 2 = ExcCode, 3 = ExcAddress.
+    let mut tag_of: [u8; 16] = [0; 16];
+    let mut exc_trig_set: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
     let reg_idx = |r: Register| -> Option<usize> {
         match r {
             Register::RAX => Some(0), Register::RCX => Some(1),
@@ -496,6 +506,9 @@ pub fn analyse_handler(image: &[u8], handler_va: u64) -> Option<HandlerAnalysis>
             _ => None,
         }
     };
+
+    // Handler entry convention: rcx = ExceptionRecord*.
+    tag_of[1] = 1;
 
     while dec.can_decode() && a.insn_count < 1024 {
         dec.decode_out(&mut insn);
@@ -523,6 +536,93 @@ pub fn analyse_handler(image: &[u8], handler_va: u64) -> Option<HandlerAnalysis>
             // Any other write to a register clears the tracked immediate.
             if let Some(i) = reg_idx(insn.op_register(0)) {
                 imm64_of[i] = None;
+            }
+        }
+
+        // ---- ExceptionRecord field reads -----------------------------
+        // `mov dst, dword ptr [rcx + 0]`  →  dst holds ExceptionCode.
+        // `mov dst, qword ptr [rcx + 8]`  →  dst holds ExceptionAddress.
+        // Reads via other tagged pointer (e.g. copied ExcRecordPtr) also
+        // propagate.
+        if op == Mnemonic::Mov && insn.op_count() == 2
+            && insn.op_kind(0) == OpKind::Register
+            && insn.op_kind(1) == OpKind::Memory
+            && insn.memory_index() == Register::None
+        {
+            let base = insn.memory_base();
+            let base_tag = reg_idx(base).map(|i| tag_of[i]).unwrap_or(0);
+            let dst_idx = reg_idx(insn.op_register(0));
+            if base_tag == 1 {
+                let disp = insn.memory_displacement64();
+                if let Some(di) = dst_idx {
+                    tag_of[di] = match disp {
+                        0x00 => 2, // ExcCode
+                        0x08 => 3, // ExcAddress
+                        _    => 0,
+                    };
+                    if tag_of[di] != 0 {
+                        a.reads_exception_info = true;
+                    }
+                }
+            } else if let Some(di) = dst_idx {
+                // Register-to-register mov overwrites prior tag (already handled
+                // above by imm64 clear for the unconditional clear path, so mirror).
+                tag_of[di] = 0;
+            }
+        } else if op == Mnemonic::Mov && insn.op_count() == 2
+            && insn.op_kind(0) == OpKind::Register
+            && insn.op_kind(1) == OpKind::Register
+        {
+            // `mov dst, src` — copy the source's symbolic tag.
+            let di = reg_idx(insn.op_register(0));
+            let si = reg_idx(insn.op_register(1));
+            if let (Some(di), Some(si)) = (di, si) { tag_of[di] = tag_of[si]; }
+        }
+
+        // ---- CMP on ExceptionCode → record the trigger value ----------
+        // Patterns:
+        //   cmp <reg tagged ExcCode>, imm
+        //   cmp dword ptr [rcx + 0], imm          (rcx still ExcRecordPtr)
+        if op == Mnemonic::Cmp && insn.op_count() == 2 {
+            match (insn.op_kind(0), insn.op_kind(1)) {
+                (OpKind::Register, _) => {
+                    if let Some(ri) = reg_idx(insn.op_register(0)) {
+                        if tag_of[ri] == 2 {
+                            let imm = match insn.op_kind(1) {
+                                OpKind::Immediate8 | OpKind::Immediate8to16
+                                | OpKind::Immediate8to32 | OpKind::Immediate8to64 =>
+                                    Some(insn.immediate8() as i8 as i32 as u32),
+                                OpKind::Immediate16 => Some(insn.immediate16() as u32),
+                                OpKind::Immediate32 | OpKind::Immediate32to64 =>
+                                    Some(insn.immediate32()),
+                                _ => None,
+                            };
+                            if let Some(v) = imm { exc_trig_set.insert(v); }
+                        }
+                    }
+                }
+                (OpKind::Memory, _) => {
+                    if insn.memory_index() == Register::None {
+                        let base = insn.memory_base();
+                        let base_tag = reg_idx(base).map(|i| tag_of[i]).unwrap_or(0);
+                        if base_tag == 1 && insn.memory_displacement64() == 0 {
+                            let imm = match insn.op_kind(1) {
+                                OpKind::Immediate8 | OpKind::Immediate8to16
+                                | OpKind::Immediate8to32 | OpKind::Immediate8to64 =>
+                                    Some(insn.immediate8() as i8 as i32 as u32),
+                                OpKind::Immediate16 => Some(insn.immediate16() as u32),
+                                OpKind::Immediate32 | OpKind::Immediate32to64 =>
+                                    Some(insn.immediate32()),
+                                _ => None,
+                            };
+                            if let Some(v) = imm {
+                                exc_trig_set.insert(v);
+                                a.reads_exception_info = true;
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -626,6 +726,7 @@ pub fn analyse_handler(image: &[u8], handler_va: u64) -> Option<HandlerAnalysis>
         }
     }
 
+    a.exc_code_triggers = exc_trig_set.into_iter().collect();
     Some(a)
 }
 
@@ -736,16 +837,30 @@ fn enumerate_jump_table(
 }
 
 /// Abstract register value.
+///
+/// `ExcRecordPtr` / `ExcCode` / `ExcAddress` are symbolic tags carrying no
+/// concrete value; they exist so that the interpreter can recognise reads
+/// of well-known ExceptionRecord fields and narrow conditional-branch
+/// decisions accordingly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RegVal {
     Top,
     Imm(u64),
     Addr(u64),
+    /// Handler's first argument — pointer to `EXCEPTION_RECORD`.
+    ExcRecordPtr,
+    /// Value loaded from `[ExcRecordPtr + 0x00]` (ExceptionCode, 4 bytes).
+    ExcCode,
+    /// Value loaded from `[ExcRecordPtr + 0x08]` (ExceptionAddress, 8 bytes).
+    ExcAddress,
 }
 
 impl RegVal {
     fn as_concrete(self) -> Option<u64> {
-        match self { RegVal::Imm(v) | RegVal::Addr(v) => Some(v), RegVal::Top => None }
+        match self {
+            RegVal::Imm(v) | RegVal::Addr(v) => Some(v),
+            _ => None,
+        }
     }
 }
 
@@ -1428,6 +1543,27 @@ mod tests {
         assert!(!r.converged, "expected non-convergence under adversarial oracle");
         assert_eq!(r.iterations, 4);
         assert!(r.newly_discovered_fns.len() >= 4);
+    }
+
+    #[test]
+    fn msvc_cxx_handler_detects_msc_exception_code() {
+        // clang-apply-replacements.exe is built by MSVC and contains C++
+        // personality functions that case-split on the MSVC C++ exception
+        // code `'msc' | 0xE0000000 == 0xe06d7363`.  At least one handler
+        // must report that code in `exc_code_triggers` — proves that
+        // ExceptionRecord symbolic reads actually land on real MSVC SEH
+        // shapes.  Skip if the binary isn't staged locally.
+        let path = std::path::Path::new("/tmp/clang-ar/clang-apply-replacements.exe");
+        if !path.exists() {
+            eprintln!("skipping: {:?} not staged", path);
+            return;
+        }
+        let bytes = match std::fs::read(path) { Ok(b) => b, Err(_) => return };
+        let analyses = analyse_all_handlers(&bytes);
+        let found = analyses.values()
+            .any(|a| a.exc_code_triggers.contains(&0xe06d7363));
+        assert!(found,
+            "expected at least one handler to case-split on MSVC C++ exception code 0xe06d7363");
     }
 
     #[test]

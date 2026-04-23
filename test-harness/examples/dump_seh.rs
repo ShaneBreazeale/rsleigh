@@ -55,8 +55,13 @@ fn main() {
         let rip = a.resumption_va.map(|r| format!(" resume={:#x}", r)).unwrap_or_default();
         let calls = if a.iat_calls.is_empty() { String::new() }
                     else { format!(" calls=[{}]", a.iat_calls.join(", ")) };
-        println!("  {:#x}  insn={:3}  [{}]{}{}{}",
-                 va, a.insn_count, tags.join(","), smc, rip, calls);
+        let triggers = if a.exc_code_triggers.is_empty() { String::new() } else {
+            let parts: Vec<String> = a.exc_code_triggers.iter()
+                .map(|c| format!("{:#010x}", c)).collect();
+            format!(" exc_codes={{{}}}", parts.join(","))
+        };
+        println!("  {:#x}  insn={:3}  [{}]{}{}{}{}",
+                 va, a.insn_count, tags.join(","), smc, rip, calls, triggers);
     }
 
     println!("\n--- extracted patches ---");
