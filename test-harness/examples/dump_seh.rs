@@ -6,7 +6,9 @@
 //! obfuscated binaries.  Prints one record per line plus a handler-address
 //! summary at the end.
 
-use rsleigh_decompile::seh_static::{analyse_all_handlers, handler_addresses, parse_pe64_seh};
+use rsleigh_decompile::seh_static::{
+    analyse_all_handlers, extract_all_patches, handler_addresses, parse_pe64_seh,
+};
 
 fn main() {
     let Some(path) = std::env::args().nth(1) else {
@@ -53,5 +55,19 @@ fn main() {
                     else { format!(" calls=[{}]", a.iat_calls.join(", ")) };
         println!("  {:#x}  insn={:3}  [{}]{}{}{}",
                  va, a.insn_count, tags.join(","), smc, rip, calls);
+    }
+
+    println!("\n--- extracted patches ---");
+    let patches = extract_all_patches(&bytes);
+    if patches.is_empty() {
+        println!("  (none — handlers emit no statically-resolvable writes)");
+    } else {
+        for p in &patches {
+            let preview: String = p.bytes.iter().take(16)
+                .map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+            let more = if p.bytes.len() > 16 { " .." } else { "" };
+            println!("  patch @ {:#x}  len={:4}  from handler {:#x}  [{}{}]",
+                     p.target_va, p.bytes.len(), p.handler_va, preview, more);
+        }
     }
 }
