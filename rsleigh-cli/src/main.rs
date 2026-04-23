@@ -456,6 +456,22 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
         }
     }
 
+    // Always run PyMethodDef scan for PE64 — even when the export table is
+    // non-empty, Python C-extensions register most of their methods through
+    // PyMethodDef arrays rather than direct exports.
+    if let goblin::Object::PE(pe) = &obj {
+        if pe.is_64 {
+            let extra = scan_pymethoddef(&segs, &data);
+            let mut seen: std::collections::HashSet<u64> =
+                symbols.iter().map(|(a, _)| *a).collect();
+            for (addr, name) in extra {
+                if seen.insert(addr) {
+                    symbols.push((addr, name));
+                }
+            }
+        }
+    }
+
     // For stripped ELF binaries: discover functions via entry point, CALL scanning, prologues
     // Also trigger for ELF with only import symbols (dynsym but no symtab)
     let is_elf_stripped = if let goblin::Object::Elf(elf) = &obj {
@@ -509,8 +525,15 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                     || n.starts_with("_GLOBAL_") || n.starts_with("$s")
                     || n.starts_with("_$s")
                 { return true; }
-                // Hide other single-underscore runtime glue.
-                if n.starts_with('_') { return false; }
+                // Hide well-known CRT glue by prefix. Python-visible method
+                // names (e.g. `_ttokwy5gsm`, `__name__`) start with `_` too,
+                // so a blanket underscore filter is wrong.
+                if n.starts_with("_dl_") || n.starts_with("__do_global")
+                    || n.starts_with("__libc_") || n.starts_with("__pthread_")
+                    || n.starts_with("_GLOBAL__sub_I_")
+                    || matches!(n.as_str(),
+                        "_init" | "_fini" | "_start" | "_DYNAMIC" | "_GLOBAL_OFFSET_TABLE_")
+                { return false; }
                 true
             })
             .map(|(a, n)| (n.as_str(), *a))
@@ -3306,7 +3329,16 @@ fn discover_pe_functions(
                                         || (b0 == 0x48 && b1 == 0x89 && (b2 == 0x5C || b2 == 0x7C)) // mov [rsp+N]
                                         || (b0 == 0xFF && b1 == 0x25)                 // JMP [rip+disp]
                                         || b0 == 0xE9                                 // JMP rel32
-                                        || (b0 == 0x55 && b1 == 0x8B && b2 == 0xEC);  // push ebp; mov
+                                        || (b0 == 0x55 && b1 == 0x8B && b2 == 0xEC)   // push ebp; mov
+                                        // MSVC: push <reg>; sub rsp, imm8 (reg = rbx/rbp/rsi/rdi)
+                                        || ((b0 == 0x53 || b0 == 0x55 || b0 == 0x56 || b0 == 0x57)
+                                            && b1 == 0x48 && b2 == 0x83)
+                                        // MSVC: push <reg>; sub rsp, imm32
+                                        || ((b0 == 0x53 || b0 == 0x55 || b0 == 0x56 || b0 == 0x57)
+                                            && b1 == 0x48 && b2 == 0x81)
+                                        // MSVC: mov [rsp+0x10], rdx / [rsp+0x18], r8 (arg home)
+                                        || (b0 == 0x48 && b1 == 0x89 && b2 == 0x54)
+                                        || (b0 == 0x4C && b1 == 0x89 && b2 == 0x44);
                                     if looks_like_func {
                                         found.insert(ptr);
                                     }
@@ -3321,10 +3353,122 @@ fn discover_pe_functions(
         }
     }
 
+    // Also run PyMethodDef scan during the stripped-PE path so `--all`
+    // automatically picks up Python-registered methods.
+    for (addr, name) in scan_pymethoddef(segs, data) {
+        found.insert(addr);
+        // Names attached here lose to existing FUN_xxx in the final map;
+        // that's OK — the standalone caller above owns name attribution.
+        let _ = name;
+    }
+
     let sorted: Vec<u64> = found.into_iter().collect();
-    sorted.iter().enumerate().map(|(_i, addr)| {
+    sorted.iter().map(|addr| {
         (*addr, format!("FUN_{:08x}", addr))
     }).collect()
+}
+
+/// Scan PE64 data sections for PyMethodDef arrays.
+///
+/// A PyMethodDef entry is a 32-byte struct:
+///   { const char *ml_name; PyCFunction ml_meth; int ml_flags; const char *ml_doc; }
+/// Arrays are terminated by a zeroed sentinel. Python C-extensions use this to
+/// expose methods that would otherwise never be called by any function inside
+/// the module, so neither CALL-target descent nor vtable scanning finds them.
+///
+/// Validation rules per entry, all of which must hold:
+///   * ml_meth  — within the executable address range
+///   * ml_name  — points to a short (<=64 byte) ASCII identifier, non-empty
+///   * ml_flags — fits in a u32 and its value is a plausible METH_* bitmask
+///   * ml_doc   — NULL, or points to ASCII text
+///
+/// Returns a list of (function_va, method_name) for each discovered method.
+fn scan_pymethoddef(segs: &[(u64, u64, u64)], data: &[u8]) -> Vec<(u64, String)> {
+    let obj = match goblin::Object::parse(data) { Ok(o) => o, Err(_) => return vec![] };
+    let pe = match obj { goblin::Object::PE(pe) => pe, _ => return vec![] };
+    if !pe.is_64 { return vec![]; }
+
+    // segs contains only executable sections — used for the .text range
+    // check. For string lookups we need all readable sections.
+    let mut text_start = u64::MAX;
+    let mut text_end   = 0u64;
+    for seg in segs.iter() {
+        text_start = text_start.min(seg.0);
+        text_end   = text_end.max(seg.0 + seg.1);
+    }
+    let base = pe.image_base as u64;
+    let all_segs: Vec<(u64, u64, u64)> = pe.sections.iter()
+        .filter(|s| (s.characteristics & 0x40000000) != 0)  // readable
+        .map(|s| (
+            base + s.virtual_address as u64,
+            s.virtual_size.min(s.size_of_raw_data) as u64,
+            s.pointer_to_raw_data as u64,
+        ))
+        .collect();
+    let va_to_fo = |va: u64| -> Option<usize> {
+        all_segs.iter().find_map(|(v, s, fo)| {
+            if va >= *v && va < v + s { Some(*fo as usize + (va - v) as usize) } else { None }
+        })
+    };
+    // Strict C identifier (used for ml_name)
+    let read_ident = |va: u64| -> Option<String> {
+        let fo = va_to_fo(va)?;
+        if fo >= data.len() { return None; }
+        let slice = &data[fo..data.len().min(fo + 128)];
+        let end = slice.iter().position(|&b| b == 0)?;
+        if end == 0 || end > 64 { return None; }
+        let s = &slice[..end];
+        if !s.iter().all(|&b| b == b'_' || b.is_ascii_alphanumeric()) { return None; }
+        Some(String::from_utf8_lossy(s).into_owned())
+    };
+    // Loose printable-ASCII check (used for ml_doc — doc strings contain
+    // spaces, punctuation, newlines). An empty string (first byte is NUL)
+    // is accepted as equivalent to a NULL doc.
+    let read_text_ok = |va: u64| -> bool {
+        let Some(fo) = va_to_fo(va) else { return false; };
+        if fo >= data.len() { return false; }
+        let slice = &data[fo..data.len().min(fo + 512)];
+        let end = match slice.iter().position(|&b| b == 0) { Some(e) => e, None => return false };
+        slice[..end].iter().all(|&b| b == b'\n' || b == b'\t' || (0x20..=0x7e).contains(&b))
+    };
+
+    let mut out: Vec<(u64, String)> = Vec::new();
+    for sec in &pe.sections {
+        let ch = sec.characteristics;
+        let is_read = (ch & 0x40000000) != 0;
+        let is_exec = (ch & 0x20000000) != 0;
+        let is_init = (ch & 0x00000040) != 0;
+        if !is_read || is_exec || !is_init { continue; }
+        let fo = sec.pointer_to_raw_data as usize;
+        let sz = sec.virtual_size.min(sec.size_of_raw_data) as usize;
+        if fo + sz > data.len() || sz < 32 { continue; }
+
+        let mut off = 0usize;
+        while off + 32 <= sz {
+            let rd_q = |o: usize| u64::from_le_bytes(
+                data[fo + o .. fo + o + 8].try_into().unwrap_or([0; 8]));
+            let ml_name    = rd_q(off);
+            let ml_meth    = rd_q(off + 8);
+            let ml_flags_q = rd_q(off + 16);
+            let ml_doc     = rd_q(off + 24);
+
+            let ml_flags_hi = (ml_flags_q >> 32) as u32;
+            let ml_flags    = ml_flags_q as u32;
+
+            let meth_ok  = ml_meth >= text_start && ml_meth < text_end;
+            let flags_ok = ml_flags_hi == 0 && ml_flags < 0x1000;
+            let name_str = if meth_ok && flags_ok { read_ident(ml_name) } else { None };
+            let doc_ok   = ml_doc == 0 || read_text_ok(ml_doc);
+
+            if meth_ok && flags_ok && doc_ok && name_str.is_some() {
+                out.push((ml_meth, name_str.unwrap()));
+                off += 32;
+                continue;
+            }
+            off += 8;
+        }
+    }
+    out
 }
 
 /// Discover functions in a stripped ELF binary.
