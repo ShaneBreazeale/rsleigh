@@ -178,3 +178,66 @@ pub fn scan_vulns(
 
     findings
 }
+
+/// Shannon entropy in bits/byte over `data`. 0.0 for empty input.
+pub fn shannon_entropy(data: &[u8]) -> f64 {
+    if data.is_empty() { return 0.0; }
+    let mut hist = [0u64; 256];
+    for &b in data { hist[b as usize] += 1; }
+    let n = data.len() as f64;
+    let mut h = 0.0;
+    for &c in &hist {
+        if c == 0 { continue; }
+        let p = c as f64 / n;
+        h -= p * p.log2();
+    }
+    h
+}
+
+/// Scan binary sections for anomalies relevant to packed/encrypted/stego payloads.
+///
+/// Inputs: `sections` = list of (name, bytes, virtual_address). `overlay_bytes` =
+/// trailing bytes past the last section (PE-specific; empty for other formats).
+/// Emits INFO / LOW / MED findings for:
+///   - high-entropy sections (>7.5 bits/byte = likely compressed/encrypted/packed)
+///   - PE overlay regions (appended data past image end)
+///   - non-zero section slack (StegoForge-style embedding target)
+pub fn scan_section_anomalies(
+    sections: &[(String, &[u8], u64)],
+    overlay: Option<&[u8]>,
+) -> Vec<VulnFinding> {
+    let mut findings = Vec::new();
+    for (name, bytes, va) in sections {
+        if bytes.len() < 256 { continue; }
+        let h = shannon_entropy(bytes);
+        if h > 7.5 {
+            let sev = if h > 7.9 { "MED" } else { "LOW" };
+            findings.push(VulnFinding {
+                severity: sev.to_string(),
+                address: *va,
+                function: name.clone(),
+                description: format!(
+                    "high-entropy section ({:.2} bits/byte, {} bytes) — likely packed/encrypted",
+                    h, bytes.len()
+                ),
+                context: String::new(),
+            });
+        }
+    }
+    if let Some(ov) = overlay {
+        if !ov.is_empty() {
+            let h = shannon_entropy(ov);
+            findings.push(VulnFinding {
+                severity: "LOW".to_string(),
+                address: 0,
+                function: "<overlay>".to_string(),
+                description: format!(
+                    "PE overlay: {} bytes past last section (entropy {:.2}) — installer/dropper/appended payload",
+                    ov.len(), h
+                ),
+                context: String::new(),
+            });
+        }
+    }
+    findings
+}

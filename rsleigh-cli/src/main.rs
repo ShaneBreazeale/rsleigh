@@ -123,6 +123,16 @@ fn main() {
         .unwrap_or(0);
     let callgraph_mode = args.iter().any(|a| a == "--callgraph");
     let seh_fixpoint_mode = args.iter().any(|a| a == "--seh-fixpoint");
+    let sections_mode = args.iter().any(|a| a == "--sections");
+
+    if sections_mode {
+        let data = match std::fs::read(binary_path) {
+            Ok(d) => d,
+            Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
+        };
+        run_section_scan(binary_path, &data);
+        return;
+    }
 
     if seh_fixpoint_mode {
         let data = match std::fs::read(binary_path) {
@@ -1920,6 +1930,80 @@ fn output_search_results(matches: &[(u64, String, String, String, String)], quer
 }
 
 /// Scan for common vulnerability patterns in decompiled output.
+fn run_section_scan(binary_path: &str, data: &[u8]) {
+    let obj = match goblin::Object::parse(data) {
+        Ok(o) => o, Err(e) => { eprintln!("Error: {}", e); return; }
+    };
+    let mut sec_list: Vec<(String, &[u8], u64)> = Vec::new();
+    let mut overlay: Option<&[u8]> = None;
+    match &obj {
+        goblin::Object::PE(pe) => {
+            let mut end_fo: usize = 0;
+            for sec in &pe.sections {
+                let name = String::from_utf8_lossy(&sec.name).trim_end_matches('\0').to_string();
+                let fo = sec.pointer_to_raw_data as usize;
+                let sz = sec.size_of_raw_data as usize;
+                if fo == 0 || sz == 0 { continue; }
+                let end = fo.saturating_add(sz).min(data.len());
+                if fo < end {
+                    sec_list.push((name, &data[fo..end], sec.virtual_address as u64 + pe.image_base as u64));
+                    if end > end_fo { end_fo = end; }
+                }
+            }
+            if end_fo < data.len() { overlay = Some(&data[end_fo..]); }
+        }
+        goblin::Object::Elf(elf) => {
+            for sh in &elf.section_headers {
+                if sh.sh_type != goblin::elf::section_header::SHT_PROGBITS { continue; }
+                let fo = sh.sh_offset as usize;
+                let sz = sh.sh_size as usize;
+                if sz == 0 { continue; }
+                let end = fo.saturating_add(sz).min(data.len());
+                let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("").to_string();
+                if fo < end { sec_list.push((name, &data[fo..end], sh.sh_addr)); }
+            }
+        }
+        goblin::Object::Mach(goblin::mach::Mach::Binary(m)) => {
+            for seg in &m.segments {
+                for sec_result in seg {
+                    if let Ok((sec, sec_data)) = sec_result {
+                        let name = sec.name().unwrap_or("").to_string();
+                        if !sec_data.is_empty() {
+                            sec_list.push((name, sec_data, sec.addr));
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    println!("=== Section Anomaly Scan: {} ===", binary_path);
+    println!();
+    println!("{:<24} {:>10}  entropy", "section", "bytes");
+    for (name, bytes, _va) in &sec_list {
+        let h = rsleigh_decompile::analysis::shannon_entropy(bytes);
+        let flag = if h > 7.9 { " ** HIGH" } else if h > 7.5 { " * elevated" } else { "" };
+        println!("  {:<22} {:>10}  {:>5.2}{}", name, bytes.len(), h, flag);
+    }
+    if let Some(ov) = overlay {
+        if !ov.is_empty() {
+            let h = rsleigh_decompile::analysis::shannon_entropy(ov);
+            println!("  {:<22} {:>10}  {:>5.2}  (PE overlay)", "<overlay>", ov.len(), h);
+        }
+    }
+    println!();
+    let findings = rsleigh_decompile::analysis::scan_section_anomalies(&sec_list, overlay);
+    if findings.is_empty() {
+        println!("No anomalies.");
+    } else {
+        println!("Findings:");
+        for f in &findings {
+            println!("  [{}] {} — {}", f.severity, f.function, f.description);
+        }
+    }
+}
+
 fn run_vulnscan(binary_path: &str, data: &[u8]) {
     let obj = match goblin::Object::parse(data) { Ok(o) => o, Err(e) => { eprintln!("Error: {}", e); return; } };
     let (arch, segs, mut symbols) = match parse_binary(&obj, data) { Some(r) => r, None => { eprintln!("Unsupported"); return; } };
@@ -2018,6 +2102,57 @@ fn run_vulnscan(binary_path: &str, data: &[u8]) {
             findings.push(("INFO".to_string(), *func_addr, func_name.clone(),
                 "missing stack cookie in large function".to_string(), String::new()));
         }
+    }
+
+    // Section-level anomaly scan: entropy (packed/encrypted) + PE overlay
+    let mut sec_list: Vec<(String, &[u8], u64)> = Vec::new();
+    let mut overlay: Option<&[u8]> = None;
+    match &obj {
+        goblin::Object::PE(pe) => {
+            let mut end_fo: usize = 0;
+            for sec in &pe.sections {
+                let name = String::from_utf8_lossy(&sec.name).trim_end_matches('\0').to_string();
+                let fo = sec.pointer_to_raw_data as usize;
+                let sz = sec.size_of_raw_data as usize;
+                if fo == 0 || sz == 0 { continue; }
+                let end = fo.saturating_add(sz).min(data.len());
+                if fo < end {
+                    sec_list.push((name, &data[fo..end], sec.virtual_address as u64 + pe.image_base as u64));
+                    if end > end_fo { end_fo = end; }
+                }
+            }
+            if end_fo < data.len() { overlay = Some(&data[end_fo..]); }
+        }
+        goblin::Object::Elf(elf) => {
+            for sh in &elf.section_headers {
+                if sh.sh_type != goblin::elf::section_header::SHT_PROGBITS { continue; }
+                let fo = sh.sh_offset as usize;
+                let sz = sh.sh_size as usize;
+                if sz == 0 { continue; }
+                let end = fo.saturating_add(sz).min(data.len());
+                let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("").to_string();
+                if fo < end {
+                    sec_list.push((name, &data[fo..end], sh.sh_addr));
+                }
+            }
+        }
+        goblin::Object::Mach(goblin::mach::Mach::Binary(m)) => {
+            for seg in &m.segments {
+                for sec_result in seg {
+                    if let Ok((sec, sec_data)) = sec_result {
+                        let name = sec.name().unwrap_or("").to_string();
+                        if !sec_data.is_empty() {
+                            sec_list.push((name, sec_data, sec.addr));
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    let sec_findings = rsleigh_decompile::analysis::scan_section_anomalies(&sec_list, overlay);
+    for f in sec_findings {
+        findings.push((f.severity, f.address, f.function, f.description, f.context));
     }
 
     // Sort by severity
