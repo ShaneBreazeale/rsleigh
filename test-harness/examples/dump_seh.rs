@@ -6,7 +6,7 @@
 //! obfuscated binaries.  Prints one record per line plus a handler-address
 //! summary at the end.
 
-use rsleigh_decompile::seh_static::{handler_addresses, parse_pe64_seh};
+use rsleigh_decompile::seh_static::{analyse_all_handlers, handler_addresses, parse_pe64_seh};
 
 fn main() {
     let Some(path) = std::env::args().nth(1) else {
@@ -34,5 +34,24 @@ fn main() {
     println!("\n{} unique handler addresses:", addrs.len());
     for a in &addrs {
         println!("  {:#x}", a);
+    }
+
+    println!("\n--- handler analysis ---");
+    let analyses = analyse_all_handlers(&bytes);
+    for (va, a) in &analyses {
+        let mut tags: Vec<&str> = Vec::new();
+        if a.redirects_rip       { tags.push("REDIRECT_RIP"); }
+        if a.skips_rip           { tags.push("SKIP_RIP"); }
+        if a.mutates_context     { tags.push("CTX_MUTATE"); }
+        if a.reads_exception_info{ tags.push("READS_EXC_INFO"); }
+        if a.calls_wpm           { tags.push("WriteProcessMemory"); }
+        if a.calls_vprotect      { tags.push("VirtualProtect"); }
+        if a.uses_rep_movs       { tags.push("REP_MOVS"); }
+        let smc = if a.is_smc_candidate() { "  [SMC]" } else { "" };
+        let rip = a.resumption_va.map(|r| format!(" resume={:#x}", r)).unwrap_or_default();
+        let calls = if a.iat_calls.is_empty() { String::new() }
+                    else { format!(" calls=[{}]", a.iat_calls.join(", ")) };
+        println!("  {:#x}  insn={:3}  [{}]{}{}{}",
+                 va, a.insn_count, tags.join(","), smc, rip, calls);
     }
 }
