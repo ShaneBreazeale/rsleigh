@@ -618,10 +618,20 @@ impl RegVal {
 
 /// Extract every concretely resolvable patch a handler emits.
 ///
+/// v2: control-flow aware.  Walks the handler body as a worklist over
+/// (basic-block-entry pc, register lattice state), follows both sides of
+/// every conditional branch, follows unconditional jumps, and merges
+/// register state at reconvergence points.  A reconvergence point whose
+/// merged state differs from what was recorded for it on a previous visit
+/// re-queues the block; otherwise it is skipped (fixpoint).
+///
+/// Stops each path at RET / UD2 / INT3.  Instructions-visited hard cap
+/// defends against pathological loops.
+///
 /// Returns `Vec<ImagePatch>`. Empty for handlers that do not emit SMC or
-/// whose writes depend on dynamic state the v1 interpreter cannot resolve.
+/// whose writes depend on dynamic state the v2 interpreter cannot resolve.
 pub fn extract_handler_patches(image: &[u8], handler_va: u64) -> Vec<ImagePatch> {
-    use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind, Register};
+    use iced_x86::{Decoder, DecoderOptions, FlowControl, Mnemonic, OpKind, Register};
 
     let obj = match goblin::Object::parse(image) { Ok(o) => o, _ => return vec![] };
     let pe = match obj { goblin::Object::PE(p) => p, _ => return vec![] };
@@ -639,7 +649,7 @@ pub fn extract_handler_patches(image: &[u8], handler_va: u64) -> Vec<ImagePatch>
         }
     }
     let Some(fo) = handler_fo else { return vec![]; };
-    let max_len = 4096usize.min(image.len().saturating_sub(fo));
+    let max_len = 8192usize.min(image.len().saturating_sub(fo));
     if max_len == 0 { return vec![]; }
     let bytes_slice = &image[fo..fo + max_len];
 
@@ -679,19 +689,87 @@ pub fn extract_handler_patches(image: &[u8], handler_va: u64) -> Vec<ImagePatch>
         }
     };
 
-    let mut regs: [RegVal; 16] = [RegVal::Top; 16];
+    // -------- Control-flow worklist --------
+    // Entries: (pc_absolute_va, regs_at_entry).
+    // Merged state per visited pc allows fixpoint termination.
+    let merge = |a: [RegVal; 16], b: [RegVal; 16]| -> [RegVal; 16] {
+        let mut out = [RegVal::Top; 16];
+        for i in 0..16 {
+            out[i] = match (a[i], b[i]) {
+                (x, y) if x == y => x,
+                _ => RegVal::Top,
+            };
+        }
+        out
+    };
+    let mut visited: std::collections::HashMap<u64, [RegVal; 16]> = std::collections::HashMap::new();
+    let mut worklist: Vec<(u64, [RegVal; 16])> = Vec::new();
+    worklist.push((handler_va, [RegVal::Top; 16]));
     let mut patches: Vec<ImagePatch> = Vec::new();
+    // Dedup so paths through the same patch site don't inflate output.
+    let mut patch_set: std::collections::HashSet<(u64, Vec<u8>)> = std::collections::HashSet::new();
+    let mut total_icount = 0usize;
+    let icount_cap = 8192usize;
 
-    let mut dec = Decoder::with_ip(64, bytes_slice, handler_va, DecoderOptions::NONE);
-    let mut insn = iced_x86::Instruction::default();
-    let mut icount = 0usize;
+    'outer: while let Some((pc_start, mut regs)) = worklist.pop() {
+        // Merge with any prior state at this entry; if unchanged, skip.
+        if let Some(prev) = visited.get(&pc_start) {
+            let merged = merge(*prev, regs);
+            if merged == *prev { continue; }
+            visited.insert(pc_start, merged);
+            regs = merged;
+        } else {
+            visited.insert(pc_start, regs);
+        }
 
-    while dec.can_decode() && icount < 1024 {
-        dec.decode_out(&mut insn);
-        icount += 1;
+        // Locate file offset for pc_start (could equal handler_va or a
+        // jump-target a few basic blocks away).
+        let Some(start_off) = (|| -> Option<usize> {
+            if pc_start < handler_va { return None; }
+            let delta = (pc_start - handler_va) as usize;
+            if delta >= bytes_slice.len() { return None; }
+            Some(delta)
+        })() else { continue; };
 
-        let op = insn.mnemonic();
-        if matches!(op, Mnemonic::Ret | Mnemonic::Ud2 | Mnemonic::Int3) { break; }
+        let mut dec = Decoder::with_ip(
+            64,
+            &bytes_slice[start_off..],
+            pc_start,
+            DecoderOptions::NONE,
+        );
+        let mut insn = iced_x86::Instruction::default();
+
+        while dec.can_decode() {
+            if total_icount >= icount_cap { break 'outer; }
+            dec.decode_out(&mut insn);
+            total_icount += 1;
+
+            let op = insn.mnemonic();
+            if matches!(op, Mnemonic::Ret | Mnemonic::Ud2 | Mnemonic::Int3) { break; }
+
+            // Branches: handle before generic fallthrough logic.
+            match insn.flow_control() {
+                FlowControl::UnconditionalBranch => {
+                    // Straight jmp — if target resolvable statically, requeue it.
+                    if insn.op_count() == 1 && insn.op_kind(0) == OpKind::NearBranch64 {
+                        worklist.push((insn.near_branch64(), regs));
+                    }
+                    break;
+                }
+                FlowControl::ConditionalBranch => {
+                    // Queue branch target.  Then fall through with the
+                    // same register state (conservative).
+                    if insn.op_count() == 1 && insn.op_kind(0) == OpKind::NearBranch64 {
+                        worklist.push((insn.near_branch64(), regs));
+                    }
+                    // No `break`: continue linear decode for the fall-through.
+                }
+                FlowControl::IndirectBranch => {
+                    // Can't follow statically; terminate this path.
+                    break;
+                }
+                _ => {}
+            }
 
         // ---- Pure register updates --------------------------------------
         if op == Mnemonic::Mov && insn.op_count() == 2 && insn.op_kind(0) == OpKind::Register {
@@ -806,7 +884,9 @@ pub fn extract_handler_patches(image: &[u8], handler_va: u64) -> Vec<ImagePatch>
             let Some(v) = value else { continue; };
             let mut buf = v.to_le_bytes().to_vec();
             buf.truncate(width);
-            patches.push(ImagePatch { target_va: tva, bytes: buf, handler_va });
+            if patch_set.insert((tva, buf.clone())) {
+                patches.push(ImagePatch { target_va: tva, bytes: buf, handler_va });
+            }
             continue;
         }
 
@@ -825,7 +905,9 @@ pub fn extract_handler_patches(image: &[u8], handler_va: u64) -> Vec<ImagePatch>
                 // Guard against absurd sizes from stale register tracking.
                 if total > 0 && total <= 0x10000 {
                     if let Some(body) = read_bytes(src, total) {
-                        patches.push(ImagePatch { target_va: dst, bytes: body, handler_va });
+                        if patch_set.insert((dst, body.clone())) {
+                            patches.push(ImagePatch { target_va: dst, bytes: body, handler_va });
+                        }
                     }
                 }
             }
@@ -843,7 +925,8 @@ pub fn extract_handler_patches(image: &[u8], handler_va: u64) -> Vec<ImagePatch>
                 regs[di] = RegVal::Top;
             }
         }
-    }
+        } // inner `while dec.can_decode()`
+    } // outer 'outer worklist loop
 
     patches
 }
@@ -1256,6 +1339,151 @@ mod tests {
         assert_eq!(patches[0].bytes, vec![0x90]);
         assert_eq!(patches[1].target_va, 0x00400011);
         assert_eq!(patches[1].bytes, vec![0x90]);
+    }
+
+    #[test]
+    fn control_flow_interp_explores_both_branches() {
+        // Hand-assembled sequence that writes two different single-byte
+        // patches on either side of a conditional branch:
+        //
+        //   handler:
+        //     mov rax, 0x400000                 ; tracked
+        //     cmp dword ptr [rcx], 0x80000003   ; ExceptionCode == BREAKPOINT?
+        //     je  .then
+        //     mov byte ptr [rax + 0x10], 0x90   ; patch on !je path
+        //     ret
+        //   .then:
+        //     mov byte ptr [rax + 0x20], 0xcc   ; patch on je path
+        //     ret
+        //
+        // Control-flow aware interp must recover BOTH writes as patches.
+        let bytes: [u8; 0x20] = [
+            // 0x00: 48 B8 00 00 40 00 00 00 00 00      mov rax, 0x400000
+            0x48, 0xB8, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // 0x0A: 81 39 03 00 00 80                  cmp dword [rcx], 0x80000003
+            0x81, 0x39, 0x03, 0x00, 0x00, 0x80,
+            // 0x10: 74 06                              je +6
+            0x74, 0x06,
+            // 0x12: C6 40 10 90                        mov byte [rax+0x10], 0x90
+            0xC6, 0x40, 0x10, 0x90,
+            // 0x16: C3                                 ret
+            0xC3,
+            // 0x17: 90                                 nop (padding before target)
+            0x90,
+            // 0x18: C6 40 20 CC                        mov byte [rax+0x20], 0xCC
+            0xC6, 0x40, 0x20, 0xCC,
+            // 0x1C: C3                                 ret
+            0xC3,
+            // 0x1D..0x1F: padding
+            0x90, 0x90, 0x90,
+        ];
+        let patches = cf_abstract_patches_from(&bytes);
+        assert_eq!(patches.len(), 2, "both branches should yield a patch: {:?}", patches);
+        let tvas: std::collections::BTreeSet<u64> = patches.iter().map(|p| p.target_va).collect();
+        assert_eq!(tvas, vec![0x00400010, 0x00400020].into_iter().collect());
+    }
+
+    /// Control-flow-aware mini-interpreter used by the test above.  Keeps
+    /// the test decoupled from `goblin` / `.pdata` plumbing while exercising
+    /// the same worklist shape as `extract_handler_patches`.
+    fn cf_abstract_patches_from(bytes: &[u8]) -> Vec<ImagePatch> {
+        use iced_x86::{Decoder, DecoderOptions, FlowControl, Mnemonic, OpKind, Register};
+        fn merge(a: [RegVal; 16], b: [RegVal; 16]) -> [RegVal; 16] {
+            let mut out = [RegVal::Top; 16];
+            for i in 0..16 {
+                out[i] = if a[i] == b[i] { a[i] } else { RegVal::Top };
+            }
+            out
+        }
+        let reg_idx = |r: Register| -> Option<usize> {
+            match r {
+                Register::RAX=>Some(0), Register::RCX=>Some(1),
+                Register::RDX=>Some(2), Register::RBX=>Some(3),
+                Register::RSP=>Some(4), Register::RBP=>Some(5),
+                Register::RSI=>Some(6), Register::RDI=>Some(7),
+                Register::R8=>Some(8),  Register::R9=>Some(9),
+                Register::R10=>Some(10),Register::R11=>Some(11),
+                Register::R12=>Some(12),Register::R13=>Some(13),
+                Register::R14=>Some(14),Register::R15=>Some(15),
+                _ => None,
+            }
+        };
+        let start_va = 0x1000u64;
+        let mut worklist: Vec<(u64, [RegVal; 16])> = vec![(start_va, [RegVal::Top; 16])];
+        let mut visited: std::collections::HashMap<u64, [RegVal; 16]> = std::collections::HashMap::new();
+        let mut patches: Vec<ImagePatch> = Vec::new();
+        let mut patch_set: std::collections::HashSet<(u64, Vec<u8>)> = std::collections::HashSet::new();
+
+        while let Some((pc, mut regs)) = worklist.pop() {
+            if let Some(prev) = visited.get(&pc) {
+                let m = merge(*prev, regs);
+                if m == *prev { continue; }
+                visited.insert(pc, m);
+                regs = m;
+            } else { visited.insert(pc, regs); }
+            let off = (pc - start_va) as usize;
+            if off >= bytes.len() { continue; }
+            let mut dec = Decoder::with_ip(64, &bytes[off..], pc, DecoderOptions::NONE);
+            let mut insn = iced_x86::Instruction::default();
+            while dec.can_decode() {
+                dec.decode_out(&mut insn);
+                let op = insn.mnemonic();
+                if matches!(op, Mnemonic::Ret | Mnemonic::Ud2 | Mnemonic::Int3) { break; }
+                match insn.flow_control() {
+                    FlowControl::UnconditionalBranch => {
+                        if insn.op_count()==1 && insn.op_kind(0)==OpKind::NearBranch64 {
+                            worklist.push((insn.near_branch64(), regs));
+                        }
+                        break;
+                    }
+                    FlowControl::ConditionalBranch => {
+                        if insn.op_count()==1 && insn.op_kind(0)==OpKind::NearBranch64 {
+                            worklist.push((insn.near_branch64(), regs));
+                        }
+                    }
+                    FlowControl::IndirectBranch => break,
+                    _ => {}
+                }
+                if op == Mnemonic::Mov && insn.op_count()==2 && insn.op_kind(0)==OpKind::Register {
+                    let Some(di) = reg_idx(insn.op_register(0)) else { continue; };
+                    regs[di] = match insn.op_kind(1) {
+                        OpKind::Immediate64 => RegVal::Imm(insn.immediate64()),
+                        OpKind::Immediate32to64 => RegVal::Imm(insn.immediate64()),
+                        OpKind::Register => reg_idx(insn.op_register(1))
+                            .map(|i| regs[i]).unwrap_or(RegVal::Top),
+                        _ => RegVal::Top,
+                    };
+                }
+                if op == Mnemonic::Mov && insn.op_count()==2 && insn.op_kind(0)==OpKind::Memory {
+                    let base = insn.memory_base();
+                    if !matches!(base, Register::R8 | Register::RCX) {
+                        let tva = reg_idx(base).and_then(|i| regs[i].as_concrete())
+                            .map(|v| v.wrapping_add(insn.memory_displacement64()));
+                        if let Some(tva) = tva {
+                            let width = insn.memory_size().size();
+                            let v: Option<u64> = match insn.op_kind(1) {
+                                OpKind::Immediate8 | OpKind::Immediate8to64 =>
+                                    Some(insn.immediate8() as u64),
+                                OpKind::Immediate32 | OpKind::Immediate32to64 =>
+                                    Some(insn.immediate32() as u64),
+                                OpKind::Immediate64 => Some(insn.immediate64()),
+                                OpKind::Register => reg_idx(insn.op_register(1))
+                                    .and_then(|i| regs[i].as_concrete()),
+                                _ => None,
+                            };
+                            if let Some(v) = v {
+                                let mut buf = v.to_le_bytes().to_vec();
+                                buf.truncate(width);
+                                if patch_set.insert((tva, buf.clone())) {
+                                    patches.push(ImagePatch { target_va: tva, bytes: buf, handler_va: 0 });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        patches
     }
 
     #[test]
