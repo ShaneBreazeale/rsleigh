@@ -264,16 +264,56 @@ pub fn read_scope_table(image: &[u8], scope_table_va: u64) -> Vec<ScopeRecord> {
 /// scope tables of handlers in the image.  Typically surfaces filter
 /// functions and `__except` / `__finally` resumption blocks that are not
 /// reachable from any CALL site.
+///
+/// Handles **nested SEH**: a filter function discovered via one scope table
+/// may have its own `RUNTIME_FUNCTION` entry with another scope table (e.g.,
+/// `__except { __try { ... } __except { ... } }`).  The traversal walks
+/// that graph up to a hard depth of 8.
 pub fn scope_table_addresses(image: &[u8]) -> Vec<u64> {
-    let mut set: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
-    for r in parse_pe64_seh(image) {
-        let Some(st) = r.scope_table else { continue; };
-        for sr in read_scope_table(image, st) {
-            if sr.handler_va > 1 { set.insert(sr.handler_va); }
-            if sr.jump_target_va != 0 { set.insert(sr.jump_target_va); }
+    let records = parse_pe64_seh(image);
+
+    // Build a side map from function-start VA to scope_table VA so that a
+    // discovered filter function can be looked up for its nested handler.
+    let mut scope_by_fn: std::collections::HashMap<u64, u64> = std::collections::HashMap::new();
+    for r in &records {
+        if let Some(st) = r.scope_table {
+            scope_by_fn.insert(r.func_begin, st);
         }
     }
-    set.into_iter().collect()
+
+    let mut visited_st: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut out: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+
+    // BFS over scope tables.  Each newly found filter/resume VA is checked
+    // for a further scope table (via scope_by_fn); if it has one and has
+    // not been visited yet, enqueue it.
+    let mut queue: std::collections::VecDeque<(u64, u32)> = std::collections::VecDeque::new();
+    for r in &records {
+        if let Some(st) = r.scope_table {
+            queue.push_back((st, 0));
+        }
+    }
+
+    while let Some((st_va, depth)) = queue.pop_front() {
+        if depth > 8 { continue; }
+        if !visited_st.insert(st_va) { continue; }
+        for sr in read_scope_table(image, st_va) {
+            if sr.handler_va > 1 {
+                out.insert(sr.handler_va);
+                if let Some(&next_st) = scope_by_fn.get(&sr.handler_va) {
+                    queue.push_back((next_st, depth + 1));
+                }
+            }
+            if sr.jump_target_va != 0 {
+                out.insert(sr.jump_target_va);
+                if let Some(&next_st) = scope_by_fn.get(&sr.jump_target_va) {
+                    queue.push_back((next_st, depth + 1));
+                }
+            }
+        }
+    }
+
+    out.into_iter().collect()
 }
 
 /// Collect every distinct handler VA from the records.  Handy as a

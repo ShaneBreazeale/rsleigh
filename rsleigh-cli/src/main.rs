@@ -129,10 +129,41 @@ fn main() {
             Ok(d) => d,
             Err(e) => { eprintln!("Error: {}", e); std::process::exit(1); }
         };
-        // Use SEH-only discovery for the fixpoint — full function discovery
-        // depends on this same binary and could recurse; the SEH surface is
-        // what we care about here anyway.
-        let result = rsleigh_decompile::seh_static::smc_fixpoint_seh_only(&data, 16);
+        // Full-discovery fixpoint: at each step, re-run the CLI's complete
+        // function-discovery pipeline against the mutated image.  This
+        // picks up not just SEH handlers and scope-table filters but also
+        // PyMethodDef registrations, RIP-relative function pointers in
+        // .rdata, and the prologue / CALL-descent passes that run in
+        // `discover_pe_functions`.
+        let result = rsleigh_decompile::seh_static::smc_fixpoint(&data, 16, |img| {
+            let Ok(obj) = goblin::Object::parse(img) else { return vec![]; };
+            let Some((arch, segs, mut symbols)) = parse_binary(&obj, img) else { return vec![]; };
+            if symbols.is_empty() {
+                if let goblin::Object::PE(pe) = &obj {
+                    let base = pe.image_base as u64;
+                    if let Some(optional) = pe.header.optional_header {
+                        let entry = base + optional.standard_fields.address_of_entry_point as u64;
+                        symbols = discover_pe_functions(entry, &segs, img, arch);
+                    }
+                }
+            }
+            if let goblin::Object::PE(pe) = &obj {
+                if pe.is_64 {
+                    for (addr, _) in scan_pymethoddef(&segs, img) { symbols.push((addr, String::new())); }
+                    let seh = rsleigh_decompile::seh_static::parse_pe64_seh(img);
+                    for a in rsleigh_decompile::seh_static::handler_addresses(&seh) {
+                        symbols.push((a, String::new()));
+                    }
+                    for a in rsleigh_decompile::seh_static::scope_table_addresses(img) {
+                        symbols.push((a, String::new()));
+                    }
+                }
+            }
+            let mut addrs: Vec<u64> = symbols.into_iter().map(|(a, _)| a).collect();
+            addrs.sort_unstable();
+            addrs.dedup();
+            addrs
+        });
         println!("iterations: {}  converged: {}", result.iterations, result.converged);
         println!("patches applied: {}", result.patches.len());
         for p in &result.patches {
