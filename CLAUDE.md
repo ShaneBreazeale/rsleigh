@@ -392,6 +392,63 @@ bytes + addr → Decoder::decode() → Instruction { disassembly, ops: Vec<Pcode
   self-loop terminator used to emit `return func_<self_addr>(); // thunk` and
   erase real calls.
 
+### Function signatures + discovery (cross-cutting)
+
+- **Adding a `SigType` variant touches 3 match sites.** `c_str()` and
+  `to_inferred()` in `rsleigh-decompile/src/signatures.rs`, and
+  `sigtype_to_cast()` in `rsleigh-decompile/src/printer.rs`. Missing
+  the third breaks compile with non-exhaustive-match.
+- **248 Python C API sigs** live in
+  `rsleigh-decompile/src/signatures_python.rs`. Nine Python-specific
+  `SigType` variants: `PyObjectPtr`, `ConstPyObjectPtr`,
+  `PyObjectPtrPtr`, `PyTypeObjectPtr`, `PyFrameObjectPtr`, `PySsizeT`,
+  `PyHashT`, `PyCFunction`, `PyRichCmpOp`.
+- **PyMethodDef scanner** in `rsleigh-cli/src/main.rs::scan_pymethoddef`
+  ALWAYS runs for PE64 (not gated on `symbols.is_empty()`). Validates
+  struct shape — name → ASCII ident, meth → .text range, flags < 0x1000,
+  doc → NULL or printable. Scans sections by characteristics rather than
+  name so obfuscated section names (e.g. PyVMProtect's `.424um`) work.
+- **`segs` in `discover_pe_functions` is executable-only.** For data
+  scans (PyMethodDef string resolution, handler-body RIP-relative reads)
+  build a separate `all_segs` over readable sections.
+- **Underscore filter.** Listing hides `_dl_*`, `__do_global*`,
+  `__libc_*`, `__pthread_*`, `_GLOBAL__sub_I_`, plus named entries
+  `_init`, `_fini`, `_start`, `_DYNAMIC`, `_GLOBAL_OFFSET_TABLE_`. A
+  blanket `_`-prefix reject is wrong — Python method names start with
+  `_` by convention.
+
+### SEH static-analysis pipeline (`rsleigh-decompile/src/seh_static.rs`)
+
+PE64-only. Backbone of SMC-aware static lift (PyVMProtect v5 class).
+Dependency: `iced-x86` in `rsleigh-decompile/Cargo.toml`.
+
+- **`parse_pe64_seh(image)`** — walks `.pdata` + UNWIND_INFO. Resolves
+  `UNW_FLAG_CHAININFO` plus the undocumented low-bit chain trick
+  (`UnwindData & 1` → "this is an RVA to another RUNTIME_FUNCTION").
+- **`read_scope_table(image, va)`** — parses MSVC
+  `_C_specific_handler` / `__except_handler4` SCOPE_TABLE records
+  (`{begin, end, handler, jump_target}`).
+- **`scope_table_addresses(image)`** — BFS (depth 8) over nested
+  scope tables. Surfaces filter and `__except` resumption blocks
+  that are unreachable from any CALL site.
+- **`analyse_handler(image, va)`** → `HandlerAnalysis` (flags
+  `redirects_rip` / `skips_rip` / `calls_wpm` / `calls_vprotect` /
+  `uses_rep_movs`, plus `resumption_va`, `iat_calls`).
+  `is_smc_candidate()` rolls the SMC-relevant flags up.
+- **`extract_handler_patches(image, va)`** — control-flow-aware
+  abstract interpreter over a `RegVal` lattice (`Top | Imm | Addr`).
+  Handles `mov [tracked+disp], imm/reg`, `rep movsb/d/q`, and
+  indirect jumps (`jmp reg`, `jmp [rip+disp]`, indexed jump tables
+  with stride 8 and MSVC i32-relative stride 4).
+- **`smc_fixpoint(image, max_iters, discover_fn)`** —
+  extract → apply → re-discover until stable. CLI `--seh-fixpoint`
+  wires the full discovery oracle. Hard cap 16 iterations.
+- **Fixture**: `test-harness/fixtures/crackmev3.pyd` (308 KB,
+  PyVMProtect v4 sample). Regression tests lock in its handler
+  classification and zero-patch baseline.
+- **Walkthrough**: `docs/pe64-seh-pipeline.md` (feature matrix +
+  crackmev3 / clang-apply-replacements / 7za / NumPy benchmarks).
+
 ### Peephole Optimizer (`pcode-ir/src/lib.rs`)
 
 - Identity Subpiece elimination
@@ -517,6 +574,16 @@ regressions are usually `>1%` or show up on two+ runs.
 - `pip3` aliased to `uv` → install via `uv pip install --system` or in a venv.
 - `cargo test -p test-harness` has pre-existing stack overflow in unit tests; iterate
   via `cargo test -p rsleigh-decompile --release` (26 tests, ~0.1s).
+- **rtk caches aggressively.** If `cargo build` reports `0 crates compiled`
+  when something clearly changed, use `/opt/homebrew/bin/cargo` directly and
+  optionally `cargo clean -p <crate>` to force real rebuild.
+- **`test-harness/examples/*.rs` includes stale files.** At least
+  `probe_check2_ssa` has a pre-existing non-exhaustive match on
+  `Expr::UserOp` unrelated to current work. Run
+  `cargo test -p <crate> --release --lib` to skip examples when checking
+  regressions.
+- **`.DS_Store` sneaks into initial commits.** Put it in `.gitignore` on
+  any new repo first thing.
 
 ## Debugging fold/structure passes
 
