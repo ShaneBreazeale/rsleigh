@@ -170,6 +170,11 @@ fn expr_str(e: &Expr, _vars: &[VarDef]) -> String {
         Expr::Phi(ins) => format!("Phi({:?})", ins.iter().map(|i| i.0).collect::<Vec<_>>()),
         Expr::Ternary(c, t, e) => format!("Ternary(v{}, v{}, v{})", c.0, t.0, e.0),
         Expr::Unknown => "Unknown".to_string(),
+        Expr::UserOp { func_id, inputs } => format!(
+            "UserOp({}, {:?})",
+            func_id,
+            inputs.iter().map(|i| i.0).collect::<Vec<_>>()
+        ),
     }
 }
 
