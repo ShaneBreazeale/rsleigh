@@ -478,6 +478,14 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                     symbols.push((addr, format!("seh_handler_{:x}", addr)));
                 }
             }
+            // Filter functions and __except resumption blocks from
+            // SCOPE_TABLE — these are reached only by the exception
+            // dispatcher, never by CALL descent.
+            for addr in rsleigh_decompile::seh_static::scope_table_addresses(&data) {
+                if seen.insert(addr) {
+                    symbols.push((addr, format!("seh_scope_{:x}", addr)));
+                }
+            }
         }
     }
 

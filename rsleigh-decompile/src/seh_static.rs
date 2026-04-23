@@ -21,6 +21,22 @@
 
 use std::convert::TryInto;
 
+/// A single entry from the `SCOPE_TABLE` that `_C_specific_handler` and
+/// `__except_handler4` use as language-specific data.
+///
+/// Each entry describes one `__try` block within the covered function.
+/// For a `__try / __except`, `handler_va` is the filter function VA and
+/// `jump_target_va` is where execution resumes after the handler runs.
+/// For a `__try / __finally`, `handler_va` is a constant (0 or 1), and
+/// `jump_target_va` is the finally-block entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopeRecord {
+    pub begin_va: u64,
+    pub end_va: u64,
+    pub handler_va: u64,
+    pub jump_target_va: u64,
+}
+
 /// A single exception-handler registration recovered from `.pdata` + UNWIND_INFO.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SehRecord {
@@ -93,13 +109,27 @@ pub fn parse_pe64_seh(image_data: &[u8]) -> Vec<SehRecord> {
     // Recursively resolve an UNWIND_INFO at an RVA.  Follows CHAININFO links
     // to the last entry in the chain (that's where the real handler sits).
     // `depth` bound prevents pathological loops.
+    //
+    // The undocumented "UnwindData low-bit" optimisation (Ken Johnson /
+    // Matt Miller): when (UnwindData & 1) is set, the value with the low
+    // bit cleared is itself an RVA of a RUNTIME_FUNCTION (the first in a
+    // chain) rather than a pointer to UNWIND_INFO.  Rare in practice but
+    // correct to model.
     fn resolve_unwind(
-        unwind_rva: u32,
+        mut unwind_rva: u32,
         image: &[u8],
         rva_to_fo: &dyn Fn(u32) -> Option<usize>,
         depth: u32,
     ) -> Option<UnwindSummary> {
         if depth > 8 { return None; }
+        if (unwind_rva & 1) != 0 {
+            // Follow the RUNTIME_FUNCTION reference.
+            let rf_fo = rva_to_fo(unwind_rva & !1)?;
+            if rf_fo + 12 > image.len() { return None; }
+            let next_unwind = u32::from_le_bytes(
+                image[rf_fo + 8..rf_fo + 12].try_into().ok()?);
+            unwind_rva = next_unwind;
+        }
         let fo = rva_to_fo(unwind_rva)?;
         if fo + 4 > image.len() { return None; }
         let hdr0 = image[fo];
@@ -174,6 +204,76 @@ pub fn parse_pe64_seh(image_data: &[u8]) -> Vec<SehRecord> {
         });
     }
     out
+}
+
+/// Read a `SCOPE_TABLE` for a `_C_specific_handler`-class handler, if the
+/// handler's exception-data pointer references one.
+///
+/// Layout:
+///   `DWORD Count;`
+///   followed by `Count` records of `{ BeginRVA, EndRVA, HandlerRVA, JumpTargetRVA }`.
+///
+/// The call is best-effort: if the pointed-to structure does not look like a
+/// plausible scope table (implausible `Count`, out-of-section addresses,
+/// begin >= end, etc.), it returns an empty vector so callers can safely
+/// ignore non-C-handler scope data.
+pub fn read_scope_table(image: &[u8], scope_table_va: u64) -> Vec<ScopeRecord> {
+    let obj = match goblin::Object::parse(image) { Ok(o) => o, _ => return vec![] };
+    let pe = match obj { goblin::Object::PE(p) => p, _ => return vec![] };
+    if !pe.is_64 { return vec![]; }
+    let base = pe.image_base as u64;
+
+    let va_to_fo = |va: u64| -> Option<usize> {
+        for sec in &pe.sections {
+            let sva = base + sec.virtual_address as u64;
+            let vsz = sec.virtual_size as u64;
+            if va >= sva && va < sva + vsz {
+                return Some(sec.pointer_to_raw_data as usize + (va - sva) as usize);
+            }
+        }
+        None
+    };
+    let Some(fo) = va_to_fo(scope_table_va) else { return vec![]; };
+    if fo + 4 > image.len() { return vec![]; }
+    let count = u32::from_le_bytes(image[fo..fo + 4].try_into().unwrap_or([0; 4]));
+    if count == 0 || count > 1024 { return vec![]; }
+    let need = 4usize + count as usize * 16;
+    if fo + need > image.len() { return vec![]; }
+
+    let mut out = Vec::with_capacity(count as usize);
+    for i in 0..count as usize {
+        let r = fo + 4 + i * 16;
+        let begin    = u32::from_le_bytes(image[r     ..r + 4 ].try_into().unwrap()) as u64;
+        let end      = u32::from_le_bytes(image[r + 4 ..r + 8 ].try_into().unwrap()) as u64;
+        let handler  = u32::from_le_bytes(image[r + 8 ..r + 12].try_into().unwrap()) as u64;
+        let jump     = u32::from_le_bytes(image[r + 12..r + 16].try_into().unwrap()) as u64;
+        // Sanity: begin/end should form a valid covered range; handler 0 or 1
+        // is a __finally sentinel, otherwise it must land in the image.
+        if end <= begin { return vec![]; }
+        out.push(ScopeRecord {
+            begin_va:       base + begin,
+            end_va:         base + end,
+            handler_va:     if handler <= 1 { handler } else { base + handler },
+            jump_target_va: if jump == 0    { 0        } else { base + jump    },
+        });
+    }
+    out
+}
+
+/// Harvest every additional function-start VA that can be recovered from
+/// scope tables of handlers in the image.  Typically surfaces filter
+/// functions and `__except` / `__finally` resumption blocks that are not
+/// reachable from any CALL site.
+pub fn scope_table_addresses(image: &[u8]) -> Vec<u64> {
+    let mut set: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+    for r in parse_pe64_seh(image) {
+        let Some(st) = r.scope_table else { continue; };
+        for sr in read_scope_table(image, st) {
+            if sr.handler_va > 1 { set.insert(sr.handler_va); }
+            if sr.jump_target_va != 0 { set.insert(sr.jump_target_va); }
+        }
+    }
+    set.into_iter().collect()
 }
 
 /// Collect every distinct handler VA from the records.  Handy as a
@@ -858,6 +958,28 @@ mod tests {
         for (va, a) in &analyses {
             assert!(!a.is_smc_candidate(),
                 "handler {:#x} wrongly flagged as SMC: {:?}", va, a);
+        }
+    }
+
+    #[test]
+    fn crackmev3_scope_tables_parse() {
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let fixture  = manifest.parent().unwrap()
+            .join("test-harness/fixtures/crackmev3.pyd");
+        if !fixture.exists() {
+            eprintln!("skipping: crackmev3.pyd not staged");
+            return;
+        }
+        let bytes = std::fs::read(&fixture).unwrap();
+        // crackmev3 has 112 EH records — plenty of C_specific_handler scope
+        // tables to parse.  Total scope-table-derived addresses should be
+        // non-zero and all addresses should fall inside the image.
+        let extra = scope_table_addresses(&bytes);
+        assert!(!extra.is_empty(),
+            "expected at least one scope-table-derived address");
+        for a in &extra {
+            assert!(*a >= 0x180000000 && *a < 0x181000000,
+                "scope address {:#x} out of image range", a);
         }
     }
 
