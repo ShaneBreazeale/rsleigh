@@ -864,6 +864,183 @@ impl RegVal {
     }
 }
 
+/// Linear sub-interpreter used by `extract_handler_patches` to inline the
+/// body of a directly-called helper function.  Walks instructions
+/// straight-line from `entry_va` until RET / UD2 / INT3 / budget-out.
+/// Does not follow branches (the caller's control-flow worklist handles
+/// branches at the handler level; helpers are expected to be small and
+/// linear).  Recurses into nested direct CALLs up to a depth cap.
+///
+/// `regs` is mutated in place to reflect assignments along the path.
+/// `patches`/`patch_set` collect any byte writes the helper emits.
+fn walk_helper_linear(
+    pe: &goblin::pe::PE,
+    image: &[u8],
+    entry_va: u64,
+    handler_va: u64,
+    regs: &mut [RegVal; 16],
+    patches: &mut Vec<ImagePatch>,
+    patch_set: &mut std::collections::HashSet<(u64, Vec<u8>)>,
+    call_depth: u32,
+    budget: usize,
+) {
+    use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind, Register};
+    if call_depth >= 3 || budget == 0 { return; }
+    let base = pe.image_base as u64;
+
+    // Locate body.
+    let mut fo: Option<usize> = None;
+    for sec in &pe.sections {
+        let va  = base + sec.virtual_address as u64;
+        let vsz = sec.virtual_size as u64;
+        if entry_va >= va && entry_va < va + vsz {
+            fo = Some(sec.pointer_to_raw_data as usize + (entry_va - va) as usize);
+            break;
+        }
+    }
+    let Some(start) = fo else { return; };
+    let span = (budget * 16).min(image.len().saturating_sub(start));
+    if span == 0 { return; }
+
+    // Helpers mirroring the main interpreter.
+    let va_to_fo = |va: u64| -> Option<usize> {
+        for sec in &pe.sections {
+            let sva = base + sec.virtual_address as u64;
+            let vsz = sec.virtual_size as u64;
+            if va >= sva && va < sva + vsz {
+                return Some(sec.pointer_to_raw_data as usize + (va - sva) as usize);
+            }
+        }
+        None
+    };
+    let read_bytes = |va: u64, len: usize| -> Option<Vec<u8>> {
+        let o = va_to_fo(va)?;
+        if o + len > image.len() { return None; }
+        Some(image[o..o + len].to_vec())
+    };
+    let reg_idx = |r: Register| -> Option<usize> {
+        match r {
+            Register::RAX=>Some(0), Register::RCX=>Some(1),
+            Register::RDX=>Some(2), Register::RBX=>Some(3),
+            Register::RSP=>Some(4), Register::RBP=>Some(5),
+            Register::RSI=>Some(6), Register::RDI=>Some(7),
+            Register::R8=>Some(8),  Register::R9=>Some(9),
+            Register::R10=>Some(10),Register::R11=>Some(11),
+            Register::R12=>Some(12),Register::R13=>Some(13),
+            Register::R14=>Some(14),Register::R15=>Some(15),
+            _ => None,
+        }
+    };
+
+    let mut dec = Decoder::with_ip(64, &image[start..start + span], entry_va, DecoderOptions::NONE);
+    let mut insn = iced_x86::Instruction::default();
+    let mut count = 0usize;
+
+    while dec.can_decode() && count < budget {
+        dec.decode_out(&mut insn);
+        count += 1;
+        let op = insn.mnemonic();
+        if matches!(op, Mnemonic::Ret | Mnemonic::Ud2 | Mnemonic::Int3) { return; }
+
+        // Track reg loads (imm, lea, reg-to-reg). Skipped for brevity — only
+        // the writes below rely on regs, and the caller may already have
+        // resolved values for the common SMC idiom.
+        if op == Mnemonic::Mov && insn.op_count() == 2 && insn.op_kind(0) == OpKind::Register {
+            let Some(di) = reg_idx(insn.op_register(0)) else { continue; };
+            regs[di] = match insn.op_kind(1) {
+                OpKind::Immediate64 => RegVal::Imm(insn.immediate64()),
+                OpKind::Immediate32to64 => RegVal::Imm(insn.immediate64()),
+                OpKind::Register => reg_idx(insn.op_register(1))
+                    .map(|i| regs[i]).unwrap_or(RegVal::Top),
+                _ => RegVal::Top,
+            };
+            continue;
+        }
+
+        // Memory write (same rule as main interpreter).
+        if op == Mnemonic::Mov && insn.op_count() == 2 && insn.op_kind(0) == OpKind::Memory {
+            let base_reg = insn.memory_base();
+            if matches!(base_reg, Register::R8 | Register::RCX) { continue; }
+            let tva = if insn.is_ip_rel_memory_operand() {
+                Some(insn.ip_rel_memory_address())
+            } else if base_reg != Register::None && insn.memory_index() == Register::None {
+                reg_idx(base_reg).and_then(|i| regs[i].as_concrete())
+                    .map(|v| v.wrapping_add(insn.memory_displacement64()))
+            } else { None };
+            let Some(tva) = tva else { continue; };
+            let width = insn.memory_size().size();
+            if width == 0 || width > 8 { continue; }
+            let v: Option<u64> = match insn.op_kind(1) {
+                OpKind::Immediate8 | OpKind::Immediate8to64
+                    => Some(insn.immediate8() as u64),
+                OpKind::Immediate32 | OpKind::Immediate32to64
+                    => Some(insn.immediate32() as u64),
+                OpKind::Immediate64 => Some(insn.immediate64()),
+                OpKind::Register => {
+                    let full = insn.op_register(1).full_register();
+                    reg_idx(full).and_then(|i| regs[i].as_concrete())
+                }
+                _ => None,
+            };
+            if let Some(v) = v {
+                let mut buf = v.to_le_bytes().to_vec();
+                buf.truncate(width);
+                if patch_set.insert((tva, buf.clone())) {
+                    patches.push(ImagePatch { target_va: tva, bytes: buf, handler_va });
+                }
+            }
+            continue;
+        }
+
+        // rep movs — same rule as main interpreter.
+        if insn.has_rep_prefix() && matches!(op, Mnemonic::Movsb | Mnemonic::Movsd | Mnemonic::Movsq) {
+            let rdi = regs[reg_idx(Register::RDI).unwrap()].as_concrete();
+            let rsi = regs[reg_idx(Register::RSI).unwrap()].as_concrete();
+            let rcx = regs[reg_idx(Register::RCX).unwrap()].as_concrete();
+            if let (Some(dst), Some(src), Some(cnt)) = (rdi, rsi, rcx) {
+                let unit = match op { Mnemonic::Movsb => 1, Mnemonic::Movsd => 4, Mnemonic::Movsq => 8, _ => 1 };
+                let total = (cnt as usize).saturating_mul(unit);
+                if total > 0 && total <= 0x10000 {
+                    if let Some(body) = read_bytes(src, total) {
+                        if patch_set.insert((dst, body.clone())) {
+                            patches.push(ImagePatch { target_va: dst, bytes: body, handler_va });
+                        }
+                    }
+                }
+            }
+            regs[reg_idx(Register::RCX).unwrap()] = RegVal::Top;
+            regs[reg_idx(Register::RDI).unwrap()] = RegVal::Top;
+            regs[reg_idx(Register::RSI).unwrap()] = RegVal::Top;
+            continue;
+        }
+
+        // Nested direct CALL — recurse with depth+1.
+        if op == Mnemonic::Call && insn.op_count() == 1 && insn.op_kind(0) == OpKind::NearBranch64 {
+            walk_helper_linear(pe, image, insn.near_branch64(), handler_va,
+                               regs, patches, patch_set, call_depth + 1, budget.saturating_sub(count));
+            for r in [Register::RAX, Register::RCX, Register::RDX,
+                      Register::R8, Register::R9, Register::R10, Register::R11] {
+                if let Some(i) = reg_idx(r) { regs[i] = RegVal::Top; }
+            }
+            continue;
+        }
+
+        // Unconditional branch (tail call) — retarget linearly.
+        if op == Mnemonic::Jmp && insn.op_count() == 1 && insn.op_kind(0) == OpKind::NearBranch64 {
+            walk_helper_linear(pe, image, insn.near_branch64(), handler_va,
+                               regs, patches, patch_set, call_depth + 1, budget.saturating_sub(count));
+            return;
+        }
+
+        // Default: any other write to a register clears tracking.
+        if insn.op_count() >= 1 && insn.op_kind(0) == OpKind::Register {
+            if let Some(di) = reg_idx(insn.op_register(0)) {
+                regs[di] = RegVal::Top;
+            }
+        }
+    }
+}
+
 /// Extract every concretely resolvable patch a handler emits.
 ///
 /// v2: control-flow aware.  Walks the handler body as a worklist over
@@ -1169,9 +1346,10 @@ pub fn extract_handler_patches(image: &[u8], handler_va: u64) -> Vec<ImagePatch>
                 OpKind::Immediate32 | OpKind::Immediate32to64 => Some(insn.immediate32() as u64),
                 OpKind::Immediate64 => Some(insn.immediate64()),
                 OpKind::Register => {
-                    if let Some(si) = reg_idx(insn.op_register(1)) {
-                        regs[si].as_concrete()
-                    } else { None }
+                    // Map subregisters (AL/AX/EAX/...) to their full GPR
+                    // so the tracked value is visible.
+                    let full = insn.op_register(1).full_register();
+                    reg_idx(full).and_then(|si| regs[si].as_concrete())
                 }
                 _ => None,
             };
@@ -1180,6 +1358,42 @@ pub fn extract_handler_patches(image: &[u8], handler_va: u64) -> Vec<ImagePatch>
             buf.truncate(width);
             if patch_set.insert((tva, buf.clone())) {
                 patches.push(ImagePatch { target_va: tva, bytes: buf, handler_va });
+            }
+            continue;
+        }
+
+        // ---- Direct CALL into a local helper — inline its body ---------
+        //
+        // A handler often delegates the actual write/copy to a short
+        // helper. Without following the CALL we lose the patch.  We
+        // inline the callee's linear body (no CF reasoning inside it;
+        // the caller's CF worklist handles branches in the handler
+        // proper) up to 128 instructions, tracked with the caller's
+        // register state.  Call depth capped at 3 to bound recursion.
+        //
+        // After the call returns, volatile regs (Win64 ABI) are clobbered.
+        if op == Mnemonic::Call
+            && insn.op_count() == 1
+            && insn.op_kind(0) == OpKind::NearBranch64
+        {
+            let callee = insn.near_branch64();
+            // Only follow into executable sections.
+            let in_text = pe.sections.iter().any(|sec| {
+                if (sec.characteristics & 0x20000000) == 0 { return false; }
+                let va = base + sec.virtual_address as u64;
+                callee >= va && callee < va + sec.virtual_size as u64
+            });
+            if in_text {
+                walk_helper_linear(
+                    &pe, image, callee, handler_va,
+                    &mut regs, &mut patches, &mut patch_set,
+                    /* call_depth */ 0, /* budget */ 128,
+                );
+            }
+            // Win64 ABI: volatile regs clobbered across any call.
+            for r in [Register::RAX, Register::RCX, Register::RDX,
+                      Register::R8, Register::R9, Register::R10, Register::R11] {
+                if let Some(i) = reg_idx(r) { regs[i] = RegVal::Top; }
             }
             continue;
         }
@@ -1714,6 +1928,115 @@ mod tests {
         assert_eq!(patches[0].bytes, vec![0x90]);
         assert_eq!(patches[1].target_va, 0x00400011);
         assert_eq!(patches[1].bytes, vec![0x90]);
+    }
+
+    /// CALL-follow exercise via the same decoder path the real interpreter
+    /// uses.  Emulates the shape: handler sets up rcx/rdx (dst/imm), calls
+    /// a helper, helper writes `mov byte [rcx], dl`, returns.  The patch
+    /// must land despite never happening in the caller's own body.
+    #[test]
+    fn call_follow_captures_helper_patch() {
+        use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind, Register};
+        // Caller starts at 0x1000; helper lives at 0x1020 in the same slab.
+        //   caller:
+        //     mov rcx, 0x500000          ; dst
+        //     mov rdx, 0xAB               ; imm byte
+        //     call 0x1020                 ; call helper
+        //     ret
+        //   helper:
+        //     mov byte ptr [rcx], dl
+        //     ret
+        let mut bytes = vec![0u8; 0x40];
+        // 0x00: 48 B9 00 00 50 00 00 00 00 00     mov rcx, 0x500000
+        let m = [0x48u8, 0xB9, 0x00, 0x00, 0x50, 0x00, 0x00, 0x00, 0x00, 0x00];
+        bytes[0..m.len()].copy_from_slice(&m);
+        // 0x0A: 48 BA AB 00 00 00 00 00 00 00     mov rdx, 0xAB
+        let m = [0x48u8, 0xBA, 0xAB, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        bytes[0x0A..0x0A + m.len()].copy_from_slice(&m);
+        // 0x14: E8 07 00 00 00                    call +7 (0x0020)
+        bytes[0x14] = 0xE8;
+        let rel: i32 = 0x0020 - (0x14 + 5);
+        bytes[0x15..0x19].copy_from_slice(&rel.to_le_bytes());
+        // 0x19: C3                                ret
+        bytes[0x19] = 0xC3;
+        // 0x20: 88 11                             mov byte [rcx], dl
+        bytes[0x20] = 0x88; bytes[0x21] = 0x11;
+        // 0x22: C3                                ret
+        bytes[0x22] = 0xC3;
+
+        // Reimplement the caller driver inline so the test is free of PE setup.
+        fn reg_idx(r: Register) -> Option<usize> {
+            match r {
+                Register::RAX=>Some(0), Register::RCX=>Some(1),
+                Register::RDX=>Some(2), Register::RBX=>Some(3),
+                Register::RSP=>Some(4), Register::RBP=>Some(5),
+                Register::RSI=>Some(6), Register::RDI=>Some(7),
+                Register::R8=>Some(8),  Register::R9=>Some(9),
+                Register::R10=>Some(10),Register::R11=>Some(11),
+                Register::R12=>Some(12),Register::R13=>Some(13),
+                Register::R14=>Some(14),Register::R15=>Some(15),
+                _ => None,
+            }
+        }
+        fn walk(bytes: &[u8], start_va: u64, entry_off: usize,
+                regs: &mut [RegVal; 16], patches: &mut Vec<ImagePatch>,
+                patch_set: &mut std::collections::HashSet<(u64, Vec<u8>)>,
+                depth: u32) {
+            if depth >= 3 { return; }
+            let mut dec = Decoder::with_ip(64, &bytes[entry_off..], start_va + entry_off as u64, DecoderOptions::NONE);
+            let mut insn = iced_x86::Instruction::default();
+            while dec.can_decode() {
+                dec.decode_out(&mut insn);
+                let op = insn.mnemonic();
+                if matches!(op, Mnemonic::Ret | Mnemonic::Ud2 | Mnemonic::Int3) { return; }
+                if op == Mnemonic::Mov && insn.op_count()==2 && insn.op_kind(0)==OpKind::Register {
+                    let Some(di) = reg_idx(insn.op_register(0)) else { continue; };
+                    regs[di] = match insn.op_kind(1) {
+                        OpKind::Immediate64 => RegVal::Imm(insn.immediate64()),
+                        OpKind::Immediate32to64 => RegVal::Imm(insn.immediate64()),
+                        _ => RegVal::Top,
+                    };
+                    continue;
+                }
+                if op == Mnemonic::Mov && insn.op_count()==2 && insn.op_kind(0)==OpKind::Memory {
+                    let base = insn.memory_base();
+                    if !matches!(base, Register::R8) {
+                        let tva = reg_idx(base).and_then(|i| regs[i].as_concrete())
+                            .map(|v| v.wrapping_add(insn.memory_displacement64()));
+                        if let Some(tva) = tva {
+                            let v: Option<u64> = match insn.op_kind(1) {
+                                OpKind::Register => {
+                                    // Subregister → full GPR.
+                                    let full = insn.op_register(1).full_register();
+                                    reg_idx(full).and_then(|i| regs[i].as_concrete())
+                                }
+                                _ => None,
+                            };
+                            if let Some(v) = v {
+                                let buf = vec![(v & 0xff) as u8];
+                                if patch_set.insert((tva, buf.clone())) {
+                                    patches.push(ImagePatch { target_va: tva, bytes: buf, handler_va: 0 });
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if op == Mnemonic::Call && insn.op_count()==1 && insn.op_kind(0)==OpKind::NearBranch64 {
+                    let cb = insn.near_branch64() - start_va;
+                    walk(bytes, start_va, cb as usize, regs, patches, patch_set, depth + 1);
+                    continue;
+                }
+            }
+        }
+
+        let mut regs: [RegVal; 16] = [RegVal::Top; 16];
+        let mut patches: Vec<ImagePatch> = Vec::new();
+        let mut pset: std::collections::HashSet<(u64, Vec<u8>)> = std::collections::HashSet::new();
+        walk(&bytes, 0x1000, 0, &mut regs, &mut patches, &mut pset, 0);
+        assert_eq!(patches.len(), 1, "expected one patch from helper, got: {:?}", patches);
+        assert_eq!(patches[0].target_va, 0x500000);
+        assert_eq!(patches[0].bytes, vec![0xAB]);
     }
 
     /// Smoke test: the indirect-branch resolver must not panic or hang on
