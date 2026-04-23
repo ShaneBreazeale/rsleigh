@@ -29,11 +29,15 @@ pub fn bundled_dbs(arch: rsleigh_api::Architecture) -> Vec<(&'static str, FidDb)
             ("glibc", include_bytes!("../data/glibc-x86_64.fidb")),
             ("libstdcxx", include_bytes!("../data/libstdcxx-x86_64.fidb")),
             ("musl", include_bytes!("../data/musl-x86_64.fidb")),
+            ("zlib", include_bytes!("../data/zlib-x86_64.fidb")),
+            ("openssl", include_bytes!("../data/openssl-x86_64.fidb")),
         ],
         rsleigh_api::Architecture::AArch64 => &[
             ("glibc", include_bytes!("../data/glibc-aarch64.fidb")),
             ("libstdcxx", include_bytes!("../data/libstdcxx-aarch64.fidb")),
             ("musl", include_bytes!("../data/musl-aarch64.fidb")),
+            ("zlib", include_bytes!("../data/zlib-aarch64.fidb")),
+            ("openssl", include_bytes!("../data/openssl-aarch64.fidb")),
         ],
         _ => &[],
     };

@@ -133,12 +133,70 @@ build_musl_arm64() {
   log_manifest "musl" "1.2.5-r11" "aarch64" "$url" "$sum" "musl-aarch64.fidb" "$n"
 }
 
+build_zlib_amd64() {
+  local url="http://ftp.debian.org/debian/pool/main/z/zlib/zlib1g_1.2.13.dfsg-1_amd64.deb"
+  local deb="$WORK/zlib_amd64.deb"
+  local dir="$WORK/zlib_amd64"
+  local sum; sum=$(fetch "$url" "$deb")
+  extract_deb "$deb" "$dir"
+  local so; so=$(find "$dir" -name 'libz.so.1*' -type f | head -1)
+  [[ -n "$so" ]] || { echo "libz missing"; return 1; }
+  "$GEN" --lib zlib --arch x86_64 --out "$OUT_DIR/zlib-x86_64.fidb" "$so" 2>&1 | tee -a "$WORK/log"
+  local n; n=$(grep -Eo 'wrote [0-9]+ entries' "$WORK/log" | tail -1 | awk '{print $2}')
+  log_manifest "zlib1g" "1.2.13.dfsg-1" "amd64" "$url" "$sum" "zlib-x86_64.fidb" "$n"
+}
+
+build_zlib_arm64() {
+  local url="http://ftp.debian.org/debian/pool/main/z/zlib/zlib1g_1.2.13.dfsg-1_arm64.deb"
+  local deb="$WORK/zlib_arm64.deb"
+  local dir="$WORK/zlib_arm64"
+  local sum; sum=$(fetch "$url" "$deb")
+  extract_deb "$deb" "$dir"
+  local so; so=$(find "$dir" -name 'libz.so.1*' -type f | head -1)
+  [[ -n "$so" ]] || { echo "libz missing"; return 1; }
+  "$GEN" --lib zlib --arch aarch64 --out "$OUT_DIR/zlib-aarch64.fidb" "$so" 2>&1 | tee -a "$WORK/log"
+  local n; n=$(grep -Eo 'wrote [0-9]+ entries' "$WORK/log" | tail -1 | awk '{print $2}')
+  log_manifest "zlib1g" "1.2.13.dfsg-1" "arm64" "$url" "$sum" "zlib-aarch64.fidb" "$n"
+}
+
+build_openssl_amd64() {
+  local url="http://ftp.debian.org/debian/pool/main/o/openssl/libssl3_3.0.17-1~deb12u2_amd64.deb"
+  local deb="$WORK/openssl_amd64.deb"
+  local dir="$WORK/openssl_amd64"
+  local sum; sum=$(fetch "$url" "$deb")
+  extract_deb "$deb" "$dir"
+  local ssl; ssl=$(find "$dir" -name 'libssl.so.3' -type f | head -1)
+  local crypto; crypto=$(find "$dir" -name 'libcrypto.so.3' -type f | head -1)
+  [[ -n "$ssl" && -n "$crypto" ]] || { echo "openssl missing"; return 1; }
+  "$GEN" --lib openssl --arch x86_64 --out "$OUT_DIR/openssl-x86_64.fidb" "$ssl" "$crypto" 2>&1 | tee -a "$WORK/log"
+  local n; n=$(grep -Eo 'wrote [0-9]+ entries' "$WORK/log" | tail -1 | awk '{print $2}')
+  log_manifest "libssl3+libcrypto3" "3.0.17-1~deb12u2" "amd64" "$url" "$sum" "openssl-x86_64.fidb" "$n"
+}
+
+build_openssl_arm64() {
+  local url="http://ftp.debian.org/debian/pool/main/o/openssl/libssl3_3.0.17-1~deb12u2_arm64.deb"
+  local deb="$WORK/openssl_arm64.deb"
+  local dir="$WORK/openssl_arm64"
+  local sum; sum=$(fetch "$url" "$deb")
+  extract_deb "$deb" "$dir"
+  local ssl; ssl=$(find "$dir" -name 'libssl.so.3' -type f | head -1)
+  local crypto; crypto=$(find "$dir" -name 'libcrypto.so.3' -type f | head -1)
+  [[ -n "$ssl" && -n "$crypto" ]] || { echo "openssl missing"; return 1; }
+  "$GEN" --lib openssl --arch aarch64 --out "$OUT_DIR/openssl-aarch64.fidb" "$ssl" "$crypto" 2>&1 | tee -a "$WORK/log"
+  local n; n=$(grep -Eo 'wrote [0-9]+ entries' "$WORK/log" | tail -1 | awk '{print $2}')
+  log_manifest "libssl3+libcrypto3" "3.0.17-1~deb12u2" "arm64" "$url" "$sum" "openssl-aarch64.fidb" "$n"
+}
+
 build_glibc_amd64
 build_glibc_arm64
 build_libstdcxx_amd64
 build_libstdcxx_arm64
 build_musl_amd64
 build_musl_arm64
+build_zlib_amd64
+build_zlib_arm64
+build_openssl_amd64
+build_openssl_arm64
 
 echo
 echo "=== results ==="
