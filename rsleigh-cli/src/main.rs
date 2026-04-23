@@ -461,12 +461,21 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
     // PyMethodDef arrays rather than direct exports.
     if let goblin::Object::PE(pe) = &obj {
         if pe.is_64 {
-            let extra = scan_pymethoddef(&segs, &data);
             let mut seen: std::collections::HashSet<u64> =
                 symbols.iter().map(|(a, _)| *a).collect();
-            for (addr, name) in extra {
+            for (addr, name) in scan_pymethoddef(&segs, &data) {
                 if seen.insert(addr) {
                     symbols.push((addr, name));
+                }
+            }
+            // PE64 SEH handlers live in .text but are never reached by CALL
+            // descent, vtable scans, or prologue heuristics — they are only
+            // visible to the OS exception dispatcher. Enumerate them from
+            // UNWIND_INFO and register as functions.
+            let seh = rsleigh_decompile::seh_static::parse_pe64_seh(&data);
+            for addr in rsleigh_decompile::seh_static::handler_addresses(&seh) {
+                if seen.insert(addr) {
+                    symbols.push((addr, format!("seh_handler_{:x}", addr)));
                 }
             }
         }

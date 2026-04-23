@@ -17,6 +17,7 @@ pub mod cpp_class;
 mod signatures_libc;
 mod signatures_win32;
 mod signatures_python;
+pub mod seh_static;
 
 use std::path::Path;
 use pcode_ir::Instruction;
