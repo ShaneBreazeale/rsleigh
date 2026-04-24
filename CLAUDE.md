@@ -116,9 +116,18 @@ Key entry points:
 - `scope_table_addresses(image)` — BFS depth 8, surfaces filter + `__except` blocks unreachable from CALL
 - `analyse_handler(image, va)` → `HandlerAnalysis` (flags: redirects_rip, skips_rip, calls_wpm, calls_vprotect, uses_rep_movs)
 - `extract_handler_patches(image, va)` — CF-aware abstract interp over `RegVal` (Top|Imm|Addr). Handles `mov [tracked+disp]`, `rep movsb/d/q`, indirect jumps + jump tables (stride 8, MSVC i32-rel stride 4)
-- `smc_fixpoint(image, max_iters, discover_fn)` — extract→apply→re-discover, hard cap 16 iters
+- `tls_callback_addresses(image)` — walks `IMAGE_TLS_DIRECTORY64.AddressOfCallBacks` (data dir 9), NULL-terminated VA array, cap 64
+- `extract_patches_at_candidates(image, vas)` — generic patch scan over arbitrary VAs with `(target_va, bytes)` dedup
+- `extract_all_patches_extended(image, extra)` — SEH + TLS + caller VAs merged
+- `smc_fixpoint(image, max_iters, discover_fn)` — uses extended scan; extract→apply→re-discover, hard cap 16 iters
 
 Fixture: `test-harness/fixtures/crackmev3.pyd` (PyVMProtect v4).
+
+### PE64 annotators (`rsleigh-decompile/src/{syscall_table,peb_walk}.rs`)
+
+- **`syscall_table.rs`** — Win11 24H2 x64 ntdll syscall numbers (~120 entries). Numbers shift across Windows builds; treat results as hint with version qualifier. `resolve_x64_syscall(num)` returns `Option<&'static str>`. Wired into printer void-stmt UserOp render; only fires when arch == X86_64 AND `func_id == 5` (syscall pcodeop).
+- **`peb_walk.rs`** — ROR13 API hash resolver. `ror13_api(name)` and `ror13_module_api(module, name)` for both unqualified + Metasploit-style block_api UTF-16 forms. `LazyLock<HashMap>` reverse-index, ~130 seeds. `looks_like_hash(v)` filters out small offsets / masks / page sizes — false-positive surface ~1 in 2^32. Annotation appears via `format_const` wrapper; wraps every `Const` render so the comment shows up in any context (mov, cmp, conditional, return).
+- **Annotation falsifying**: ROR13 algorithm has multiple published variants (uppercase pre-folding, UTF-16 module prefix, custom seed). The shipped algo doesn't necessarily match Metasploit's documented `0x0726774C` for `LoadLibraryA` — different shellcode strains use different ROR13 variants. Tests assert determinism + uniqueness, NOT match against external reference. Add new hash variants by adding new `ror13_*` entry-point fn + extending `HASH_INDEX` initializer.
 
 ## `.opt/` convention
 

@@ -6,6 +6,9 @@ Implementation under `rsleigh-decompile/` + `rsleigh-cli/`. See `docs/decompiler
 
 - String decryption (XOR/ADD/SUB loops)
 - Crypto detection: AES S-box, DES tables, RC4 KSA, SHA constants, CRC32, custom XOR (20+ patterns)
+- **x64 syscall annotation:** `syscall_table.rs` — block-local 8-stmt look-back from each `syscall()` UserOp finds the most-recent EAX/RAX const write; matches against Win11 24H2 ntdll table (~120 entries) and emits `// syscall 0xNN -> likely NtXxx (Win11 24H2)`. Resolves Windows direct-syscall gadget (`mov eax, IMM; syscall`) common in shellcode, Donut, Cobalt Strike, SysWhispers.
+- **PEB-walk ROR13 hash resolver:** `peb_walk.rs` — ~130 curated APIs across kernel32/ntdll/ws2_32/advapi32/wininet/user32. `LazyLock` reverse-index with both unqualified (`ror13_api`) and Metasploit `block_api` UTF-16 module-prefixed (`ror13_module_api`) forms. `format_const` adds `/* ROR13("Foo") */` annotation when 4/8-byte const matches known hash and `looks_like_hash` entropy filter passes (high+low halves nonzero, ≥0x01000000). Zero false positives on real fixtures.
+- **Non-SEH SMC discovery:** `seh_static.rs::tls_callback_addresses` walks `IMAGE_TLS_DIRECTORY64.AddressOfCallBacks` (data dir 9), bounded NULL-terminated VA array (cap 64). `extract_patches_at_candidates` generalises handler-style patch extraction over arbitrary VAs with `(target_va, bytes)` dedup. `extract_all_patches_extended` merges SEH + TLS + caller-supplied; `smc_fixpoint` uses it so TLS-callback-hidden unpack stubs enter fixpoint loop.
 - Taint tracking (`--taint`): user inputs (recv/read/fgets) → sinks (exec/system/SQL)
 - Vulnerability scanner (`--vulnscan`, 27 patterns): buffer overflow, format string, UAF, int overflow, cmd injection, path traversal. Color-coded HIGH/MED/LOW.
 - Call graph (`--callgraph`): JSON + behavioral tags (network_io, crypto, process_injection) + reverse caller map

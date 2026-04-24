@@ -82,6 +82,11 @@ Algebraic simplification, single-use temp inlining, copy prop, dead flag elim (x
 - GCC RTTI: `_ZTV`/`_ZTI` parsing, template demangling, multi-level inheritance
 - Malware: Win32 constant annotation, suspicious API flag (24 APIs), stack cookie detect, dynamic resolve
 
+## Annotators (printer-time, x86-64 PE)
+
+- **Syscall annotation:** statement-level UserOp render path in `printer.rs` — when `func_id == 5` (x86 `syscall` pcodeop) and arch is X86_64, calls `resolve_syscall_number_from_block(stmts, cur_idx, ssa)` which walks back ≤8 stmts in the same block looking for the most recent Register(offset=0) Const write. If found, looks up `crate::syscall_table::resolve_x64_syscall(num)` and emits trailing `// syscall 0xNN -> likely NtXxx (Win11 24H2)` or `// syscall 0xNN (unresolved)`. Non-Const RAX write before syscall stops look-back (indirect gadget).
+- **ROR13 hash annotation:** `format_const(val, size)` wraps inner formatting; when `size ∈ {4, 8}` AND `val <= u32::MAX` AND `peb_walk::looks_like_hash` AND `peb_walk::resolve_ror13_hash` matches → appends `/* ROR13("ApiName") */` inline. Annotation fires on any rendered constant — works in `mov eax, HASH`, `cmp eax, HASH`, conditionals, etc.
+
 ## Peephole (pcode-ir/src/lib.rs)
 
 Identity Subpiece elim, copy chain forwarding, DCE (batch collect + reverse remove), overwrite elim, output sinking, redundant IntAnd collapse.
