@@ -11018,7 +11018,23 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                     let args: Vec<String> = inputs.iter()
                         .map(|v| format_var_tracked(*v, ssa, ctx, tracker))
                         .collect();
-                    out.push_str(&format!("{}{}({});\n", pad, name, args.join(", ")));
+                    // x86-64 `syscall` annotation: when preceded by a constant
+                    // load into EAX/RAX, look up the syscall number against the
+                    // Win11 24H2 ntdll table and annotate. Windows build-specific
+                    // — treated as a hint, not a rewrite.
+                    let mut trailing = String::new();
+                    if matches!(ctx.arch, Architecture::X86_64)
+                        && *func_id == 5  // syscall pcodeop id
+                    {
+                        if let Some(num) = resolve_syscall_number_from_block(stmts, stmt_idx, ssa) {
+                            if let Some(api) = crate::syscall_table::resolve_x64_syscall(num) {
+                                trailing = format!("  // syscall 0x{:x} -> likely {} (Win11 24H2)", num, api);
+                            } else {
+                                trailing = format!("  // syscall 0x{:x} (unresolved)", num);
+                            }
+                        }
+                    }
+                    out.push_str(&format!("{}{}({});{}\n", pad, name, args.join(", "), trailing));
                     return;
                 }
             }
@@ -13329,6 +13345,36 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
 /// declaration order of `define pcodeop` lines in the slaspec for the active
 /// architecture; names shown match Ghidra's convention so the analyst can
 /// cross-reference.
+/// Walk backwards through the current block's statements from the syscall
+/// site and return the most recent Const written into EAX/RAX (offset 0). The
+/// Windows direct-syscall gadget is `mov eax, <num>; syscall`, so the
+/// immediately-preceding RAX/EAX constant assignment is the NT syscall number.
+/// The RegTracker path doesn't help here — it intentionally skips Const sources
+/// so the printer can inline them at the use site, but for the syscall
+/// annotation we need the Const visible on its own.
+fn resolve_syscall_number_from_block(stmts: &[StructuredStmt], cur_idx: usize, ssa: &SsaCfg) -> Option<u32> {
+    // Only scan within the current block — bound look-back to prevent
+    // picking up a stale RAX write from a far-earlier control-flow path.
+    let lower = cur_idx.saturating_sub(8);
+    for i in (lower..cur_idx).rev() {
+        if let StructuredStmt::Assign { lhs, .. } = &stmts[i] {
+            let vdef = ssa.var(*lhs);
+            if vdef.varnode.space == AddressSpaceId::Register && vdef.varnode.offset == 0 {
+                if let Expr::Const(n, _) = &vdef.expr {
+                    if *n <= u32::MAX as u64 {
+                        return Some(*n as u32);
+                    }
+                }
+                // A non-Const RAX write before syscall means the tracked
+                // value is no longer a clean immediate (indirect syscall
+                // gadget, value from memory). Stop looking.
+                return None;
+            }
+        }
+    }
+    None
+}
+
 /// True when the user-pcodeop is pure architectural bookkeeping whose output
 /// is noise in decompiled code. Mirrors what Ghidra hides by default.
 fn is_elidable_pcodeop(arch: Architecture, id: u64) -> bool {
@@ -13548,6 +13594,27 @@ fn format_const_ctx_load(val: u64, size: u32, ctx: &PrintCtx) -> String {
 }
 
 fn format_const(val: u64, size: u32) -> String {
+    let s = format_const_inner(val, size);
+    // PEB-walk hash annotation: 4-byte constants that match a known ROR13
+    // API hash get a trailing comment. Filter via looks_like_hash to avoid
+    // adding noise to common low-entropy constants. The annotation appears
+    // inline so that conditional comparisons read as
+    //   `if (eax == 0x6a4abc5b /* ROR13("LoadLibraryA") */)`.
+    // 4-byte constants OR 8-byte constants whose upper half is zero (common
+    // when ROR13 hashes get loaded into RAX via `mov eax, IMM` with implicit
+    // zero-extension on x86-64).
+    if val <= u32::MAX as u64 && (size == 4 || size == 8) {
+        let v32 = val as u32;
+        if crate::peb_walk::looks_like_hash(v32) {
+            if let Some(api) = crate::peb_walk::resolve_ror13_hash(v32) {
+                return format!("{} /* ROR13(\"{}\") */", s, api);
+            }
+        }
+    }
+    s
+}
+
+fn format_const_inner(val: u64, size: u32) -> String {
     if val == 0 { return "0".to_string(); }
     // Small positive values in decimal for readability
     if val < 1000 { return format!("{}", val); }

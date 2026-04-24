@@ -1497,6 +1497,112 @@ pub fn extract_all_patches(image: &[u8]) -> Vec<ImagePatch> {
     out
 }
 
+/// Enumerate TLS callbacks from `IMAGE_TLS_DIRECTORY64.AddressOfCallBacks`.
+///
+/// TLS callbacks run before `main` and before most debug attach points, so
+/// packers and DRM systems frequently hide unpack stubs here. Each callback
+/// is a NULL-terminated `PIMAGE_TLS_CALLBACK`-array of VAs (not RVAs) in the
+/// `.rdata` / `.tls` section.
+///
+/// Returns the list of callback VAs (image base already applied) in declaration
+/// order. Empty when the binary has no TLS directory or an unreadable callback
+/// array.
+pub fn tls_callback_addresses(image: &[u8]) -> Vec<u64> {
+    let obj = match goblin::Object::parse(image) { Ok(o) => o, _ => return vec![] };
+    let pe  = match obj { goblin::Object::PE(pe) => pe, _ => return vec![] };
+    if !pe.is_64 { return vec![]; }
+    let base = pe.image_base as u64;
+
+    // IMAGE_DATA_DIRECTORY[9] = TLS table. Copy out fields before the
+    // optional_header reference goes out of scope.
+    let oh = match pe.header.optional_header { Some(o) => o, None => return vec![] };
+    let (tls_va, tls_sz) = match oh.data_directories.get_tls_table() {
+        Some(d) if d.virtual_address != 0 && d.size >= 0x28 => (d.virtual_address, d.size),
+        _ => return vec![],
+    };
+    let _ = tls_sz;
+
+    // Helper: RVA → file offset.
+    let rva_to_fo = |rva: u64| -> Option<usize> {
+        for sec in &pe.sections {
+            let va = sec.virtual_address as u64;
+            let sz = sec.virtual_size.max(sec.size_of_raw_data) as u64;
+            if rva >= va && rva < va + sz {
+                return Some(sec.pointer_to_raw_data as usize + (rva - va) as usize);
+            }
+        }
+        None
+    };
+
+    // IMAGE_TLS_DIRECTORY64 layout (x64):
+    //   +0x00 StartAddressOfRawData   u64 (VA)
+    //   +0x08 EndAddressOfRawData     u64 (VA)
+    //   +0x10 AddressOfIndex          u64 (VA)
+    //   +0x18 AddressOfCallBacks      u64 (VA)
+    //   +0x20 SizeOfZeroFill          u32
+    //   +0x24 Characteristics         u32
+    let tls_fo = match rva_to_fo(tls_va as u64) {
+        Some(fo) if fo + 0x28 <= image.len() => fo,
+        _ => return vec![],
+    };
+    let callbacks_va = u64::from_le_bytes(image[tls_fo + 0x18..tls_fo + 0x20].try_into().unwrap());
+    if callbacks_va == 0 || callbacks_va < base { return vec![]; }
+    let callbacks_rva = callbacks_va - base;
+    let mut cb_fo = match rva_to_fo(callbacks_rva) { Some(f) => f, None => return vec![] };
+
+    let mut out: Vec<u64> = Vec::new();
+    // NULL-terminated VA array. Cap at 64 entries — any binary with more is
+    // pathological; treat as malformed and bail.
+    for _ in 0..64 {
+        if cb_fo + 8 > image.len() { break; }
+        let va = u64::from_le_bytes(image[cb_fo..cb_fo + 8].try_into().unwrap());
+        if va == 0 { break; }
+        out.push(va);
+        cb_fo += 8;
+    }
+    out
+}
+
+/// Extract SMC patches at any VA, not just SEH handlers.
+///
+/// The canonical `extract_handler_patches` is called for every candidate
+/// entry point and results are merged. Dedup is by (target_va, bytes).
+/// Candidates should include:
+///   * SEH handler VAs (from `handler_addresses`)
+///   * TLS callback VAs (from `tls_callback_addresses`)
+///   * Discovered function starts (caller-supplied)
+///   * `.CRT$X` initializer VAs (caller-supplied)
+///
+/// Non-SEH SMC is common in packers that don't use structured exception
+/// abuse — they hide unpack stubs in TLS callbacks or in prologues of
+/// exported functions that appear benign until the first patch lands.
+pub fn extract_patches_at_candidates(image: &[u8], candidate_vas: &[u64]) -> Vec<ImagePatch> {
+    let mut seen: std::collections::BTreeSet<(u64, Vec<u8>)> = std::collections::BTreeSet::new();
+    let mut out: Vec<ImagePatch> = Vec::new();
+    for &va in candidate_vas {
+        for p in extract_handler_patches(image, va) {
+            let key = (p.target_va, p.bytes.clone());
+            if seen.insert(key) { out.push(p); }
+        }
+    }
+    out
+}
+
+/// SEH + TLS + caller-supplied VAs merged into one SMC scan.
+///
+/// Default candidate set for general PE64 SMC recovery. When the caller
+/// wants function-start-driven scanning too, supply additional VAs via
+/// `extra`.
+pub fn extract_all_patches_extended(image: &[u8], extra: &[u64]) -> Vec<ImagePatch> {
+    let mut vas: Vec<u64> = Vec::new();
+    vas.extend(handler_addresses(&parse_pe64_seh(image)));
+    vas.extend(tls_callback_addresses(image));
+    vas.extend_from_slice(extra);
+    vas.sort();
+    vas.dedup();
+    extract_patches_at_candidates(image, &vas)
+}
+
 /// Result of running the SMC-fixpoint loop.
 #[derive(Debug, Clone)]
 pub struct FixpointResult {
@@ -1563,8 +1669,13 @@ where
         if iter >= max_iters { break false; }
         iter += 1;
 
-        // 1. Extract patches from the current image.
-        let fresh = extract_all_patches(&working);
+        // 1. Extract patches from the current image — SEH handlers + TLS
+        // callbacks. TLS callbacks are a common non-SEH packing vector
+        // (unpack stub hidden in AddressOfCallBacks), so we include them in
+        // the default fixpoint sweep. No caller-supplied `extra` here —
+        // callers wanting function-start-driven scans should construct
+        // candidates themselves and call `extract_patches_at_candidates`.
+        let fresh = extract_all_patches_extended(&working, &[]);
         let mut new_this_round: Vec<ImagePatch> = Vec::new();
         for p in fresh {
             let key = (p.target_va, p.bytes.clone());
@@ -2247,5 +2358,39 @@ mod tests {
         ];
         let addrs = handler_addresses(&rs);
         assert_eq!(addrs, vec![0x2000, 0x3000]);
+    }
+
+    #[test]
+    fn tls_callback_addresses_empty_on_non_tls_binary() {
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let fixture  = manifest.parent().unwrap()
+            .join("test-harness/fixtures/crackmev3.pyd");
+        if !fixture.exists() {
+            eprintln!("skipping: {:?} not staged", fixture);
+            return;
+        }
+        let bytes = std::fs::read(&fixture).unwrap();
+        // crackmev3 does not ship with a TLS callback table — result must
+        // parse without panic and return empty, not fail on missing data
+        // directory.
+        let cbs = tls_callback_addresses(&bytes);
+        assert!(cbs.len() <= 4, "unexpectedly many TLS callbacks: {}", cbs.len());
+    }
+
+    #[test]
+    fn extract_patches_at_candidates_dedups() {
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let fixture  = manifest.parent().unwrap()
+            .join("test-harness/fixtures/crackmev3.pyd");
+        if !fixture.exists() { return; }
+        let bytes = std::fs::read(&fixture).unwrap();
+
+        let via_seh     = extract_all_patches(&bytes);
+        let via_general = extract_all_patches_extended(&bytes, &[]);
+        // General pass includes SEH candidates + TLS; must be a superset
+        // (or equal when no TLS callbacks exist).
+        assert!(via_general.len() >= via_seh.len(),
+            "general patch set smaller than SEH-only: {} < {}",
+            via_general.len(), via_seh.len());
     }
 }

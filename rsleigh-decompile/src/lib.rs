@@ -18,6 +18,8 @@ mod signatures_libc;
 mod signatures_win32;
 mod signatures_python;
 pub mod seh_static;
+pub mod syscall_table;
+pub mod peb_walk;
 
 use std::path::Path;
 use pcode_ir::Instruction;
