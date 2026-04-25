@@ -2041,6 +2041,48 @@ fn simplify_expr(expr: Expr, vars: &[VarDef]) -> Expr {
             }
         }
 
+        // === Boolean-domain identities ===
+        //
+        // Bool ops mirror the bitwise rules but operate over {0,1}. The
+        // SSA stays canonical when these collapse.
+        Expr::BinOp(BinOpKind::BoolAnd, left, right) => {
+            if left == right || same_varnode(*left, *right, vars) {
+                Expr::Var(*left)
+            } else if is_const_zero(*right, vars) || is_const_zero(*left, vars) {
+                Expr::Const(0, 1)
+            } else if is_const_one(*right, vars) {
+                Expr::Var(*left)
+            } else if is_const_one(*left, vars) {
+                Expr::Var(*right)
+            } else {
+                expr
+            }
+        }
+        Expr::BinOp(BinOpKind::BoolOr, left, right) => {
+            if left == right || same_varnode(*left, *right, vars) {
+                Expr::Var(*left)
+            } else if is_const_zero(*right, vars) {
+                Expr::Var(*left)
+            } else if is_const_zero(*left, vars) {
+                Expr::Var(*right)
+            } else if is_const_one(*right, vars) || is_const_one(*left, vars) {
+                Expr::Const(1, 1)
+            } else {
+                expr
+            }
+        }
+        Expr::BinOp(BinOpKind::BoolXor, left, right) => {
+            if left == right || same_varnode(*left, *right, vars) {
+                Expr::Const(0, 1)
+            } else if is_const_zero(*right, vars) {
+                Expr::Var(*left)
+            } else if is_const_zero(*left, vars) {
+                Expr::Var(*right)
+            } else {
+                expr
+            }
+        }
+
         // === Comparison reflexivity ===
         //
         // x == x  → 1, x != x → 0, x < x → 0, x <= x → 1, etc.
@@ -2089,10 +2131,14 @@ fn simplify_expr(expr: Expr, vars: &[VarDef]) -> Expr {
             }
         }
         Expr::UnaryOp(UnaryOpKind::Neg, inner) => {
-            if let Expr::UnaryOp(UnaryOpKind::Neg, x) = &vars[inner.0 as usize].expr {
-                Expr::Var(*x)
-            } else {
-                expr
+            match &vars[inner.0 as usize].expr {
+                // -(-x) → x
+                Expr::UnaryOp(UnaryOpKind::Neg, x) => Expr::Var(*x),
+                // -(a - b) → b - a — distribute negation through Sub.
+                Expr::BinOp(BinOpKind::Sub, a, b) => {
+                    Expr::BinOp(BinOpKind::Sub, *b, *a)
+                }
+                _ => expr,
             }
         }
         // !(!x) = x for boolean negation.

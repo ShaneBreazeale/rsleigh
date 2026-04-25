@@ -404,6 +404,90 @@ fn and_absorption_into_or() {
 }
 
 #[test]
+fn bool_and_x_x_folds_to_x() {
+    let vars = vec![
+        vd(0, Expr::Unknown, 1),
+        vd(
+            1,
+            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::BoolAnd, VarId(0), VarId(0)),
+            1,
+        ),
+    ];
+    let ssa = run_fold(vars, 1);
+    assert!(
+        !matches!(
+            &ssa.vars[1].expr,
+            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::BoolAnd, _, _)
+        ),
+        "BoolAnd(x, x) survived fold: {:?}",
+        ssa.vars[1].expr
+    );
+}
+
+#[test]
+fn bool_or_x_zero_folds_to_x() {
+    let vars = vec![
+        vd(0, Expr::Const(7, 1), 1),
+        vd(1, Expr::Const(0, 1), 1),
+        vd(
+            2,
+            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::BoolOr, VarId(0), VarId(1)),
+            1,
+        ),
+    ];
+    let ssa = run_fold(vars, 2);
+    assert!(
+        !matches!(
+            &ssa.vars[2].expr,
+            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::BoolOr, _, _)
+        ),
+        "BoolOr(x, 0) survived fold: {:?}",
+        ssa.vars[2].expr
+    );
+}
+
+#[test]
+fn bool_xor_x_x_folds_to_zero() {
+    let vars = vec![
+        vd(0, Expr::Unknown, 1),
+        vd(
+            1,
+            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::BoolXor, VarId(0), VarId(0)),
+            1,
+        ),
+    ];
+    let ssa = run_fold(vars, 1);
+    match ssa.vars[1].expr {
+        Expr::Const(0, _) => {}
+        ref other => panic!("expected Const(0, _) for BoolXor(x,x), got {:?}", other),
+    }
+}
+
+#[test]
+fn neg_sub_distributes_to_swapped_sub() {
+    // var0 = unknown (a), var1 = unknown (b)
+    // var2 = a - b
+    // var3 = -var2  →  must fold to b - a (Sub with swapped operands)
+    let vars = vec![
+        vd(0, Expr::Unknown, 4),
+        vd(1, Expr::Unknown, 4),
+        vd(
+            2,
+            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::Sub, VarId(0), VarId(1)),
+            4,
+        ),
+        vd(3, Expr::UnaryOp(UnaryOpKind::Neg, VarId(2)), 4),
+    ];
+    let ssa = run_fold(vars, 3);
+    // var3 should no longer be a UnaryOp(Neg, _) — distribution fired.
+    assert!(
+        !matches!(&ssa.vars[3].expr, Expr::UnaryOp(UnaryOpKind::Neg, _)),
+        "Neg(Sub) distribution did not fire: {:?}",
+        ssa.vars[3].expr
+    );
+}
+
+#[test]
 fn x_minus_x_folds_to_zero() {
     // Idempotence check — the existing `x - x → 0` rule survives the new
     // `0 - x → -x` rule and isn't accidentally shadowed.
