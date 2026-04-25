@@ -3386,13 +3386,32 @@ fn detect_return_values(ssa: &mut SsaCfg) {
         // Strategy 1: Look backwards in this block for RAX/EAX assignment
         let mut found = find_ret_reg_in_block(&ssa.blocks[bi].stmts, &ssa.vars, ret_reg_offset);
 
-        // Strategy 2: Check for call_return var (EAX set by a preceding CALL)
+        // Strategy 2: Check for call_return var (EAX set by a preceding CALL).
+        //
+        // This branch covers two source-level patterns that compile to
+        // identical machine code:
+        //   int wrap() { return foo(); }      // legitimate
+        //   void f()    { foo(); }            // call_return is stale
+        // The decompiler cannot disambiguate without callsite information,
+        // so it promotes the call_return (matching the wrap() interpretation
+        // — the more common case) and records a StaleReturnInherited
+        // diagnostic so audits can flag the f() case.
         if found.is_none() {
             for stmt in ssa.blocks[bi].stmts.iter().rev() {
                 if let Stmt::Assign(var_id) = stmt {
                     let vdef = &ssa.vars[var_id.0 as usize];
                     if vdef.call_return {
                         found = Some(*var_id);
+                        ssa.diagnostics.push(crate::ir::Diagnostic {
+                            severity: crate::ir::Severity::Info,
+                            kind: crate::ir::DiagKind::StaleReturnInherited,
+                            addr: None,
+                            detail: format!(
+                                "block {} return inferred from call_return; \
+                                 function may actually be void",
+                                bi
+                            ),
+                        });
                         break;
                     }
                 }

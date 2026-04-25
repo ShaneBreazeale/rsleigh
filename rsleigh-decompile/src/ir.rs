@@ -43,6 +43,13 @@ pub enum DiagKind {
     /// Indirect call could not be resolved through Load chain / GP-relative
     /// trace; left as `CallTarget::Indirect`.
     UnresolvedIndirectCall,
+    /// Return value was inferred from a `call_return` clobber (the previous
+    /// call wrote EAX/RAX/x0 etc. and the function returned without an
+    /// explicit write). Without callsite information the decompiler cannot
+    /// distinguish `int wrap() { return foo(); }` from `void f() { foo(); }`
+    /// — both produce identical machine code. This diagnostic surfaces the
+    /// ambiguity so callers can audit the inferred return.
+    StaleReturnInherited,
 }
 
 /// One observation surfaced from the decode/lift/SSA pipeline.
