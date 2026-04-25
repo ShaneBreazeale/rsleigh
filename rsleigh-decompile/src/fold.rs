@@ -2015,6 +2015,40 @@ fn simplify_expr(expr: Expr, vars: &[VarDef]) -> Expr {
             }
         }
 
+        // === Comparison reflexivity ===
+        //
+        // x == x  → 1, x != x → 0, x < x → 0, x <= x → 1, etc.
+        // Pure facts over total orderings; every comparison op admits
+        // a definite answer when both operands name the same SSA value.
+        Expr::BinOp(BinOpKind::Eq, left, right) => {
+            if left == right || same_varnode(*left, *right, vars) {
+                Expr::Const(1, 1)
+            } else {
+                expr
+            }
+        }
+        Expr::BinOp(BinOpKind::NotEq, left, right) => {
+            if left == right || same_varnode(*left, *right, vars) {
+                Expr::Const(0, 1)
+            } else {
+                expr
+            }
+        }
+        Expr::BinOp(BinOpKind::Less | BinOpKind::SLess, left, right) => {
+            if left == right || same_varnode(*left, *right, vars) {
+                Expr::Const(0, 1)
+            } else {
+                expr
+            }
+        }
+        Expr::BinOp(BinOpKind::LessEq | BinOpKind::SLessEq, left, right) => {
+            if left == right || same_varnode(*left, *right, vars) {
+                Expr::Const(1, 1)
+            } else {
+                expr
+            }
+        }
+
         // === Unary involutions: f(f(x)) = x ===
         //
         // Audit P2 #1: ~~x and -(-x) are involutive over their domains.

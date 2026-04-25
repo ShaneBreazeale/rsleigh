@@ -230,6 +230,96 @@ fn x_xor_all_ones_canonicalizes_to_not() {
 }
 
 #[test]
+fn x_eq_x_folds_to_one() {
+    let vars = vec![
+        vd(0, Expr::Unknown, 4),
+        vd(
+            1,
+            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::Eq, VarId(0), VarId(0)),
+            1,
+        ),
+    ];
+    let ssa = run_fold(vars, 1);
+    match ssa.vars[1].expr {
+        Expr::Const(1, _) => {}
+        ref other => panic!("expected Const(1, _), got {:?}", other),
+    }
+}
+
+#[test]
+fn x_neq_x_folds_to_zero() {
+    let vars = vec![
+        vd(0, Expr::Unknown, 4),
+        vd(
+            1,
+            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::NotEq, VarId(0), VarId(0)),
+            1,
+        ),
+    ];
+    let ssa = run_fold(vars, 1);
+    match ssa.vars[1].expr {
+        Expr::Const(0, _) => {}
+        ref other => panic!("expected Const(0, _), got {:?}", other),
+    }
+}
+
+#[test]
+fn x_less_x_folds_to_zero() {
+    let vars = vec![
+        vd(0, Expr::Unknown, 4),
+        vd(
+            1,
+            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::Less, VarId(0), VarId(0)),
+            1,
+        ),
+        vd(
+            2,
+            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::SLess, VarId(0), VarId(0)),
+            1,
+        ),
+    ];
+    let ssa = run_fold(vars, 1);
+    match ssa.vars[1].expr {
+        Expr::Const(0, _) => {}
+        ref other => panic!("expected Const(0, _) for x < x, got {:?}", other),
+    }
+    match ssa.vars[2].expr {
+        Expr::Const(0, _) => {}
+        ref other => panic!("expected Const(0, _) for x <s x, got {:?}", other),
+    }
+}
+
+#[test]
+fn x_lesseq_x_folds_to_one() {
+    let vars = vec![
+        vd(0, Expr::Unknown, 4),
+        vd(
+            1,
+            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::LessEq, VarId(0), VarId(0)),
+            1,
+        ),
+        vd(
+            2,
+            Expr::BinOp(
+                rsleigh_decompile::ir::BinOpKind::SLessEq,
+                VarId(0),
+                VarId(0),
+            ),
+            1,
+        ),
+    ];
+    let ssa = run_fold(vars, 1);
+    match ssa.vars[1].expr {
+        Expr::Const(1, _) => {}
+        ref other => panic!("expected Const(1, _) for x <= x, got {:?}", other),
+    }
+    match ssa.vars[2].expr {
+        Expr::Const(1, _) => {}
+        ref other => panic!("expected Const(1, _) for x <=s x, got {:?}", other),
+    }
+}
+
+#[test]
 fn x_minus_x_folds_to_zero() {
     // Idempotence check — the existing `x - x → 0` rule survives the new
     // `0 - x → -x` rule and isn't accidentally shadowed.
