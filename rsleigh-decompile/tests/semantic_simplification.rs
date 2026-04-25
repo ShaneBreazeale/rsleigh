@@ -1,0 +1,135 @@
+//! Audit P2 #1 — semantic algebraic identities at the SSA layer.
+//!
+//! Three identities that previously lived only in `printer.rs`'s text
+//! post-processor are now expressed as SSA folds. Pinning the contract
+//! at the SSA layer makes them visible in `--ssa-json` and lets future
+//! work retire the redundant text rewrites without losing the
+//! simplification.
+
+use rsleigh_decompile::fold::{fold_with_cc, CallingConv};
+use rsleigh_decompile::ir::{
+    BlockId, Expr, InferredType, SsaBlock, SsaCfg, SsaTerminator, UnaryOpKind, VarDef, VarId,
+};
+
+fn vd(id: u32, expr: Expr, size: u32) -> VarDef {
+    VarDef {
+        id: VarId(id),
+        varnode: pcode_ir::Varnode {
+            space: pcode_ir::AddressSpaceId::Unique,
+            offset: id as u64,
+            size,
+        },
+        expr,
+        size,
+        use_count: 0,
+        param_name: None,
+        call_return: false,
+        inferred_type: InferredType::Unknown,
+        display_type: None,
+    }
+}
+
+fn run_fold(vars: Vec<VarDef>, return_id: u32) -> SsaCfg {
+    let mut ssa = SsaCfg {
+        blocks: vec![SsaBlock {
+            id: BlockId(0),
+            addr: 0x1000,
+            stmts: vars
+                .iter()
+                .map(|v| rsleigh_decompile::ir::Stmt::Assign(v.id))
+                .collect(),
+            terminator: SsaTerminator::Return(Some(VarId(return_id))),
+        }],
+        vars,
+        entry: BlockId(0),
+        diagnostics: Vec::new(),
+    };
+    fold_with_cc(&mut ssa, CallingConv::SysV);
+    ssa
+}
+
+#[test]
+fn zero_minus_x_folds_to_neg_x() {
+    // var0 = const(0, 4)
+    // var1 = unknown (stand-in for x)
+    // var2 = var0 - var1   →  must fold to UnaryOp(Neg, var1)
+    let vars = vec![
+        vd(0, Expr::Const(0, 4), 4),
+        vd(1, Expr::Unknown, 4),
+        vd(
+            2,
+            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::Sub, VarId(0), VarId(1)),
+            4,
+        ),
+    ];
+    let ssa = run_fold(vars, 2);
+    let v2 = &ssa.vars[2].expr;
+    match v2 {
+        Expr::UnaryOp(UnaryOpKind::Neg, inner) => {
+            assert_eq!(inner.0, 1, "expected Neg(var1), got {:?}", v2);
+        }
+        other => panic!("expected UnaryOp(Neg, _), got {:?}", other),
+    }
+}
+
+#[test]
+fn x_times_one_folds_away_the_mult() {
+    let vars = vec![
+        vd(0, Expr::Const(42, 4), 4),
+        vd(1, Expr::Const(1, 4), 4),
+        vd(
+            2,
+            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::Mult, VarId(0), VarId(1)),
+            4,
+        ),
+    ];
+    let ssa = run_fold(vars, 2);
+    // After fold + constant propagation the multiply must collapse —
+    // either to Var(0) (identity) or further to Const(42, _).
+    let ok = matches!(
+        ssa.vars[2].expr,
+        Expr::Var(VarId(0)) | Expr::Const(42, _)
+    );
+    assert!(
+        ok,
+        "x*1 must collapse; got {:?}",
+        ssa.vars[2].expr
+    );
+}
+
+#[test]
+fn x_times_zero_folds_to_zero() {
+    let vars = vec![
+        vd(0, Expr::Unknown, 4),
+        vd(1, Expr::Const(0, 4), 4),
+        vd(
+            2,
+            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::Mult, VarId(0), VarId(1)),
+            4,
+        ),
+    ];
+    let ssa = run_fold(vars, 2);
+    match ssa.vars[2].expr {
+        Expr::Const(0, _) => {}
+        ref other => panic!("expected Const(0, _), got {:?}", other),
+    }
+}
+
+#[test]
+fn x_minus_x_folds_to_zero() {
+    // Idempotence check — the existing `x - x → 0` rule survives the new
+    // `0 - x → -x` rule and isn't accidentally shadowed.
+    let vars = vec![
+        vd(0, Expr::Unknown, 4),
+        vd(
+            1,
+            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::Sub, VarId(0), VarId(0)),
+            4,
+        ),
+    ];
+    let ssa = run_fold(vars, 1);
+    match ssa.vars[1].expr {
+        Expr::Const(0, _) => {}
+        ref other => panic!("expected Const(0, _), got {:?}", other),
+    }
+}

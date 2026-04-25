@@ -1953,12 +1953,19 @@ fn simplify_expr(expr: Expr, vars: &[VarDef]) -> Expr {
                 expr
             }
         }
-        // x - 0 → x, x - x → 0
+        // x - 0 → x, x - x → 0, 0 - x → -x.
+        // The third rule moves the printer.rs::post_process text rewrite
+        // `"0 - "` → `"-"` (audit P2 #1) into the SSA layer where the
+        // semantic invariant lives. Printer keeps a redundant text strip
+        // as belt-and-suspenders; after corpus validation the text rule
+        // can be retired.
         Expr::BinOp(BinOpKind::Sub, left, right) => {
             if is_const_zero(*right, vars) {
                 Expr::Var(*left)
             } else if left == right || same_varnode(*left, *right, vars) {
                 Expr::Const(0, vars[left.0 as usize].size)
+            } else if is_const_zero(*left, vars) {
+                Expr::UnaryOp(UnaryOpKind::Neg, *right)
             } else {
                 expr
             }
