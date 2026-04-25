@@ -13,6 +13,31 @@
 //! assert_eq!(inst.disassembly, "MOV RAX,RBX");
 //! assert_eq!(inst.len, 3);
 //! ```
+//!
+//! # Stability
+//!
+//! This crate is the **stable** entry point for embedding rsleigh as a
+//! decoder/lifter. Audit P2 #2: the surface listed below is covered by
+//! semver and changes go through deprecation; everything outside this
+//! list (the `rsleigh-decompile` analysis crate, the `rsleigh-cli`
+//! binary, signature/FID heuristics, printer text rewrites) is
+//! experimental and may change without notice.
+//!
+//! Stable surface:
+//!
+//! - [`Decoder`], [`Decoder::new`], [`Decoder::decode`],
+//!   [`Decoder::architecture`]
+//! - [`Architecture`] (variants may be added; existing variants stay)
+//! - [`Architecture::addr_size`], [`Architecture::register_name`]
+//! - Re-exports from `pcode-ir`: `Instruction`, `PcodeOp`, `Varnode`,
+//!   `AddressSpaceId`, `DecodeError`
+//!
+//! Anything else in this crate (helper functions, internal context
+//! types, generated-crate re-exports) is implementation detail.
+//! `rsleigh_decompile::*`, `rsleigh_decompile::printer::*`,
+//! `rsleigh_decompile::fold::*`, etc. are **not** covered by this
+//! stability promise — pin a specific patch version if you depend on
+//! their shape.
 
 pub use pcode_ir::{AddressSpaceId, DecodeError, Instruction, PcodeOp, Varnode};
 
@@ -134,9 +159,7 @@ impl Decoder {
             }
             Architecture::AArch64 => DecoderInner::AArch64 {
                 context: aarch64_root::ContextMemory::default(),
-                global_set: aarch64_root::GlobalSet::new(
-                    aarch64_root::ContextMemory::default(),
-                ),
+                global_set: aarch64_root::GlobalSet::new(aarch64_root::ContextMemory::default()),
             },
             Architecture::ARM32 => DecoderInner::ARM32 {
                 context: arm32_root::ContextMemory::default(),

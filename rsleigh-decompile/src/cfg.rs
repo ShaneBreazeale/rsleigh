@@ -113,10 +113,7 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                             severity: Severity::Warn,
                             kind: DiagKind::UnresolvedBranchTarget,
                             addr: Some(last_inst_addr),
-                            detail: format!(
-                                "Branch target {:#x} not in instruction set",
-                                target
-                            ),
+                            detail: format!("Branch target {:#x} not in instruction set", target),
                         });
                         Terminator::Indirect(dest)
                     }
@@ -200,6 +197,17 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                         .flat_map(|(addr, inst)| inst.ops.iter().map(move |op| (*addr, op.clone())))
                         .collect();
                     let target = resolve_callind_target(&ops, &dest, func_addr, &all_ops);
+                    if matches!(target, CallTarget::Indirect(_)) {
+                        diagnostics.push(Diagnostic {
+                            severity: Severity::Info,
+                            kind: DiagKind::UnresolvedIndirectCall,
+                            addr: Some(last_inst_addr),
+                            detail: format!(
+                                "CallInd via {:?} not resolved through Load chain or GP-relative trace",
+                                dest
+                            ),
+                        });
+                    }
                     ops.pop();
                     // Strip x86-32 return address push (IntSub ESP + Store [ESP])
                     strip_call_push_ops(&mut ops);

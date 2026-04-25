@@ -54,6 +54,44 @@ fn clean_decode_emits_no_diagnostics() {
 }
 
 #[test]
+fn unresolved_indirect_call_emits_diagnostic() {
+    // CallInd through a register that the resolver can't trace to a const.
+    let inst = |len: u64, ops: Vec<PcodeOp>| Instruction {
+        len,
+        disassembly: String::new(),
+        ops,
+    };
+    let dest = Varnode {
+        space: AddressSpaceId::Register,
+        offset: 8, // RCX or similar — no Load chain in this fixture
+        size: 8,
+    };
+    let insts = vec![
+        (0x1000, inst(2, vec![PcodeOp::CallInd { dest }])),
+        (0x1002, inst(1, vec![PcodeOp::Return { dest: Varnode { space: AddressSpaceId::Ram, offset: 0, size: 8 } }])),
+    ];
+    let cfg = build_cfg(&insts);
+
+    let unresolved = cfg
+        .diagnostics
+        .iter()
+        .filter(|d| d.kind == DiagKind::UnresolvedIndirectCall)
+        .count();
+    assert_eq!(
+        unresolved, 1,
+        "expected one UnresolvedIndirectCall diagnostic, got {}: {:#?}",
+        unresolved, cfg.diagnostics
+    );
+    let d = cfg
+        .diagnostics
+        .iter()
+        .find(|d| d.kind == DiagKind::UnresolvedIndirectCall)
+        .unwrap();
+    assert_eq!(d.severity, Severity::Info);
+    assert_eq!(d.addr, Some(0x1000));
+}
+
+#[test]
 fn unresolved_branch_target_emits_diagnostic() {
     // Hand-built instruction stream: a Branch to an address that isn't a
     // leader. This is exactly the case the audit's branch-snap removal
