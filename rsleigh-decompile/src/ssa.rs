@@ -56,6 +56,12 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
 
     // Per-block: stack slot values at block exit (Phase 1 collection).
     let mut block_exit_stack: Vec<StackMap> = vec![HashMap::new(); cfg.blocks.len()];
+
+    // Audit P1 #3 cross-block: parallel data structure for global memory.
+    // Keyed by (absolute address, access size). Cross-block phi insertion
+    // mirrors the stack-slot machinery in Phase 2.
+    let mut block_exit_global: Vec<GlobalMap> = vec![HashMap::new(); cfg.blocks.len()];
+    let mut global_store_blocks: HashMap<(u64, u32), Vec<usize>> = HashMap::new();
     // Track which blocks have STORES (not inherited) for each slot key.
     let mut slot_store_blocks: HashMap<SlotKey, Vec<usize>> = HashMap::new();
 
@@ -248,6 +254,7 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                             &mut local_stack,
                             &mut local_global,
                             &mut slot_store_blocks,
+                            &mut global_store_blocks,
                             block.id.0,
                             &mut stmts,
                             op,
@@ -273,6 +280,7 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                             &mut local_stack,
                             &mut local_global,
                             &mut slot_store_blocks,
+                            &mut global_store_blocks,
                             block.id.0,
                             &mut stmts,
                             op,
@@ -301,6 +309,7 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                             &mut local_stack,
                             &mut local_global,
                             &mut slot_store_blocks,
+                            &mut global_store_blocks,
                             block.id.0,
                             &mut stmts,
                             inst_ops[last_idx],
@@ -327,6 +336,7 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                             &mut local_stack,
                             &mut local_global,
                             &mut slot_store_blocks,
+                            &mut global_store_blocks,
                             block.id.0,
                             &mut stmts,
                             op,
@@ -357,13 +367,30 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
             for (key, var_id) in &local_stack {
                 exit_stack.insert(*key, *var_id);
             }
+            // Same shape for global slots — Phase 2 fixed-point refines
+            // and inserts memory phis at join points.
+            let mut exit_global: GlobalMap = if !block_preds.is_empty() {
+                block_preds
+                    .iter()
+                    .find(|p| p.0 < block.id.0)
+                    .map(|p| block_exit_global[p.0].clone())
+                    .unwrap_or_default()
+            } else {
+                HashMap::new()
+            };
+            for (key, var_id) in &local_global {
+                exit_global.insert(*key, *var_id);
+            }
 
-            if block_exit_vars[block.id.0] != current || block_exit_stack[block.id.0] != exit_stack
+            if block_exit_vars[block.id.0] != current
+                || block_exit_stack[block.id.0] != exit_stack
+                || block_exit_global[block.id.0] != exit_global
             {
                 changed = true;
             }
             block_exit_vars[block.id.0] = current;
             block_exit_stack[block.id.0] = exit_stack;
+            block_exit_global[block.id.0] = exit_global;
 
             // On first iteration, push new blocks; on subsequent iterations, replace
             if iteration == 0 {
@@ -727,7 +754,145 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
         }
     }
 
-    // Count uses (after Phase 2 may have changed expressions)
+    // ====================================================================
+    // Phase 3: Memory SSA — cross-block global Loads via Phi nodes
+    // ====================================================================
+    //
+    // Mirror of Phase 2 keyed by `(absolute address, access size)`. Audit
+    // P1 #3 full closure. The key difference vs stack: the slot key
+    // already encodes a global address, so the resulting phi varnode uses
+    // the address directly rather than a synthesized frame-relative offset.
+    {
+        let mut block_entry_global: Vec<GlobalMap> = vec![HashMap::new(); cfg.blocks.len()];
+        let mut effective_exit: Vec<GlobalMap> = vec![HashMap::new(); cfg.blocks.len()];
+        let mut mem_phis: HashMap<(usize, (u64, u32)), VarId> = HashMap::new();
+
+        let mut worklist: VecDeque<usize> = (0..cfg.blocks.len()).collect();
+        let mut visited = vec![false; cfg.blocks.len()];
+        let max_iterations = cfg.blocks.len() * 4;
+        let mut iter_count = 0;
+
+        while let Some(bid) = worklist.pop_front() {
+            iter_count += 1;
+            if iter_count > max_iterations {
+                break;
+            }
+
+            let block_preds_list = &preds[bid];
+            let mut new_entry: GlobalMap = HashMap::new();
+
+            if block_preds_list.is_empty() {
+                // Entry block: empty global state.
+            } else if block_preds_list.len() == 1 {
+                new_entry = effective_exit[block_preds_list[0].0].clone();
+            } else {
+                let mut all_keys: HashSet<(u64, u32)> = HashSet::new();
+                for &pred_id in block_preds_list {
+                    for key in effective_exit[pred_id.0].keys() {
+                        all_keys.insert(*key);
+                    }
+                }
+                for key in &all_keys {
+                    let pred_values: Vec<Option<VarId>> = block_preds_list
+                        .iter()
+                        .map(|pred| effective_exit[pred.0].get(key).copied())
+                        .collect();
+                    if pred_values.iter().any(|v| v.is_none()) {
+                        continue;
+                    }
+                    let values: Vec<VarId> =
+                        pred_values.into_iter().map(|v| v.unwrap()).collect();
+                    if values.iter().all(|v| *v == values[0]) {
+                        new_entry.insert(*key, values[0]);
+                    } else {
+                        let phi_key = (bid, *key);
+                        let phi_var = if let Some(&existing) = mem_phis.get(&phi_key) {
+                            ssa.vars[existing.0 as usize].expr = Expr::Phi(values.clone());
+                            existing
+                        } else {
+                            // Synthesize a Unique varnode for the global phi
+                            // sentinel. Address is the absolute global addr;
+                            // collisions with stack phis are avoided by the
+                            // 0xE000_… high bits.
+                            let slot_vn = Varnode {
+                                space: AddressSpaceId::Unique,
+                                offset: 0xE000_0000_0000_0000_u64
+                                    .wrapping_add(key.0 ^ ((key.1 as u64) << 56)),
+                                size: key.1,
+                            };
+                            let phi_var = ssa.new_var(slot_vn, Expr::Phi(values), key.1);
+                            ssa.blocks[bid].stmts.insert(0, Stmt::Assign(phi_var));
+                            mem_phis.insert(phi_key, phi_var);
+                            phi_var
+                        };
+                        new_entry.insert(*key, phi_var);
+                    }
+                }
+            }
+
+            if visited[bid] && new_entry == block_entry_global[bid] {
+                continue;
+            }
+            visited[bid] = true;
+            block_entry_global[bid] = new_entry.clone();
+
+            let mut new_effective_exit = new_entry.clone();
+            for (key, var_id) in &block_exit_global[bid] {
+                new_effective_exit.insert(*key, *var_id);
+            }
+            if effective_exit[bid] != new_effective_exit {
+                effective_exit[bid] = new_effective_exit;
+                for succ in cfg.successors(BlockId(bid)) {
+                    if !worklist.contains(&succ.0) {
+                        worklist.push_back(succ.0);
+                    }
+                }
+            }
+        }
+
+        // Phase 3b: Resolve cross-block Loads with constant-resolvable
+        // pointers using the computed entry global state.
+        for bid in 0..ssa.blocks.len() {
+            let mut running_global = block_entry_global[bid].clone();
+            let mut local_global_keys: HashSet<(u64, u32)> = HashSet::new();
+
+            for stmt_idx in 0..ssa.blocks[bid].stmts.len() {
+                match ssa.blocks[bid].stmts[stmt_idx].clone() {
+                    Stmt::Store { addr, val } => {
+                        let val_size = ssa.vars[val.0 as usize].size;
+                        if let Some(global_addr) = resolve_const_addr(&ssa, addr) {
+                            running_global.insert((global_addr, val_size), val);
+                            local_global_keys.insert((global_addr, val_size));
+                        }
+                    }
+                    Stmt::Assign(var_id) => {
+                        let load_size = ssa.vars[var_id.0 as usize].size;
+                        if let Expr::Load(ptr) = ssa.vars[var_id.0 as usize].expr.clone() {
+                            if let Some(global_addr) = resolve_const_addr(&ssa, ptr) {
+                                let key = (global_addr, load_size);
+                                if let Some(&stored_var) = running_global.get(&key) {
+                                    let is_phi = matches!(
+                                        &ssa.vars[stored_var.0 as usize].expr,
+                                        Expr::Phi(_)
+                                    );
+                                    let is_local = local_global_keys.contains(&key);
+                                    let is_readonly = global_store_blocks
+                                        .get(&key)
+                                        .map_or(false, |blocks| blocks.iter().all(|b| *b == 0));
+                                    if is_phi || is_local || is_readonly {
+                                        ssa.vars[var_id.0 as usize].expr = Expr::Var(stored_var);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Count uses (after Phase 2 + Phase 3 may have changed expressions)
     count_uses(&mut ssa);
 
     ssa
@@ -741,6 +906,7 @@ fn process_op(
     local_stack: &mut StackMap,
     local_global: &mut GlobalMap,
     slot_store_blocks: &mut HashMap<SlotKey, Vec<usize>>,
+    global_store_blocks: &mut HashMap<(u64, u32), Vec<usize>>,
     block_id: usize,
     stmts: &mut Vec<Stmt>,
     op: &PcodeOp,
@@ -758,8 +924,12 @@ fn process_op(
             } else if let Some(addr) = resolve_const_addr(ssa, addr_var) {
                 // Constant absolute address — record as a global memory slot
                 // so a subsequent Load through the same address forwards the
-                // stored value (audit P1 #3 intra-block wedge).
+                // stored value (audit P1 #3, intra-block + cross-block).
                 local_global.insert((addr, val_size), val_var);
+                global_store_blocks
+                    .entry((addr, val_size))
+                    .or_default()
+                    .push(block_id);
             } else {
                 // Unknown pointer: conservatively invalidate the global map
                 // since the store could alias any global. Stack tracking

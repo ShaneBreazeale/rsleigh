@@ -156,3 +156,125 @@ fn store_then_load_of_same_global_addr_forwards_value() {
         saw_load
     );
 }
+
+#[test]
+fn cross_block_global_forwarding_inserts_phi_at_join() {
+    // Two predecessors store different constants to the same global
+    // address; the join-block load must resolve to a Phi over those
+    // values, not a bare Expr::Load. Audit P1 #3 cross-block closure.
+    let addr_const = cnst(0x4242, 8);
+    let val_a = cnst(11, 8);
+    let val_b = cnst(22, 8);
+
+    let insts = vec![
+        (
+            0x1000,
+            inst(
+                1,
+                vec![PcodeOp::CBranch {
+                    dest: ram(0x1003, 8),
+                    cond: Varnode {
+                        space: AddressSpaceId::Register,
+                        offset: 8,
+                        size: 1,
+                    },
+                }],
+            ),
+        ),
+        (
+            0x1001,
+            inst(
+                1,
+                vec![PcodeOp::Store {
+                    space: AddressSpaceId::Ram,
+                    ptr: addr_const,
+                    val: val_a,
+                }],
+            ),
+        ),
+        (
+            0x1002,
+            inst(
+                1,
+                vec![PcodeOp::Branch {
+                    dest: ram(0x1004, 8),
+                }],
+            ),
+        ),
+        (
+            0x1003,
+            inst(
+                1,
+                vec![PcodeOp::Store {
+                    space: AddressSpaceId::Ram,
+                    ptr: addr_const,
+                    val: val_b,
+                }],
+            ),
+        ),
+        (
+            0x1004,
+            inst(
+                1,
+                vec![
+                    PcodeOp::Load {
+                        out: rax(),
+                        space: AddressSpaceId::Ram,
+                        ptr: addr_const,
+                    },
+                    PcodeOp::Return { dest: ram(0, 8) },
+                ],
+            ),
+        ),
+    ];
+
+    let cfg = build_cfg(&insts);
+    let ssa = build_ssa_with_cc(&cfg, CallingConv::SysV);
+
+    let mut return_var: Option<VarId> = None;
+    for block in &ssa.blocks {
+        if let SsaTerminator::Return(Some(vid)) = &block.terminator {
+            return_var = Some(*vid);
+        }
+    }
+    let rv = return_var.expect("function returns RAX");
+
+    let mut stack = vec![rv];
+    let mut seen = std::collections::HashSet::new();
+    let mut found_phi = false;
+    let mut found_const_a = false;
+    let mut found_const_b = false;
+    let mut saw_load = false;
+    while let Some(vid) = stack.pop() {
+        if !seen.insert(vid.0) {
+            continue;
+        }
+        let vdef = &ssa.vars[vid.0 as usize];
+        match &vdef.expr {
+            Expr::Phi(inputs) => {
+                found_phi = true;
+                stack.extend(inputs.iter().copied());
+            }
+            Expr::Const(11, _) => found_const_a = true,
+            Expr::Const(22, _) => found_const_b = true,
+            Expr::Var(v) => stack.push(*v),
+            Expr::Load(_) => saw_load = true,
+            Expr::BinOp(_, l, r) => {
+                stack.push(*l);
+                stack.push(*r);
+            }
+            Expr::UnaryOp(_, x) => stack.push(*x),
+            _ => {}
+        }
+    }
+
+    assert!(
+        found_phi && found_const_a && found_const_b && !saw_load,
+        "cross-block global forwarding failed: phi={} const_a={} \
+         const_b={} saw_load={}",
+        found_phi,
+        found_const_a,
+        found_const_b,
+        saw_load
+    );
+}
