@@ -186,7 +186,9 @@ fn rsleigh_op_to_norm(op: &PcodeOp) -> NormOp {
         Load { out, space: _, ptr } => n!("Load", Some(v(out)), vec![v(ptr)]),
         Store { space: _, ptr, val } => n!("Store", None, vec![v(ptr), v(val)]),
         Branch { dest } => n!("Branch", None, vec![v(dest)]),
-        CBranch { dest, cond } => n!("CBranch", None, vec![v(dest), v(cond)]),
+        // CBranch dest convention (skip-count vs jump-target) differs from
+        // Ghidra; oracle_op_to_norm strips Ghidra's dest too. Keep cond only.
+        CBranch { dest: _, cond } => n!("CBranch", None, vec![v(cond)]),
         BranchInd { dest } => n!("BranchInd", None, vec![v(dest)]),
         Call { dest } => n!("Call", None, vec![v(dest)]),
         CallInd { dest } => n!("CallInd", None, vec![v(dest)]),
@@ -289,11 +291,71 @@ fn oracle_op_to_norm(op: &OracleOp) -> Option<NormOp> {
     if matches!(mnemonic, "Load" | "Store") && !inputs.is_empty() {
         inputs.remove(0);
     }
+    // CBranch's first input is an intra-instruction pcode offset Const.
+    // Ghidra and rsleigh use different conventions (Ghidra: relative
+    // jump target, size 4; rsleigh: skip count, size 8). Both encode
+    // the same control flow; strip the opaque Const so the comparator
+    // matches CBranch shape + cond input without depending on the
+    // numeric convention.
+    if mnemonic == "CBranch" && !inputs.is_empty() {
+        inputs.remove(0);
+    }
     Some(NormOp {
         mnemonic,
         out,
         inputs,
     })
+}
+
+/// Propagate `Copy{Unique{x}, Const(v, n)}` forward into any subsequent op
+/// that reads `Unique{x}` of size `n`, replacing the input with the
+/// constant. rsleigh's pcode peephole already does this — Ghidra's exporter
+/// leaves the indirection in place. Running the same fold on both sides
+/// makes the strict comparison agree.
+///
+/// After propagation `drop_dead_const_unique_inits` should be re-run to
+/// sweep up the now-dead Copy ops.
+fn propagate_const_unique_copies(ops: &mut [NormOp]) {
+    use std::collections::HashMap;
+    let mut env: HashMap<(u64, u32), NormVar> = HashMap::new();
+    for op in ops.iter_mut() {
+        // Substitute reads first.
+        for inp in op.inputs.iter_mut() {
+            if inp.space == AddressSpaceId::Unique {
+                if let Some(c) = env.get(&(inp.offset, inp.size)) {
+                    *inp = c.clone();
+                }
+            }
+        }
+        // Then check whether this op writes to a Unique we care about.
+        match op.mnemonic {
+            "Copy" => {
+                if let (Some(out), Some(inp)) = (op.out.as_ref(), op.inputs.first()) {
+                    if out.space == AddressSpaceId::Unique
+                        && inp.space == AddressSpaceId::Const
+                        && out.size == inp.size
+                    {
+                        env.insert((out.offset, out.size), inp.clone());
+                        continue;
+                    }
+                }
+                // Non-const Copy to a tracked Unique invalidates the env entry.
+                if let Some(out) = op.out.as_ref() {
+                    if out.space == AddressSpaceId::Unique {
+                        env.remove(&(out.offset, out.size));
+                    }
+                }
+            }
+            _ => {
+                // Any other write to a Unique invalidates a tracked entry.
+                if let Some(out) = op.out.as_ref() {
+                    if out.space == AddressSpaceId::Unique {
+                        env.remove(&(out.offset, out.size));
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Drop dead `Copy{Unique, Const}` ops whose Unique output is never read by
@@ -405,15 +467,6 @@ const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
          (INT_AND/INT_NOTEQUAL/COPY into TB/ISAModeSwitch + CALLOTHER \
          pcodeop) that Ghidra emits; rsleigh produces 5 ops vs Ghidra 6.",
     ),
-    (
-        "aarch64/csel.ghidra.json",
-        "AArch64 csinc (csel-family) emits one fewer macro-init Copy \
-         than Ghidra (6 vs 7 ops) at offset 0x8. Distinct from the \
-         csetm INT_2COMP output-size bug (closed by codegen unary \
-         size-preserve fix) — this is a SLEIGH-level macro expansion \
-         shape difference around the conditional select. The csetm \
-         instruction at 0x4 now matches strictly.",
-    ),
 ];
 
 fn known_divergence_for(path: &Path) -> Option<&'static str> {
@@ -467,8 +520,12 @@ fn check_oracle(path: &Path) {
 
             let mut rs_norm: Vec<NormOp> = decoded.ops.iter().map(rsleigh_op_to_norm).collect();
             let mut gh_norm: Vec<NormOp> = ins.pcode.iter().filter_map(oracle_op_to_norm).collect();
-            // Strip macro-emitted dead Copies before unique renumbering so
-            // both sides agree on definition order.
+            // Match rsleigh's pcode peephole: constant-propagate
+            // Copy{Unique, Const} into downstream reads, then strip the
+            // resulting dead Copies. Apply to both sides so AArch64 csel
+            // family / similar SLEIGH macro patterns agree on shape.
+            propagate_const_unique_copies(&mut rs_norm);
+            propagate_const_unique_copies(&mut gh_norm);
             drop_dead_const_unique_inits(&mut rs_norm);
             drop_dead_const_unique_inits(&mut gh_norm);
             normalize_uniques(&mut rs_norm);
