@@ -245,7 +245,8 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                         process_op(
                             &mut ssa,
                             &mut current,
-                            &mut local_stack, &mut local_global,
+                            &mut local_stack,
+                            &mut local_global,
                             &mut slot_store_blocks,
                             block.id.0,
                             &mut stmts,
@@ -269,7 +270,8 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                         process_op(
                             &mut ssa,
                             &mut current,
-                            &mut local_stack, &mut local_global,
+                            &mut local_stack,
+                            &mut local_global,
                             &mut slot_store_blocks,
                             block.id.0,
                             &mut stmts,
@@ -296,7 +298,8 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                         process_op(
                             &mut ssa,
                             &mut current,
-                            &mut local_stack, &mut local_global,
+                            &mut local_stack,
+                            &mut local_global,
                             &mut slot_store_blocks,
                             block.id.0,
                             &mut stmts,
@@ -321,7 +324,8 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                         process_op(
                             &mut ssa,
                             &mut current,
-                            &mut local_stack, &mut local_global,
+                            &mut local_stack,
+                            &mut local_global,
                             &mut slot_store_blocks,
                             block.id.0,
                             &mut stmts,
@@ -1040,7 +1044,11 @@ fn return_reg_offset(cc: CallingConv) -> u64 {
 fn return_reg_size(cc: CallingConv) -> u32 {
     match cc {
         CallingConv::SysV | CallingConv::Win64 | CallingConv::GoAmd64 | CallingConv::AArch64 => 8,
-        CallingConv::Cdecl32 | CallingConv::Stdcall32 | CallingConv::Arm32 => 4,
+        CallingConv::Cdecl32
+        | CallingConv::Stdcall32
+        | CallingConv::Thiscall32
+        | CallingConv::Fastcall32
+        | CallingConv::Arm32 => 4,
     }
 }
 
@@ -1049,7 +1057,10 @@ fn caller_saved_offsets(cc: CallingConv) -> &'static [u64] {
         CallingConv::Win64 => WIN64_CALLER_SAVED,
         CallingConv::SysV | CallingConv::GoAmd64 => SYSV64_CALLER_SAVED,
         CallingConv::AArch64 => AARCH64_CALLER_SAVED,
-        CallingConv::Cdecl32 | CallingConv::Stdcall32 => X86_32_CALLER_SAVED,
+        CallingConv::Cdecl32
+        | CallingConv::Stdcall32
+        | CallingConv::Thiscall32
+        | CallingConv::Fastcall32 => X86_32_CALLER_SAVED,
         CallingConv::Arm32 => ARM32_CALLER_SAVED,
     }
 }

@@ -82,6 +82,22 @@ impl Varnode {
     }
 }
 
+/// Provenance metadata identifying which SLEIGH constructor produced an
+/// `Instruction`. Audit P2 #3 — gives the analyst a way to trace
+/// surprising P-code back to its source rule when debugging lifter
+/// divergences. `None` means the producing decoder pre-dated this
+/// metadata (legacy generated crates) or the decoder declined to emit it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConstructorSpan {
+    /// Numeric constructor index assigned by the SLEIGH compiler.
+    pub constructor_id: u32,
+    /// Numeric table id the constructor belongs to.
+    pub table_id: u32,
+    /// Free-form source location string (file:line) emitted by codegen.
+    /// Empty string when the codegen did not record one.
+    pub source: &'static str,
+}
+
 /// A decoded and lifted instruction.
 #[derive(Debug, Clone)]
 pub struct Instruction {
@@ -91,6 +107,23 @@ pub struct Instruction {
     pub disassembly: String,
     /// P-code operations (peephole-optimized).
     pub ops: Vec<PcodeOp>,
+    /// Optional SLEIGH constructor that emitted this instruction.
+    /// Default `None` for backward compatibility with generated crates
+    /// that don't yet populate this field.
+    pub constructor: Option<ConstructorSpan>,
+}
+
+impl Instruction {
+    /// Construct an instruction without constructor provenance —
+    /// preserves call sites that pre-date the `constructor` field.
+    pub fn new(len: u64, disassembly: String, ops: Vec<PcodeOp>) -> Self {
+        Self {
+            len,
+            disassembly,
+            ops,
+            constructor: None,
+        }
+    }
 }
 
 /// Decode error returned when an instruction cannot be parsed.

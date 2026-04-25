@@ -642,6 +642,7 @@ mod tests {
             len,
             disassembly: String::new(),
             ops,
+            constructor: None,
         }
     }
 

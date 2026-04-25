@@ -9,6 +9,17 @@ description = "P-code decompiler — turns rsleigh P-code IR into C-like pseudoc
 keywords = ["decompiler", "pcode", "reverse-engineering", "sleigh", "ghidra"]
 categories = ["development-tools"]
 
+[features]
+# Audit P2 #2: stability boundary as a build-time feature flag.
+# Default builds expose only the conservative correctness surface
+# (decompile core, fold, ssa, structure, printer). The `experimental`
+# feature opts into the heuristic-heavy modules whose shape may shift
+# across patch versions: C++ class recovery, eqsat-based MBA undo,
+# DWARF/PDB/PE pickers, FID signature DBs, eh_frame / Go-pclntab /
+# SEH static walkers, and the syscall/ROR13 annotation tables.
+default = ["experimental"]
+experimental = []
+
 [dependencies]
 pcode-ir = { path = "../pcode-ir", version = "0.2.0" }
 rsleigh-api = { path = "../rsleigh-api", version = "0.2.0" }

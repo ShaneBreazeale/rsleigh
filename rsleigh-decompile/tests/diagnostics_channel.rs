@@ -60,6 +60,7 @@ fn unresolved_indirect_call_emits_diagnostic() {
         len,
         disassembly: String::new(),
         ops,
+        constructor: None,
     };
     let dest = Varnode {
         space: AddressSpaceId::Register,
@@ -100,6 +101,7 @@ fn unresolved_branch_target_emits_diagnostic() {
         len,
         disassembly: String::new(),
         ops,
+        constructor: None,
     };
     let insts = vec![
         (

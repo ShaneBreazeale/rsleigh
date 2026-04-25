@@ -213,6 +213,7 @@ impl Decoder {
                         len: inst_next - addr,
                         disassembly: format_display(&display),
                         ops,
+                        constructor: None,
                     })
                 } else {
                     Err(DecodeError::UnknownInstruction)
@@ -232,6 +233,7 @@ impl Decoder {
                     len: (inst_next - addr32) as u64,
                     disassembly: format_display(&display),
                     ops,
+                    constructor: None,
                 })
             }
             DecoderInner::AArch64 {
@@ -247,6 +249,7 @@ impl Decoder {
                     len: inst_next - addr,
                     disassembly: format_display(&display),
                     ops,
+                    constructor: None,
                 })
             }
             DecoderInner::ARM32 {
@@ -263,6 +266,7 @@ impl Decoder {
                     len: (inst_next - addr32) as u64,
                     disassembly: format_display(&display),
                     ops,
+                    constructor: None,
                 })
             }
             DecoderInner::MIPS32 {
@@ -279,6 +283,7 @@ impl Decoder {
                     len: (inst_next - addr32) as u64,
                     disassembly: format_display(&display),
                     ops,
+                    constructor: None,
                 })
             }
             DecoderInner::RiscV64 {
@@ -294,6 +299,7 @@ impl Decoder {
                     len: inst_next - addr,
                     disassembly: format_display(&display),
                     ops,
+                    constructor: None,
                 })
             }
         }
@@ -391,6 +397,7 @@ fn fallback_x86_64_mov_from_rsp_sib(bytes: &[u8], addr: u64) -> Option<Instructi
         len: pos as u64,
         disassembly,
         ops,
+        constructor: None,
     })
 }
 

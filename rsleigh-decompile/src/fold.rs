@@ -70,13 +70,15 @@ fn float_arg_reg_offsets() -> &'static [u64] {
 /// Calling convention detected from binary format.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum CallingConv {
-    SysV,      // Linux, macOS, BSD — RDI, RSI, RDX, RCX, R8, R9
-    Win64,     // Windows x64 — RCX, RDX, R8, R9
-    Cdecl32,   // x86-32 cdecl — stack-based, caller cleans
-    Stdcall32, // x86-32 stdcall — stack-based, callee cleans (RET imm16)
-    AArch64,   // AAPCS64 — x0-x7
-    Arm32,     // AAPCS — r0-r3
-    GoAmd64,   // Go internal ABI v1.17+ — RAX, RBX, RCX, RDI, RSI, R8-R11
+    SysV,       // Linux, macOS, BSD — RDI, RSI, RDX, RCX, R8, R9
+    Win64,      // Windows x64 — RCX, RDX, R8, R9
+    Cdecl32,    // x86-32 cdecl — stack-based, caller cleans
+    Stdcall32,  // x86-32 stdcall — stack-based, callee cleans (RET imm16)
+    Thiscall32, // x86-32 MSVC thiscall — `this` in ECX, rest on stack, callee cleans
+    Fastcall32, // x86-32 MSVC __fastcall — first 2 args in ECX/EDX, rest on stack, callee cleans
+    AArch64,    // AAPCS64 — x0-x7
+    Arm32,      // AAPCS — r0-r3
+    GoAmd64,    // Go internal ABI v1.17+ — RAX, RBX, RCX, RDI, RSI, R8-R11
 }
 
 /// Full ABI descriptor: arg locations, return locations, cleanup, shadow space.
@@ -101,7 +103,20 @@ pub struct Abi {
     pub callee_cleanup_stack: bool,
     /// Shadow space the caller must allocate (Win64 = 32, others = 0).
     pub shadow_space_bytes: u32,
+    /// True when the convention permits trailing varargs at all (anywhere).
+    /// Wired by future varargs-aware passes; for now a static descriptor
+    /// flag so call-site recovery can branch on it.
+    pub allows_varargs: bool,
 }
+
+/// x86-32 ECX register offset (0x4) — the `this` pointer slot for thiscall
+/// and the first integer arg for fastcall.
+const X86_32_ECX: u64 = 0x4;
+/// x86-32 EDX register offset (0x8) — the second integer arg for fastcall.
+const X86_32_EDX: u64 = 0x8;
+
+const THISCALL32_ARG_REGS: &[u64] = &[X86_32_ECX]; // `this`
+const FASTCALL32_ARG_REGS: &[u64] = &[X86_32_ECX, X86_32_EDX];
 
 /// Look up the ABI descriptor for a calling convention.
 pub fn abi(cc: CallingConv) -> Abi {
@@ -113,6 +128,7 @@ pub fn abi(cc: CallingConv) -> Abi {
             return_reg_float: Some(4608), // XMM0
             callee_cleanup_stack: false,
             shadow_space_bytes: 0,
+            allows_varargs: true,
         },
         CallingConv::Win64 => Abi {
             int_args: WIN64_ARG_REGS,
@@ -121,6 +137,7 @@ pub fn abi(cc: CallingConv) -> Abi {
             return_reg_float: Some(4608),
             callee_cleanup_stack: false,
             shadow_space_bytes: 32,
+            allows_varargs: true,
         },
         CallingConv::Cdecl32 => Abi {
             int_args: &[],
@@ -129,6 +146,8 @@ pub fn abi(cc: CallingConv) -> Abi {
             return_reg_float: None,           // ST0 — not modeled here
             callee_cleanup_stack: false,
             shadow_space_bytes: 0,
+            // cdecl is the canonical varargs convention on x86-32.
+            allows_varargs: true,
         },
         CallingConv::Stdcall32 => Abi {
             int_args: &[],
@@ -137,6 +156,26 @@ pub fn abi(cc: CallingConv) -> Abi {
             return_reg_float: None,
             callee_cleanup_stack: true,
             shadow_space_bytes: 0,
+            // stdcall callee-cleans a fixed stack — varargs incompatible.
+            allows_varargs: false,
+        },
+        CallingConv::Thiscall32 => Abi {
+            int_args: THISCALL32_ARG_REGS,
+            float_args: &[],
+            return_reg_int: Some(RAX_OFFSET),
+            return_reg_float: None,
+            callee_cleanup_stack: true,
+            shadow_space_bytes: 0,
+            allows_varargs: false,
+        },
+        CallingConv::Fastcall32 => Abi {
+            int_args: FASTCALL32_ARG_REGS,
+            float_args: &[],
+            return_reg_int: Some(RAX_OFFSET),
+            return_reg_float: None,
+            callee_cleanup_stack: true,
+            shadow_space_bytes: 0,
+            allows_varargs: false,
         },
         CallingConv::AArch64 => Abi {
             int_args: AARCH64_ARG_REGS,
@@ -145,6 +184,7 @@ pub fn abi(cc: CallingConv) -> Abi {
             return_reg_float: Some(20480), // v0
             callee_cleanup_stack: false,
             shadow_space_bytes: 0,
+            allows_varargs: true,
         },
         CallingConv::Arm32 => Abi {
             int_args: ARM32_ARG_REGS,
@@ -153,6 +193,7 @@ pub fn abi(cc: CallingConv) -> Abi {
             return_reg_float: None,
             callee_cleanup_stack: false,
             shadow_space_bytes: 0,
+            allows_varargs: true,
         },
         CallingConv::GoAmd64 => Abi {
             int_args: GO_AMD64_ARG_REGS,
@@ -161,6 +202,8 @@ pub fn abi(cc: CallingConv) -> Abi {
             return_reg_float: Some(4608),
             callee_cleanup_stack: false,
             shadow_space_bytes: 0,
+            // Go has no varargs at the ABI layer.
+            allows_varargs: false,
         },
     }
 }

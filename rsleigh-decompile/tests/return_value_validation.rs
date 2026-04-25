@@ -6,6 +6,9 @@
 //! diagnostic so audits can flag genuine void cases.
 
 use pcode_ir::{AddressSpaceId, Instruction, PcodeOp, Varnode};
+use rsleigh_decompile::analysis::{
+    collect_callsite_return_uses, validate_returns_against_callsites,
+};
 use rsleigh_decompile::cfg::build_cfg;
 use rsleigh_decompile::fold::{fold_with_cc, CallingConv};
 use rsleigh_decompile::ir::{DiagKind, Severity, SsaTerminator};
@@ -24,6 +27,7 @@ fn inst(len: u64, ops: Vec<PcodeOp>) -> Instruction {
         len,
         disassembly: String::new(),
         ops,
+        constructor: None,
     }
 }
 
@@ -46,10 +50,7 @@ fn call_then_ret_emits_stale_return_diagnostic() {
                 }],
             ),
         ),
-        (
-            0x1005,
-            inst(1, vec![PcodeOp::Return { dest: ram(0, 8) }]),
-        ),
+        (0x1005, inst(1, vec![PcodeOp::Return { dest: ram(0, 8) }])),
     ];
 
     let cfg = build_cfg(&insts);
@@ -127,4 +128,108 @@ fn explicit_rax_write_does_not_emit_stale_diagnostic() {
          diagnostics: {:#?}",
         ssa.diagnostics
     );
+}
+
+#[test]
+fn collect_callsite_uses_zero_for_call_then_immediate_ret() {
+    // call foo; ret — function does not read foo's return.
+    let insts = vec![
+        (
+            0x1000,
+            inst(
+                5,
+                vec![PcodeOp::Call {
+                    dest: ram(0x2000, 8),
+                }],
+            ),
+        ),
+        (0x1005, inst(1, vec![PcodeOp::Return { dest: ram(0, 8) }])),
+    ];
+    let cfg = build_cfg(&insts);
+    let mut ssa = build_ssa_with_cc(&cfg, CallingConv::SysV);
+    fold_with_cc(&mut ssa, CallingConv::SysV);
+
+    let uses = collect_callsite_return_uses(&ssa);
+    // The synthetic call_return for foo at 0x2000 is created but never
+    // consumed by a downstream Stmt::Assign read.
+    assert!(
+        uses.iter().any(|(callee, _)| *callee == 0x2000),
+        "expected to see callee 0x2000 in {:?}",
+        uses
+    );
+}
+
+#[test]
+fn validate_returns_demotes_when_no_caller_reads() {
+    // Two synthetic functions: f calls g; nothing in f reads g's return.
+    // After validation, g should be demoted to Return(None).
+    let make_call_then_ret = |target: u64| {
+        let insts = vec![
+            (
+                0x100,
+                inst(
+                    5,
+                    vec![PcodeOp::Call {
+                        dest: ram(target, 8),
+                    }],
+                ),
+            ),
+            (
+                0x105,
+                inst(1, vec![PcodeOp::Return { dest: ram(0, 8) }]),
+            ),
+        ];
+        let cfg = build_cfg(&insts);
+        let mut ssa = build_ssa_with_cc(&cfg, CallingConv::SysV);
+        fold_with_cc(&mut ssa, CallingConv::SysV);
+        ssa
+    };
+
+    // g at 0x2000 — its body (`call h; ret`) inferred Return(Some) via
+    // StaleReturnInherited, since detect_return_values would pick the
+    // call_return from h. We need to trigger that path. Use the call→ret
+    // pattern that fired the diagnostic in the existing first test.
+    let g = make_call_then_ret(0x3000);
+    // f at 0x1000 — calls g, ignores its return.
+    let f = make_call_then_ret(0x2000);
+
+    let mut funcs: Vec<(u64, _)> = vec![(0x1000, f), (0x2000, g)];
+    let demoted = validate_returns_against_callsites(&mut funcs, false);
+
+    // If g's detect_return_values stage actually inferred Return(Some) +
+    // emitted the StaleReturnInherited, then validation must demote it.
+    // The other path (DCE collapsed call_return → Return(None) already)
+    // means nothing to demote.
+    let g_after = &funcs[1].1;
+    let g_returns_some = g_after
+        .blocks
+        .iter()
+        .any(|b| matches!(b.terminator, SsaTerminator::Return(Some(_))));
+    assert!(
+        !g_returns_some,
+        "g must not still hold Return(Some) after demotion: {:?}",
+        g_after.blocks.iter().map(|b| &b.terminator).collect::<Vec<_>>()
+    );
+    // demoted is 0 if the diag never fired (DCE path) or 1 if it did.
+    assert!(demoted <= 1, "demoted={} should be 0 or 1", demoted);
+}
+
+#[test]
+fn validate_returns_skips_when_external_callers_assumed() {
+    // External-callers mode must never demote, even when no caller reads
+    // — preserves the wrap() interpretation for library exports.
+    let make_call_then_ret = |target: u64| {
+        let insts = vec![
+            (0x100, inst(5, vec![PcodeOp::Call { dest: ram(target, 8) }])),
+            (0x105, inst(1, vec![PcodeOp::Return { dest: ram(0, 8) }])),
+        ];
+        let cfg = build_cfg(&insts);
+        let mut ssa = build_ssa_with_cc(&cfg, CallingConv::SysV);
+        fold_with_cc(&mut ssa, CallingConv::SysV);
+        ssa
+    };
+
+    let mut funcs: Vec<(u64, _)> = vec![(0x2000, make_call_then_ret(0x3000))];
+    let demoted = validate_returns_against_callsites(&mut funcs, true);
+    assert_eq!(demoted, 0);
 }

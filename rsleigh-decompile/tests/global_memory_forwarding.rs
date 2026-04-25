@@ -49,6 +49,7 @@ fn inst(len: u64, ops: Vec<PcodeOp>) -> Instruction {
         len,
         disassembly: String::new(),
         ops,
+        constructor: None,
     }
 }
 

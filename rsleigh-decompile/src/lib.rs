@@ -1,5 +1,12 @@
 pub mod analysis;
 pub mod cfg;
+// Heuristic-heavy modules whose shape may shift across patch versions.
+// `experimental` is the only fully-isolated feature today: gating cpp_class
+// and seh_static is the maximum we can do without unwinding the deeper
+// fold/printer/decompile-pipeline coupling. Pinning the boundary at these
+// two modules makes the limitation honest and gives the gate something
+// concrete to enforce.
+#[cfg(feature = "experimental")]
 pub mod cpp_class;
 pub mod dominators;
 pub mod dwarf;
@@ -12,6 +19,7 @@ pub mod ir;
 pub mod pdb_info;
 pub mod peb_walk;
 pub mod printer;
+#[cfg(feature = "experimental")]
 pub mod seh_static;
 pub mod signatures;
 mod signatures_crypto;
@@ -22,7 +30,7 @@ mod signatures_python;
 mod signatures_win32;
 pub mod ssa;
 pub mod structure;
-pub mod syscall_table;
+pub mod syscall_table; // used by printer
 
 use pcode_ir::Instruction;
 use rsleigh_api::Architecture;

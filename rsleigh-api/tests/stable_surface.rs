@@ -54,4 +54,12 @@ fn stable_surface_smoke() {
 
     // Decoder::architecture returns the configured arch.
     assert_eq!(dec.architecture(), Architecture::X86_64);
+
+    // Audit P2 #3 — Instruction.constructor is part of the surface.
+    // Generated crates do not yet populate it; the field must default
+    // to None so it doesn't break legacy callers.
+    assert!(
+        inst.constructor.is_none(),
+        "constructor span should default to None until codegen wiring lands"
+    );
 }
