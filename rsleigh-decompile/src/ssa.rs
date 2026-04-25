@@ -15,6 +15,25 @@ struct SlotKey {
 
 type StackMap = HashMap<SlotKey, VarId>;
 
+/// Intra-block forwarding map for global memory: `(absolute address, access
+/// size in bytes) -> last stored VarId`. Reset per block. Cross-block memory
+/// SSA (audit P1 #3 full) is intentionally out of scope here.
+type GlobalMap = HashMap<(u64, u32), VarId>;
+
+/// Walk a VarId through Copy/Var chains to find an underlying constant
+/// address. Returns `None` if the chain hits anything else.
+fn resolve_const_addr(ssa: &SsaCfg, mut vid: VarId) -> Option<u64> {
+    for _ in 0..16 {
+        let vdef = &ssa.vars[vid.0 as usize];
+        match &vdef.expr {
+            Expr::Const(v, _) => return Some(*v),
+            Expr::Var(inner) => vid = *inner,
+            _ => return None,
+        }
+    }
+    None
+}
+
 /// Convert a CFG into SSA form (SysV calling convention).
 pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
     build_ssa_with_cc(cfg, CallingConv::SysV)
@@ -80,6 +99,10 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
             // Phase 1 stack tracking: INTRA-BLOCK only during SSA construction.
             // Cross-block resolution happens in Phase 2 after Phi insertion.
             let mut local_stack: StackMap = HashMap::new();
+            // Audit P1 #3 wedge: intra-block forwarding for global memory
+            // (Store/Load through pointers that resolve to constants). Resets
+            // per block; cross-block extension is future work.
+            let mut local_global: GlobalMap = HashMap::new();
 
             // Inherit from the first already-processed FORWARD predecessor.
             // A forward predecessor has a lower block ID (comes before in CFG order).
@@ -222,7 +245,7 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                         process_op(
                             &mut ssa,
                             &mut current,
-                            &mut local_stack,
+                            &mut local_stack, &mut local_global,
                             &mut slot_store_blocks,
                             block.id.0,
                             &mut stmts,
@@ -246,7 +269,7 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                         process_op(
                             &mut ssa,
                             &mut current,
-                            &mut local_stack,
+                            &mut local_stack, &mut local_global,
                             &mut slot_store_blocks,
                             block.id.0,
                             &mut stmts,
@@ -273,7 +296,7 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                         process_op(
                             &mut ssa,
                             &mut current,
-                            &mut local_stack,
+                            &mut local_stack, &mut local_global,
                             &mut slot_store_blocks,
                             block.id.0,
                             &mut stmts,
@@ -298,7 +321,7 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                         process_op(
                             &mut ssa,
                             &mut current,
-                            &mut local_stack,
+                            &mut local_stack, &mut local_global,
                             &mut slot_store_blocks,
                             block.id.0,
                             &mut stmts,
@@ -712,6 +735,7 @@ fn process_op(
     ssa: &mut SsaCfg,
     current: &mut HashMap<Varnode, VarId>,
     local_stack: &mut StackMap,
+    local_global: &mut GlobalMap,
     slot_store_blocks: &mut HashMap<SlotKey, Vec<usize>>,
     block_id: usize,
     stmts: &mut Vec<Stmt>,
@@ -727,6 +751,17 @@ fn process_op(
             if let Some(key) = key {
                 local_stack.insert(key, val_var);
                 slot_store_blocks.entry(key).or_default().push(block_id);
+            } else if let Some(addr) = resolve_const_addr(ssa, addr_var) {
+                // Constant absolute address — record as a global memory slot
+                // so a subsequent Load through the same address forwards the
+                // stored value (audit P1 #3 intra-block wedge).
+                local_global.insert((addr, val_size), val_var);
+            } else {
+                // Unknown pointer: conservatively invalidate the global map
+                // since the store could alias any global. Stack tracking
+                // stays intact — stack slots cannot alias the global heap
+                // under standard C/C++ object lifetime rules.
+                local_global.clear();
             }
             stmts.push(Stmt::Store {
                 addr: addr_var,
@@ -771,6 +806,14 @@ fn process_op(
                     let key = get_slot_key(p, out_vn.size, ssa);
                     if let Some(key) = key {
                         if let Some(&stored_var) = local_stack.get(&key) {
+                            Expr::Var(stored_var)
+                        } else {
+                            Expr::Load(p)
+                        }
+                    } else if let Some(addr) = resolve_const_addr(ssa, p) {
+                        // Global memory forward: previous Store to the same
+                        // (addr, size) wins.
+                        if let Some(&stored_var) = local_global.get(&(addr, out_vn.size)) {
                             Expr::Var(stored_var)
                         } else {
                             Expr::Load(p)
