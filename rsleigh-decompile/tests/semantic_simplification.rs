@@ -320,6 +320,90 @@ fn x_lesseq_x_folds_to_one() {
 }
 
 #[test]
+fn add_with_neg_canonicalizes_to_sub() {
+    // var0 = unknown (x), var1 = -x, var2 = x + (-x)
+    // After folding the Add{x, -y} → Sub{x, y} rule fires; var2 must
+    // not retain the Add(_, UnaryOp(Neg, _)) shape.
+    let vars = vec![
+        vd(0, Expr::Unknown, 4),
+        vd(1, Expr::UnaryOp(UnaryOpKind::Neg, VarId(0)), 4),
+        vd(
+            2,
+            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::Add, VarId(0), VarId(1)),
+            4,
+        ),
+    ];
+    let ssa = run_fold(vars, 2);
+    // After the canonicalization: x + (-x) → x - x → Const(0).
+    // Either form is acceptable; the Add+Neg shape must be gone.
+    let still_add_neg = matches!(
+        &ssa.vars[2].expr,
+        Expr::BinOp(rsleigh_decompile::ir::BinOpKind::Add, _, _)
+    );
+    assert!(
+        !still_add_neg,
+        "Add with negated operand survived fold: {:?}",
+        ssa.vars[2].expr
+    );
+}
+
+#[test]
+fn sub_with_neg_canonicalizes_to_add() {
+    // var0 = unknown (x), var1 = -y, var2 = x - (-y)  →  x + y
+    let vars = vec![
+        vd(0, Expr::Unknown, 4),
+        vd(1, Expr::Unknown, 4),
+        vd(2, Expr::UnaryOp(UnaryOpKind::Neg, VarId(1)), 4),
+        vd(
+            3,
+            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::Sub, VarId(0), VarId(2)),
+            4,
+        ),
+    ];
+    let ssa = run_fold(vars, 3);
+    let still_sub_neg = match &ssa.vars[3].expr {
+        Expr::BinOp(rsleigh_decompile::ir::BinOpKind::Sub, _, r) => matches!(
+            &ssa.vars[r.0 as usize].expr,
+            Expr::UnaryOp(UnaryOpKind::Neg, _)
+        ),
+        _ => false,
+    };
+    assert!(
+        !still_sub_neg,
+        "Sub with negated rhs survived fold: {:?}",
+        ssa.vars[3].expr
+    );
+}
+
+#[test]
+fn and_absorption_into_or() {
+    // var2 = (x | y) & x  →  x
+    let vars = vec![
+        vd(0, Expr::Unknown, 4),
+        vd(1, Expr::Unknown, 4),
+        vd(
+            2,
+            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::Or, VarId(0), VarId(1)),
+            4,
+        ),
+        vd(
+            3,
+            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::And, VarId(2), VarId(0)),
+            4,
+        ),
+    ];
+    let ssa = run_fold(vars, 3);
+    assert!(
+        !matches!(
+            &ssa.vars[3].expr,
+            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::And, _, _)
+        ),
+        "(x|y) & x absorption did not fire: {:?}",
+        ssa.vars[3].expr
+    );
+}
+
+#[test]
 fn x_minus_x_folds_to_zero() {
     // Idempotence check — the existing `x - x → 0` rule survives the new
     // `0 - x → -x` rule and isn't accidentally shadowed.

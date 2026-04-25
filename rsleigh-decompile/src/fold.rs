@@ -1896,7 +1896,8 @@ fn simplify_expr(expr: Expr, vars: &[VarDef]) -> Expr {
     match &expr {
         // === Identity / Annihilation rules ===
 
-        // x & x → x, x & 0 → 0, x & -1 → x, const & mask noop
+        // x & x → x, x & 0 → 0, x & -1 → x, const & mask noop,
+        // and absorption: (x | y) & x → x, x & (x | y) → x.
         Expr::BinOp(BinOpKind::And, left, right) => {
             if left == right || same_varnode(*left, *right, vars) {
                 Expr::Var(*left)
@@ -1908,6 +1909,20 @@ fn simplify_expr(expr: Expr, vars: &[VarDef]) -> Expr {
                 Expr::Var(*right)
             } else if is_const_mask_noop(*left, *right, vars) {
                 Expr::Var(*left)
+            } else if let Expr::BinOp(BinOpKind::Or, l, r) = &vars[right.0 as usize].expr {
+                // x & (x | _) → x; x & (_ | x) → x.
+                if *l == *left || *r == *left {
+                    Expr::Var(*left)
+                } else {
+                    expr
+                }
+            } else if let Expr::BinOp(BinOpKind::Or, l, r) = &vars[left.0 as usize].expr {
+                // (x | _) & x → x; (_ | x) & x → x.
+                if *l == *right || *r == *right {
+                    Expr::Var(*right)
+                } else {
+                    expr
+                }
             } else {
                 expr
             }
@@ -1955,16 +1970,24 @@ fn simplify_expr(expr: Expr, vars: &[VarDef]) -> Expr {
             // x + x → x * 2 → x << 1 (useful for MBA reduction)
             else if left == right || same_varnode(*left, *right, vars) {
                 Expr::BinOp(BinOpKind::Lsl, *left, *right) // approximate as shift
+            }
+            // x + (-y)  →  x - y. Pulls Add-with-negated-operand into
+            // the canonical Sub form so the printer formatter can drop
+            // the `" + -"` → `" - "` text rewrite later.
+            else if let Expr::UnaryOp(UnaryOpKind::Neg, y) = &vars[right.0 as usize].expr {
+                Expr::BinOp(BinOpKind::Sub, *left, *y)
+            } else if let Expr::UnaryOp(UnaryOpKind::Neg, y) = &vars[left.0 as usize].expr {
+                // (-y) + x  →  x - y
+                Expr::BinOp(BinOpKind::Sub, *right, *y)
             } else {
                 expr
             }
         }
-        // x - 0 → x, x - x → 0, 0 - x → -x.
-        // The third rule moves the printer.rs::post_process text rewrite
-        // `"0 - "` → `"-"` (audit P2 #1) into the SSA layer where the
-        // semantic invariant lives. Printer keeps a redundant text strip
-        // as belt-and-suspenders; after corpus validation the text rule
-        // can be retired.
+        // x - 0 → x, x - x → 0, 0 - x → -x, x - (-y) → x + y.
+        // The 0 - x rule moves the printer.rs::post_process text rewrite
+        // `"0 - "` → `"-"` (audit P2 #1) into the SSA layer. The
+        // x - (-y) rule canonicalizes nested negations so downstream
+        // pattern recognizers see a single Add/Sub shape.
         Expr::BinOp(BinOpKind::Sub, left, right) => {
             if is_const_zero(*right, vars) {
                 Expr::Var(*left)
@@ -1972,6 +1995,9 @@ fn simplify_expr(expr: Expr, vars: &[VarDef]) -> Expr {
                 Expr::Const(0, vars[left.0 as usize].size)
             } else if is_const_zero(*left, vars) {
                 Expr::UnaryOp(UnaryOpKind::Neg, *right)
+            } else if let Expr::UnaryOp(UnaryOpKind::Neg, y) = &vars[right.0 as usize].expr {
+                // x - (-y)  →  x + y
+                Expr::BinOp(BinOpKind::Add, *left, *y)
             } else {
                 expr
             }
