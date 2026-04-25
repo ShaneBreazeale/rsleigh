@@ -1,29 +1,32 @@
-pub mod ir;
-pub mod cfg;
-pub mod ssa;
-pub mod fold;
-pub mod dominators;
-pub mod structure;
-pub mod printer;
-pub mod imports;
-pub mod eh_frame;
-pub mod go_pclntab;
-pub mod dwarf;
-pub mod pdb_info;
-pub mod signatures;
-pub mod eqsat;
 pub mod analysis;
+pub mod cfg;
 pub mod cpp_class;
-mod signatures_libc;
-mod signatures_win32;
-mod signatures_python;
-pub mod seh_static;
-pub mod syscall_table;
+pub mod dominators;
+pub mod dwarf;
+pub mod eh_frame;
+pub mod eqsat;
+pub mod fold;
+pub mod go_pclntab;
+pub mod imports;
+pub mod ir;
+pub mod pdb_info;
 pub mod peb_walk;
+pub mod printer;
+pub mod seh_static;
+pub mod signatures;
+mod signatures_crypto;
+mod signatures_cxxabi;
+mod signatures_libc;
+mod signatures_msvcrt;
+mod signatures_python;
+mod signatures_win32;
+pub mod ssa;
+pub mod structure;
+pub mod syscall_table;
 
-use std::path::Path;
 use pcode_ir::Instruction;
 use rsleigh_api::Architecture;
+use std::path::Path;
 
 /// Detect calling convention from binary format and architecture.
 fn detect_cc(arch: Architecture, binary: Option<&[u8]>) -> fold::CallingConv {
@@ -51,14 +54,18 @@ fn detect_cc(arch: Architecture, binary: Option<&[u8]>) -> fold::CallingConv {
 }
 
 fn is_go_binary(binary: &[u8]) -> bool {
-    let Ok(obj) = goblin::Object::parse(binary) else { return false; };
+    let Ok(obj) = goblin::Object::parse(binary) else {
+        return false;
+    };
     match &obj {
-        goblin::Object::Elf(elf) => elf.section_headers.iter().any(|sh| {
-            elf.shdr_strtab.get_at(sh.sh_name) == Some(".gopclntab")
-        }),
-        goblin::Object::PE(pe) => pe.sections.iter().any(|s| {
-            s.name().ok() == Some(".gopclntab")
-        }),
+        goblin::Object::Elf(elf) => elf
+            .section_headers
+            .iter()
+            .any(|sh| elf.shdr_strtab.get_at(sh.sh_name) == Some(".gopclntab")),
+        goblin::Object::PE(pe) => pe
+            .sections
+            .iter()
+            .any(|s| s.name().ok() == Some(".gopclntab")),
         _ => false,
     }
 }
@@ -112,10 +119,18 @@ pub fn decompile_with_binary(
     // Apply DWARF debug info if available: replace param_N with actual names
     let debug_info = if let Some(path) = binary_path {
         let info = dwarf::parse_dwarf_from_path(path);
-        if !info.is_empty() { Some(info) } else { None }
+        if !info.is_empty() {
+            Some(info)
+        } else {
+            None
+        }
     } else if let Some(binary) = binary {
         let info = dwarf::parse_dwarf(binary);
-        if !info.is_empty() { Some(info) } else { None }
+        if !info.is_empty() {
+            Some(info)
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -125,10 +140,16 @@ pub fn decompile_with_binary(
         if let Some(path) = binary_path {
             pdb_info::parse_pdb_from_path(path)
         } else {
-            (std::collections::HashMap::new(), std::collections::HashMap::new())
+            (
+                std::collections::HashMap::new(),
+                std::collections::HashMap::new(),
+            )
         }
     } else {
-        (std::collections::HashMap::new(), std::collections::HashMap::new())
+        (
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+        )
     };
 
     // Merge: prefer DWARF, fall back to PDB
@@ -148,7 +169,10 @@ pub fn decompile_with_binary(
             // Apply parameter names
             for v in &mut ssa.vars {
                 if let Some(ref param_name) = v.param_name {
-                    if let Some(idx) = param_name.strip_prefix("param_").and_then(|s| s.parse::<usize>().ok()) {
+                    if let Some(idx) = param_name
+                        .strip_prefix("param_")
+                        .and_then(|s| s.parse::<usize>().ok())
+                    {
                         if let Some(dwarf_name) = info.param_names.get(idx) {
                             v.param_name = Some(dwarf_name.clone());
                         }
@@ -166,7 +190,9 @@ pub fn decompile_with_binary(
                     // Also try with 8-byte adjustment (CFA vs RBP frame base mismatch)
                     let adjusted = positive + 8;
                     let adj_name = format!("var_{:x}", adjusted);
-                    local_var_names.entry(adj_name).or_insert_with(|| name.clone());
+                    local_var_names
+                        .entry(adj_name)
+                        .or_insert_with(|| name.clone());
                 } else if *offset > 0 {
                     let var_name = format!("var_{:x}", *offset as u64);
                     local_var_names.insert(var_name, name.clone());
@@ -190,9 +216,18 @@ pub fn decompile_with_binary(
 
     // Resolve function name from import map or DWARF
     let func_addr = instructions[0].0;
-    let func_name = import_map.get(&func_addr).cloned()
-        .or_else(|| debug_info.as_ref().and_then(|di| di.get(&func_addr).and_then(|f|
-            Some(f.param_names.first()?.clone()))).and(None)) // DWARF doesn't have func name easily
+    let func_name = import_map
+        .get(&func_addr)
+        .cloned()
+        .or_else(|| {
+            debug_info
+                .as_ref()
+                .and_then(|di| {
+                    di.get(&func_addr)
+                        .and_then(|f| Some(f.param_names.first()?.clone()))
+                })
+                .and(None)
+        }) // DWARF doesn't have func name easily
         .unwrap_or_else(|| format!("func_{:x}", func_addr));
 
     // Resolve try/catch regions from .eh_frame LSDA (C++ only; empty otherwise).
@@ -205,7 +240,17 @@ pub fn decompile_with_binary(
     let try_regions = try_regions_map.get(&func_addr).unwrap_or(&empty_regions);
 
     let structured = structure::recover_structure(&ssa, &cfg);
-    printer::print_c_with_try(&structured, &ssa, arch, binary, &import_map, &local_var_names, &struct_fields, &func_name, try_regions)
+    printer::print_c_with_try(
+        &structured,
+        &ssa,
+        arch,
+        binary,
+        &import_map,
+        &local_var_names,
+        &struct_fields,
+        &func_name,
+        try_regions,
+    )
 }
 
 /// Learned type information for a function, extracted after decompilation.
@@ -213,8 +258,8 @@ pub fn decompile_with_binary(
 #[derive(Debug, Clone)]
 pub struct LearnedFuncType {
     pub addr: u64,
-    pub param_types: Vec<Option<&'static str>>,  // display_type per param (None = unknown)
-    pub return_type: Option<&'static str>,         // display_type of return value
+    pub param_types: Vec<Option<&'static str>>, // display_type per param (None = unknown)
+    pub return_type: Option<&'static str>,      // display_type of return value
 }
 
 /// Extract type information from a function's SSA (after fold pass).
@@ -225,7 +270,9 @@ pub fn extract_learned_types(
     instructions: &[(u64, Instruction)],
     binary: Option<&[u8]>,
 ) -> Option<LearnedFuncType> {
-    if instructions.is_empty() { return None; }
+    if instructions.is_empty() {
+        return None;
+    }
 
     let mut expanded = Vec::new();
     for (addr, inst) in instructions {
@@ -233,7 +280,9 @@ pub fn extract_learned_types(
     }
 
     let cfg = cfg::build_cfg(&expanded);
-    if cfg.blocks.is_empty() { return None; }
+    if cfg.blocks.is_empty() {
+        return None;
+    }
 
     let import_map = binary
         .map(|b| imports::resolve_imports(b))
@@ -252,7 +301,10 @@ pub fn extract_learned_types(
     let mut params: Vec<(u32, Option<&'static str>)> = Vec::new();
     for v in &ssa.vars {
         if let Some(ref name) = v.param_name {
-            if let Some(idx) = name.strip_prefix("param_").and_then(|s| s.parse::<u32>().ok()) {
+            if let Some(idx) = name
+                .strip_prefix("param_")
+                .and_then(|s| s.parse::<u32>().ok())
+            {
                 params.push((idx, v.display_type));
             }
         }
@@ -275,8 +327,10 @@ pub fn extract_learned_types(
 
     // Also detect non-void return even without display_type:
     // If any Return terminator has Some(var), the function returns a value.
-    let has_return_val = ssa.blocks.iter().any(|b|
-        matches!(&b.terminator, ir::SsaTerminator::Return(Some(_))));
+    let has_return_val = ssa
+        .blocks
+        .iter()
+        .any(|b| matches!(&b.terminator, ir::SsaTerminator::Return(Some(_))));
     if has_return_val && return_type.is_none() {
         // We know it returns something, just don't know the display type.
         // Mark as "int" (conservative — better than void).
@@ -285,7 +339,11 @@ pub fn extract_learned_types(
 
     // Only return if we learned something useful
     if param_types.iter().any(|t| t.is_some()) || return_type.is_some() {
-        Some(LearnedFuncType { addr: func_addr, param_types, return_type })
+        Some(LearnedFuncType {
+            addr: func_addr,
+            param_types,
+            return_type,
+        })
     } else {
         None
     }
@@ -304,10 +362,7 @@ pub struct LearnedStructParam {
 /// Parses "// param_N is STRUCT_NAME *" comments emitted by the printer's struct identification.
 /// Also parses call sites to learn which arguments are struct pointers, enabling
 /// propagation to callees.
-pub fn extract_learned_structs(
-    func_addr: u64,
-    output: &str,
-) -> Vec<LearnedStructParam> {
+pub fn extract_learned_structs(func_addr: u64, output: &str) -> Vec<LearnedStructParam> {
     let mut results = Vec::new();
 
     for line in output.lines() {
@@ -344,16 +399,22 @@ pub fn infer_returns_from_callsites(
     instructions: &[(u64, Instruction)],
     binary: Option<&[u8]>,
 ) -> Vec<(u64, &'static str)> {
-    if instructions.is_empty() { return Vec::new(); }
+    if instructions.is_empty() {
+        return Vec::new();
+    }
 
     let mut expanded = Vec::new();
     for (addr, inst) in instructions {
         expanded.push((*addr, inst.clone()));
     }
     let cfg_result = cfg::build_cfg(&expanded);
-    if cfg_result.blocks.is_empty() { return Vec::new(); }
+    if cfg_result.blocks.is_empty() {
+        return Vec::new();
+    }
 
-    let import_map = binary.map(|b| imports::resolve_imports(b)).unwrap_or_default();
+    let import_map = binary
+        .map(|b| imports::resolve_imports(b))
+        .unwrap_or_default();
     let cc = detect_cc(arch, binary);
     let mut ssa = ssa::build_ssa_with_cc(&cfg_result, cc);
 
@@ -364,14 +425,18 @@ pub fn infer_returns_from_callsites(
     // Check Call terminators: if the fallthrough block reads EAX, the call returns a value
     for bi in 0..ssa.blocks.len() {
         let (target_addr, ft) = match &ssa.blocks[bi].terminator {
-            ir::SsaTerminator::Call { target: ir::CallTarget::Direct(addr), fallthrough, .. } => {
-                (*addr, fallthrough.0)
-            }
+            ir::SsaTerminator::Call {
+                target: ir::CallTarget::Direct(addr),
+                fallthrough,
+                ..
+            } => (*addr, fallthrough.0),
             _ => continue,
         };
 
         // Skip known imports (they already have signatures)
-        if import_map.contains_key(&target_addr) { continue; }
+        if import_map.contains_key(&target_addr) {
+            continue;
+        }
 
         // Check if the fallthrough block reads the call return register
         if ft < ssa.blocks.len() {
@@ -391,8 +456,15 @@ pub fn infer_returns_from_callsites(
     // Also check Stmt::Call with out variable that has use_count > 0
     for block in &ssa.blocks {
         for stmt in &block.stmts {
-            if let ir::Stmt::Call { target: ir::CallTarget::Direct(addr), out: Some(out_var), .. } = stmt {
-                if import_map.contains_key(addr) { continue; }
+            if let ir::Stmt::Call {
+                target: ir::CallTarget::Direct(addr),
+                out: Some(out_var),
+                ..
+            } = stmt
+            {
+                if import_map.contains_key(addr) {
+                    continue;
+                }
                 let vdef = &ssa.vars[out_var.0 as usize];
                 if vdef.use_count > 0 {
                     results.push((*addr, "int"));

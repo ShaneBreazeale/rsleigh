@@ -36,34 +36,34 @@ pub enum SigType {
     DWord,
     LpVoid,
     // Fine-grained Win32 handle/typedef types
-    HKey,       // HKEY — registry key handle
-    HModule,    // HMODULE — module handle
-    Hwnd,       // HWND — window handle
-    HIcon,      // HICON — icon handle
-    HBrush,     // HBRUSH — brush handle
-    HDc,        // HDC — device context handle
-    HBitmap,    // HBITMAP — bitmap handle
-    HFont,      // HFONT — font handle
-    HMenu,      // HMENU — menu handle
-    HInstance,  // HINSTANCE — instance handle (= HMODULE)
-    LResult,    // LRESULT — long return value
-    WParam,     // WPARAM — message parameter (uint_ptr)
-    LParam,     // LPARAM — message parameter (long_ptr)
-    Atom,       // ATOM — atom handle (ushort)
-    LpCStr,     // LPCSTR = const char * (Win32 alias)
-    LpCWStr,    // LPCWSTR = const wchar_t * (Win32 alias)
-    LpStr,      // LPSTR = char * (Win32 alias)
-    LpWStr,     // LPWSTR = wchar_t * (Win32 alias)
-    LpByte,     // LPBYTE = unsigned char * (Win32 alias)
-    LpDWord,    // LPDWORD = unsigned long * (Win32 alias)
-    PhKey,      // PHKEY = HKEY * (pointer to registry key)
-    RegSam,     // REGSAM = unsigned long (registry access mask)
-    LStatus,    // LSTATUS = long (registry return status)
-    ScHandle,   // SC_HANDLE — service control handle
-    Ntstatus,   // NTSTATUS = long (NT status code)
-    HResult,    // HRESULT = long (COM return code)
-    Word,       // WORD = unsigned short
-    Byte,       // BYTE = unsigned char
+    HKey,      // HKEY — registry key handle
+    HModule,   // HMODULE — module handle
+    Hwnd,      // HWND — window handle
+    HIcon,     // HICON — icon handle
+    HBrush,    // HBRUSH — brush handle
+    HDc,       // HDC — device context handle
+    HBitmap,   // HBITMAP — bitmap handle
+    HFont,     // HFONT — font handle
+    HMenu,     // HMENU — menu handle
+    HInstance, // HINSTANCE — instance handle (= HMODULE)
+    LResult,   // LRESULT — long return value
+    WParam,    // WPARAM — message parameter (uint_ptr)
+    LParam,    // LPARAM — message parameter (long_ptr)
+    Atom,      // ATOM — atom handle (ushort)
+    LpCStr,    // LPCSTR = const char * (Win32 alias)
+    LpCWStr,   // LPCWSTR = const wchar_t * (Win32 alias)
+    LpStr,     // LPSTR = char * (Win32 alias)
+    LpWStr,    // LPWSTR = wchar_t * (Win32 alias)
+    LpByte,    // LPBYTE = unsigned char * (Win32 alias)
+    LpDWord,   // LPDWORD = unsigned long * (Win32 alias)
+    PhKey,     // PHKEY = HKEY * (pointer to registry key)
+    RegSam,    // REGSAM = unsigned long (registry access mask)
+    LStatus,   // LSTATUS = long (registry return status)
+    ScHandle,  // SC_HANDLE — service control handle
+    Ntstatus,  // NTSTATUS = long (NT status code)
+    HResult,   // HRESULT = long (COM return code)
+    Word,      // WORD = unsigned short
+    Byte,      // BYTE = unsigned char
     // Python C API typedefs
     PyObjectPtr,      // PyObject *
     ConstPyObjectPtr, // const PyObject *
@@ -140,32 +140,65 @@ impl SigType {
             SigType::Void => InferredType::Unknown,
             SigType::Bool => InferredType::Bool,
             // Signed integers
-            SigType::Int | SigType::Long | SigType::Fd | SigType::SockFd
-            | SigType::LStatus | SigType::Ntstatus | SigType::HResult
-            | SigType::LResult | SigType::LParam => InferredType::Signed,
+            SigType::Int
+            | SigType::Long
+            | SigType::Fd
+            | SigType::SockFd
+            | SigType::LStatus
+            | SigType::Ntstatus
+            | SigType::HResult
+            | SigType::LResult
+            | SigType::LParam => InferredType::Signed,
             // Unsigned integers
-            SigType::UInt | SigType::ULong | SigType::SizeT | SigType::DWord
-            | SigType::Word | SigType::Byte | SigType::RegSam | SigType::Atom
+            SigType::UInt
+            | SigType::ULong
+            | SigType::SizeT
+            | SigType::DWord
+            | SigType::Word
+            | SigType::Byte
+            | SigType::RegSam
+            | SigType::Atom
             | SigType::WParam => InferredType::Unsigned,
             // Handles (pointer-sized but semantically unsigned)
-            SigType::Handle | SigType::HKey | SigType::HModule | SigType::Hwnd
-            | SigType::HIcon | SigType::HBrush | SigType::HDc | SigType::HBitmap
-            | SigType::HFont | SigType::HMenu | SigType::HInstance
+            SigType::Handle
+            | SigType::HKey
+            | SigType::HModule
+            | SigType::Hwnd
+            | SigType::HIcon
+            | SigType::HBrush
+            | SigType::HDc
+            | SigType::HBitmap
+            | SigType::HFont
+            | SigType::HMenu
+            | SigType::HInstance
             | SigType::ScHandle => InferredType::Pointer,
             // Python scalars
             SigType::PySsizeT => InferredType::Signed,
             SigType::PyHashT => InferredType::Signed,
             SigType::PyRichCmpOp => InferredType::Signed,
             // Python pointers
-            SigType::PyObjectPtr | SigType::ConstPyObjectPtr | SigType::PyObjectPtrPtr
-            | SigType::PyTypeObjectPtr | SigType::PyFrameObjectPtr
+            SigType::PyObjectPtr
+            | SigType::ConstPyObjectPtr
+            | SigType::PyObjectPtrPtr
+            | SigType::PyTypeObjectPtr
+            | SigType::PyFrameObjectPtr
             | SigType::PyCFunction => InferredType::Pointer,
             // Pointers
-            SigType::CharPtr | SigType::ConstCharPtr | SigType::VoidPtr
-            | SigType::ConstVoidPtr | SigType::FilePtr | SigType::WCharPtr
-            | SigType::ConstWCharPtr | SigType::LpVoid | SigType::LpStr
-            | SigType::LpCStr | SigType::LpWStr | SigType::LpCWStr
-            | SigType::LpByte | SigType::LpDWord | SigType::PhKey => InferredType::Pointer,
+            SigType::CharPtr
+            | SigType::ConstCharPtr
+            | SigType::VoidPtr
+            | SigType::ConstVoidPtr
+            | SigType::FilePtr
+            | SigType::WCharPtr
+            | SigType::ConstWCharPtr
+            | SigType::LpVoid
+            | SigType::LpStr
+            | SigType::LpCStr
+            | SigType::LpWStr
+            | SigType::LpCWStr
+            | SigType::LpByte
+            | SigType::LpDWord
+            | SigType::PhKey => InferredType::Pointer,
         }
     }
 }
@@ -268,6 +301,15 @@ static SIGNATURE_MAP: LazyLock<HashMap<&'static str, &'static FuncSig>> = LazyLo
     for sig in crate::signatures_python::PYTHON_SIGNATURES {
         map.insert(sig.name, sig);
     }
+    for sig in crate::signatures_cxxabi::CXXABI_SIGNATURES {
+        map.insert(sig.name, sig);
+    }
+    for sig in crate::signatures_msvcrt::MSVCRT_SIGNATURES {
+        map.insert(sig.name, sig);
+    }
+    for sig in crate::signatures_crypto::CRYPTO_SIGNATURES {
+        map.insert(sig.name, sig);
+    }
     // Load embedded compressed signature database (36K+ sigs, ~320KB gzipped)
     load_embedded_tsv(&mut map);
     // Load Qt5 library signatures (23K+ sigs from libQt5Core/Gui/Widgets/...)
@@ -310,22 +352,32 @@ fn load_embedded_tsv(map: &mut HashMap<&'static str, &'static FuncSig>) {
 
     for line in text.lines() {
         let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 4 { continue; }
+        if parts.len() < 4 {
+            continue;
+        }
 
         let name = parts[0];
-        if map.contains_key(name) { continue; } // macro sigs take priority
+        if map.contains_key(name) {
+            continue;
+        } // macro sigs take priority
 
         let ret = tsv_type_code(parts[1]);
 
         let params: Vec<SigParam> = if parts[2].is_empty() {
             Vec::new()
         } else {
-            parts[2].split(',').map(|p| {
-                let mut it = p.splitn(2, ':');
-                let pname = it.next().unwrap_or("arg");
-                let ptype = tsv_type_code(it.next().unwrap_or("i"));
-                SigParam { name: leak_str(pname), ty: ptype }
-            }).collect()
+            parts[2]
+                .split(',')
+                .map(|p| {
+                    let mut it = p.splitn(2, ':');
+                    let pname = it.next().unwrap_or("arg");
+                    let ptype = tsv_type_code(it.next().unwrap_or("i"));
+                    SigParam {
+                        name: leak_str(pname),
+                        ty: ptype,
+                    }
+                })
+                .collect()
         };
 
         let variadic = parts[3] == "1";
@@ -355,19 +407,29 @@ fn load_embedded_qt_tsv(map: &mut HashMap<&'static str, &'static FuncSig>) {
     }
     for line in text.lines() {
         let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 4 { continue; }
+        if parts.len() < 4 {
+            continue;
+        }
         let name = parts[0];
-        if map.contains_key(name) { continue; }
+        if map.contains_key(name) {
+            continue;
+        }
         let ret = tsv_type_code(parts[1]);
         let params: Vec<SigParam> = if parts[2].is_empty() {
             Vec::new()
         } else {
-            parts[2].split(',').map(|p| {
-                let mut it = p.splitn(2, ':');
-                let pname = it.next().unwrap_or("arg");
-                let ptype = tsv_type_code(it.next().unwrap_or("i"));
-                SigParam { name: leak_str(pname), ty: ptype }
-            }).collect()
+            parts[2]
+                .split(',')
+                .map(|p| {
+                    let mut it = p.splitn(2, ':');
+                    let pname = it.next().unwrap_or("arg");
+                    let ptype = tsv_type_code(it.next().unwrap_or("i"));
+                    SigParam {
+                        name: leak_str(pname),
+                        ty: ptype,
+                    }
+                })
+                .collect()
         };
         let variadic = parts[3] == "1";
         let sig = FuncSig {
@@ -384,15 +446,21 @@ fn load_embedded_qt_tsv(map: &mut HashMap<&'static str, &'static FuncSig>) {
 /// Load curated JSON signatures (supplements TSV with hand-written entries).
 fn load_embedded_json(map: &mut HashMap<&'static str, &'static FuncSig>) {
     let json_str = include_str!("../data/signatures.json");
-    let Ok(entries) = serde_json::from_str::<Vec<JsonSigEntry>>(json_str) else { return };
+    let Ok(entries) = serde_json::from_str::<Vec<JsonSigEntry>>(json_str) else {
+        return;
+    };
     for entry in &entries {
-        if map.contains_key(entry.name.as_str()) { continue; }
-        let params: Vec<SigParam> = entry.params.iter().map(|p| {
-            SigParam {
+        if map.contains_key(entry.name.as_str()) {
+            continue;
+        }
+        let params: Vec<SigParam> = entry
+            .params
+            .iter()
+            .map(|p| SigParam {
                 name: leak_str(&clean_param_name(&p.name)),
                 ty: ghidra_type_to_sigtype(&p.ty),
-            }
-        }).collect();
+            })
+            .collect();
         let sig = FuncSig {
             name: leak_str(&entry.name),
             ret: ghidra_type_to_sigtype(&entry.ret),
@@ -443,7 +511,8 @@ static RUNTIME_SIGS: std::sync::OnceLock<RuntimeSigStore> = std::sync::OnceLock:
 
 /// Address-based learned type store for interprocedural propagation.
 /// Populated by two-pass decompilation: first pass learns types, second pass uses them.
-static LEARNED_SIGS: std::sync::OnceLock<std::sync::Mutex<HashMap<u64, &'static FuncSig>>> = std::sync::OnceLock::new();
+static LEARNED_SIGS: std::sync::OnceLock<std::sync::Mutex<HashMap<u64, &'static FuncSig>>> =
+    std::sync::OnceLock::new();
 
 /// Register learned function types from the first decompilation pass.
 /// These are used by the second pass to type internal function parameters.
@@ -454,15 +523,18 @@ pub fn register_learned_types(types: &[crate::LearnedFuncType]) {
         if lt.param_types.iter().all(|t| t.is_none()) && lt.return_type.is_none() {
             continue;
         }
-        let params: Vec<SigParam> = lt.param_types.iter().enumerate().map(|(i, dt)| {
-            SigParam {
+        let params: Vec<SigParam> = lt
+            .param_types
+            .iter()
+            .enumerate()
+            .map(|(i, dt)| SigParam {
                 name: leak_str(&format!("param_{}", i)),
                 ty: match dt {
                     Some(s) => c_str_to_sigtype(s),
                     None => SigType::Int,
                 },
-            }
-        }).collect();
+            })
+            .collect();
         let ret = match lt.return_type {
             Some(s) => c_str_to_sigtype(s),
             None => SigType::Void,
@@ -530,7 +602,8 @@ fn c_str_to_sigtype(s: &str) -> SigType {
 
 /// Learned struct parameter store for cross-function struct propagation.
 /// Maps (func_addr, param_index) → struct_name.
-static LEARNED_STRUCTS: std::sync::OnceLock<std::sync::Mutex<HashMap<(u64, u32), String>>> = std::sync::OnceLock::new();
+static LEARNED_STRUCTS: std::sync::OnceLock<std::sync::Mutex<HashMap<(u64, u32), String>>> =
+    std::sync::OnceLock::new();
 
 /// Register learned struct parameters from the first decompilation pass.
 /// These are used by the second pass to propagate struct types to callers/callees.
@@ -583,12 +656,14 @@ pub fn load_json(json_str: &str) -> Result<usize, String> {
     let mut storage: Vec<Box<dyn std::any::Any + Send + Sync>> = Vec::new();
 
     for entry in &entries {
-        let params: Vec<SigParam> = entry.params.iter().map(|p| {
-            SigParam {
+        let params: Vec<SigParam> = entry
+            .params
+            .iter()
+            .map(|p| SigParam {
                 name: leak_str(&clean_param_name(&p.name)),
                 ty: ghidra_type_to_sigtype(&p.ty),
-            }
-        }).collect();
+            })
+            .collect();
         let params_ref: &'static [SigParam] = Box::leak(params.into_boxed_slice());
 
         let sig = FuncSig {
@@ -604,7 +679,10 @@ pub fn load_json(json_str: &str) -> Result<usize, String> {
     let count = map.len();
     storage.push(Box::new(())); // placeholder to keep _storage non-empty
 
-    let _ = RUNTIME_SIGS.set(RuntimeSigStore { map, _storage: storage });
+    let _ = RUNTIME_SIGS.set(RuntimeSigStore {
+        map,
+        _storage: storage,
+    });
     Ok(count)
 }
 
@@ -621,13 +699,15 @@ fn leak_str(s: &str) -> &'static str {
 
 fn clean_param_name(name: &str) -> String {
     let n = name.trim_start_matches('_');
-    if n.is_empty() { return "arg".to_string(); }
+    if n.is_empty() {
+        return "arg".to_string();
+    }
     // Rust keywords
     match n {
-        "type" | "fn" | "mod" | "self" | "super" | "use" | "in" | "ref" | "mut"
-        | "loop" | "match" | "if" | "else" | "return" | "struct" | "enum"
-        | "trait" | "impl" | "as" | "where" | "break" | "continue" | "for"
-        | "while" | "pub" | "const" | "static" | "let" | "move" | "unsafe" => {
+        "type" | "fn" | "mod" | "self" | "super" | "use" | "in" | "ref" | "mut" | "loop"
+        | "match" | "if" | "else" | "return" | "struct" | "enum" | "trait" | "impl" | "as"
+        | "where" | "break" | "continue" | "for" | "while" | "pub" | "const" | "static" | "let"
+        | "move" | "unsafe" => {
             format!("{}_", n)
         }
         _ => n.to_string(),
@@ -655,7 +735,11 @@ fn ghidra_type_to_sigtype(ty: &str) -> SigType {
         "FILE *" => SigType::FilePtr,
         _ if t.ends_with(" *") || t.ends_with(" * *") => {
             if t.contains("char") && !t.contains("* *") {
-                if t.contains("wchar") { SigType::WCharPtr } else { SigType::CharPtr }
+                if t.contains("wchar") {
+                    SigType::WCharPtr
+                } else {
+                    SigType::CharPtr
+                }
             } else {
                 SigType::VoidPtr
             }
@@ -731,22 +815,39 @@ mod tests {
     fn python_coverage() {
         // Representative sample — one from each protocol the sig pack covers.
         for name in [
-            "PyObject_GetAttr", "PyObject_RichCompare", "PyObject_Call",
-            "PyNumber_Add", "PyNumber_Remainder",
-            "PyLong_FromLong", "PyLong_AsLongLong",
+            "PyObject_GetAttr",
+            "PyObject_RichCompare",
+            "PyObject_Call",
+            "PyNumber_Add",
+            "PyNumber_Remainder",
+            "PyLong_FromLong",
+            "PyLong_AsLongLong",
             "PyFloat_FromDouble",
-            "PyBytes_FromStringAndSize", "PyBytes_AsString",
-            "PyUnicode_FromString", "PyUnicode_AsUTF8", "PyUnicode_Join",
-            "PyDict_New", "PyDict_GetItem", "PyDict_SetItemString",
-            "PyList_New", "PyList_Append",
-            "PyTuple_New", "PyTuple_Pack",
-            "PySet_New", "PySet_Add",
+            "PyBytes_FromStringAndSize",
+            "PyBytes_AsString",
+            "PyUnicode_FromString",
+            "PyUnicode_AsUTF8",
+            "PyUnicode_Join",
+            "PyDict_New",
+            "PyDict_GetItem",
+            "PyDict_SetItemString",
+            "PyList_New",
+            "PyList_Append",
+            "PyTuple_New",
+            "PyTuple_Pack",
+            "PySet_New",
+            "PySet_Add",
             "PySlice_New",
-            "PySequence_Contains", "PyMapping_HasKey",
-            "PyErr_SetString", "PyErr_Occurred",
-            "PyImport_ImportModule", "PyModule_Create2",
-            "PyType_Ready", "PyType_GenericNew",
-            "PyArg_ParseTuple", "Py_BuildValue",
+            "PySequence_Contains",
+            "PyMapping_HasKey",
+            "PyErr_SetString",
+            "PyErr_Occurred",
+            "PyImport_ImportModule",
+            "PyModule_Create2",
+            "PyType_Ready",
+            "PyType_GenericNew",
+            "PyArg_ParseTuple",
+            "Py_BuildValue",
             "PyEval_GetBuiltins",
         ] {
             assert!(lookup(name).is_some(), "missing python sig: {}", name);
@@ -755,36 +856,187 @@ mod tests {
 
     #[test]
     fn libc_coverage() {
-        for name in ["printf", "fprintf", "sprintf", "snprintf", "puts", "fputs",
-                      "fgets", "fread", "fwrite", "fopen", "fclose", "fseek",
-                      "ftell", "feof", "ferror", "fflush", "fputc", "fgetc",
-                      "putchar", "getchar",
-                      "malloc", "calloc", "realloc", "free", "atoi", "atol",
-                      "strtol", "strtoul", "exit", "abort", "abs", "qsort",
-                      "strlen", "strcpy", "strncpy", "strcmp", "strncmp",
-                      "strcat", "strncat", "strchr", "strrchr", "strstr",
-                      "memcpy", "memset", "memmove", "memcmp", "strerror",
-                      "read", "write", "open", "close", "fork", "execve",
-                      "getpid", "sleep", "dup2", "pipe",
-                      "socket", "bind", "listen", "accept", "connect",
-                      "send", "recv", "sendto", "recvfrom",
-                      "setsockopt", "getsockopt", "shutdown"] {
+        for name in [
+            "printf",
+            "fprintf",
+            "sprintf",
+            "snprintf",
+            "puts",
+            "fputs",
+            "fgets",
+            "fread",
+            "fwrite",
+            "fopen",
+            "fclose",
+            "fseek",
+            "ftell",
+            "feof",
+            "ferror",
+            "fflush",
+            "fputc",
+            "fgetc",
+            "putchar",
+            "getchar",
+            "malloc",
+            "calloc",
+            "realloc",
+            "free",
+            "atoi",
+            "atol",
+            "strtol",
+            "strtoul",
+            "exit",
+            "abort",
+            "abs",
+            "qsort",
+            "strlen",
+            "strcpy",
+            "strncpy",
+            "strcmp",
+            "strncmp",
+            "strcat",
+            "strncat",
+            "strchr",
+            "strrchr",
+            "strstr",
+            "memcpy",
+            "memset",
+            "memmove",
+            "memcmp",
+            "strerror",
+            "read",
+            "write",
+            "open",
+            "close",
+            "fork",
+            "execve",
+            "getpid",
+            "sleep",
+            "dup2",
+            "pipe",
+            "socket",
+            "bind",
+            "listen",
+            "accept",
+            "connect",
+            "send",
+            "recv",
+            "sendto",
+            "recvfrom",
+            "setsockopt",
+            "getsockopt",
+            "shutdown",
+        ] {
             assert!(lookup(name).is_some(), "missing libc sig: {}", name);
         }
     }
 
     #[test]
     fn win32_coverage() {
-        for name in ["VirtualAlloc", "VirtualFree", "VirtualProtect",
-                      "CreateFileA", "CreateFileW", "ReadFile", "WriteFile",
-                      "CloseHandle", "GetProcAddress", "LoadLibraryA", "LoadLibraryW",
-                      "GetModuleHandleA", "GetModuleHandleW",
-                      "CreateProcessA", "CreateProcessW",
-                      "CreateRemoteThread", "WriteProcessMemory",
-                      "GetLastError", "SetLastError",
-                      "HeapAlloc", "HeapFree",
-                      "RegOpenKeyExA", "RegSetValueExA"] {
+        for name in [
+            "VirtualAlloc",
+            "VirtualFree",
+            "VirtualProtect",
+            "CreateFileA",
+            "CreateFileW",
+            "ReadFile",
+            "WriteFile",
+            "CloseHandle",
+            "GetProcAddress",
+            "LoadLibraryA",
+            "LoadLibraryW",
+            "GetModuleHandleA",
+            "GetModuleHandleW",
+            "CreateProcessA",
+            "CreateProcessW",
+            "CreateRemoteThread",
+            "WriteProcessMemory",
+            "GetLastError",
+            "SetLastError",
+            "HeapAlloc",
+            "HeapFree",
+            "RegOpenKeyExA",
+            "RegSetValueExA",
+        ] {
             assert!(lookup(name).is_some(), "missing win32 sig: {}", name);
+        }
+    }
+
+    #[test]
+    fn cxxabi_coverage() {
+        for name in [
+            "__cxa_throw",
+            "__cxa_allocate_exception",
+            "__cxa_begin_catch",
+            "__cxa_end_catch",
+            "__cxa_pure_virtual",
+            "__cxa_atexit",
+            "__cxa_finalize",
+            "__cxa_demangle",
+            "__cxa_guard_acquire",
+            "__cxa_guard_release",
+            "__dynamic_cast",
+            "_Unwind_RaiseException",
+            "_Unwind_Resume",
+            "_Unwind_GetIP",
+            "_Znwm",
+            "_Znam",
+            "_ZdlPv",
+            "_ZdaPv",
+        ] {
+            assert!(lookup(name).is_some(), "missing C++ ABI sig: {}", name);
+        }
+    }
+
+    #[test]
+    fn msvcrt_coverage() {
+        for name in [
+            "__security_check_cookie",
+            "__report_gsfailure",
+            "_invalid_parameter",
+            "_CrtDbgReport",
+            "_CrtSetDbgFlag",
+            "__stdio_common_vfprintf",
+            "__stdio_common_vsprintf",
+            "_wfopen",
+            "fopen_s",
+            "strcpy_s",
+            "memcpy_s",
+            "_aligned_malloc",
+            "_aligned_free",
+            "_msize",
+            "_initterm",
+            "__p__commode",
+        ] {
+            assert!(lookup(name).is_some(), "missing MSVC CRT sig: {}", name);
+        }
+    }
+
+    #[test]
+    fn crypto_coverage() {
+        for name in [
+            "EVP_MD_CTX_new",
+            "EVP_DigestInit_ex",
+            "EVP_DigestUpdate",
+            "EVP_sha256",
+            "EVP_aes_256_gcm",
+            "MD5",
+            "SHA1",
+            "SHA256",
+            "HMAC",
+            "RAND_bytes",
+            "BN_new",
+            "EVP_PKEY_new",
+            "RSA_new",
+            "RSA_public_encrypt",
+            "SSL_CTX_new",
+            "SSL_read",
+            "SSL_write",
+            "TLS_client_method",
+            "ERR_get_error",
+            "getrandom",
+        ] {
+            assert!(lookup(name).is_some(), "missing crypto sig: {}", name);
         }
     }
 
@@ -799,11 +1051,24 @@ mod tests {
     #[test]
     fn embedded_json_loads() {
         // These are only in the JSON database, not the macro files
-        for name in ["mmap", "pthread_create", "dlopen", "epoll_create",
-                      "CreateToolhelp32Snapshot", "Process32First",
-                      "WSAStartup", "InternetOpenA", "IsDebuggerPresent",
-                      "NtQueryInformationProcess", "TlsAlloc"] {
-            assert!(lookup(name).is_some(), "missing from embedded JSON: {}", name);
+        for name in [
+            "mmap",
+            "pthread_create",
+            "dlopen",
+            "epoll_create",
+            "CreateToolhelp32Snapshot",
+            "Process32First",
+            "WSAStartup",
+            "InternetOpenA",
+            "IsDebuggerPresent",
+            "NtQueryInformationProcess",
+            "TlsAlloc",
+        ] {
+            assert!(
+                lookup(name).is_some(),
+                "missing from embedded JSON: {}",
+                name
+            );
         }
     }
 
