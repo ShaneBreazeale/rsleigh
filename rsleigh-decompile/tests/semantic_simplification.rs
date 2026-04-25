@@ -167,6 +167,69 @@ fn boolnot_boolnot_x_folds_away_double_negation() {
 }
 
 #[test]
+fn x_div_one_folds_away_the_div() {
+    let vars = vec![
+        vd(0, Expr::Const(42, 4), 4),
+        vd(1, Expr::Const(1, 4), 4),
+        vd(
+            2,
+            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::Div, VarId(0), VarId(1)),
+            4,
+        ),
+    ];
+    let ssa = run_fold(vars, 2);
+    // x/1 must collapse — either to Var(0) or to a folded Const(42).
+    let ok = matches!(
+        ssa.vars[2].expr,
+        Expr::Var(VarId(0)) | Expr::Const(42, _)
+    );
+    assert!(ok, "x/1 must collapse; got {:?}", ssa.vars[2].expr);
+}
+
+#[test]
+fn x_rem_one_folds_to_zero() {
+    let vars = vec![
+        vd(0, Expr::Const(42, 4), 4),
+        vd(1, Expr::Const(1, 4), 4),
+        vd(
+            2,
+            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::Rem, VarId(0), VarId(1)),
+            4,
+        ),
+    ];
+    let ssa = run_fold(vars, 2);
+    match ssa.vars[2].expr {
+        Expr::Const(0, _) => {}
+        ref other => panic!("expected Const(0, _), got {:?}", other),
+    }
+}
+
+#[test]
+fn x_xor_all_ones_canonicalizes_to_not() {
+    // var0 = unknown
+    // var1 = -1 (4-byte: 0xFFFFFFFF)
+    // var2 = var0 ^ var1   →  must fold to UnaryOp(Not, var0)
+    let vars = vec![
+        vd(0, Expr::Unknown, 4),
+        vd(1, Expr::Const(0xFFFF_FFFF, 4), 4),
+        vd(
+            2,
+            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::Xor, VarId(0), VarId(1)),
+            4,
+        ),
+    ];
+    let ssa = run_fold(vars, 2);
+    assert!(
+        !matches!(
+            &ssa.vars[2].expr,
+            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::Xor, _, _)
+        ),
+        "x ^ -1 must canonicalize away the Xor; got {:?}",
+        ssa.vars[2].expr
+    );
+}
+
+#[test]
 fn x_minus_x_folds_to_zero() {
     // Idempotence check — the existing `x - x → 0` rule survives the new
     // `0 - x → -x` rule and isn't accidentally shadowed.

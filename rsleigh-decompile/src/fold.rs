@@ -1912,7 +1912,7 @@ fn simplify_expr(expr: Expr, vars: &[VarDef]) -> Expr {
                 expr
             }
         }
-        // x ^ x → 0, x ^ 0 → x, 0 ^ x → x
+        // x ^ x → 0, x ^ 0 → x, 0 ^ x → x, x ^ -1 → ~x
         Expr::BinOp(BinOpKind::Xor, left, right) => {
             if left == right || same_varnode(*left, *right, vars) {
                 Expr::Const(0, vars[left.0 as usize].size)
@@ -1920,6 +1920,12 @@ fn simplify_expr(expr: Expr, vars: &[VarDef]) -> Expr {
                 Expr::Var(*left)
             } else if is_const_zero(*left, vars) {
                 Expr::Var(*right)
+            } else if is_const_all_ones(*right, vars) {
+                // x ^ -1 ≡ ~x — canonicalize to bitwise-NOT so downstream
+                // recognizers see a single shape.
+                Expr::UnaryOp(UnaryOpKind::Not, *left)
+            } else if is_const_all_ones(*left, vars) {
+                Expr::UnaryOp(UnaryOpKind::Not, *right)
             } else {
                 expr
             }
@@ -1988,6 +1994,22 @@ fn simplify_expr(expr: Expr, vars: &[VarDef]) -> Expr {
         Expr::BinOp(BinOpKind::Lsr | BinOpKind::Lsl | BinOpKind::Asr, left, right) => {
             if is_const_zero(*right, vars) {
                 Expr::Var(*left)
+            } else {
+                expr
+            }
+        }
+        // x / 1 → x. Same family as x * 1 — pure identity.
+        Expr::BinOp(BinOpKind::Div | BinOpKind::SDiv, left, right) => {
+            if is_const_one(*right, vars) {
+                Expr::Var(*left)
+            } else {
+                expr
+            }
+        }
+        // x % 1 → 0. Pure identity over integers.
+        Expr::BinOp(BinOpKind::Rem | BinOpKind::SRem, left, right) => {
+            if is_const_one(*right, vars) {
+                Expr::Const(0, vars[left.0 as usize].size)
             } else {
                 expr
             }
