@@ -315,6 +315,27 @@ pub fn djb2_api(name: &str) -> u32 {
     djb2(&buf)
 }
 
+/// DJB2a — XOR variant of DJB2. `h = h * 33 ^ byte` instead of
+/// `h * 33 + byte`. Used by PyVMProtect v5 and several modern shellcode
+/// loaders that want a slightly different distribution from canonical
+/// DJB2 without changing the loop shape. Note: terminator byte is NOT
+/// folded in (loop exits on zero — like the canonical Bernstein "while
+/// (c = *str++)" form, the NUL is not part of the hash).
+pub fn djb2a(input: &[u8]) -> u32 {
+    let mut h: u32 = 5381;
+    for &b in input {
+        h = h.wrapping_mul(33) ^ (b as u32);
+    }
+    h
+}
+
+/// DJB2a over an API name with no NUL terminator — matches the
+/// `while (c = *str++) { hash = hash*33 ^ c }` loop in PyVMProtect v5
+/// where the terminator is the loop-exit signal, not a hashed input.
+pub fn djb2a_api(name: &str) -> u32 {
+    djb2a(name.as_bytes())
+}
+
 /// Simple additive hash: `h = sum(byte)` rotated left 1 each step.
 /// Seen in primitive shellcode (early Metasploit demos, some packers).
 /// Lower entropy than ROR13/DJB2 but widely deployed.
@@ -346,6 +367,8 @@ static HASH_INDEX: LazyLock<HashMap<u32, &'static str>> = LazyLock::new(|| {
         m.entry(ror13_module_api(module, name)).or_insert(name);
         // DJB2 — Cobalt Strike UDRL, several Donut variants.
         m.entry(djb2_api(name)).or_insert(name);
+        // DJB2a — PyVMProtect v5 + similar loaders.
+        m.entry(djb2a_api(name)).or_insert(name);
         // add+rotl1 — primitive shellcode.
         m.entry(add_rotl1_api(name)).or_insert(name);
     }
