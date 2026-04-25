@@ -221,7 +221,11 @@ fn rsleigh_op_to_norm(op: &PcodeOp) -> NormOp {
             Some(v(out)),
             vec![
                 v(input),
-                NormVar { space: AddressSpaceId::Const, offset: *lsb as u64, size: 4 },
+                NormVar {
+                    space: AddressSpaceId::Const,
+                    offset: *lsb as u64,
+                    size: 4
+                },
             ]
         ),
         IntCarry { out, left, right } => n!("IntCarry", Some(v(out)), vec![v(left), v(right)]),
@@ -253,7 +257,11 @@ fn rsleigh_op_to_norm(op: &PcodeOp) -> NormOp {
         FloatRound { out, input } => n!("FloatRound", Some(v(out)), vec![v(input)]),
         Popcount { out, input } => n!("Popcount", Some(v(out)), vec![v(input)]),
         Lzcount { out, input } => n!("Lzcount", Some(v(out)), vec![v(input)]),
-        CallOther { out, func_id, inputs } => {
+        CallOther {
+            out,
+            func_id,
+            inputs,
+        } => {
             let mut v_inputs = vec![NormVar {
                 space: AddressSpaceId::Const,
                 offset: *func_id,
@@ -355,12 +363,6 @@ fn parse_hex(s: &str) -> Vec<u8> {
 /// unexpectedly *passes* so the list cannot rot in the green direction.
 const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
     (
-        "arm32/mov_r0_imm.ghidra.json",
-        "ARM32 lifter emits Subpiece{Const(_,8), lsb=0} for 32-bit MOV \
-         immediates; Ghidra emits direct Copy{Const(_,4)}. Audit P-code \
-         IR section: byte-oriented Subpiece lowering loses precision.",
-    ),
-    (
         "arm32/bx_lr.ghidra.json",
         "ARM32 lifter omits the BX-LR thumb-mode state switch ops \
          (INT_AND/INT_NOTEQUAL/COPY into TB/ISAModeSwitch + CALLOTHER \
@@ -388,7 +390,11 @@ fn check_oracle(path: &Path) {
     assert_eq!(oracle.schema_version, 1, "{}", path.display());
 
     let arch = arch_from_string(&oracle.arch).unwrap_or_else(|| {
-        panic!("unmapped Ghidra arch in {}: {}", path.display(), oracle.arch)
+        panic!(
+            "unmapped Ghidra arch in {}: {}",
+            path.display(),
+            oracle.arch
+        )
     });
 
     assert!(
@@ -410,7 +416,8 @@ fn check_oracle(path: &Path) {
                 .unwrap_or_else(|e| panic!("rsleigh decode failed at {:#x}: {:?}", ins.addr, e));
 
             assert_eq!(
-                decoded.len as u32, ins.len,
+                decoded.len as u32,
+                ins.len,
                 "{}@{:#x}: instruction length mismatch (rsleigh={} ghidra={})",
                 path.display(),
                 ins.addr,
@@ -419,11 +426,7 @@ fn check_oracle(path: &Path) {
             );
 
             let mut rs_norm: Vec<NormOp> = decoded.ops.iter().map(rsleigh_op_to_norm).collect();
-            let mut gh_norm: Vec<NormOp> = ins
-                .pcode
-                .iter()
-                .filter_map(oracle_op_to_norm)
-                .collect();
+            let mut gh_norm: Vec<NormOp> = ins.pcode.iter().filter_map(oracle_op_to_norm).collect();
             normalize_uniques(&mut rs_norm);
             normalize_uniques(&mut gh_norm);
 
@@ -497,13 +500,29 @@ fn unique_normalization_is_stable() {
     let mut ops = vec![
         NormOp {
             mnemonic: "Copy",
-            out: Some(NormVar { space: Unique, offset: 0xdeadbeef, size: 8 }),
-            inputs: vec![NormVar { space: Register, offset: 0, size: 8 }],
+            out: Some(NormVar {
+                space: Unique,
+                offset: 0xdeadbeef,
+                size: 8,
+            }),
+            inputs: vec![NormVar {
+                space: Register,
+                offset: 0,
+                size: 8,
+            }],
         },
         NormOp {
             mnemonic: "Copy",
-            out: Some(NormVar { space: Register, offset: 24, size: 8 }),
-            inputs: vec![NormVar { space: Unique, offset: 0xdeadbeef, size: 8 }],
+            out: Some(NormVar {
+                space: Register,
+                offset: 24,
+                size: 8,
+            }),
+            inputs: vec![NormVar {
+                space: Unique,
+                offset: 0xdeadbeef,
+                size: 8,
+            }],
         },
     ];
     normalize_uniques(&mut ops);

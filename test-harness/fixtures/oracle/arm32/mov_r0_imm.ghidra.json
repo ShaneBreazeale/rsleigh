@@ -1,26 +1,16 @@
 {
   "schema_version": 1,
   "arch": "ARM:LE:32:v8",
-  "binary_sha256": "e613a9cebab09c6ffbc8e1e277bce1d97a25e760cc685eeadfd2c67f387bcd65",
+  "binary_sha256": "4fe69ba21347fe0f2f03a3eb8730330c767e5ef320aeb66f53f1d1d4fbb86fcf",
   "functions": [
     {
       "entry": 0,
       "name": "Reset",
       "blocks": [
-        {"start": 0, "end": 4, "succs": [4]}
+        {"start": 0, "end": 4, "succs": []}
       ],
       "instructions": [
         {"addr": 0, "len": 4, "bytes": "2a00a0e3", "disasm": "mov r0,#0x2a", "pcode": [{"op": "INT_RIGHT", "out": {"space": "unique", "offset": 23808, "size": 4}, "inputs": [{"space": "const", "offset": 42, "size": 4}, {"space": "const", "offset": 31, "size": 4}]}, {"op": "INT_EQUAL", "out": {"space": "unique", "offset": 24064, "size": 1}, "inputs": [{"space": "const", "offset": 0, "size": 1}, {"space": "const", "offset": 0, "size": 1}]}, {"op": "BOOL_AND", "out": {"space": "unique", "offset": 24320, "size": 1}, "inputs": [{"space": "unique", "offset": 24064, "size": 1}, {"space": "register", "offset": 98, "size": 1}]}, {"op": "INT_NOTEQUAL", "out": {"space": "unique", "offset": 24576, "size": 1}, "inputs": [{"space": "const", "offset": 0, "size": 1}, {"space": "const", "offset": 0, "size": 1}]}, {"op": "SUBPIECE", "out": {"space": "unique", "offset": 24832, "size": 1}, "inputs": [{"space": "unique", "offset": 23808, "size": 4}, {"space": "const", "offset": 0, "size": 4}]}, {"op": "BOOL_AND", "out": {"space": "unique", "offset": 25088, "size": 1}, "inputs": [{"space": "unique", "offset": 24576, "size": 1}, {"space": "unique", "offset": 24832, "size": 1}]}, {"op": "BOOL_OR", "out": {"space": "register", "offset": 104, "size": 1}, "inputs": [{"space": "unique", "offset": 24320, "size": 1}, {"space": "unique", "offset": 25088, "size": 1}]}, {"op": "COPY", "out": {"space": "register", "offset": 32, "size": 4}, "inputs": [{"space": "const", "offset": 42, "size": 4}]}, {"op": "INT_SLESS", "out": {"space": "register", "offset": 100, "size": 1}, "inputs": [{"space": "register", "offset": 32, "size": 4}, {"space": "const", "offset": 0, "size": 4}]}, {"op": "INT_EQUAL", "out": {"space": "register", "offset": 101, "size": 1}, "inputs": [{"space": "register", "offset": 32, "size": 4}, {"space": "const", "offset": 0, "size": 4}]}, {"op": "COPY", "out": {"space": "register", "offset": 102, "size": 1}, "inputs": [{"space": "register", "offset": 104, "size": 1}]}, {"op": "COPY", "out": {"space": "register", "offset": 103, "size": 1}, "inputs": [{"space": "register", "offset": 99, "size": 1}]}]}
-      ]
-    },
-    {
-      "entry": 4,
-      "name": "UndefinedInstruction",
-      "blocks": [
-        {"start": 4, "end": 8, "succs": []}
-      ],
-      "instructions": [
-        {"addr": 4, "len": 4, "bytes": "1eff2fe1", "disasm": "bx lr", "pcode": [{"op": "INT_AND", "out": {"space": "unique", "offset": 0, "size": 4}, "inputs": [{"space": "register", "offset": 88, "size": 4}, {"space": "const", "offset": 1, "size": 4}]}, {"op": "INT_NOTEQUAL", "out": {"space": "register", "offset": 120, "size": 1}, "inputs": [{"space": "unique", "offset": 0, "size": 4}, {"space": "const", "offset": 0, "size": 4}]}, {"op": "COPY", "out": {"space": "register", "offset": 105, "size": 1}, "inputs": [{"space": "register", "offset": 120, "size": 1}]}, {"op": "CALLOTHER", "inputs": [{"space": "const", "offset": 62, "size": 4}]}, {"op": "INT_AND", "out": {"space": "register", "offset": 92, "size": 4}, "inputs": [{"space": "register", "offset": 88, "size": 4}, {"space": "const", "offset": 4294967294, "size": 4}]}, {"op": "RETURN", "inputs": [{"space": "register", "offset": 92, "size": 4}]}]}
       ]
     }
   ]

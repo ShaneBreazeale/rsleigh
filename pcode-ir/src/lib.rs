@@ -218,6 +218,32 @@ fn optimize_once(ops: &mut Vec<PcodeOp>) {
         }
     }
 
+    // Pass 1b: collapse `Subpiece{Const(v, big), lsb=0}` → `Copy{Const(v', out.size)}`.
+    // ARM32 `mov rN, #imm8` lifts to a size-8 Const followed by Subpiece-to-4;
+    // Ghidra emits a single Copy of a size-4 Const. Mask the value to the
+    // output width so the truncation is explicit and the Const carries the
+    // correct size for downstream consumers.
+    for op in ops.iter_mut() {
+        if let PcodeOp::Subpiece { out, input, lsb: 0 } = op {
+            if input.space == AddressSpaceId::Const && input.size > out.size {
+                let mask: u64 = if out.size >= 8 {
+                    u64::MAX
+                } else {
+                    (1u64 << (out.size as u64 * 8)) - 1
+                };
+                let truncated = Varnode {
+                    space: AddressSpaceId::Const,
+                    offset: input.offset & mask,
+                    size: out.size,
+                };
+                *op = PcodeOp::Copy {
+                    out: *out,
+                    input: truncated,
+                };
+            }
+        }
+    }
+
     // Compute unique-varnode analysis once. Passes below share and recompute only
     // after structural mutations (removals). Indices in NextAccess::Read are
     // invalidated by any removal, so we must recompute after each ops.remove().
