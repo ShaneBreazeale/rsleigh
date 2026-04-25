@@ -1,16 +1,16 @@
-use std::collections::{HashMap, HashSet, VecDeque};
-use pcode_ir::{PcodeOp, Varnode, AddressSpaceId, get_output};
-use crate::ir::*;
 use crate::fold::CallingConv;
+use crate::ir::*;
+use pcode_ir::{get_output, AddressSpaceId, PcodeOp, Varnode};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Stack slot key: identifies a unique stack memory location.
 /// Keyed by (base register offset, displacement, access size) to prevent
 /// conflating different-sized accesses at the same offset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct SlotKey {
-    base_reg: u64,  // Frame register offset (RBP=40, x29=29, RSP=32, SP=256, GP=112)
-    disp: i64,      // Displacement from base
-    size: u32,      // Access size in bytes
+    base_reg: u64, // Frame register offset (RBP=40, x29=29, RSP=32, SP=256, GP=112)
+    disp: i64,     // Displacement from base
+    size: u32,     // Access size in bytes
 }
 
 type StackMap = HashMap<SlotKey, VarId>;
@@ -55,14 +55,14 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                 if block_preds.is_empty() {
                     continue; // Entry block — never re-process
                 }
-                let any_pred_changed = block_preds.iter().any(|pred| {
-                    prev_exit_vars[pred.0] != block_exit_vars[pred.0]
-                });
+                let any_pred_changed = block_preds
+                    .iter()
+                    .any(|pred| prev_exit_vars[pred.0] != block_exit_vars[pred.0]);
                 // Also check if any predecessor has new keys not in our current entry state
                 let any_new_keys = block_preds.iter().any(|pred| {
-                    block_exit_vars[pred.0].keys().any(|k| {
-                        !prev_exit_vars[pred.0].contains_key(k)
-                    })
+                    block_exit_vars[pred.0]
+                        .keys()
+                        .any(|k| !prev_exit_vars[pred.0].contains_key(k))
                 });
                 // Self-loop blocks (block is its own predecessor) must be re-processed
                 // on iteration 1 so that early Phi nodes can be created for loop accumulators.
@@ -138,9 +138,9 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                             && out.size > input.size
                         {
                             // Check if any later op in this instruction reads the output register
-                            let reads_later = inst_ops[i+1..].iter().any(|later_op| {
-                                pcode_ir::reads_varnode(later_op, out)
-                            });
+                            let reads_later = inst_ops[i + 1..]
+                                .iter()
+                                .any(|later_op| pcode_ir::reads_varnode(later_op, out));
                             if reads_later {
                                 // Snapshot the current value of the super-register
                                 // Process the Zext to get its VarId, but don't update current yet
@@ -167,7 +167,11 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                             && out.size == 16
                         {
                             if i + 1 < inst_ops.len() {
-                                if let PcodeOp::Copy { out: copy_out, input } = inst_ops[i + 1] {
+                                if let PcodeOp::Copy {
+                                    out: copy_out,
+                                    input,
+                                } = inst_ops[i + 1]
+                                {
                                     if copy_out.space == out.space
                                         && copy_out.offset == out.offset
                                         && input.space == AddressSpaceId::Const
@@ -200,29 +204,54 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                     // Get the CBranch condition varnode
                     let cond_vn = if let PcodeOp::CBranch { cond, .. } = inst_ops[cb_idx] {
                         *cond
-                    } else { unreachable!() };
+                    } else {
+                        unreachable!()
+                    };
 
                     // Process pre-CBranch ops normally (condition setup + then-value copies)
                     for (op_idx, op) in inst_ops[..cb_idx].iter().enumerate() {
-                        if skip_zero_copy.contains(&op_idx) { continue; }
-                        if let PcodeOp::IntZext { out, .. } = op {
-                            if deferred_zext.iter().any(|(vn, _)| vn == out) { continue; }
+                        if skip_zero_copy.contains(&op_idx) {
+                            continue;
                         }
-                        process_op(&mut ssa, &mut current, &mut local_stack, &mut slot_store_blocks, block.id.0, &mut stmts, op, cc);
+                        if let PcodeOp::IntZext { out, .. } = op {
+                            if deferred_zext.iter().any(|(vn, _)| vn == out) {
+                                continue;
+                            }
+                        }
+                        process_op(
+                            &mut ssa,
+                            &mut current,
+                            &mut local_stack,
+                            &mut slot_store_blocks,
+                            block.id.0,
+                            &mut stmts,
+                            op,
+                            cc,
+                        );
                     }
 
                     let cond_var = resolve_input(&mut ssa, &mut current, &cond_vn);
 
                     // Snapshot current state — Unique varnodes hold "then" values
-                    let then_state: HashMap<Varnode, VarId> = current.iter()
+                    let then_state: HashMap<Varnode, VarId> = current
+                        .iter()
                         .filter(|(vn, _)| vn.space == AddressSpaceId::Unique)
                         .map(|(vn, vid)| (*vn, *vid))
                         .collect();
 
                     // Process else-path ops (between CBranch and last op)
                     let last_idx = inst_ops.len() - 1;
-                    for op in &inst_ops[cb_idx+1..last_idx] {
-                        process_op(&mut ssa, &mut current, &mut local_stack, &mut slot_store_blocks, block.id.0, &mut stmts, op, cc);
+                    for op in &inst_ops[cb_idx + 1..last_idx] {
+                        process_op(
+                            &mut ssa,
+                            &mut current,
+                            &mut local_stack,
+                            &mut slot_store_blocks,
+                            block.id.0,
+                            &mut stmts,
+                            op,
+                            cc,
+                        );
                     }
 
                     // For each Unique varnode written in both then and else paths,
@@ -240,24 +269,42 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
 
                     // Process post-label ops (final assignment like IntZext)
                     if last_idx < inst_ops.len() {
-                        process_op(&mut ssa, &mut current, &mut local_stack, &mut slot_store_blocks, block.id.0, &mut stmts, inst_ops[last_idx], cc);
+                        process_op(
+                            &mut ssa,
+                            &mut current,
+                            &mut local_stack,
+                            &mut slot_store_blocks,
+                            block.id.0,
+                            &mut stmts,
+                            inst_ops[last_idx],
+                            cc,
+                        );
                     }
                 } else {
-                // Process remaining ops normally
-                for (op_idx, op) in inst_ops.iter().enumerate() {
-                    // Skip MOVSD zero-clobber copies
-                    if skip_zero_copy.contains(&op_idx) {
-                        continue;
-                    }
-                    // Skip ops we already handled as deferred Zext
-                    if let PcodeOp::IntZext { out, input } = op {
-                        if deferred_zext.iter().any(|(vn, _)| vn == out) {
+                    // Process remaining ops normally
+                    for (op_idx, op) in inst_ops.iter().enumerate() {
+                        // Skip MOVSD zero-clobber copies
+                        if skip_zero_copy.contains(&op_idx) {
                             continue;
                         }
-                    }
+                        // Skip ops we already handled as deferred Zext
+                        if let PcodeOp::IntZext { out, input } = op {
+                            if deferred_zext.iter().any(|(vn, _)| vn == out) {
+                                continue;
+                            }
+                        }
 
-                    process_op(&mut ssa, &mut current, &mut local_stack, &mut slot_store_blocks, block.id.0, &mut stmts, op, cc);
-                }
+                        process_op(
+                            &mut ssa,
+                            &mut current,
+                            &mut local_stack,
+                            &mut slot_store_blocks,
+                            block.id.0,
+                            &mut stmts,
+                            op,
+                            cc,
+                        );
+                    }
                 }
 
                 // Now apply deferred Zext writes
@@ -266,11 +313,13 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                 }
             }
 
-            let terminator = convert_terminator(&mut ssa, &mut current, &block.terminator, cc, &mut stmts);
+            let terminator =
+                convert_terminator(&mut ssa, &mut current, &block.terminator, cc, &mut stmts);
 
             // Build exit stack: inherit from forward predecessor + local stores
             let mut exit_stack: StackMap = if !block_preds.is_empty() {
-                block_preds.iter()
+                block_preds
+                    .iter()
                     .find(|p| p.0 < block.id.0)
                     .map(|p| block_exit_stack[p.0].clone())
                     .unwrap_or_default()
@@ -281,7 +330,8 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                 exit_stack.insert(*key, *var_id);
             }
 
-            if block_exit_vars[block.id.0] != current || block_exit_stack[block.id.0] != exit_stack {
+            if block_exit_vars[block.id.0] != current || block_exit_stack[block.id.0] != exit_stack
+            {
                 changed = true;
             }
             block_exit_vars[block.id.0] = current;
@@ -401,12 +451,19 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                     }
                 }
                 // Also re-link the terminator condition
-                if let SsaTerminator::CBranch { cond, taken, fallthrough } = &block.terminator {
+                if let SsaTerminator::CBranch {
+                    cond,
+                    taken,
+                    fallthrough,
+                } = &block.terminator
+                {
                     if let Some(&new_cond) = relink.get(cond) {
                         let t = *taken;
                         let f = *fallthrough;
                         ssa.blocks[bid].terminator = SsaTerminator::CBranch {
-                            cond: new_cond, taken: t, fallthrough: f,
+                            cond: new_cond,
+                            taken: t,
+                            fallthrough: f,
                         };
                     }
                 }
@@ -418,19 +475,31 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
             if !back_relink.is_empty() {
                 // Find successor blocks (exit targets from this loop header)
                 let successors: Vec<usize> = match &ssa.blocks[bid].terminator {
-                    SsaTerminator::CBranch { taken, fallthrough, .. } => {
+                    SsaTerminator::CBranch {
+                        taken, fallthrough, ..
+                    } => {
                         let mut s = Vec::new();
-                        if taken.0 != bid { s.push(taken.0); }
-                        if fallthrough.0 != bid { s.push(fallthrough.0); }
+                        if taken.0 != bid {
+                            s.push(taken.0);
+                        }
+                        if fallthrough.0 != bid {
+                            s.push(fallthrough.0);
+                        }
                         s
                     }
                     SsaTerminator::Fallthrough(b) | SsaTerminator::Branch(b) => {
-                        if b.0 != bid { vec![b.0] } else { vec![] }
+                        if b.0 != bid {
+                            vec![b.0]
+                        } else {
+                            vec![]
+                        }
                     }
                     _ => vec![],
                 };
                 for succ_bid in successors {
-                    if succ_bid >= ssa.blocks.len() { continue; }
+                    if succ_bid >= ssa.blocks.len() {
+                        continue;
+                    }
                     for stmt in &ssa.blocks[succ_bid].stmts {
                         if let Stmt::Assign(vid) = stmt {
                             let vi = vid.0 as usize;
@@ -452,7 +521,8 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                             };
                             if let Some(inner_id) = inner {
                                 if let Some(&phi_var) = back_relink.get(&inner_id) {
-                                    ssa.blocks[succ_bid].terminator = SsaTerminator::Return(Some(phi_var));
+                                    ssa.blocks[succ_bid].terminator =
+                                        SsaTerminator::Return(Some(phi_var));
                                 }
                             }
                         }
@@ -490,7 +560,9 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
 
         while let Some(bid) = worklist.pop_front() {
             iter_count += 1;
-            if iter_count > max_iterations { break; }
+            if iter_count > max_iterations {
+                break;
+            }
 
             let block_preds_list = &preds[bid];
             let mut new_entry: StackMap = HashMap::new();
@@ -510,7 +582,8 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                 }
 
                 for key in &all_keys {
-                    let pred_values: Vec<Option<VarId>> = block_preds_list.iter()
+                    let pred_values: Vec<Option<VarId>> = block_preds_list
+                        .iter()
                         .map(|pred| effective_exit[pred.0].get(key).copied())
                         .collect();
 
@@ -534,7 +607,8 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                         } else {
                             let slot_vn = Varnode {
                                 space: AddressSpaceId::Unique,
-                                offset: 0xF000_0000_u64.wrapping_add(key.disp as u64)
+                                offset: 0xF000_0000_u64
+                                    .wrapping_add(key.disp as u64)
                                     .wrapping_add(key.base_reg << 32),
                                 size: key.size,
                             };
@@ -598,10 +672,14 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                                     // - Phi: properly merged value at join point
                                     // - Local: same-block store→load (always safe)
                                     // - Readonly: slot only written in entry block (never changes)
-                                    let is_phi = matches!(&ssa.vars[stored_var.0 as usize].expr, Expr::Phi(_));
+                                    let is_phi = matches!(
+                                        &ssa.vars[stored_var.0 as usize].expr,
+                                        Expr::Phi(_)
+                                    );
                                     let is_local = local_stack_keys.contains(&key);
                                     // Check if this slot is only stored in the entry block
-                                    let is_readonly = slot_store_blocks.get(&key)
+                                    let is_readonly = slot_store_blocks
+                                        .get(&key)
                                         .map_or(false, |blocks| blocks.iter().all(|b| *b == 0));
                                     if is_phi || is_local || is_readonly {
                                         // If the stored VarId has a param_name but its expression
@@ -649,15 +727,23 @@ fn process_op(
                 local_stack.insert(key, val_var);
                 slot_store_blocks.entry(key).or_default().push(block_id);
             }
-            stmts.push(Stmt::Store { addr: addr_var, val: val_var });
+            stmts.push(Stmt::Store {
+                addr: addr_var,
+                val: val_var,
+            });
         }
-        PcodeOp::CallOther { func_id, inputs, out: None } => {
+        PcodeOp::CallOther {
+            func_id,
+            inputs,
+            out: None,
+        } => {
             // Void user-pcodeop (e.g. `software_interrupt(0x71)` on ARM swi).
             // Emit as a statement even though there's no output varnode — the
             // side effect itself is meaningful (it changes machine state the
             // decompiler cannot model, so surfacing the call keeps the
             // analyst informed).
-            let resolved: Vec<VarId> = inputs.iter()
+            let resolved: Vec<VarId> = inputs
+                .iter()
                 .map(|vn| resolve_input(ssa, current, vn))
                 .collect();
             // Allocate a synthetic var to hold the UserOp expr so the printer
@@ -669,7 +755,10 @@ fn process_op(
             };
             let var_id = ssa.new_var(
                 placeholder_vn,
-                Expr::UserOp { func_id, inputs: resolved },
+                Expr::UserOp {
+                    func_id,
+                    inputs: resolved,
+                },
                 0,
             );
             stmts.push(Stmt::Assign(var_id));
@@ -691,8 +780,7 @@ fn process_op(
                 } else {
                     build_expr(ssa, current, op)
                 };
-                let effective_size = float_semantic_size(&expr, &ssa.vars)
-                    .unwrap_or(out_vn.size);
+                let effective_size = float_semantic_size(&expr, &ssa.vars).unwrap_or(out_vn.size);
                 let var_id = ssa.new_var(out_vn, expr, effective_size);
                 current.insert(out_vn, var_id);
                 // Sub-register propagation: when writing to a larger register (e.g., RAX 8-byte),
@@ -700,34 +788,79 @@ fn process_op(
                 // This ensures that return value detection finds the correct value when the
                 // function uses 64-bit ops (LEA/INC on RAX) but the return checks EAX first.
                 if out_vn.space == AddressSpaceId::Register && out_vn.size == 8 {
-                    let sub_vn = Varnode { space: out_vn.space, offset: out_vn.offset, size: 4 };
+                    let sub_vn = Varnode {
+                        space: out_vn.space,
+                        offset: out_vn.offset,
+                        size: 4,
+                    };
                     current.insert(sub_vn, var_id);
                 }
                 // Reverse sub-register propagation: writing to a SMALLER register
-                // (e.g. AL = 1 byte from `setne al`) must also invalidate the
+                // (e.g. AL = 1 byte from `setne al`) must also update the
                 // parent aliases (EAX 4, RAX 8) so subsequent reads of the parent
-                // see the updated low bits instead of a stale pre-write value.
-                // x86 bool-return idiom is the canonical case:
-                //   xor eax, eax   (EAX = 0)
-                //   setne al       (AL = bool — must propagate to EAX)
-                //   ret            (returns EAX — should see AL, not 0)
-                // Zext approximation holds when the bool is the sole signal; the
-                // general case `(old & ~mask) | Zext(new)` is expressible but rare
-                // enough in real code that pure Zext covers the observed idioms.
+                // see the merged value instead of a stale pre-write value.
+                //
+                // The merge model is `parent = (old & ~mask) | Zext(new)` where
+                // mask covers the low `out_vn.size` bytes. This preserves the
+                // high bytes of the prior parent value, which a pure Zext would
+                // discard. Canonical case where the high bytes matter:
+                //   mov eax, 0x12345678   (RAX low 4 bytes = 0x12345678)
+                //   mov al,  0x01         (RAX low byte = 0x01 → 0x12345601)
+                // Constant folding collapses the masked-or back to a single
+                // Const when both inputs are constants, so the bool-return
+                // idiom (xor eax,eax; setne al) still folds to a clean Zext.
                 if out_vn.space == AddressSpaceId::Register
                     && (out_vn.size == 1 || out_vn.size == 2)
                 {
                     for parent_size in [4u32, 8u32] {
-                        if parent_size <= out_vn.size { continue; }
+                        if parent_size <= out_vn.size {
+                            continue;
+                        }
                         let parent_vn = Varnode {
                             space: out_vn.space,
                             offset: out_vn.offset,
                             size: parent_size,
                         };
-                        if current.contains_key(&parent_vn) {
-                            let zext = Expr::UnaryOp(UnaryOpKind::Zext, var_id);
-                            let parent_id = ssa.new_var(parent_vn, zext, parent_size);
-                            current.insert(parent_vn, parent_id);
+                        if let Some(&parent_old) = current.get(&parent_vn) {
+                            // mask: high bytes of parent (above the sub-write).
+                            let high_mask: u64 = if parent_size >= 8 {
+                                !((1u128 << (out_vn.size as u128 * 8)) - 1) as u64
+                            } else {
+                                let parent_bits = parent_size * 8;
+                                let sub_bits = out_vn.size * 8;
+                                let parent_mask = if parent_bits >= 64 {
+                                    u64::MAX
+                                } else {
+                                    (1u64 << parent_bits) - 1
+                                };
+                                let sub_mask = (1u64 << sub_bits) - 1;
+                                parent_mask & !sub_mask
+                            };
+                            let mask_const_id = ssa.new_var(
+                                Varnode {
+                                    space: AddressSpaceId::Const,
+                                    offset: high_mask,
+                                    size: parent_size,
+                                },
+                                Expr::Const(high_mask, parent_size),
+                                parent_size,
+                            );
+                            let high_id = ssa.new_var(
+                                parent_vn,
+                                Expr::BinOp(BinOpKind::And, parent_old, mask_const_id),
+                                parent_size,
+                            );
+                            let zext_id = ssa.new_var(
+                                parent_vn,
+                                Expr::UnaryOp(UnaryOpKind::Zext, var_id),
+                                parent_size,
+                            );
+                            let merged_id = ssa.new_var(
+                                parent_vn,
+                                Expr::BinOp(BinOpKind::Or, high_id, zext_id),
+                                parent_size,
+                            );
+                            current.insert(parent_vn, merged_id);
                         }
                     }
                 }
@@ -783,26 +916,20 @@ fn relink_expr(expr: &Expr, relink: &HashMap<VarId, VarId>) -> Expr {
         Expr::BinOp(k, l, r) => {
             Expr::BinOp(*k, *relink.get(l).unwrap_or(l), *relink.get(r).unwrap_or(r))
         }
-        Expr::UnaryOp(k, i) => {
-            Expr::UnaryOp(*k, *relink.get(i).unwrap_or(i))
-        }
+        Expr::UnaryOp(k, i) => Expr::UnaryOp(*k, *relink.get(i).unwrap_or(i)),
         Expr::Load(p) => Expr::Load(*relink.get(p).unwrap_or(p)),
-        Expr::Ternary(c, t, e) => {
-            Expr::Ternary(
-                *relink.get(c).unwrap_or(c),
-                *relink.get(t).unwrap_or(t),
-                *relink.get(e).unwrap_or(e),
-            )
-        }
+        Expr::Ternary(c, t, e) => Expr::Ternary(
+            *relink.get(c).unwrap_or(c),
+            *relink.get(t).unwrap_or(t),
+            *relink.get(e).unwrap_or(e),
+        ),
         Expr::Phi(inputs) => {
             Expr::Phi(inputs.iter().map(|i| *relink.get(i).unwrap_or(i)).collect())
         }
-        Expr::UserOp { func_id, inputs } => {
-            Expr::UserOp {
-                func_id: *func_id,
-                inputs: inputs.iter().map(|i| *relink.get(i).unwrap_or(i)).collect(),
-            }
-        }
+        Expr::UserOp { func_id, inputs } => Expr::UserOp {
+            func_id: *func_id,
+            inputs: inputs.iter().map(|i| *relink.get(i).unwrap_or(i)).collect(),
+        },
         _ => expr.clone(),
     }
 }
@@ -843,7 +970,7 @@ const SYSV64_CALLER_SAVED: &[u64] = &[
 const AARCH64_CALLER_SAVED: &[u64] = &[
     16384, 16392, 16400, 16408, 16416, 16424, 16432, 16440, // x0..x7
     16448, 16456, 16464, 16472, 16480, 16488, 16496, 16504, // x8..x15
-    16512, 16520, 16528,                                    // x16..x18
+    16512, 16520, 16528, // x16..x18
 ];
 
 /// x86-32 cdecl caller-saved: EAX, ECX, EDX. Offsets same as x86-64 lower regs.
@@ -856,15 +983,14 @@ const X86_32_CALLER_SAVED: &[u64] = &[
 /// ARM32 AAPCS caller-saved: r0-r3 (args), r12 (IP scratch), r14 (LR).
 const ARM32_CALLER_SAVED: &[u64] = &[
     32, 36, 40, 44, // r0..r3
-    80,             // r12 (offset 0x20 + 12*4 = 0x50 = 80)
-    88,             // r14 / lr (0x20 + 14*4 = 0x58 = 88)
+    80, // r12 (offset 0x20 + 12*4 = 0x50 = 80)
+    88, // r14 / lr (0x20 + 14*4 = 0x58 = 88)
 ];
 
 /// Register offset of the return register per calling convention.
 fn return_reg_offset(cc: CallingConv) -> u64 {
     match cc {
-        CallingConv::SysV | CallingConv::Win64 | CallingConv::Cdecl32
-        | CallingConv::GoAmd64 => 0, // RAX/EAX
+        CallingConv::SysV | CallingConv::Win64 | CallingConv::Cdecl32 | CallingConv::GoAmd64 => 0, // RAX/EAX
         CallingConv::AArch64 => 16384, // x0
         CallingConv::Arm32 => 32,      // r0
     }
@@ -905,9 +1031,7 @@ fn clobber_caller_saved(
     let ret_size = return_reg_size(cc);
 
     // Drop every current entry at any caller-saved offset, regardless of size.
-    current.retain(|vn, _| {
-        !(vn.space == AddressSpaceId::Register && offsets.contains(&vn.offset))
-    });
+    current.retain(|vn, _| !(vn.space == AddressSpaceId::Register && offsets.contains(&vn.offset)));
 
     // Create a fresh return-register clobber with call_return=true.
     let ret_vn = Varnode {
@@ -939,8 +1063,14 @@ fn get_slot_key(ptr_var: VarId, size: u32, ssa: &SsaCfg) -> Option<SlotKey> {
     match &vdef.expr {
         Expr::Unknown if vdef.varnode.space == AddressSpaceId::Register => {
             if FRAME_REGS.contains(&vdef.varnode.offset) {
-                Some(SlotKey { base_reg: vdef.varnode.offset, disp: 0, size })
-            } else { None }
+                Some(SlotKey {
+                    base_reg: vdef.varnode.offset,
+                    disp: 0,
+                    size,
+                })
+            } else {
+                None
+            }
         }
         Expr::BinOp(BinOpKind::Add, left, right) => {
             let lv = &ssa.vars[left.0 as usize];
@@ -949,14 +1079,22 @@ fn get_slot_key(ptr_var: VarId, size: u32, ssa: &SsaCfg) -> Option<SlotKey> {
                 && FRAME_REGS.contains(&lv.varnode.offset)
             {
                 if let Expr::Const(val, _) = &rv.expr {
-                    return Some(SlotKey { base_reg: lv.varnode.offset, disp: *val as i64, size });
+                    return Some(SlotKey {
+                        base_reg: lv.varnode.offset,
+                        disp: *val as i64,
+                        size,
+                    });
                 }
             }
             if rv.varnode.space == AddressSpaceId::Register
                 && FRAME_REGS.contains(&rv.varnode.offset)
             {
                 if let Expr::Const(val, _) = &lv.expr {
-                    return Some(SlotKey { base_reg: rv.varnode.offset, disp: *val as i64, size });
+                    return Some(SlotKey {
+                        base_reg: rv.varnode.offset,
+                        disp: *val as i64,
+                        size,
+                    });
                 }
             }
             None
@@ -998,7 +1136,9 @@ fn build_expr(ssa: &mut SsaCfg, current: &mut HashMap<Varnode, VarId>, op: &Pcod
         PcodeOp::IntSRem { left, right, .. } => bin!(SRem, left, right),
         PcodeOp::IntAnd { left, right, .. } => bin!(And, left, right),
         PcodeOp::IntOr { left, right, .. } => bin!(Or, left, right),
-        PcodeOp::IntXor { left, right, out, .. } => {
+        PcodeOp::IntXor {
+            left, right, out, ..
+        } => {
             // XOR reg, reg → 0 (common zero-init: XORPS/XORPD/XOR EAX,EAX)
             if left.space == right.space
                 && left.offset == right.offset
@@ -1050,11 +1190,17 @@ fn build_expr(ssa: &mut SsaCfg, current: &mut HashMap<Varnode, VarId>, op: &Pcod
         PcodeOp::FloatRound { input, .. } => unary!(FloatRound, input),
         PcodeOp::Popcount { input, .. } => unary!(Popcount, input),
         PcodeOp::Lzcount { input, .. } => unary!(Lzcount, input),
-        PcodeOp::CallOther { func_id, inputs, .. } => {
-            let resolved: Vec<VarId> = inputs.iter()
+        PcodeOp::CallOther {
+            func_id, inputs, ..
+        } => {
+            let resolved: Vec<VarId> = inputs
+                .iter()
                 .map(|vn| resolve_input(ssa, current, vn))
                 .collect();
-            Expr::UserOp { func_id: *func_id, inputs: resolved }
+            Expr::UserOp {
+                func_id: *func_id,
+                inputs: resolved,
+            }
         }
         PcodeOp::Subpiece { input, lsb, out: _ } => {
             let i = resolve_input(ssa, current, input);
@@ -1093,8 +1239,7 @@ fn float_semantic_size(expr: &Expr, vars: &[VarDef]) -> Option<u32> {
         Expr::UnaryOp(kind, input) => {
             use UnaryOpKind::*;
             match kind {
-                FloatNeg | FloatAbs | FloatSqrt | FloatCeil
-                | FloatFloor | FloatRound => {
+                FloatNeg | FloatAbs | FloatSqrt | FloatCeil | FloatFloor | FloatRound => {
                     Some(vars[input.0 as usize].size)
                 }
                 Int2Float => {
@@ -1119,13 +1264,29 @@ fn convert_terminator(
     match term {
         Terminator::Fallthrough(b) => SsaTerminator::Fallthrough(*b),
         Terminator::Branch(b) => SsaTerminator::Branch(*b),
-        Terminator::CBranch { cond, taken, fallthrough } => {
+        Terminator::CBranch {
+            cond,
+            taken,
+            fallthrough,
+        } => {
             let cond_var = resolve_input(ssa, current, cond);
-            SsaTerminator::CBranch { cond: cond_var, taken: *taken, fallthrough: *fallthrough }
+            SsaTerminator::CBranch {
+                cond: cond_var,
+                taken: *taken,
+                fallthrough: *fallthrough,
+            }
         }
-        Terminator::Call { target, fallthrough } => {
+        Terminator::Call {
+            target,
+            fallthrough,
+        } => {
             clobber_caller_saved(ssa, current, cc, stmts);
-            SsaTerminator::Call { target: target.clone(), args: vec![], out: None, fallthrough: *fallthrough }
+            SsaTerminator::Call {
+                target: target.clone(),
+                args: vec![],
+                out: None,
+                fallthrough: *fallthrough,
+            }
         }
         Terminator::Return => {
             // Try to find RAX/EAX/x0/r0/v0 (return value register) in current state.
@@ -1147,13 +1308,39 @@ fn convert_terminator(
             // RAX has a real value, prefer RAX. This handles loop counters where
             // XOR EAX,EAX inits the counter but LEA/INC on RAX is the loop result.
             let ret_val = [
-                Varnode { space: AddressSpaceId::Register, offset: 16384, size: 4 }, // AArch64 w0
-                Varnode { space: AddressSpaceId::Register, offset: 16384, size: 8 }, // AArch64 x0
-                Varnode { space: AddressSpaceId::Register, offset: 0, size: 4 }, // EAX / r0
-                Varnode { space: AddressSpaceId::Register, offset: 0, size: 8 }, // RAX
-                Varnode { space: AddressSpaceId::Register, offset: 16, size: 4 }, // MIPS v0
-                Varnode { space: AddressSpaceId::Register, offset: 80, size: 8 }, // RISC-V a0
-            ].iter().find_map(|vn| {
+                Varnode {
+                    space: AddressSpaceId::Register,
+                    offset: 16384,
+                    size: 4,
+                }, // AArch64 w0
+                Varnode {
+                    space: AddressSpaceId::Register,
+                    offset: 16384,
+                    size: 8,
+                }, // AArch64 x0
+                Varnode {
+                    space: AddressSpaceId::Register,
+                    offset: 0,
+                    size: 4,
+                }, // EAX / r0
+                Varnode {
+                    space: AddressSpaceId::Register,
+                    offset: 0,
+                    size: 8,
+                }, // RAX
+                Varnode {
+                    space: AddressSpaceId::Register,
+                    offset: 16,
+                    size: 4,
+                }, // MIPS v0
+                Varnode {
+                    space: AddressSpaceId::Register,
+                    offset: 80,
+                    size: 8,
+                }, // RISC-V a0
+            ]
+            .iter()
+            .find_map(|vn| {
                 let var_id = current.get(vn).copied()?;
                 let vdef = &ssa.vars[var_id.0 as usize];
                 // Skip if this is just the entry parameter value (Unknown)
