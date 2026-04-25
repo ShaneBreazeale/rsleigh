@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "arch": "ARM:LE:32:v8",
+  "binary_sha256": "4fe69ba21347fe0f2f03a3eb8730330c767e5ef320aeb66f53f1d1d4fbb86fcf",
+  "functions": [
+    {
+      "entry": 0,
+      "name": "Reset",
+      "blocks": [
+        {"start": 0, "end": 4, "succs": []}
+      ],
+      "instructions": [
+        {"addr": 0, "len": 4, "bytes": "1eff2fe1", "disasm": "bx lr", "pcode": [{"op": "INT_AND", "out": {"space": "unique", "offset": 0, "size": 4}, "inputs": [{"space": "register", "offset": 88, "size": 4}, {"space": "const", "offset": 1, "size": 4}]}, {"op": "INT_NOTEQUAL", "out": {"space": "register", "offset": 120, "size": 1}, "inputs": [{"space": "unique", "offset": 0, "size": 4}, {"space": "const", "offset": 0, "size": 4}]}, {"op": "COPY", "out": {"space": "register", "offset": 105, "size": 1}, "inputs": [{"space": "register", "offset": 120, "size": 1}]}, {"op": "CALLOTHER", "inputs": [{"space": "const", "offset": 62, "size": 4}]}, {"op": "INT_AND", "out": {"space": "register", "offset": 92, "size": 4}, "inputs": [{"space": "register", "offset": 88, "size": 4}, {"space": "const", "offset": 4294967294, "size": 4}]}, {"op": "RETURN", "inputs": [{"space": "register", "offset": 92, "size": 4}]}]}
+      ]
+    }
+  ]
+}

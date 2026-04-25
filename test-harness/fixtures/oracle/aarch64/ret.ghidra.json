@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "arch": "AARCH64:LE:64:v8A",
+  "binary_sha256": "4fe69ba21347fe0f2f03a3eb8730330c767e5ef320aeb66f53f1d1d4fbb86fcf",
+  "functions": [
+    {
+      "entry": 0,
+      "name": "Reset",
+      "blocks": [
+        {"start": 0, "end": 4, "succs": []}
+      ],
+      "instructions": [
+        {"addr": 0, "len": 4, "bytes": "c0035fd6", "disasm": "ret", "pcode": [{"op": "COPY", "out": {"space": "register", "offset": 0, "size": 8}, "inputs": [{"space": "register", "offset": 16624, "size": 8}]}, {"op": "RETURN", "inputs": [{"space": "register", "offset": 0, "size": 8}]}]}
+      ]
+    }
+  ]
+}
