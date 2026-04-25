@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-use pcode_ir::{Varnode, AddressSpaceId};
-use rsleigh_api::Architecture;
 use crate::ir::*;
+use pcode_ir::{AddressSpaceId, Varnode};
+use rsleigh_api::Architecture;
+use std::collections::HashMap;
 
 const RBP_OFFSET: u64 = 40;
 const EBP_OFFSET: u64 = 20;
@@ -20,7 +20,17 @@ pub fn print_c(
     struct_fields: &HashMap<u64, String>,
     func_name: &str,
 ) -> String {
-    print_c_with_try(stmts, ssa, arch, binary, imports, local_names, struct_fields, func_name, &[])
+    print_c_with_try(
+        stmts,
+        ssa,
+        arch,
+        binary,
+        imports,
+        local_names,
+        struct_fields,
+        func_name,
+        &[],
+    )
 }
 
 pub fn print_c_with_try(
@@ -35,7 +45,12 @@ pub fn print_c_with_try(
     try_regions: &[crate::eh_frame::TryRegion],
 ) -> String {
     let mut out = String::new();
-    let ctx = PrintCtx { arch, binary, imports, try_regions };
+    let ctx = PrintCtx {
+        arch,
+        binary,
+        imports,
+        try_regions,
+    };
 
     // Generate function signature from SSA analysis
     generate_function_signature(&mut out, ssa, func_name);
@@ -52,8 +67,11 @@ pub fn print_c_with_try(
         const MAX_INLINE: usize = 10;
         out.push_str("    /* try/catch regions");
         if ctx.try_regions.len() > MAX_INLINE {
-            out.push_str(&format!(" ({} total, showing first {}):\n",
-                                   ctx.try_regions.len(), MAX_INLINE));
+            out.push_str(&format!(
+                " ({} total, showing first {}):\n",
+                ctx.try_regions.len(),
+                MAX_INLINE
+            ));
         } else {
             out.push_str(":\n");
         }
@@ -64,8 +82,10 @@ pub fn print_c_with_try(
             ));
         }
         if ctx.try_regions.len() > MAX_INLINE {
-            out.push_str(&format!("     *   ... {} more\n",
-                                   ctx.try_regions.len() - MAX_INLINE));
+            out.push_str(&format!(
+                "     *   ... {} more\n",
+                ctx.try_regions.len() - MAX_INLINE
+            ));
         }
         out.push_str("     */\n");
     }
@@ -83,7 +103,9 @@ pub fn print_c_with_try(
         all_aliases.insert(var_name.clone(), dwarf_name.clone());
     }
     // Collect parameter names for return value inference
-    let param_names: Vec<String> = ssa.vars.iter()
+    let param_names: Vec<String> = ssa
+        .vars
+        .iter()
         .filter_map(|v| {
             let name = v.param_name.as_ref()?;
             // Exclude loop Phi variable names (e.g., "iVar1", "lVar1") —
@@ -99,13 +121,18 @@ pub fn print_c_with_try(
     // Detect empty thunk functions: if body is empty after post-processing,
     // check SSA for a Branch/Indirect terminator that jumps to another function.
     // Show as tail call: "return target_func();" or "// thunk → FUN_XXXX"
-    let body_lines: Vec<&str> = out.lines()
+    let body_lines: Vec<&str> = out
+        .lines()
         .filter(|l| !l.trim().is_empty() && !l.trim().starts_with("//") && !l.contains('{'))
         .filter(|l| {
             let t = l.trim();
             // Skip variable declarations
-            !t.starts_with("int ") && !t.starts_with("long ") && !t.starts_with("uint")
-                && !t.starts_with("char ") && !t.starts_with("float ") && !t.starts_with("double ")
+            !t.starts_with("int ")
+                && !t.starts_with("long ")
+                && !t.starts_with("uint")
+                && !t.starts_with("char ")
+                && !t.starts_with("float ")
+                && !t.starts_with("double ")
                 && !t.starts_with("bool ")
         })
         .collect();
@@ -127,7 +154,8 @@ pub fn print_c_with_try(
             // branch points to an address not in our block set.
             let internal_addrs: std::collections::HashSet<u64> =
                 ssa.blocks.iter().map(|b| b.addr).collect();
-            let func_addr = func_name.strip_prefix("func_")
+            let func_addr = func_name
+                .strip_prefix("func_")
                 .and_then(|hex| u64::from_str_radix(hex, 16).ok());
             for block in &ssa.blocks {
                 match &block.terminator {
@@ -141,7 +169,8 @@ pub fn print_c_with_try(
                             {
                                 continue;
                             }
-                            let target_name = imports.get(&addr)
+                            let target_name = imports
+                                .get(&addr)
                                 .cloned()
                                 .unwrap_or_else(|| format!("func_{:x}", addr));
                             out.push_str(&format!("    return {}(); // thunk\n", target_name));
@@ -155,9 +184,13 @@ pub fn print_c_with_try(
     }
 
     // Close the function body brace (opened in generate_function_signature)
-    if out.starts_with("void ") || out.starts_with("int ") || out.starts_with("long ")
-        || out.starts_with("float ") || out.starts_with("double ")
-        || out.starts_with("char ") || out.starts_with("uint8_t ")
+    if out.starts_with("void ")
+        || out.starts_with("int ")
+        || out.starts_with("long ")
+        || out.starts_with("float ")
+        || out.starts_with("double ")
+        || out.starts_with("char ")
+        || out.starts_with("uint8_t ")
         || out.starts_with("bool ")
     {
         out.push_str("}\n");
@@ -165,7 +198,12 @@ pub fn print_c_with_try(
     out
 }
 
-fn collect_store_aliases(stmts: &[StructuredStmt], ssa: &SsaCfg, ctx: &PrintCtx, tracker: &mut RegTracker) {
+fn collect_store_aliases(
+    stmts: &[StructuredStmt],
+    ssa: &SsaCfg,
+    ctx: &PrintCtx,
+    tracker: &mut RegTracker,
+) {
     // Only collect aliases from the prologue — stores that happen before any calls or loops.
     // These are the initial parameter saves (MOV [RBP-0x8], RDI etc.) and local initialization.
     // Post-call stores may reference stale register values via the tracker and produce wrong aliases.
@@ -186,10 +224,14 @@ fn collect_store_aliases(stmts: &[StructuredStmt], ssa: &SsaCfg, ctx: &PrintCtx,
                 // The SSA may have contaminated param register VarIds with loop values
                 // (e.g., RDI gets a Phi that merges entry param with loop's LEA).
                 // Check param_name on the VarId, its Var/Phi chain, and by register offset.
-                let param = val_vdef.param_name.clone()
+                let param = val_vdef
+                    .param_name
+                    .clone()
                     .or_else(|| match &val_vdef.expr {
                         Expr::Var(src) => ssa.var(*src).param_name.clone(),
-                        Expr::Phi(inputs) => inputs.iter().find_map(|i| ssa.var(*i).param_name.clone()),
+                        Expr::Phi(inputs) => {
+                            inputs.iter().find_map(|i| ssa.var(*i).param_name.clone())
+                        }
                         _ => None,
                     })
                     .or_else(|| {
@@ -199,7 +241,10 @@ fn collect_store_aliases(stmts: &[StructuredStmt], ssa: &SsaCfg, ctx: &PrintCtx,
                         // Win64: RCX=8, RDX=16, R8=128, R9=136
                         if val_vdef.varnode.space == AddressSpaceId::Register {
                             let arg_offsets: &[u64] = &[56, 48, 16, 8, 128, 136];
-                            if let Some(idx) = arg_offsets.iter().position(|o| *o == val_vdef.varnode.offset) {
+                            if let Some(idx) = arg_offsets
+                                .iter()
+                                .position(|o| *o == val_vdef.varnode.offset)
+                            {
                                 // Check that no earlier param has this index
                                 // (avoid duplicates from different-sized references)
                                 return Some(format!("param_{}", idx));
@@ -219,7 +264,9 @@ fn collect_store_aliases(stmts: &[StructuredStmt], ssa: &SsaCfg, ctx: &PrintCtx,
         if let StructuredStmt::Assign { lhs, .. } = stmt {
             let vdef = ssa.var(*lhs);
             if vdef.varnode.space == AddressSpaceId::Register {
-                if let Expr::Var(_) | Expr::Load(_) | Expr::BinOp(_, _, _) | Expr::UnaryOp(_, _) = &vdef.expr {
+                if let Expr::Var(_) | Expr::Load(_) | Expr::BinOp(_, _, _) | Expr::UnaryOp(_, _) =
+                    &vdef.expr
+                {
                     tracker.set(vdef.varnode.offset, vdef.varnode.size, *lhs);
                 }
                 if vdef.param_name.is_some() {
@@ -230,7 +277,14 @@ fn collect_store_aliases(stmts: &[StructuredStmt], ssa: &SsaCfg, ctx: &PrintCtx,
     }
 }
 
-fn print_stmts_with_tracker(stmts: &[StructuredStmt], ssa: &SsaCfg, ctx: &PrintCtx, indent: usize, out: &mut String, _parent_tracker: &mut RegTracker) {
+fn print_stmts_with_tracker(
+    stmts: &[StructuredStmt],
+    ssa: &SsaCfg,
+    ctx: &PrintCtx,
+    indent: usize,
+    out: &mut String,
+    _parent_tracker: &mut RegTracker,
+) {
     let mut tracker = RegTracker::new();
     // Copy aliases from parent
     tracker.stack_alias = _parent_tracker.stack_alias.clone();
@@ -240,7 +294,13 @@ fn print_stmts_with_tracker(stmts: &[StructuredStmt], ssa: &SsaCfg, ctx: &PrintC
 }
 
 /// Text-level post-processing to clean up common patterns.
-fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, String>, param_names: &[String], struct_fields: &HashMap<u64, String>, ctx: &PrintCtx) {
+fn post_process(
+    out: &mut String,
+    aliases: &std::collections::HashMap<String, String>,
+    param_names: &[String],
+    struct_fields: &HashMap<u64, String>,
+    ctx: &PrintCtx,
+) {
     let mut lines: Vec<String> = out.lines().map(|l| l.to_string()).collect();
 
     let mut i = 0;
@@ -255,7 +315,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // Then remove just the 2 preamble lines and stop — don't touch the
             // code that follows. The epilogue check (if ... __stack_chk_guard) is
             // handled separately below.
-            let next = lines.get(i + 1).map(|l| l.trim().to_string()).unwrap_or_default();
+            let next = lines
+                .get(i + 1)
+                .map(|l| l.trim().to_string())
+                .unwrap_or_default();
             if next == "RAX = *(RAX);" {
                 lines.remove(i); // RAX = *(0x...)
                 lines.remove(i); // RAX = *(RAX)
@@ -270,7 +333,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let lt = lines[i].trim();
             if (lt.starts_with("RAX = *(0x") || lt.starts_with("EAX = *(0x"))
                 && lt.ends_with(");")
-                && !lt.contains("+") && !lt.contains("-")
+                && !lt.contains("+")
+                && !lt.contains("-")
             {
                 lines.remove(i);
                 continue;
@@ -294,13 +358,17 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             if let Some(eq_pos) = lt.find(" = 0x") {
                 let lhs_candidate = &lt[..eq_pos];
                 // x86 uppercase regs (RAX, EBX, R9D, ...).
-                let is_x86_reg = lhs_candidate.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-                    && lhs_candidate.len() >= 2 && lhs_candidate.len() <= 3;
+                let is_x86_reg = lhs_candidate
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                    && lhs_candidate.len() >= 2
+                    && lhs_candidate.len() <= 3;
                 // AArch64 / ARM32 lowercase regs (x0..x30, w0..w30, r0..r15,
                 // s/d/q 0..31, sp, lr, fp, pc).
                 let is_arm_reg = {
                     let s = lhs_candidate;
-                    s.len() >= 2 && s.len() <= 3
+                    s.len() >= 2
+                        && s.len() <= 3
                         && matches!(s.as_bytes()[0], b'x' | b'w' | b'r' | b's' | b'd' | b'q')
                         && s[1..].chars().all(|c| c.is_ascii_digit())
                 };
@@ -310,7 +378,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     || lhs_candidate.starts_with("lVar")
                     || lhs_candidate.starts_with("uVar")
                     || lhs_candidate.starts_with("iVar"))
-                    && lhs_candidate.chars().skip(4).all(|c| c.is_ascii_alphanumeric() || c == '_');
+                    && lhs_candidate
+                        .chars()
+                        .skip(4)
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_');
                 if (is_reg_lhs || is_local_lhs) && lt.ends_with(';') {
                     let hex_val = &lt[eq_pos + 3..lt.len() - 1];
                     let indent = lines[i].len() - lines[i].trim_start().len();
@@ -323,8 +394,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // Hide LEA patterns: REG = RBP ± offset (address computation, not a value)
             if let Some(eq_pos) = lt.find(" = RBP") {
                 let lhs = &lt[..eq_pos];
-                let is_reg = lhs.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-                    && lhs.len() >= 2 && lhs.len() <= 3;
+                let is_reg = lhs
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                    && lhs.len() >= 2
+                    && lhs.len() <= 3;
                 if is_reg && lt.ends_with(';') && (lt.contains("- ") || lt.contains("+ ")) {
                     lines.remove(i);
                     continue;
@@ -336,14 +410,20 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // was incorrectly tracked as an argument. Replace nested calls with "buf".
         {
             let lt = lines[i].trim().to_string();
-            if lt.contains("(") && !lt.starts_with("if ") && !lt.starts_with("while ")
+            if lt.contains("(")
+                && !lt.starts_with("if ")
+                && !lt.starts_with("while ")
                 && !lt.starts_with("return ")
             {
                 // Check each argument: if it's a function call expression (has balanced
                 // parens like printf("...")), replace with "buf"
                 if let Some(outer_open) = lt.find('(') {
                     let outer_name = &lt[..outer_open];
-                    if !outer_name.is_empty() && outer_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '*') {
+                    if !outer_name.is_empty()
+                        && outer_name
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '*')
+                    {
                         let args_start = outer_open + 1;
                         if let Some(outer_close) = find_matching_paren(&lt, outer_open) {
                             let args = &lt[args_start..outer_close];
@@ -352,14 +432,18 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                             let mut rest = args;
                             let mut changed = false;
                             // Known void/output functions whose return value is NOT useful as an arg
-                            let void_funcs = ["printf", "puts", "fputs", "putchar", "putc",
-                                "fprintf", "write", "send", "perror"];
+                            let void_funcs = [
+                                "printf", "puts", "fputs", "putchar", "putc", "fprintf", "write",
+                                "send", "perror",
+                            ];
                             while !rest.is_empty() {
                                 let comma = find_balanced_comma(rest).unwrap_or(rest.len());
                                 let arg = rest[..comma].trim();
                                 // Only replace if the nested call is a known void/output function
-                                let is_void_call = arg.contains('(') && arg.contains(')')
-                                    && !arg.starts_with('"') && !arg.starts_with("*(")
+                                let is_void_call = arg.contains('(')
+                                    && arg.contains(')')
+                                    && !arg.starts_with('"')
+                                    && !arg.starts_with("*(")
                                     && void_funcs.iter().any(|f| arg.starts_with(f));
                                 if is_void_call {
                                     new_args.push("buf".to_string());
@@ -367,14 +451,23 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                                 } else {
                                     new_args.push(arg.to_string());
                                 }
-                                rest = if comma < rest.len() { &rest[comma + 1..] } else { "" };
+                                rest = if comma < rest.len() {
+                                    &rest[comma + 1..]
+                                } else {
+                                    ""
+                                };
                             }
                             if changed {
                                 let indent = lines[i].len() - lines[i].trim_start().len();
                                 let pad = " ".repeat(indent);
                                 let suffix = &lt[outer_close..]; // includes ")" and ";"
-                                lines[i] = format!("{}{}({}{}",
-                                    pad, outer_name, new_args.join(", "), suffix);
+                                lines[i] = format!(
+                                    "{}{}({}{}",
+                                    pad,
+                                    outer_name,
+                                    new_args.join(", "),
+                                    suffix
+                                );
                             }
                         }
                     }
@@ -402,12 +495,14 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             if let Some(eq_pos) = lt.find(" = ") {
                 let lhs = &lt[..eq_pos];
                 let rhs = &lt[eq_pos + 3..lt.len().saturating_sub(1)]; // strip ;
-                let is_reg_lhs = lhs.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+                let is_reg_lhs = lhs
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
                 let is_call_rhs = rhs.contains('(') && rhs.contains(')');
                 if is_reg_lhs && is_call_rhs {
                     // Check if this call result is already represented by another line
                     let mut is_redundant = false;
-                    for j in (0..i).chain(i+1..lines.len()) {
+                    for j in (0..i).chain(i + 1..lines.len()) {
                         if lines[j].trim().contains(rhs) {
                             is_redundant = true;
                             break;
@@ -429,15 +524,18 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             if lt.starts_with("var_") && lt.ends_with(';') && lt.contains(" = ") && next_t == "}" {
                 let indent = lines[i].len() - lines[i].trim_start().len();
                 // Check that we're inside an if/else, not a while
-                let in_if_else = indent > 0 && lines[..i].iter().rev().any(|l| {
-                    let lt = l.trim();
-                    lt.starts_with("if (") || lt.starts_with("} else {")
-                        || lt.ends_with("} else {")
-                });
-                let in_while = indent > 0 && lines[..i].iter().rev().any(|l| {
-                    let lt = l.trim();
-                    lt.starts_with("while (")
-                });
+                let in_if_else = indent > 0
+                    && lines[..i].iter().rev().any(|l| {
+                        let lt = l.trim();
+                        lt.starts_with("if (")
+                            || lt.starts_with("} else {")
+                            || lt.ends_with("} else {")
+                    });
+                let in_while = indent > 0
+                    && lines[..i].iter().rev().any(|l| {
+                        let lt = l.trim();
+                        lt.starts_with("while (")
+                    });
                 if in_if_else && !in_while {
                     let expr = lt.split(" = ").nth(1).unwrap_or("").trim_end_matches(';');
                     if !expr.is_empty() {
@@ -454,15 +552,22 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             if let Some(eq_pos) = lt.find(" = ") {
                 let lhs = lt[..eq_pos].to_string();
                 let rhs = lt[eq_pos + 3..].trim_end_matches(';').to_string();
-                let is_reg = lhs.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-                    && lhs.len() >= 2 && lhs.len() <= 3;
+                let is_reg = lhs
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                    && lhs.len() >= 2
+                    && lhs.len() <= 3;
                 if is_reg && lt.ends_with(';') {
                     // Remove: REG = simple_value (var, param, DWARF name, another REG, constant 0)
                     let is_simple = (rhs.starts_with("var_") && !rhs.contains(' '))
                         || (rhs.starts_with("param_") && !rhs.contains(' '))
                         || rhs == "0"
-                        || (rhs.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) && rhs.len() <= 3)
-                        || (!rhs.contains(' ') && !rhs.contains('(')
+                        || (rhs
+                            .chars()
+                            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                            && rhs.len() <= 3)
+                        || (!rhs.contains(' ')
+                            && !rhs.contains('(')
                             && rhs.chars().next().map_or(false, |c| c.is_ascii_lowercase()));
                     if is_simple {
                         lines.remove(i);
@@ -488,23 +593,34 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         i += 1;
     }
 
-    // Strip verbose casts and simplify common patterns
+    // Strip verbose casts and simplify common patterns.
+    //
+    // Audit P2 #1 — algebraic identities migrated to the SSA layer:
+    //   - `x * 1 → x` and `x * 0 → 0` live in `fold::simplify_expr`.
+    //   - `0 - x → -x` lives in `fold::simplify_expr` (Sub branch).
+    // The matching text rewrites previously here are now redundant for
+    // pcode-driven output; they only kept legacy text paths covered.
+    // Retired below; regression suite + bench confirm no observable
+    // change.
     for line in &mut lines {
         *line = line.replace("(int64_t)", "").replace("(uint64_t)", "");
-        // * 1 in address expressions is identity
-        *line = line.replace(" * 1)", ")").replace(" * 1 ", " ");
-        // 0 - x → -x (negation)
-        *line = line.replace("0 - ", "-");
-        // x + -y → x - y
+        // x + -y → x - y — printer formatting only (semantic is already
+        // BinOp(Add, x, Const(c)) where c has the sign bit set). Kept
+        // until printer learns to format negative-Const arithmetic.
         *line = line.replace(" + -", " - ");
         // Division by constant via multiply-shift: x * MAGIC → x / N
         // Well-known magic numbers from compiler optimizations
         for (magic, divisor) in [
-            ("0xffffffff92492493", "7"), ("0x92492493", "7"),
-            ("0x66666667", "10"), ("0xcccccccd", "10"),
-            ("0x55555556", "3"), ("0xaaaaaaab", "3"),
-            ("0x2aaaaaab", "6"), ("0x24924925", "7"),
-            ("0x38e38e39", "9"), ("0x51eb851f", "100"),
+            ("0xffffffff92492493", "7"),
+            ("0x92492493", "7"),
+            ("0x66666667", "10"),
+            ("0xcccccccd", "10"),
+            ("0x55555556", "3"),
+            ("0xaaaaaaab", "3"),
+            ("0x2aaaaaab", "6"),
+            ("0x24924925", "7"),
+            ("0x38e38e39", "9"),
+            ("0x51eb851f", "100"),
         ] {
             if line.contains(magic) {
                 *line = line.replace(&format!("* {}", magic), &format!("/ {}", divisor));
@@ -528,7 +644,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let args_str = &line[call_start + 1..close];
                     // Remove the last comma-separated argument
                     let mut args: Vec<&str> = args_str.split(", ").collect();
-                    if args.len() > 2 { args.pop(); } // strcpy has 2 args, chk adds a 3rd
+                    if args.len() > 2 {
+                        args.pop();
+                    } // strcpy has 2 args, chk adds a 3rd
                     let new_call = format!("{}({})", clean_name, args.join(", "));
                     *line = format!("{}{}{}", &line[..pos], new_call, &line[close + 1..]);
                 } else {
@@ -560,17 +678,32 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         let mut i = 0;
         while i < lines.len() {
             let lt = lines[i].trim();
-            if lt.starts_with("while (") { in_while = true; depth = 0; }
+            if lt.starts_with("while (") {
+                in_while = true;
+                depth = 0;
+            }
             if in_while {
-                if lt.contains('{') { depth += 1; }
-                if lt.contains('}') { if depth > 0 { depth -= 1; } if depth == 0 { in_while = false; } }
+                if lt.contains('{') {
+                    depth += 1;
+                }
+                if lt.contains('}') {
+                    if depth > 0 {
+                        depth -= 1;
+                    }
+                    if depth == 0 {
+                        in_while = false;
+                    }
+                }
                 // Remove: REG = var + 1; (loop counter increment)
                 if depth > 0 {
                     if let Some(eq_pos) = lt.find(" = ") {
                         let lhs = &lt[..eq_pos];
                         let rhs = lt[eq_pos + 3..].trim_end_matches(';');
-                        let is_reg = lhs.len() >= 2 && lhs.len() <= 3
-                            && lhs.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+                        let is_reg = lhs.len() >= 2
+                            && lhs.len() <= 3
+                            && lhs
+                                .chars()
+                                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
                         if is_reg && rhs.ends_with(" + 1") {
                             lines.remove(i);
                             continue;
@@ -611,7 +744,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         continue;
                     }
                     // Pattern 2: REG = X; REG = Y op REG → REG = Y op X
-                    if rhs2.ends_with(&format!(" {}", lhs1)) || rhs2.contains(&format!(" {} ", lhs1)) {
+                    if rhs2.ends_with(&format!(" {}", lhs1))
+                        || rhs2.contains(&format!(" {} ", lhs1))
+                    {
                         let new_rhs = if rhs1.contains(' ') {
                             rhs2.replace(&lhs1, &format!("({})", rhs1))
                         } else {
@@ -649,7 +784,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // Only apply at indent 0 or 4 (top level or first nesting level)
             if lt.starts_with("EAX = EAX ") && indent_level <= 4 {
                 // Verify the next non-blank line is "return;" or end of function
-                let next_is_return = lines[i + 1..].iter()
+                let next_is_return = lines[i + 1..]
+                    .iter()
                     .find(|l| !l.trim().is_empty())
                     .map_or(false, |l| l.trim() == "return;");
                 if next_is_return {
@@ -670,7 +806,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     for line in &mut lines {
         for (var_name, alias) in aliases {
             let alias_is_name = alias.starts_with("param_")
-                || (alias.chars().next().map_or(false, |c| c.is_ascii_lowercase())
+                || (alias
+                    .chars()
+                    .next()
+                    .map_or(false, |c| c.is_ascii_lowercase())
                     && alias.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
                     && !alias.chars().all(|c| c.is_ascii_digit() || c == 'x'));
             if var_name.starts_with("var_") && alias != var_name && alias_is_name {
@@ -683,7 +822,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     // Check word boundary
                     let before_ok = pos == 0 || !rest.as_bytes()[pos - 1].is_ascii_alphanumeric();
                     let after = pos + pattern.len();
-                    let after_ok = after >= rest.len() || !rest.as_bytes()[after].is_ascii_alphanumeric();
+                    let after_ok =
+                        after >= rest.len() || !rest.as_bytes()[after].is_ascii_alphanumeric();
                     if before_ok && after_ok {
                         result.push_str(alias);
                     } else {
@@ -699,7 +839,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
 
     // Simplify x86 IDIV dividend pattern: EDX << 32 | X → X (sign extension noise)
     for line in &mut lines {
-        for pattern in &["EDX << 32 | ", "EDX << 0x20 | ", "RDX << 32 | ", "RDX << 0x20 | "] {
+        for pattern in &[
+            "EDX << 32 | ",
+            "EDX << 0x20 | ",
+            "RDX << 32 | ",
+            "RDX << 0x20 | ",
+        ] {
             while let Some(pos) = line.find(pattern) {
                 *line = format!("{}{}", &line[..pos], &line[pos + pattern.len()..]);
             }
@@ -722,9 +867,15 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     if let Some(plus) = find_array_split(inner) {
                         let base = &inner[..plus];
                         let idx = &inner[plus + 3..];
-                        if base == "sp" { break; }
-                        *line = format!("{}{}{}", &line[..star_pos],
-                            format!("{}[{}]", base, idx), &line[close + 1..]);
+                        if base == "sp" {
+                            break;
+                        }
+                        *line = format!(
+                            "{}{}{}",
+                            &line[..star_pos],
+                            format!("{}[{}]", base, idx),
+                            &line[close + 1..]
+                        );
                         continue;
                     }
                 }
@@ -734,15 +885,23 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // Pattern 2: *(X + Y) — plain pointer deref with addition
         while let Some(star_pos) = line.find("*(") {
             // Make sure it's not *(uint...*) which we already handled
-            if line[star_pos + 2..].starts_with("uint") { break; }
+            if line[star_pos + 2..].starts_with("uint") {
+                break;
+            }
             if let Some(close) = find_matching_paren(line, star_pos + 1) {
                 let inner = &line[star_pos + 2..close];
                 if let Some(plus) = find_array_split(inner) {
                     let base = &inner[..plus];
                     let idx = &inner[plus + 3..];
-                    if base == "sp" { break; }
-                    *line = format!("{}{}{}", &line[..star_pos],
-                        format!("{}[{}]", base, idx), &line[close + 1..]);
+                    if base == "sp" {
+                        break;
+                    }
+                    *line = format!(
+                        "{}{}{}",
+                        &line[..star_pos],
+                        format!("{}[{}]", base, idx),
+                        &line[close + 1..]
+                    );
                     continue;
                 }
             }
@@ -769,7 +928,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // === PROLOGUE: register saves to stack ===
         // sp[N] = VALUE; — callee-saved save, return address, or frame setup
         if t.starts_with("sp[") && t.ends_with(';') && t.contains("] = ") {
-            let rhs = t.split("] = ").last().unwrap_or("").trim_end_matches(';').trim();
+            let rhs = t
+                .split("] = ")
+                .last()
+                .unwrap_or("")
+                .trim_end_matches(';')
+                .trim();
             // Keep string literals and named function calls — those are real data
             if rhs.starts_with('"') || rhs.starts_with("L\"") || rhs.contains("func_") {
                 return true;
@@ -783,18 +947,34 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 || rhs.starts_with("*(")
                 // Small integer constants (stack frame size, alignment)
                 || rhs.chars().all(|c| c.is_ascii_digit());
-            if is_spill { return false; }
+            if is_spill {
+                return false;
+            }
         }
         // sp->fieldN = VALUE; (alternative syntax for stack spills)
         if t.starts_with("sp->field") && t.ends_with(';') && t.contains(" = ") {
-            let rhs = t.split(" = ").last().unwrap_or("").trim_end_matches(';').trim();
-            if rhs.starts_with('"') || rhs.contains("func_") { return true; }
-            let is_spill = rhs.starts_with("lVar") || rhs.starts_with("iVar")
-                || rhs.starts_with("dVar") || rhs.starts_with("param_")
-                || rhs == "x29" || rhs == "x30" || rhs == "0"
-                || rhs.starts_with("0x") || rhs.starts_with("*(")
+            let rhs = t
+                .split(" = ")
+                .last()
+                .unwrap_or("")
+                .trim_end_matches(';')
+                .trim();
+            if rhs.starts_with('"') || rhs.contains("func_") {
+                return true;
+            }
+            let is_spill = rhs.starts_with("lVar")
+                || rhs.starts_with("iVar")
+                || rhs.starts_with("dVar")
+                || rhs.starts_with("param_")
+                || rhs == "x29"
+                || rhs == "x30"
+                || rhs == "0"
+                || rhs.starts_with("0x")
+                || rhs.starts_with("*(")
                 || rhs.chars().all(|c| c.is_ascii_digit());
-            if is_spill { return false; }
+            if is_spill {
+                return false;
+            }
         }
 
         // === EPILOGUE: register restores from stack ===
@@ -805,13 +985,15 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
         // lVarN = sp[N]; or lVarN = sp[N]->field_8; (callee-saved register reload)
         if (t.starts_with("lVar") || t.starts_with("iVar") || t.starts_with("dVar"))
-            && t.contains(" = sp[") && t.ends_with(';')
+            && t.contains(" = sp[")
+            && t.ends_with(';')
         {
             return false;
         }
         // lVarN = sp->fieldN; or lVarN = sp->fieldN->field_8; (alternative reload syntax)
         if (t.starts_with("lVar") || t.starts_with("iVar") || t.starts_with("dVar"))
-            && t.contains(" = sp->field") && t.ends_with(';')
+            && t.contains(" = sp->field")
+            && t.ends_with(';')
         {
             return false;
         }
@@ -820,8 +1002,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // return sp->field_10->field_8; or return sp[N]->field_8;
         // Also catches return *(sp)->field_8; (post-indexed LDP variant)
         if (t.starts_with("return sp") || t.starts_with("return *(sp)"))
-            && !t.contains("func_") && !t.contains("param_")
-            && !t.contains("malloc") && !t.contains("strlen")
+            && !t.contains("func_")
+            && !t.contains("param_")
+            && !t.contains("malloc")
+            && !t.contains("strlen")
         {
             return false;
         }
@@ -844,7 +1028,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     if offset <= 64 && offset > 0 && offset % 4 == 0 {
                         // This looks like a struct field access (4-byte aligned small offset)
                         let field_name = format!("->field{:x}", offset);
-                        *line = format!("{}{}{}", &line[..abs_start], field_name, &line[abs_end + 1..]);
+                        *line = format!(
+                            "{}{}{}",
+                            &line[..abs_start],
+                            field_name,
+                            &line[abs_end + 1..]
+                        );
                         continue; // Re-scan
                     }
                 }
@@ -853,7 +1042,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     if let Ok(offset) = u64::from_str_radix(&idx[2..], 16) {
                         if offset <= 64 && offset > 0 && offset % 4 == 0 {
                             let field_name = format!("->field{:x}", offset);
-                            *line = format!("{}{}{}", &line[..abs_start], field_name, &line[abs_end + 1..]);
+                            *line = format!(
+                                "{}{}{}",
+                                &line[..abs_start],
+                                field_name,
+                                &line[abs_end + 1..]
+                            );
                             continue;
                         }
                     }
@@ -870,7 +1064,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // Different registers map to different params by occurrence order.
     if !param_names.is_empty() {
         for line in &mut lines {
-            if !line.contains("->") { continue; }
+            if !line.contains("->") {
+                continue;
+            }
             let mut param_idx = 0;
             let reg_names = ["RAX", "RCX", "RDX", "RBX", "RSI", "RDI", "R8", "R9"];
             for reg in &reg_names {
@@ -887,7 +1083,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // Replace ->fieldN with ->actual_name using DWARF struct field info
     if !struct_fields.is_empty() {
         for line in &mut lines {
-            if !line.contains("->field") { continue; }
+            if !line.contains("->field") {
+                continue;
+            }
             for (offset, name) in struct_fields {
                 let pattern = format!("->field{:x}", offset);
                 if line.contains(&pattern) {
@@ -912,9 +1110,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let t = line.trim();
             if let Some(eq) = t.find(" = ") {
                 let lhs = &t[..eq];
-                if !lhs.is_empty()
-                    && lhs.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                {
+                if !lhs.is_empty() && lhs.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                     return Some(lhs.to_string());
                 }
             }
@@ -931,21 +1127,34 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     ret_idx = Some(k);
                     break;
                 }
-                if t == "}" || t.is_empty() { continue; }
-                if !t.is_empty() { break; }
+                if t == "}" || t.is_empty() {
+                    continue;
+                }
+                if !t.is_empty() {
+                    break;
+                }
             }
             if let Some(r) = ret_idx {
                 let ret_t = lines[r].trim();
                 let ret_expr = ret_t["return ".len()..ret_t.len() - 1].trim();
-                let ret_var = ret_expr.split(&[' ', '+', '-'][..]).next().unwrap_or("").to_string();
+                let ret_var = ret_expr
+                    .split(&[' ', '+', '-'][..])
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
                 // Search up to 8 lines above for `RET_VAR = X ^ Y;`.
                 let mut xor_idx: Option<usize> = None;
                 let lo = r.saturating_sub(8);
                 for k in (lo..r).rev() {
                     let t = lines[k].trim();
-                    if !t.contains(" ^ ") { continue; }
+                    if !t.contains(" ^ ") {
+                        continue;
+                    }
                     if let Some(lhs) = take_lhs(t) {
-                        if lhs == ret_var { xor_idx = Some(k); break; }
+                        if lhs == ret_var {
+                            xor_idx = Some(k);
+                            break;
+                        }
                     }
                 }
                 if let Some(xi) = xor_idx {
@@ -956,8 +1165,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let operands: Vec<&str> = xor_t
                         .split(" ^ ")
                         .flat_map(|p| p.split(&[' ', '=', ';'][..]))
-                        .filter(|s| !s.is_empty()
-                            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+                        .filter(|s| {
+                            !s.is_empty()
+                                && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        })
                         .collect();
                     let lo2 = xi.saturating_sub(6);
                     for k in (lo2..xi).rev() {
@@ -968,7 +1179,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                                 if let Some(eq) = t.find(" = ") {
                                     let rhs = t[eq + 3..].trim_end_matches(';').trim();
                                     if !rhs.is_empty()
-                                        && rhs.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                                        && rhs
+                                            .chars()
+                                            .all(|c| c.is_ascii_alphanumeric() || c == '_')
                                     {
                                         reload_idx = Some(k);
                                         break;
@@ -983,9 +1196,13 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     lines[r] = format!("{}return;", &lines[r][..indent_end]);
                     // Remove in descending index order to preserve offsets.
                     let mut to_remove: Vec<usize> = vec![xi];
-                    if let Some(ri) = reload_idx { to_remove.push(ri); }
+                    if let Some(ri) = reload_idx {
+                        to_remove.push(ri);
+                    }
                     to_remove.sort_unstable_by(|a, b| b.cmp(a));
-                    for idx in to_remove { lines.remove(idx); }
+                    for idx in to_remove {
+                        lines.remove(idx);
+                    }
                 }
             }
         }
@@ -1023,10 +1240,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             if let Some(fs_pos) = line.find("FS_OFFSET") {
                 // Find the end of the FS_OFFSET->xxx or *(FS_OFFSET + xxx) expression
                 let after = &line[fs_pos..];
-                let end = after.find(|c: char| c == ')' || c == ';' || c == ' ')
+                let end = after
+                    .find(|c: char| c == ')' || c == ';' || c == ' ')
                     .map(|p| fs_pos + p)
                     .unwrap_or(line.len());
-                let replacement = format!("{}{}{}", &line[..fs_pos], "__stack_chk_guard", &line[end..]);
+                let replacement =
+                    format!("{}{}{}", &line[..fs_pos], "__stack_chk_guard", &line[end..]);
                 *line = replacement;
             }
         }
@@ -1041,9 +1260,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // Match if-blocks that are canary checks:
             // 1. Condition mentions __stack_chk_guard
             // 2. Body contains __stack_chk_fail()
-            let is_canary_if = lt.starts_with("if (") && (
-                lt.contains("__stack_chk_guard") || lt.contains("__stack_chk_fail")
-            );
+            let is_canary_if = lt.starts_with("if (")
+                && (lt.contains("__stack_chk_guard") || lt.contains("__stack_chk_fail"));
             // Also match if-blocks where __stack_chk_fail is in the DIRECT body (depth 1),
             // not in a deeply nested sub-block. This prevents removing real code that
             // happens to contain a canary check in an error path.
@@ -1051,12 +1269,24 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let mut has_fail_at_depth1 = false;
                 let mut depth = 0;
                 for k in j..lines.len().min(j + 10) {
-                    if lines[k].contains('{') { depth += 1; }
-                    if depth == 1 && lines[k].contains("__stack_chk_fail") { has_fail_at_depth1 = true; break; }
-                    if lines[k].contains('}') { depth -= 1; if depth == 0 { break; } }
+                    if lines[k].contains('{') {
+                        depth += 1;
+                    }
+                    if depth == 1 && lines[k].contains("__stack_chk_fail") {
+                        has_fail_at_depth1 = true;
+                        break;
+                    }
+                    if lines[k].contains('}') {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
                 }
                 has_fail_at_depth1
-            } else { false };
+            } else {
+                false
+            };
 
             if is_canary_if || is_canary_block {
                 // Find the end of the if-block and remove it entirely
@@ -1069,11 +1299,21 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     if kl.starts_with("return") && depth == 1 && !kl.contains("__stack_chk") {
                         extracted_return = Some(lines[k].clone());
                     }
-                    if lines[k].contains('{') { depth += 1; }
-                    if lines[k].contains('}') { depth -= 1; if depth == 0 { end = Some(k); break; } }
+                    if lines[k].contains('{') {
+                        depth += 1;
+                    }
+                    if lines[k].contains('}') {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(k);
+                            break;
+                        }
+                    }
                 }
                 if let Some(end_idx) = end {
-                    for idx in (j..=end_idx).rev() { lines.remove(idx); }
+                    for idx in (j..=end_idx).rev() {
+                        lines.remove(idx);
+                    }
                     if let Some(ret) = extracted_return {
                         lines.insert(j, ret);
                     }
@@ -1114,9 +1354,13 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 })
             {
                 // Replace RAX in the next line with the symbol name
-                let sym = if lt.contains("stdout") { "stdout" }
-                    else if lt.contains("stdin") { "stdin" }
-                    else { "stderr" };
+                let sym = if lt.contains("stdout") {
+                    "stdout"
+                } else if lt.contains("stdin") {
+                    "stdin"
+                } else {
+                    "stderr"
+                };
                 lines[j + 1] = lines[j + 1].replace("RAX", sym);
                 lines.remove(j);
                 continue;
@@ -1135,8 +1379,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             if line.contains("<< 24") || line.contains("<< 16") || line.contains("<< 8") {
                 continue;
             }
-            let reg_names = ["RAX", "RCX", "RDX", "RBX", "RSI", "RDI", "R8", "R9",
-                             "EAX", "ECX", "EDX", "EBX", "ESI", "EDI"];
+            let reg_names = [
+                "RAX", "RCX", "RDX", "RBX", "RSI", "RDI", "R8", "R9", "EAX", "ECX", "EDX", "EBX",
+                "ESI", "EDI",
+            ];
             let mut param_idx = 0;
             for reg in &reg_names {
                 let deref = format!("*({})", reg);
@@ -1157,7 +1403,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let l1 = lines[i].trim().to_string();
             let l2 = lines[i + 1].trim().to_string();
             let l3 = lines[i + 2].trim().to_string();
-            if let (Some(eq1), Some(eq2), Some(eq3)) = (l1.find(" = "), l2.find(" = "), l3.find(" = ")) {
+            if let (Some(eq1), Some(eq2), Some(eq3)) =
+                (l1.find(" = "), l2.find(" = "), l3.find(" = "))
+            {
                 let lhs1 = l1[..eq1].to_string();
                 let rhs1 = l1[eq1 + 3..].trim_end_matches(';').to_string();
                 let lhs2 = l2[..eq2].to_string();
@@ -1202,9 +1450,16 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let lhs2 = &l2[..eq2];
                 let rhs2 = l2[eq2 + 3..].trim_end_matches(';');
                 // REG = expr; var_X = expr; → remove REG line
-                let is_reg = lhs1.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-                    && lhs1.len() >= 2 && lhs1.len() <= 3;
-                let is_var = lhs2.starts_with("var_") || lhs2.chars().next().map_or(false, |c| c.is_ascii_lowercase());
+                let is_reg = lhs1
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                    && lhs1.len() >= 2
+                    && lhs1.len() <= 3;
+                let is_var = lhs2.starts_with("var_")
+                    || lhs2
+                        .chars()
+                        .next()
+                        .map_or(false, |c| c.is_ascii_lowercase());
                 if is_reg && is_var && rhs1 == rhs2 {
                     lines.remove(i);
                     continue;
@@ -1224,8 +1479,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         if lt.ends_with(" - 0;") || lt.ends_with(" + 0;") {
             if let Some(eq_pos) = lt.find(" = ") {
                 let lhs = &lt[..eq_pos];
-                let rhs = lt[eq_pos + 3..].trim_end_matches(';')
-                    .trim_end_matches(" - 0").trim_end_matches(" + 0");
+                let rhs = lt[eq_pos + 3..]
+                    .trim_end_matches(';')
+                    .trim_end_matches(" - 0")
+                    .trim_end_matches(" + 0");
                 if lhs == rhs {
                     lines.remove(i);
                     continue;
@@ -1246,7 +1503,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
 
     // Remove register setup lines before while loops, but record the mappings
     // so we can substitute inside the loop body (e.g., ECX = len - 1 → use in str[ECX - i])
-    let mut loop_reg_values: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut loop_reg_values: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     {
         let mut i = 0;
         while i < lines.len() {
@@ -1254,22 +1512,34 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             if let Some(eq_pos) = lt.find(" = ") {
                 let lhs = lt[..eq_pos].to_string();
                 let rhs = lt[eq_pos + 3..].trim_end_matches(';').to_string();
-                let is_reg = lhs.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-                    && lhs.len() >= 2 && lhs.len() <= 3;
+                let is_reg = lhs
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                    && lhs.len() >= 2
+                    && lhs.len() <= 3;
                 if is_reg {
-                    let next_nonblank = lines[i + 1..].iter()
+                    let next_nonblank = lines[i + 1..]
+                        .iter()
                         .find(|l| {
                             let t = l.trim();
-                            !t.is_empty() && !{
-                                if let Some(ep) = t.find(" = ") {
-                                    let lh = &t[..ep];
-                                    lh.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-                                        && lh.len() >= 2 && lh.len() <= 3
-                                } else { false }
-                            }
+                            !t.is_empty()
+                                && !{
+                                    if let Some(ep) = t.find(" = ") {
+                                        let lh = &t[..ep];
+                                        lh.chars()
+                                            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                                            && lh.len() >= 2
+                                            && lh.len() <= 3
+                                    } else {
+                                        false
+                                    }
+                                }
                         })
                         .map(|l| l.trim().to_string());
-                    if next_nonblank.as_ref().map_or(false, |n| n.starts_with("while (")) {
+                    if next_nonblank
+                        .as_ref()
+                        .map_or(false, |n| n.starts_with("while ("))
+                    {
                         // Don't remove function call results before while loops — the call
                         // has side effects and its return value binding should be visible.
                         // Only remove/record simple variable references and expressions.
@@ -1277,8 +1547,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         if !is_call_rhs {
                             // Record the register value for use inside the loop
                             // Only record meaningful expressions (not other registers or constants)
-                            if rhs.contains("var_") || rhs.contains("len") || rhs.contains("param")
-                                || rhs.contains("str") || (rhs.contains(' ') && !rhs.starts_with("0x"))
+                            if rhs.contains("var_")
+                                || rhs.contains("len")
+                                || rhs.contains("param")
+                                || rhs.contains("str")
+                                || (rhs.contains(' ') && !rhs.starts_with("0x"))
                             {
                                 loop_reg_values.insert(lhs, rhs);
                             }
@@ -1303,10 +1576,17 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 depth = 0;
             }
             if in_while {
-                if lt.contains('{') { depth += 1; }
+                if lt.contains('{') {
+                    depth += 1;
+                }
                 if lt.contains('}') {
-                    if depth > 0 { depth -= 1; }
-                    if depth == 0 { in_while = false; continue; }
+                    if depth > 0 {
+                        depth -= 1;
+                    }
+                    if depth == 0 {
+                        in_while = false;
+                        continue;
+                    }
                 }
                 // Substitute register names in array indices: [REG - expr] → [value - expr]
                 for (reg, val) in &loop_reg_values {
@@ -1332,8 +1612,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         if let Some(eq_pos) = lt.find(" = ") {
             let lhs = &lt[..eq_pos];
             let rhs = &lt[eq_pos + 3..lt.len().saturating_sub(1)];
-            let is_reg = lhs.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-                && lhs.len() >= 2 && lhs.len() <= 3;
+            let is_reg = lhs
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                && lhs.len() >= 2
+                && lhs.len() <= 3;
             let is_call = rhs.contains('(') && rhs.contains(')');
             if is_reg && is_call {
                 let mut redundant = false;
@@ -1370,22 +1653,33 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let lhs = &lt[..eq_pos];
                 let rhs = lt[eq_pos + 3..].trim_end_matches(';').to_string();
                 // Only for register assignments (RCX, ECX, etc.)
-                let is_reg = lhs.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-                    && lhs.len() >= 2 && lhs.len() <= 3;
+                let is_reg = lhs
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                    && lhs.len() >= 2
+                    && lhs.len() <= 3;
                 if is_reg {
                     // Check if the next line uses this register (or its 64-bit alias) in array index
                     let next = lines[i + 1].trim().to_string();
                     // ECX→RCX, EAX→RAX, EDX→RDX, etc. (32→64 bit alias)
                     let alias64 = if lhs.starts_with('E') {
                         format!("R{}", &lhs[1..])
-                    } else { String::new() };
+                    } else {
+                        String::new()
+                    };
                     let bracket_pattern = format!("[{}]", lhs);
-                    let bracket_alias = if !alias64.is_empty() { format!("[{}]", alias64) } else { String::new() };
+                    let bracket_alias = if !alias64.is_empty() {
+                        format!("[{}]", alias64)
+                    } else {
+                        String::new()
+                    };
                     let matching_bracket = if next.contains(&bracket_pattern) {
                         Some(bracket_pattern.clone())
                     } else if !bracket_alias.is_empty() && next.contains(&bracket_alias) {
                         Some(bracket_alias)
-                    } else { None };
+                    } else {
+                        None
+                    };
                     if let Some(bp) = matching_bracket {
                         let indent = lines[i + 1].len() - lines[i + 1].trim_start().len();
                         let pad = &lines[i + 1][..indent];
@@ -1446,26 +1740,53 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     lines.retain(|line| {
         let t = line.trim();
         // Remove "ESP = ESP - 4;" and "ESP = ESP + N;" (cdecl stack cleanup)
-        if t.starts_with("ESP = ESP - ") && t.ends_with(';') { return false; }
-        if t.starts_with("ESP = ESP + ") && t.ends_with(';') { return false; }
+        if t.starts_with("ESP = ESP - ") && t.ends_with(';') {
+            return false;
+        }
+        if t.starts_with("ESP = ESP + ") && t.ends_with(';') {
+            return false;
+        }
         // Remove "ESP = (ESP + N) - 4;" and similar compound forms
-        if t.starts_with("ESP = (ESP") && t.ends_with(';') && !t.contains("func_")
-            && !t.contains("var_") && !t.contains("param_")
-        { return false; }
+        if t.starts_with("ESP = (ESP")
+            && t.ends_with(';')
+            && !t.contains("func_")
+            && !t.contains("var_")
+            && !t.contains("param_")
+        {
+            return false;
+        }
         // Remove "ESP = param_..." (prologue ESP init)
-        if t.starts_with("ESP = param_") && t.ends_with(';') { return false; }
+        if t.starts_with("ESP = param_") && t.ends_with(';') {
+            return false;
+        }
         // Remove "*(uint32_t*)(ESP) = EBP;" (push EBP) and other prologue pushes
-        if t == "*(uint32_t*)(ESP) = EBP;" { return false; }
-        if t == "*(uint32_t*)(ESP) = EBX;" { return false; }
-        if t == "*(uint32_t*)(ESP) = ESI;" { return false; }
-        if t == "*(uint32_t*)(ESP) = EDI;" { return false; }
+        if t == "*(uint32_t*)(ESP) = EBP;" {
+            return false;
+        }
+        if t == "*(uint32_t*)(ESP) = EBX;" {
+            return false;
+        }
+        if t == "*(uint32_t*)(ESP) = ESI;" {
+            return false;
+        }
+        if t == "*(uint32_t*)(ESP) = EDI;" {
+            return false;
+        }
         // Remove "*(uint32_t*)(ESP) = 0x40xxxx;" (return address pushes)
-        if t.starts_with("*(uint32_t*)(ESP) = 0x40") && t.ends_with(';') { return false; }
-        if t.starts_with("*(uint32_t*)(ESP) = 0x41") && t.ends_with(';') { return false; }
-        if t.starts_with("*(uint32_t*)(ESP) = 0x42") && t.ends_with(';') { return false; }
+        if t.starts_with("*(uint32_t*)(ESP) = 0x40") && t.ends_with(';') {
+            return false;
+        }
+        if t.starts_with("*(uint32_t*)(ESP) = 0x41") && t.ends_with(';') {
+            return false;
+        }
+        if t.starts_with("*(uint32_t*)(ESP) = 0x42") && t.ends_with(';') {
+            return false;
+        }
         // Remove standalone ESP stores of constants that are PUSH boilerplate
         // "*(uint32_t*)(ESP) = -1;" (SEH frame sentinel)
-        if t == "*(uint32_t*)(ESP) = -1;" { return false; }
+        if t == "*(uint32_t*)(ESP) = -1;" {
+            return false;
+        }
         true
     });
 
@@ -1473,13 +1794,21 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     lines.retain(|line| {
         let t = line.trim();
         // RSP = RSP - N / RSP = RSP + N (frame allocation/deallocation)
-        if t.starts_with("RSP = RSP ") && t.ends_with(';') { return false; }
+        if t.starts_with("RSP = RSP ") && t.ends_with(';') {
+            return false;
+        }
         // *(uint64_t*)(RBP) = -2; (stack cookie sentinel)
-        if t == "*(uint64_t*)(RBP) = -2;" { return false; }
+        if t == "*(uint64_t*)(RBP) = -2;" {
+            return false;
+        }
         // *(uint64_t*)(RSP) = RBP; (push rbp)
-        if t == "*(uint64_t*)(RSP) = RBP;" { return false; }
+        if t == "*(uint64_t*)(RSP) = RBP;" {
+            return false;
+        }
         // RBP = RSP; or RBP = RSP + N; (frame pointer setup)
-        if t.starts_with("RBP = RSP") && t.ends_with(';') && !t.contains("func_") { return false; }
+        if t.starts_with("RBP = RSP") && t.ends_with(';') && !t.contains("func_") {
+            return false;
+        }
         true
     });
 
@@ -1491,16 +1820,20 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // RBP + decimal_offset
         while let Some(pos) = line.find("RBP + ") {
             let after = &line[pos + 6..];
-            let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+            let end = after
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(after.len());
             if end > 0 {
                 if let Ok(offset) = after[..end].parse::<u64>() {
                     if offset == 0 {
                         // RBP + 0 → just RBP (or skip)
                         let replacement = "RBP".to_string();
-                        *line = format!("{}{}{}", &line[..pos], replacement, &line[pos + 6 + end..]);
+                        *line =
+                            format!("{}{}{}", &line[..pos], replacement, &line[pos + 6 + end..]);
                     } else {
                         let replacement = format!("local_{:x}", offset);
-                        *line = format!("{}{}{}", &line[..pos], replacement, &line[pos + 6 + end..]);
+                        *line =
+                            format!("{}{}{}", &line[..pos], replacement, &line[pos + 6 + end..]);
                     }
                     continue;
                 }
@@ -1523,7 +1856,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
         // RBP[N] (decimal index)
         while let Some(pos) = line.find("RBP[") {
-            if line[pos + 4..].starts_with("0x") { break; } // already handled above
+            if line[pos + 4..].starts_with("0x") {
+                break;
+            } // already handled above
             let after = &line[pos + 4..];
             let end = after.find(']').unwrap_or(0);
             if end > 0 {
@@ -1558,14 +1893,20 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 // Parse the constant: decimal or 0xHEX, terminated by non-hex/non-digit
                 let (num_str, parsed): (&str, Option<u64>) = if after.starts_with("0x") {
                     let rest = &after[2..];
-                    let end = rest.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(rest.len());
+                    let end = rest
+                        .find(|c: char| !c.is_ascii_hexdigit())
+                        .unwrap_or(rest.len());
                     (&rest[..end], u64::from_str_radix(&rest[..end], 16).ok())
                 } else {
-                    let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+                    let end = after
+                        .find(|c: char| !c.is_ascii_digit())
+                        .unwrap_or(after.len());
                     (&after[..end], after[..end].parse::<u64>().ok())
                 };
                 if let Some(n) = parsed {
-                    if n > 0 { sp_subs.insert(n); }
+                    if n > 0 {
+                        sp_subs.insert(n);
+                    }
                 }
                 s = if after.starts_with("0x") {
                     &after[2 + num_str.len()..]
@@ -1589,14 +1930,20 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let mut search_from = 0usize;
                 while let Some(rel) = line[search_from..].find("sp->field_") {
                     let pos = search_from + rel;
-                    let prev = if pos == 0 { b' ' } else { line.as_bytes()[pos - 1] };
+                    let prev = if pos == 0 {
+                        b' '
+                    } else {
+                        line.as_bytes()[pos - 1]
+                    };
                     if prev.is_ascii_alphanumeric() || prev == b'_' {
                         search_from = pos + "sp->field_".len();
                         continue;
                     }
                     let after_start = pos + "sp->field_".len();
                     let after = &line[after_start..];
-                    let end = after.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(after.len());
+                    let end = after
+                        .find(|c: char| !c.is_ascii_hexdigit())
+                        .unwrap_or(after.len());
                     if end == 0 {
                         search_from = after_start;
                         continue;
@@ -1610,8 +1957,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         continue;
                     }
                     let replacement = format!("local_{:x}", off);
-                    *line = format!("{}{}{}",
-                        &line[..pos], replacement, &line[after_start + end..]);
+                    *line = format!(
+                        "{}{}{}",
+                        &line[..pos],
+                        replacement,
+                        &line[after_start + end..]
+                    );
                     search_from = pos + replacement.len();
                 }
             }
@@ -1634,7 +1985,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             for line in lines.iter_mut() {
                 for pat in [&pat_paren_bare, &pat_paren_hex_bare] {
                     while let Some(pos) = line.find(pat.as_str()) {
-                        *line = format!("{}{}{}", &line[..pos], local_name(0), &line[pos + pat.len()..]);
+                        *line = format!(
+                            "{}{}{}",
+                            &line[..pos],
+                            local_name(0),
+                            &line[pos + pat.len()..]
+                        );
                     }
                 }
             }
@@ -1643,11 +1999,20 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 for pat in [&pat_field, &pat_hex_field] {
                     while let Some(pos) = line.find(pat.as_str()) {
                         let after = &line[pos + pat.len()..];
-                        let end = after.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(after.len());
-                        if end == 0 { break; }
+                        let end = after
+                            .find(|c: char| !c.is_ascii_hexdigit())
+                            .unwrap_or(after.len());
+                        if end == 0 {
+                            break;
+                        }
                         if let Ok(off) = u64::from_str_radix(&after[..end], 16) {
                             let replacement = local_name(off);
-                            *line = format!("{}{}{}", &line[..pos], replacement, &line[pos + pat.len() + end..]);
+                            *line = format!(
+                                "{}{}{}",
+                                &line[..pos],
+                                replacement,
+                                &line[pos + pat.len() + end..]
+                            );
                             continue;
                         }
                         break;
@@ -1659,16 +2024,27 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         let after = &line[pos + pat.len()..];
                         let (num_len, parsed): (usize, Option<u64>) = if after.starts_with("0x") {
                             let rest = &after[2..];
-                            let end = rest.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(rest.len());
+                            let end = rest
+                                .find(|c: char| !c.is_ascii_hexdigit())
+                                .unwrap_or(rest.len());
                             (2 + end, u64::from_str_radix(&rest[..end], 16).ok())
                         } else {
-                            let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+                            let end = after
+                                .find(|c: char| !c.is_ascii_digit())
+                                .unwrap_or(after.len());
                             (end, after[..end].parse::<u64>().ok())
                         };
-                        if num_len == 0 { break; }
+                        if num_len == 0 {
+                            break;
+                        }
                         if let Some(off) = parsed {
                             let replacement = local_name(off);
-                            *line = format!("{}{}{}", &line[..pos], replacement, &line[pos + pat.len() + num_len..]);
+                            *line = format!(
+                                "{}{}{}",
+                                &line[..pos],
+                                replacement,
+                                &line[pos + pat.len() + num_len..]
+                            );
                             continue;
                         }
                         break;
@@ -1683,14 +2059,20 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let mut search_from = 0usize;
                 while let Some(rel) = line[search_from..].find(pat_sp_arrow) {
                     let pos = search_from + rel;
-                    let prev = if pos == 0 { b' ' } else { line.as_bytes()[pos - 1] };
+                    let prev = if pos == 0 {
+                        b' '
+                    } else {
+                        line.as_bytes()[pos - 1]
+                    };
                     if prev.is_ascii_alphanumeric() || prev == b'_' {
                         search_from = pos + pat_sp_arrow.len();
                         continue;
                     }
                     let after_start = pos + pat_sp_arrow.len();
                     let after = &line[after_start..];
-                    let end = after.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(after.len());
+                    let end = after
+                        .find(|c: char| !c.is_ascii_hexdigit())
+                        .unwrap_or(after.len());
                     if end == 0 {
                         search_from = after_start;
                         continue;
@@ -1704,8 +2086,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         continue;
                     }
                     let replacement = local_name(off);
-                    *line = format!("{}{}{}",
-                        &line[..pos], replacement, &line[after_start + end..]);
+                    *line = format!(
+                        "{}{}{}",
+                        &line[..pos],
+                        replacement,
+                        &line[after_start + end..]
+                    );
                     search_from = pos + replacement.len();
                 }
                 // Bare `sp - N` (no further +/-> ) → local_0 (frame base itself)
@@ -1716,7 +2102,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         // Don't match if this `sp - N` is followed by another digit/hex
                         // (could be part of a longer constant) or by `->` (handled above)
                         // or by ` + ` / ` - ` (handled above)
-                        if next.is_ascii_alphanumeric() || next == b'-' || next == b'+' { break; }
+                        if next.is_ascii_alphanumeric() || next == b'-' || next == b'+' {
+                            break;
+                        }
                         let replacement = local_name(0);
                         *line = format!("{}{}{}", &line[..pos], replacement, &line[after_pos..]);
                     }
@@ -1730,7 +2118,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 while let Some(rel) = line[search_from..].find(pat_sp_plus) {
                     let pos = search_from + rel;
                     // Avoid matching inside a longer identifier like "lsp +"
-                    let prev = if pos == 0 { b' ' } else { line.as_bytes()[pos - 1] };
+                    let prev = if pos == 0 {
+                        b' '
+                    } else {
+                        line.as_bytes()[pos - 1]
+                    };
                     if prev.is_ascii_alphanumeric() || prev == b'_' {
                         search_from = pos + pat_sp_plus.len();
                         continue;
@@ -1738,10 +2130,14 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let after = &line[pos + pat_sp_plus.len()..];
                     let (num_len, parsed): (usize, Option<u64>) = if after.starts_with("0x") {
                         let rest = &after[2..];
-                        let end = rest.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(rest.len());
+                        let end = rest
+                            .find(|c: char| !c.is_ascii_hexdigit())
+                            .unwrap_or(rest.len());
                         (2 + end, u64::from_str_radix(&rest[..end], 16).ok())
                     } else {
-                        let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+                        let end = after
+                            .find(|c: char| !c.is_ascii_digit())
+                            .unwrap_or(after.len());
                         (end, after[..end].parse::<u64>().ok())
                     };
                     if num_len == 0 || parsed.is_none() {
@@ -1754,7 +2150,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         continue;
                     }
                     let replacement = local_name(off);
-                    let new_line = format!("{}{}{}", &line[..pos], replacement, &line[pos + pat_sp_plus.len() + num_len..]);
+                    let new_line = format!(
+                        "{}{}{}",
+                        &line[..pos],
+                        replacement,
+                        &line[pos + pat_sp_plus.len() + num_len..]
+                    );
                     search_from = pos + replacement.len();
                     *line = new_line;
                 }
@@ -1765,7 +2166,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let mut search_from = 0usize;
                 while let Some(rel) = line[search_from..].find("sp[") {
                     let pos = search_from + rel;
-                    let prev = if pos == 0 { b' ' } else { line.as_bytes()[pos - 1] };
+                    let prev = if pos == 0 {
+                        b' '
+                    } else {
+                        line.as_bytes()[pos - 1]
+                    };
                     if prev.is_ascii_alphanumeric() || prev == b'_' {
                         search_from = pos + 3;
                         continue;
@@ -1782,19 +2187,30 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let mut ok = true;
                     for (i, part) in inner.split(|c: char| c == '+' || c == '-').enumerate() {
                         let t = part.trim();
-                        if t.is_empty() { ok = false; break; }
+                        if t.is_empty() {
+                            ok = false;
+                            break;
+                        }
                         let v = if let Some(h) = t.strip_prefix("0x") {
                             i64::from_str_radix(h, 16).ok()
-                        } else { t.parse::<i64>().ok() };
-                        let Some(v) = v else { ok = false; break; };
-                        if i == 0 { total = v; }
-                        else { total += sign * v; }
+                        } else {
+                            t.parse::<i64>().ok()
+                        };
+                        let Some(v) = v else {
+                            ok = false;
+                            break;
+                        };
+                        if i == 0 {
+                            total = v;
+                        } else {
+                            total += sign * v;
+                        }
                         // Capture next operator char from original string
                         // (already consumed by split — peek by scanning forward)
                         let _ = sign; // silence
-                        // Simple reparse: find the operator between this part and next
-                        // by walking the original string — but split drops operators,
-                        // so we need a different approach. Restart with tokenizer.
+                                      // Simple reparse: find the operator between this part and next
+                                      // by walking the original string — but split drops operators,
+                                      // so we need a different approach. Restart with tokenizer.
                         ok = true;
                     }
                     // Restart with proper tokenizer (the loop above is a scaffolding
@@ -1807,18 +2223,29 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let mut num_buf = String::new();
                     let parse_num_to_i64 = |s: &str| -> Option<i64> {
                         let s = s.trim();
-                        if s.is_empty() { return None; }
-                        if let Some(h) = s.strip_prefix("0x") { i64::from_str_radix(h, 16).ok() }
-                        else { s.parse::<i64>().ok() }
+                        if s.is_empty() {
+                            return None;
+                        }
+                        if let Some(h) = s.strip_prefix("0x") {
+                            i64::from_str_radix(h, 16).ok()
+                        } else {
+                            s.parse::<i64>().ok()
+                        }
                     };
                     while j < bytes.len() {
                         let c = bytes[j];
-                        if c == b' ' { j += 1; continue; }
+                        if c == b' ' {
+                            j += 1;
+                            continue;
+                        }
                         if c == b'+' || c == b'-' {
                             if !num_buf.is_empty() {
                                 match parse_num_to_i64(&num_buf) {
                                     Some(v) => total += sign * v,
-                                    None => { ok = false; break; }
+                                    None => {
+                                        ok = false;
+                                        break;
+                                    }
                                 }
                                 num_buf.clear();
                             }
@@ -1862,7 +2289,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         let mut search_from = 0usize;
         loop {
             let remaining = &line[search_from..];
-            let Some(rel_start) = remaining.find("param_") else { break };
+            let Some(rel_start) = remaining.find("param_") else {
+                break;
+            };
             let start = search_from + rel_start;
 
             // Check if this param_ is followed by [RSP
@@ -1891,8 +2320,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let mut pos = abs_bracket + 1;
             let bytes = line.as_bytes();
             while pos < bytes.len() && depth > 0 {
-                if bytes[pos] == b'[' { depth += 1; }
-                if bytes[pos] == b']' { depth -= 1; }
+                if bytes[pos] == b'[' {
+                    depth += 1;
+                }
+                if bytes[pos] == b']' {
+                    depth -= 1;
+                }
                 pos += 1;
             }
             if depth != 0 {
@@ -1906,15 +2339,22 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             } else {
                 "local_0".to_string()
             };
-            *line = format!("{}{}{}", &line[..start], replacement, &line[abs_close + 1..]);
+            *line = format!(
+                "{}{}{}",
+                &line[..start],
+                replacement,
+                &line[abs_close + 1..]
+            );
             // Don't advance search_from — the replacement might enable more matches
         }
         // Pattern: "NNN + RSP" / "NNN + ESP" → "local_NNN" (offset + stack ptr)
         for suffix in &[" + RSP", " + ESP"] {
             while let Some(pos) = line.find(suffix) {
                 let before = &line[..pos];
-                let num_start = before.rfind(|c: char| !c.is_ascii_hexdigit() && c != 'x')
-                    .map(|p| p + 1).unwrap_or(0);
+                let num_start = before
+                    .rfind(|c: char| !c.is_ascii_hexdigit() && c != 'x')
+                    .map(|p| p + 1)
+                    .unwrap_or(0);
                 if num_start < pos {
                     let num_str = &line[num_start..pos];
                     let parsed: Option<u64> = if let Some(h) = num_str.strip_prefix("0x") {
@@ -1925,8 +2365,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     if let Some(offset) = parsed {
                         if offset > 0 && offset < 0x10000 {
                             let replacement = format!("local_{:x}", offset);
-                            *line = format!("{}{}{}", &line[..num_start], replacement,
-                                            &line[pos + suffix.len()..]);
+                            *line = format!(
+                                "{}{}{}",
+                                &line[..num_start],
+                                replacement,
+                                &line[pos + suffix.len()..]
+                            );
                             continue;
                         }
                     }
@@ -1939,7 +2383,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let mut search_from = 0usize;
             while let Some(rel) = line[search_from..].find(prefix) {
                 let pos = search_from + rel;
-                let prev = if pos == 0 { b' ' } else { line.as_bytes()[pos - 1] };
+                let prev = if pos == 0 {
+                    b' '
+                } else {
+                    line.as_bytes()[pos - 1]
+                };
                 if prev.is_ascii_alphanumeric() || prev == b'_' {
                     search_from = pos + prefix.len();
                     continue;
@@ -1948,10 +2396,14 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let after = &line[num_start..];
                 let (num_len, parsed): (usize, Option<u64>) = if after.starts_with("0x") {
                     let rest = &after[2..];
-                    let end = rest.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(rest.len());
+                    let end = rest
+                        .find(|c: char| !c.is_ascii_hexdigit())
+                        .unwrap_or(rest.len());
                     (2 + end, u64::from_str_radix(&rest[..end], 16).ok())
                 } else {
-                    let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+                    let end = after
+                        .find(|c: char| !c.is_ascii_digit())
+                        .unwrap_or(after.len());
                     (end, after[..end].parse::<u64>().ok())
                 };
                 if num_len == 0 || parsed.is_none() {
@@ -1963,17 +2415,28 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     search_from = pos + prefix.len() + num_len;
                     continue;
                 }
-                let replacement = if off == 0 { "local_0".to_string() }
-                    else { format!("local_{:x}", off) };
-                *line = format!("{}{}{}", &line[..pos], replacement,
-                                &line[pos + prefix.len() + num_len..]);
+                let replacement = if off == 0 {
+                    "local_0".to_string()
+                } else {
+                    format!("local_{:x}", off)
+                };
+                *line = format!(
+                    "{}{}{}",
+                    &line[..pos],
+                    replacement,
+                    &line[pos + prefix.len() + num_len..]
+                );
                 search_from = pos + replacement.len();
             }
         }
         // Bare `*(RSP)` / `*(ESP)` → `local_0` (top-of-stack deref).
         for pat in &["*(RSP)", "*(ESP)"] {
             while let Some(pos) = line.find(pat) {
-                let before = if pos == 0 { b' ' } else { line.as_bytes()[pos - 1] };
+                let before = if pos == 0 {
+                    b' '
+                } else {
+                    line.as_bytes()[pos - 1]
+                };
                 if before.is_ascii_alphanumeric() || before == b'_' {
                     break;
                 }
@@ -1995,7 +2458,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // sp[N] = lVarM; sp[N] = x29; sp[N] = x30; sp[N] = 0; sp[N+M] = xNN;
         // sp[N + M] = 0xADDRESS (return address save from link register)
         if t.starts_with("sp[") && t.ends_with(';') && t.contains("] = ") {
-            let rhs = t.split("] = ").last().unwrap_or("").trim_end_matches(';').trim();
+            let rhs = t
+                .split("] = ")
+                .last()
+                .unwrap_or("")
+                .trim_end_matches(';')
+                .trim();
             let is_callee_save = rhs.starts_with("lVar") || rhs.starts_with("iVar")
                 || rhs.starts_with("dVar")
                 || rhs == "x29" || rhs == "x30" || rhs == "0"
@@ -2004,32 +2472,53 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 || rhs.starts_with("param_")
                 // Return address constants (link register saves)
                 || rhs.starts_with("0x");
-            if is_callee_save { return false; }
+            if is_callee_save {
+                return false;
+            }
         }
-        if t.starts_with("*(uint64_t*)(sp)") && t.ends_with(';')
+        if t.starts_with("*(uint64_t*)(sp)")
+            && t.ends_with(';')
             && (t.contains("= x") || t.contains("= lVar") || t.contains("= 0"))
-        { return false; }
+        {
+            return false;
+        }
         // Frame pointer write: x29 = <anything>; — in AArch64, x29 is always the frame
         // pointer, never a C-level variable. Writes to it are prologue setup or epilogue
         // restore. Elide them all so struct-field-renamed epilogue loads go away too.
-        if t.starts_with("x29 = ") && t.ends_with(';') { return false; }
+        if t.starts_with("x29 = ") && t.ends_with(';') {
+            return false;
+        }
         // Link register write: x30 = <anything>; — x30 is always the return address;
         // any write is epilogue restore after the sp-based pattern was rewritten via
         // struct-field naming (e.g. `x30 = iVar1->lpSecurityDescriptor;`).
-        if t.starts_with("x30 = ") && t.ends_with(';') { return false; }
+        if t.starts_with("x30 = ") && t.ends_with(';') {
+            return false;
+        }
         // LR save to stack: `local_N = x30;` — always prologue boilerplate.
         // Same for saving x29 to a local (frame pointer save).
         if (t.starts_with("local_") || t.starts_with("sp["))
             && (t.ends_with(" = x30;") || t.ends_with(" = x29;"))
-        { return false; }
+        {
+            return false;
+        }
         // Frame pointer computation: `iVarN = sp - N;` or `lVarN = sp - N;`
         // This is `x29 = sp` after the prologue push decremented sp — pure boilerplate.
         if (t.starts_with("iVar") || t.starts_with("lVar"))
-            && t.contains(" = sp - ") && t.ends_with(';')
-            && !t.contains("(") && !t.contains("[")
+            && t.contains(" = sp - ")
+            && t.ends_with(';')
+            && !t.contains("(")
+            && !t.contains("[")
         {
-            let rhs = t.split(" = sp - ").nth(1).unwrap_or("").trim_end_matches(';').trim();
-            if rhs.chars().all(|c| c.is_ascii_hexdigit() || c == 'x' || c == 'X') {
+            let rhs = t
+                .split(" = sp - ")
+                .nth(1)
+                .unwrap_or("")
+                .trim_end_matches(';')
+                .trim();
+            if rhs
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == 'x' || c == 'X')
+            {
                 return false;
             }
         }
@@ -2043,8 +2532,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     && rhs.starts_with(lhs)
                     && (rhs[lhs.len()..].starts_with(" + ") || rhs[lhs.len()..].starts_with(" - "))
                 {
-                    let tail = rhs[lhs.len()+3..].trim();
-                    if tail.chars().all(|c| c.is_ascii_hexdigit() || c == 'x' || c == 'X') {
+                    let tail = rhs[lhs.len() + 3..].trim();
+                    if tail
+                        .chars()
+                        .all(|c| c.is_ascii_hexdigit() || c == 'x' || c == 'X')
+                    {
                         return false;
                     }
                 }
@@ -2053,55 +2545,117 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // Stack allocation: sp = sp + N; sp = sp - N; sp = param_-N;
         // After the AArch64 `sp - N → local_N` rewrite, this also catches
         // `sp = local_0;` (the rewritten form of `sp = sp - frame_size;`).
-        if t.starts_with("sp = sp ") && t.ends_with(';') { return false; }
-        if t.starts_with("sp = param_") && t.ends_with(';') { return false; }
-        if t.starts_with("sp = local_") && t.ends_with(';') { return false; }
+        if t.starts_with("sp = sp ") && t.ends_with(';') {
+            return false;
+        }
+        if t.starts_with("sp = param_") && t.ends_with(';') {
+            return false;
+        }
+        if t.starts_with("sp = local_") && t.ends_with(';') {
+            return false;
+        }
         // Return via link register: return sp[N]->field_8; (epilogue pattern)
-        if t.starts_with("return sp") && t.contains("->field_8") { return false; }
+        if t.starts_with("return sp") && t.contains("->field_8") {
+            return false;
+        }
         // ObjC ARC noise
-        if t == "objc_retain();" || t.starts_with("objc_retain(") && t.ends_with(");") && !t.contains("=") {
+        if t == "objc_retain();"
+            || t.starts_with("objc_retain(") && t.ends_with(");") && !t.contains("=")
+        {
             return false;
         }
         if t == "objc_release();" || t.starts_with("objc_release(") && t.ends_with(");") {
             return false;
         }
-        if t.starts_with("objc_retainAutoreleasedReturnValue(") { return false; }
-        if t.starts_with("objc_autoreleasePoolPush(") { return false; }
-        if t.starts_with("objc_autoreleasePoolPop(") { return false; }
-        if t.starts_with("objc_autoreleaseReturnValue(") { return false; }
+        if t.starts_with("objc_retainAutoreleasedReturnValue(") {
+            return false;
+        }
+        if t.starts_with("objc_autoreleasePoolPush(") {
+            return false;
+        }
+        if t.starts_with("objc_autoreleasePoolPop(") {
+            return false;
+        }
+        if t.starts_with("objc_autoreleaseReturnValue(") {
+            return false;
+        }
         // Swift ARC noise
-        if t.starts_with("swift_retain(") && t.ends_with(");") { return false; }
-        if t.starts_with("swift_release(") && t.ends_with(");") { return false; }
-        if t.starts_with("swift_bridgeObjectRetain(") && t.ends_with(");") { return false; }
-        if t.starts_with("swift_bridgeObjectRelease(") && t.ends_with(");") { return false; }
-        if t.starts_with("swift_unknownObjectRetain(") && t.ends_with(");") { return false; }
-        if t.starts_with("swift_unknownObjectRelease(") && t.ends_with(");") { return false; }
+        if t.starts_with("swift_retain(") && t.ends_with(");") {
+            return false;
+        }
+        if t.starts_with("swift_release(") && t.ends_with(");") {
+            return false;
+        }
+        if t.starts_with("swift_bridgeObjectRetain(") && t.ends_with(");") {
+            return false;
+        }
+        if t.starts_with("swift_bridgeObjectRelease(") && t.ends_with(");") {
+            return false;
+        }
+        if t.starts_with("swift_unknownObjectRetain(") && t.ends_with(");") {
+            return false;
+        }
+        if t.starts_with("swift_unknownObjectRelease(") && t.ends_with(");") {
+            return false;
+        }
         // Swift runtime housekeeping (access control, allocation, type checks)
-        if t.starts_with("swift_beginAccess(") && t.ends_with(");") { return false; }
-        if t.starts_with("swift_endAccess(") && t.ends_with(");") { return false; }
-        if t.starts_with("swift_allocObject(") && t.ends_with(");") { return false; }
-        if t.starts_with("swift_isUniquelyReferenced") && t.ends_with(");") { return false; }
-        if t.starts_with("objc_opt_self(") && t.ends_with(");") { return false; }
+        if t.starts_with("swift_beginAccess(") && t.ends_with(");") {
+            return false;
+        }
+        if t.starts_with("swift_endAccess(") && t.ends_with(");") {
+            return false;
+        }
+        if t.starts_with("swift_allocObject(") && t.ends_with(");") {
+            return false;
+        }
+        if t.starts_with("swift_isUniquelyReferenced") && t.ends_with(");") {
+            return false;
+        }
+        if t.starts_with("objc_opt_self(") && t.ends_with(");") {
+            return false;
+        }
         // Dead trap code: pc = ?; from incomplete OV block removal
-        if t == "pc = ?;" || t.starts_with("goto label_") { return false; }
+        if t == "pc = ?;" || t.starts_with("goto label_") {
+            return false;
+        }
         // AArch64 flag register leaks: CY (carry), ZR (zero) are internal CPSR flags
         // that should have been folded into comparison expressions.
         // Only strip lines where a flag register IS the assignment target (e.g., "NG = ...").
         // Don't strip lines where flags appear inside expressions assigned to named vars
         // (e.g., "lVar1 = (NG != OV) * -1" — this is a CSETM result we need to keep).
-        if (t.starts_with("CY") || t.starts_with("ZR") || t.starts_with("NG") || t.starts_with("OV")
-            || t.starts_with("tmpCY") || t.starts_with("tmpZR") || t.starts_with("tmpNG") || t.starts_with("tmpOV"))
-            && t.contains(" = ") && t.ends_with(';')
+        if (t.starts_with("CY")
+            || t.starts_with("ZR")
+            || t.starts_with("NG")
+            || t.starts_with("OV")
+            || t.starts_with("tmpCY")
+            || t.starts_with("tmpZR")
+            || t.starts_with("tmpNG")
+            || t.starts_with("tmpOV"))
+            && t.contains(" = ")
+            && t.ends_with(';')
         {
             return false;
         }
         // x30 = address (link register setup for calls — noise)
-        if t.starts_with("x30 = 0x") && t.ends_with(';') { return false; }
-        if t.starts_with("x30 = ") && t.contains(" + ") && t.ends_with(';') && !t.contains("func_") { return false; }
+        if t.starts_with("x30 = 0x") && t.ends_with(';') {
+            return false;
+        }
+        if t.starts_with("x30 = ") && t.contains(" + ") && t.ends_with(';') && !t.contains("func_")
+        {
+            return false;
+        }
         // x29 stores (frame pointer spills)
-        if t.starts_with("*(uint64_t*)(x29") && t.ends_with(';') && !t.contains("func_") && !t.contains("param_") { return false; }
+        if t.starts_with("*(uint64_t*)(x29")
+            && t.ends_with(';')
+            && !t.contains("func_")
+            && !t.contains("param_")
+        {
+            return false;
+        }
         // sp + N -> field_8 patterns (return address from stack)
-        if t.starts_with("return sp") && t.ends_with(';') && !t.contains("func_") { return false; }
+        if t.starts_with("return sp") && t.ends_with(';') && !t.contains("func_") {
+            return false;
+        }
         true
     });
 
@@ -2134,7 +2688,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         // Found orphan close. De-indent all lines between i+1 and j.
                         for k in (i + 1)..j {
                             let kt = lines[k].trim().to_string();
-                            if kt.is_empty() { continue; }
+                            if kt.is_empty() {
+                                continue;
+                            }
                             let ki = lines[k].len() - lines[k].trim_start().len();
                             let new_indent = if ki >= 4 { ki - 4 } else { 0 };
                             lines[k] = format!("{}{}", " ".repeat(new_indent), kt);
@@ -2143,7 +2699,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         lines.remove(j);
                         break;
                     }
-                    if jt == "}" && ji < cur_indent { break; } // different scope
+                    if jt == "}" && ji < cur_indent {
+                        break;
+                    } // different scope
                     j += 1;
                 }
             }
@@ -2164,7 +2722,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     // handled by is_body_empty + negate logic
                 }
                 lines.remove(i + 1); // remove "}"
-                lines.remove(i);     // remove "if (...) {"
+                lines.remove(i); // remove "if (...) {"
                 continue;
             }
             i += 1;
@@ -2175,7 +2733,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // Detect ARM32 by presence of mult_addr, shift_carry, or ARM register names.
     {
         let all_check = lines.join("");
-        let is_arm32 = all_check.contains("mult_addr") || all_check.contains("shift_carry")
+        let is_arm32 = all_check.contains("mult_addr")
+            || all_check.contains("shift_carry")
             || matches!(ctx.arch, Architecture::ARM32);
 
         if is_arm32 {
@@ -2184,20 +2743,36 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             lines.retain(|line| {
                 let t = line.trim();
                 // shift_carry = ... (barrel shifter carry output)
-                if t.starts_with("shift_carry") && t.contains("=") && t.ends_with(';') { return false; }
+                if t.starts_with("shift_carry") && t.contains("=") && t.ends_with(';') {
+                    return false;
+                }
                 // tmpNG = ... (negative flag)
-                if t.starts_with("tmpNG") && t.contains("=") && t.ends_with(';') { return false; }
+                if t.starts_with("tmpNG") && t.contains("=") && t.ends_with(';') {
+                    return false;
+                }
                 // tmpZR = ... (zero flag)
-                if t.starts_with("tmpZR") && t.contains("=") && t.ends_with(';') { return false; }
+                if t.starts_with("tmpZR") && t.contains("=") && t.ends_with(';') {
+                    return false;
+                }
                 // tmpCY = ... (carry flag)
-                if t.starts_with("tmpCY") && t.contains("=") && t.ends_with(';') { return false; }
+                if t.starts_with("tmpCY") && t.contains("=") && t.ends_with(';') {
+                    return false;
+                }
                 // tmpOV = ... (overflow flag)
-                if t.starts_with("tmpOV") && t.contains("=") && t.ends_with(';') { return false; }
+                if t.starts_with("tmpOV") && t.contains("=") && t.ends_with(';') {
+                    return false;
+                }
                 // TB = ... (Thumb bit)
-                if t.starts_with("TB") && t.contains("=") && t.ends_with(';') { return false; }
+                if t.starts_with("TB") && t.contains("=") && t.ends_with(';') {
+                    return false;
+                }
                 // NG = ..., ZR = ..., CY = ..., OV = ... (flag stores)
                 if t.len() < 50 && t.ends_with(';') {
-                    if t.starts_with("NG = ") || t.starts_with("ZR = ") || t.starts_with("CY = ") || t.starts_with("OV = ") {
+                    if t.starts_with("NG = ")
+                        || t.starts_with("ZR = ")
+                        || t.starts_with("CY = ")
+                        || t.starts_with("OV = ")
+                    {
                         return false;
                     }
                 }
@@ -2208,25 +2783,52 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             lines.retain(|line| {
                 let t = line.trim();
                 // PUSH: *(uint32_t*)(mult_addr) = rN; mult_addr = mult_addr - 4;
-                if t.starts_with("*(uint32_t*)(mult_addr)") && t.contains("=") && t.ends_with(';') { return false; }
-                if t == "mult_addr = mult_addr - 4;" || t == "mult_addr = mult_addr + 4;" { return false; }
+                if t.starts_with("*(uint32_t*)(mult_addr)") && t.contains("=") && t.ends_with(';') {
+                    return false;
+                }
+                if t == "mult_addr = mult_addr - 4;" || t == "mult_addr = mult_addr + 4;" {
+                    return false;
+                }
                 // Stack frame setup: mult_addr = sp; or mult_addr = sp - N;
-                if t.starts_with("mult_addr = sp") && t.ends_with(';') { return false; }
-                if t.starts_with("sp = mult_addr") && t.ends_with(';') { return false; }
-                if t.starts_with("mult_addr = ") && t.contains("sp") && t.ends_with(';') { return false; }
+                if t.starts_with("mult_addr = sp") && t.ends_with(';') {
+                    return false;
+                }
+                if t.starts_with("sp = mult_addr") && t.ends_with(';') {
+                    return false;
+                }
+                if t.starts_with("mult_addr = ") && t.contains("sp") && t.ends_with(';') {
+                    return false;
+                }
                 // POP: rN = *(uint32_t*)(mult_addr); or rN = *(uint32_t*)(sp...
                 // pc = ... (function return via POP {pc})
-                if t.starts_with("pc = ") && t.ends_with(';') { return false; }
+                if t.starts_with("pc = ") && t.ends_with(';') {
+                    return false;
+                }
                 // lr = *(uint32_t*)(mult_addr) — restore LR
-                if t.starts_with("lr = *(uint32_t*)(mult_addr") && t.ends_with(';') { return false; }
+                if t.starts_with("lr = *(uint32_t*)(mult_addr") && t.ends_with(';') {
+                    return false;
+                }
                 // return sp; (common ARM32 epilogue artifact)
-                if t == "return sp;" || t == "return mult_addr;" { return false; }
+                if t == "return sp;" || t == "return mult_addr;" {
+                    return false;
+                }
                 // lr = 0xNNNNN; (return address setup before BL)
-                if t.starts_with("lr = 0x") && t.ends_with(';') && !t.contains("func_") { return false; }
+                if t.starts_with("lr = 0x") && t.ends_with(';') && !t.contains("func_") {
+                    return false;
+                }
                 // lr = NN; (small constant — return address)
-                if t.starts_with("lr = ") && t.ends_with(';') && !t.contains("func_") && !t.contains("param_") {
+                if t.starts_with("lr = ")
+                    && t.ends_with(';')
+                    && !t.contains("func_")
+                    && !t.contains("param_")
+                {
                     let val = t.strip_prefix("lr = ").unwrap_or("").trim_end_matches(';');
-                    if val.chars().all(|c| c.is_ascii_digit() || c == 'x' || c.is_ascii_hexdigit()) { return false; }
+                    if val
+                        .chars()
+                        .all(|c| c.is_ascii_digit() || c == 'x' || c.is_ascii_hexdigit())
+                    {
+                        return false;
+                    }
                 }
                 true
             });
@@ -2245,11 +2847,23 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // 4. Rename ARM registers to parameter/variable names
             // ARM calling convention: r0-r3 = params, r4-r11 = callee-saved locals
             // lr (link register) → return_addr (usually noise, but kept when meaningful)
-            let param_regs = [("r0", "param_0"), ("r1", "param_1"), ("r2", "param_2"), ("r3", "param_3")];
+            let param_regs = [
+                ("r0", "param_0"),
+                ("r1", "param_1"),
+                ("r2", "param_2"),
+                ("r3", "param_3"),
+            ];
             let local_regs = [
-                ("r4", "lVar1"), ("r5", "lVar2"), ("r6", "lVar3"), ("r7", "lVar4"),
-                ("r8", "lVar5"), ("r9", "lVar6"), ("r10", "lVar7"), ("r11", "lVar8"),
-                ("r12", "iVar1"), ("lr", "lrVar"),
+                ("r4", "lVar1"),
+                ("r5", "lVar2"),
+                ("r6", "lVar3"),
+                ("r7", "lVar4"),
+                ("r8", "lVar5"),
+                ("r9", "lVar6"),
+                ("r10", "lVar7"),
+                ("r11", "lVar8"),
+                ("r12", "iVar1"),
+                ("lr", "lrVar"),
             ];
 
             // Only rename if the register appears as a standalone identifier
@@ -2260,7 +2874,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let mut result = String::new();
                     let mut remaining = t;
                     while let Some(pos) = remaining.find(reg) {
-                        let before_ok = pos == 0 || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric();
+                        let before_ok =
+                            pos == 0 || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric();
                         let after_pos = pos + reg.len();
                         let after_ok = after_pos >= remaining.len()
                             || (!remaining.as_bytes()[after_pos].is_ascii_alphanumeric()
@@ -2281,7 +2896,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let mut result = String::new();
                     let mut remaining = line.as_str();
                     while let Some(pos) = remaining.find(reg) {
-                        let before_ok = pos == 0 || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric();
+                        let before_ok =
+                            pos == 0 || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric();
                         let after_pos = pos + reg.len();
                         let after_ok = after_pos >= remaining.len()
                             || (!remaining.as_bytes()[after_pos].is_ascii_alphanumeric()
@@ -2318,15 +2934,29 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 // Remove remaining standalone flag stores not caught earlier
                 if t.ends_with(';') && !t.contains("func_") && !t.contains("param_") {
                     // lr = expr; (return address setup — noise)
-                    if t.starts_with("lr = ") || t.starts_with("lr =") { return false; }
+                    if t.starts_with("lr = ") || t.starts_with("lr =") {
+                        return false;
+                    }
                     // return sp; or return sp + N; or return ((sp+4)+4)...
-                    if t.starts_with("return sp") { return false; }
-                    if t.starts_with("return ((") && t.contains("sp") { return false; }
-                    if t.starts_with("return *(sp") || t.starts_with("return sp[") { return false; }
-                    if t.starts_with("return *(uint32_t*)(sp") { return false; }
+                    if t.starts_with("return sp") {
+                        return false;
+                    }
+                    if t.starts_with("return ((") && t.contains("sp") {
+                        return false;
+                    }
+                    if t.starts_with("return *(sp") || t.starts_with("return sp[") {
+                        return false;
+                    }
+                    if t.starts_with("return *(uint32_t*)(sp") {
+                        return false;
+                    }
                     // Remaining flag patterns: NG = ..., ZR = ..., etc in middle of lines
-                    for flag in ["NG = ", "ZR = ", "CY = ", "OV = ", "tmpNG ", "tmpZR ", "tmpCY ", "tmpOV "] {
-                        if t.starts_with(flag) { return false; }
+                    for flag in [
+                        "NG = ", "ZR = ", "CY = ", "OV = ", "tmpNG ", "tmpZR ", "tmpCY ", "tmpOV ",
+                    ] {
+                        if t.starts_with(flag) {
+                            return false;
+                        }
                     }
                 }
                 true
@@ -2338,17 +2968,18 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 while let Some(pos) = line.find("r-0x") {
                     let before_ok = pos == 0 || !line.as_bytes()[pos - 1].is_ascii_alphanumeric();
                     if before_ok {
-                        line.replace_range(pos..pos+1, ""); // remove the 'r'
+                        line.replace_range(pos..pos + 1, ""); // remove the 'r'
                     } else {
                         break;
                     }
                 }
                 while let Some(pos) = line.find("r-") {
                     let before_ok = pos == 0 || !line.as_bytes()[pos - 1].is_ascii_alphanumeric();
-                    let after = &line[pos+2..];
-                    let is_neg_num = after.starts_with("0x") || after.chars().next().map_or(false, |c| c.is_ascii_digit());
+                    let after = &line[pos + 2..];
+                    let is_neg_num = after.starts_with("0x")
+                        || after.chars().next().map_or(false, |c| c.is_ascii_digit());
                     if before_ok && is_neg_num {
-                        line.replace_range(pos..pos+1, "");
+                        line.replace_range(pos..pos + 1, "");
                     } else {
                         break;
                     }
@@ -2358,60 +2989,121 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // 5c. Simplify ARM condition patterns in if-statements
             for line_idx in 0..lines.len() {
                 let t = lines[line_idx].trim().to_string();
-                if t.starts_with("if (") || t.starts_with("} else if (") || t.starts_with("while (") {
+                if t.starts_with("if (") || t.starts_with("} else if (") || t.starts_with("while (")
+                {
                     let indent = lines[line_idx].len() - lines[line_idx].trim_start().len();
                     let pad = " ".repeat(indent);
                     // Look backwards for the most recent variable assignment (for "result" substitution)
-                    let recent_var = (0..line_idx).rev().find_map(|j| {
-                        let lt = lines[j].trim();
-                        if lt.ends_with(';') && lt.contains(" = ") && !lt.starts_with("if ") {
-                            let var_name = lt.split(" = ").next().unwrap_or("").trim();
-                            if var_name.starts_with("param_") || var_name.starts_with("lVar")
-                                || var_name.starts_with("iVar") || var_name.starts_with("local_") {
-                                return Some(var_name.to_string());
+                    let recent_var = (0..line_idx)
+                        .rev()
+                        .find_map(|j| {
+                            let lt = lines[j].trim();
+                            if lt.ends_with(';') && lt.contains(" = ") && !lt.starts_with("if ") {
+                                let var_name = lt.split(" = ").next().unwrap_or("").trim();
+                                if var_name.starts_with("param_")
+                                    || var_name.starts_with("lVar")
+                                    || var_name.starts_with("iVar")
+                                    || var_name.starts_with("local_")
+                                {
+                                    return Some(var_name.to_string());
+                                }
                             }
-                        }
-                        None
-                    }).unwrap_or_else(|| "result".to_string());
+                            None
+                        })
+                        .unwrap_or_else(|| "result".to_string());
                     // Extract the condition and surrounding syntax
                     let (prefix, cond, suffix) = if let Some(rest) = t.strip_prefix("if (") {
                         if let Some(cond) = rest.strip_suffix(") {") {
                             ("if (", cond, ") {")
-                        } else { continue; }
+                        } else {
+                            continue;
+                        }
                     } else if let Some(rest) = t.strip_prefix("} else if (") {
                         if let Some(cond) = rest.strip_suffix(") {") {
                             ("} else if (", cond, ") {")
-                        } else { continue; }
+                        } else {
+                            continue;
+                        }
                     } else if let Some(rest) = t.strip_prefix("while (") {
                         if let Some(cond) = rest.strip_suffix(") {") {
                             ("while (", cond, ") {")
-                        } else { continue; }
-                    } else { continue; };
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        continue;
+                    };
 
                     // Replace flag-based conditions with readable ones
                     let rv = &recent_var;
                     let new_cond_owned: String;
                     let new_cond = match cond {
-                        "ZR" => { new_cond_owned = format!("{} == 0", rv); &new_cond_owned }
-                        "!ZR" | "!(ZR)" => { new_cond_owned = format!("{} != 0", rv); &new_cond_owned }
-                        "CY" => { new_cond_owned = format!("(uint){} >= 0", rv); &new_cond_owned }
-                        "!CY" | "!(CY)" => { new_cond_owned = format!("(uint){} < 0", rv); &new_cond_owned }
-                        "NG" => { new_cond_owned = format!("{} < 0", rv); &new_cond_owned }
-                        "!NG" | "!(NG)" => { new_cond_owned = format!("{} >= 0", rv); &new_cond_owned }
+                        "ZR" => {
+                            new_cond_owned = format!("{} == 0", rv);
+                            &new_cond_owned
+                        }
+                        "!ZR" | "!(ZR)" => {
+                            new_cond_owned = format!("{} != 0", rv);
+                            &new_cond_owned
+                        }
+                        "CY" => {
+                            new_cond_owned = format!("(uint){} >= 0", rv);
+                            &new_cond_owned
+                        }
+                        "!CY" | "!(CY)" => {
+                            new_cond_owned = format!("(uint){} < 0", rv);
+                            &new_cond_owned
+                        }
+                        "NG" => {
+                            new_cond_owned = format!("{} < 0", rv);
+                            &new_cond_owned
+                        }
+                        "!NG" | "!(NG)" => {
+                            new_cond_owned = format!("{} >= 0", rv);
+                            &new_cond_owned
+                        }
                         "OV" => "overflow",
                         "!OV" | "!(OV)" => "!overflow",
-                        "CY && !ZR" | "!ZR && CY" => { new_cond_owned = format!("(uint){} > 0", rv); &new_cond_owned }
-                        "!CY && !ZR" => { new_cond_owned = format!("(uint){} > 0", rv); &new_cond_owned }
-                        "!CY || ZR" | "ZR || !CY" => { new_cond_owned = format!("(uint){} <= 0", rv); &new_cond_owned }
-                        "CY || ZR" | "ZR || CY" => { new_cond_owned = format!("(uint){} <= 0", rv); &new_cond_owned }
-                        "!!CY || ZR" => { new_cond_owned = format!("(uint){} <= 0", rv); &new_cond_owned }
-                        "!(CY && !ZR)" => { new_cond_owned = format!("(uint){} <= 0", rv); &new_cond_owned }
-                        "!ZR && result >= 0" => { new_cond_owned = format!("{} > 0", rv); &new_cond_owned }
-                        "ZR || result < 0" => { new_cond_owned = format!("{} <= 0", rv); &new_cond_owned }
+                        "CY && !ZR" | "!ZR && CY" => {
+                            new_cond_owned = format!("(uint){} > 0", rv);
+                            &new_cond_owned
+                        }
+                        "!CY && !ZR" => {
+                            new_cond_owned = format!("(uint){} > 0", rv);
+                            &new_cond_owned
+                        }
+                        "!CY || ZR" | "ZR || !CY" => {
+                            new_cond_owned = format!("(uint){} <= 0", rv);
+                            &new_cond_owned
+                        }
+                        "CY || ZR" | "ZR || CY" => {
+                            new_cond_owned = format!("(uint){} <= 0", rv);
+                            &new_cond_owned
+                        }
+                        "!!CY || ZR" => {
+                            new_cond_owned = format!("(uint){} <= 0", rv);
+                            &new_cond_owned
+                        }
+                        "!(CY && !ZR)" => {
+                            new_cond_owned = format!("(uint){} <= 0", rv);
+                            &new_cond_owned
+                        }
+                        "!ZR && result >= 0" => {
+                            new_cond_owned = format!("{} > 0", rv);
+                            &new_cond_owned
+                        }
+                        "ZR || result < 0" => {
+                            new_cond_owned = format!("{} <= 0", rv);
+                            &new_cond_owned
+                        }
                         "true" => "true",
                         _ => {
                             // Try to clean up remaining flag references
-                            if cond.contains("CY") || cond.contains("ZR") || cond.contains("NG") || cond.contains("OV") {
+                            if cond.contains("CY")
+                                || cond.contains("ZR")
+                                || cond.contains("NG")
+                                || cond.contains("OV")
+                            {
                                 let cleaned = cond
                                     .replace("!NG == OV", "result >= 0")
                                     .replace("NG == OV", "result >= 0")
@@ -2421,7 +3113,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                                     .replace("CY || ZR", "result <= 0 /* unsigned */")
                                     .replace("!CY || ZR", "result <= 0 /* unsigned */");
                                 if cleaned != cond {
-                                    lines[line_idx] = format!("{}{}{}{}", pad, prefix, cleaned, suffix);
+                                    lines[line_idx] =
+                                        format!("{}{}{}{}", pad, prefix, cleaned, suffix);
                                 }
                             }
                             continue;
@@ -2435,7 +3128,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let mut i = 0;
             while i + 1 < lines.len() {
                 let t = lines[i].trim().to_string();
-                let next = lines.get(i + 1).map(|s| s.trim().to_string()).unwrap_or_default();
+                let next = lines
+                    .get(i + 1)
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
                 // Empty block: "if (...) {" followed by "}"
                 if t.ends_with('{') && next == "}" {
                     lines.remove(i + 1);
@@ -2457,23 +3153,41 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     lines.retain(|line| {
         let t = line.trim();
         // "EDI = EDI + N - 8 * DF;" or "EDI = EDI + N - 4 * DF;"
-        if t.starts_with("EDI = EDI + ") && t.contains(" * DF;") { return false; }
-        if t.starts_with("ESI = ESI + ") && t.contains(" * DF;") { return false; }
+        if t.starts_with("EDI = EDI + ") && t.contains(" * DF;") {
+            return false;
+        }
+        if t.starts_with("ESI = ESI + ") && t.contains(" * DF;") {
+            return false;
+        }
         // "EDI = EDI + 4 - 8 * DF;"
-        if t.starts_with("EDI = ") && t.contains("- 8 * DF;") { return false; }
-        if t.starts_with("EDI = ") && t.contains("- 4 * DF;") { return false; }
-        if t.starts_with("EDI = ") && t.contains("- 2 * DF;") { return false; }
+        if t.starts_with("EDI = ") && t.contains("- 8 * DF;") {
+            return false;
+        }
+        if t.starts_with("EDI = ") && t.contains("- 4 * DF;") {
+            return false;
+        }
+        if t.starts_with("EDI = ") && t.contains("- 2 * DF;") {
+            return false;
+        }
         true
     });
 
     // Annotate common Win32 constants for reverse engineering readability
     for line in &mut lines {
         // CreateProcess flags
-        if line.contains("134217728") { *line = line.replace("134217728", "CREATE_NO_WINDOW /* 0x8000000 */"); }
+        if line.contains("134217728") {
+            *line = line.replace("134217728", "CREATE_NO_WINDOW /* 0x8000000 */");
+        }
         // Winsock errors
-        if line.contains("0x2733") { *line = line.replace("0x2733", "WSAEWOULDBLOCK"); }
-        if line.contains("0x2746") { *line = line.replace("0x2746", "WSAECONNRESET"); }
-        if line.contains("0x274c") { *line = line.replace("0x274c", "WSAECONNREFUSED"); }
+        if line.contains("0x2733") {
+            *line = line.replace("0x2733", "WSAEWOULDBLOCK");
+        }
+        if line.contains("0x2746") {
+            *line = line.replace("0x2746", "WSAECONNRESET");
+        }
+        if line.contains("0x274c") {
+            *line = line.replace("0x274c", "WSAECONNREFUSED");
+        }
         // Registry
         if line.contains("0x80000001") && !line.contains("0x80000001 <") {
             *line = line.replace("0x80000001", "HKEY_CURRENT_USER");
@@ -2490,7 +3204,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let cur = lines[i].trim().to_string();
             let next = lines[i + 1].trim().to_string();
             // Match: "VAR = EXPR;" followed by "return VAR;"
-            if cur.contains(" = ") && cur.ends_with(';') && next.starts_with("return ") && next.ends_with(';') {
+            if cur.contains(" = ")
+                && cur.ends_with(';')
+                && next.starts_with("return ")
+                && next.ends_with(';')
+            {
                 if let Some(eq_pos) = cur.find(" = ") {
                     let lhs = &cur[..eq_pos];
                     let rhs = &cur[eq_pos + 3..cur.len() - 1]; // strip trailing ;
@@ -2529,8 +3247,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             return false;
         }
         // Remove all stores to address 0: SEH chain setup (fs:[0]) and similar
-        if t.starts_with("*(int*)(0) = ") && t.ends_with(';') { return false; }
-        if t.starts_with("*(uint32_t*)(0) = ") && t.ends_with(';') { return false; }
+        if t.starts_with("*(int*)(0) = ") && t.ends_with(';') {
+            return false;
+        }
+        if t.starts_with("*(uint32_t*)(0) = ") && t.ends_with(';') {
+            return false;
+        }
         true
     });
 
@@ -2539,9 +3261,13 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // These are byte-by-byte extraction noise from multi-byte copies.
     lines.retain(|line| {
         let t = line.trim();
-        if !t.contains(" >> 8") || !t.contains(" = ") { return true; }
+        if !t.contains(" >> 8") || !t.contains(" = ") {
+            return true;
+        }
         // Don't remove from conditions or returns
-        if t.starts_with("if ") || t.starts_with("while ") || t.starts_with("return ") { return true; }
+        if t.starts_with("if ") || t.starts_with("while ") || t.starts_with("return ") {
+            return true;
+        }
         // Split at first " = "
         if let Some(eq_pos) = t.find(" = ") {
             let lhs = &t[..eq_pos];
@@ -2574,12 +3300,16 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 if line[num_start..].starts_with("0x") {
                     break; // hex handled below
                 }
-                let num_end = line[num_start..].find(|c: char| !c.is_ascii_digit())
-                    .map(|e| num_start + e).unwrap_or(line.len());
+                let num_end = line[num_start..]
+                    .find(|c: char| !c.is_ascii_digit())
+                    .map(|e| num_start + e)
+                    .unwrap_or(line.len());
                 let num_str = &line[num_start..num_end].to_string();
                 if let Ok(offset) = num_str.parse::<u64>() {
                     let var_name = format!("var_{:x}", offset);
-                    let resolved = aliases.get(&var_name).cloned()
+                    let resolved = aliases
+                        .get(&var_name)
+                        .cloned()
                         .or_else(|| {
                             let adj = format!("var_{:x}", offset + 8);
                             aliases.get(&adj).cloned()
@@ -2594,12 +3324,16 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // Pattern: "RBP/EBP - 0xNN"
             while let Some(_pos) = line.find(&minus_hex_pat) {
                 let hex_start = line.find(&minus_hex_pat).unwrap_or(0) + minus_hex_pat.len();
-                let hex_end = line[hex_start..].find(|c: char| !c.is_ascii_hexdigit())
-                    .map(|e| hex_start + e).unwrap_or(line.len());
+                let hex_end = line[hex_start..]
+                    .find(|c: char| !c.is_ascii_hexdigit())
+                    .map(|e| hex_start + e)
+                    .unwrap_or(line.len());
                 let hex_str = line[hex_start..hex_end].to_string();
                 if let Ok(offset) = u64::from_str_radix(&hex_str, 16) {
                     let var_name = format!("var_{:x}", offset);
-                    let resolved = aliases.get(&var_name).cloned()
+                    let resolved = aliases
+                        .get(&var_name)
+                        .cloned()
                         .or_else(|| {
                             let adj = format!("var_{:x}", offset + 8);
                             aliases.get(&adj).cloned()
@@ -2614,8 +3348,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // Fallback: "RBP/EBP + 0xNN" where NN is large (signed-byte negative in unsigned form)
             while let Some(_pos) = line.find(&plus_hex_pat) {
                 let hex_start = line.find(&plus_hex_pat).unwrap_or(0) + plus_hex_pat.len();
-                let hex_end = line[hex_start..].find(|c: char| !c.is_ascii_hexdigit())
-                    .map(|e| hex_start + e).unwrap_or(line.len());
+                let hex_end = line[hex_start..]
+                    .find(|c: char| !c.is_ascii_hexdigit())
+                    .map(|e| hex_start + e)
+                    .unwrap_or(line.len());
                 let hex_str = line[hex_start..hex_end].to_string();
                 if let Ok(val) = u64::from_str_radix(&hex_str, 16) {
                     // Large values are actually negative offsets (e.g., 0xfffffffc = -4)
@@ -2629,7 +3365,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         break; // positive offset (args above EBP), skip
                     };
                     let var_name = format!("var_{:x}", neg_off);
-                    let resolved = aliases.get(&var_name).cloned()
+                    let resolved = aliases
+                        .get(&var_name)
+                        .cloned()
                         .or_else(|| {
                             let adj = format!("var_{:x}", neg_off + 8);
                             aliases.get(&adj).cloned()
@@ -2654,17 +3392,24 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let abs_start = pos + br_start;
             if let Some(br_end) = lt[abs_start..].find(']') {
                 let idx = &lt[abs_start + 1..abs_start + br_end];
-                let is_bare_reg = idx.len() >= 2 && idx.len() <= 3
-                    && idx.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+                let is_bare_reg = idx.len() >= 2
+                    && idx.len() <= 3
+                    && idx
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
                 if is_bare_reg {
                     // Find the base (text before the bracket)
-                    let base_start = lt[..abs_start].rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                        .map(|p| p + 1).unwrap_or(0);
+                    let base_start = lt[..abs_start]
+                        .rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                        .map(|p| p + 1)
+                        .unwrap_or(0);
                     let base = &lt[base_start..abs_start];
                     if !base.is_empty() {
                         // Search for the same base with a richer index on another line
                         for j in 0..lines.len() {
-                            if i == j { continue; }
+                            if i == j {
+                                continue;
+                            }
                             let other = lines[j].trim();
                             let search = format!("{}[", base);
                             if let Some(ob) = other.find(&search) {
@@ -2737,7 +3482,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let lhs = &lt[..eq_pos];
                     let is_var = lhs.chars().next().map_or(false, |c| c.is_ascii_lowercase())
                         && lhs.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-                    if !is_var { continue; }
+                    if !is_var {
+                        continue;
+                    }
                     let rhs = &lt[eq_pos + 3..].trim_end_matches(';');
                     let is_self_increment = rhs.ends_with("+ 1") && rhs.starts_with(lhs);
                     let is_ptr_advance = rhs.contains("->")
@@ -2747,7 +3494,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         break;
                     }
                     // Track first non-parameter increment as fallback
-                    if is_self_increment && !param_names.contains(&lhs.to_string())
+                    if is_self_increment
+                        && !param_names.contains(&lhs.to_string())
                         && fallback_increment.is_none()
                     {
                         fallback_increment = Some(lhs.to_string());
@@ -2779,14 +3527,21 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let t = lines[j].trim();
                 if t.starts_with("return ") && !t.starts_with("return;") {
                     has_return = true;
-                    if_return_val = t.strip_prefix("return ").unwrap_or("")
-                        .trim_end_matches(';').to_string();
+                    if_return_val = t
+                        .strip_prefix("return ")
+                        .unwrap_or("")
+                        .trim_end_matches(';')
+                        .to_string();
                 }
-                if t.starts_with("if (") { if_line_idx = j; break; }
+                if t.starts_with("if (") {
+                    if_line_idx = j;
+                    break;
+                }
             }
             // Check there's no return statement after the }
-            let has_return_after = lines.get(last + 1..).map_or(false, |rest|
-                rest.iter().any(|l| l.trim().starts_with("return ")));
+            let has_return_after = lines.get(last + 1..).map_or(false, |rest| {
+                rest.iter().any(|l| l.trim().starts_with("return "))
+            });
             if has_return && !has_return_after {
                 // Look for the last assignment before the if block to determine return value
                 // e.g., "EAX = -EDI;" → else returns EAX (= -EDI expression)
@@ -2801,7 +3556,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                             break;
                         }
                     }
-                    if !t.is_empty() { break; }
+                    if !t.is_empty() {
+                        break;
+                    }
                 }
                 let ret_val = if !else_val.is_empty() {
                     else_val
@@ -2839,12 +3596,15 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let is_return_bare = next == "return;";
                     // Don't fold if the variable is used elsewhere in the function
                     // (e.g., ptr = malloc(...); ... printf("...", ptr); return ptr;)
-                    let var_used_elsewhere = is_return_var && lines.iter().enumerate().any(|(j, l)| {
-                        j != i && j != i + 1
-                            && l.contains(var_name)
-                            && !l.trim().starts_with("//")
-                    });
-                    if (is_return_bare || is_return_var) && !expr.is_empty() && !var_used_elsewhere {
+                    let var_used_elsewhere = is_return_var
+                        && lines.iter().enumerate().any(|(j, l)| {
+                            j != i
+                                && j != i + 1
+                                && l.contains(var_name)
+                                && !l.trim().starts_with("//")
+                        });
+                    if (is_return_bare || is_return_var) && !expr.is_empty() && !var_used_elsewhere
+                    {
                         let indent = lines[i].len() - lines[i].trim_start().len();
                         let pad = " ".repeat(indent);
                         lines[i] = format!("{}return {};", pad, expr);
@@ -2859,8 +3619,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // convert to "return expr;" (the function implicitly returns via EAX)
         if let Some(last) = lines.iter().rposition(|l| !l.trim().is_empty()) {
             let lt = lines[last].trim().to_string();
-            if lt.starts_with("var_") && lt.contains(" = ") && lt.ends_with(';')
-                && !lt.starts_with("var_8 =") // Don't convert stack canary stores
+            if lt.starts_with("var_")
+                && lt.contains(" = ")
+                && lt.ends_with(';')
+                && !lt.starts_with("var_8 =")
+            // Don't convert stack canary stores
             {
                 if let Some(eq_pos) = lt.find(" = ") {
                     let expr = &lt[eq_pos + 3..lt.len() - 1];
@@ -2883,9 +3646,13 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let indent = lines[i].len() - lines[i].trim_start().len();
             let lt = lines[i].trim().to_string();
             // Only fold top-level assignments (indent 0)
-            if indent == 0 && lt.contains(" = ") && lt.ends_with(';')
-                && !lt.starts_with("if ") && !lt.starts_with("return ")
-                && !lt.starts_with("while ") && !lt.starts_with("}")
+            if indent == 0
+                && lt.contains(" = ")
+                && lt.ends_with(';')
+                && !lt.starts_with("if ")
+                && !lt.starts_with("return ")
+                && !lt.starts_with("while ")
+                && !lt.starts_with("}")
             {
                 if let Some(eq_pos) = lt.find(" = ") {
                     let var_name = lt[..eq_pos].to_string();
@@ -2894,10 +3661,15 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     // But don't fold if var_name is used elsewhere (e.g., ptr used in
                     // printf/free after malloc assignment).
                     let var_used_elsewhere = lines.iter().enumerate().any(|(j, l)| {
-                        j != i && l.contains(&var_name) && !l.trim().starts_with("//")
+                        j != i
+                            && l.contains(&var_name)
+                            && !l.trim().starts_with("//")
                             && l.trim() != format!("return {};", var_name)
                     });
-                    if var_used_elsewhere { i += 1; continue; }
+                    if var_used_elsewhere {
+                        i += 1;
+                        continue;
+                    }
                     let mut found = false;
                     for j in (i + 1)..lines.len() {
                         let j_indent = lines[j].len() - lines[j].trim_start().len();
@@ -2913,7 +3685,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                             break;
                         }
                     }
-                    if found { continue; }
+                    if found {
+                        continue;
+                    }
                 }
             }
             i += 1;
@@ -2929,7 +3703,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         while let Some(pos) = new_line[search_from..].find("0x") {
             let abs_pos = search_from + pos;
             // Extract the hex value
-            let hex_end = abs_pos + 2 + new_line[abs_pos + 2..].find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(new_line.len() - abs_pos - 2);
+            let hex_end = abs_pos
+                + 2
+                + new_line[abs_pos + 2..]
+                    .find(|c: char| !c.is_ascii_hexdigit())
+                    .unwrap_or(new_line.len() - abs_pos - 2);
             if hex_end > abs_pos + 2 {
                 let hex_str = &new_line[abs_pos..hex_end];
                 if let Ok(val) = u64::from_str_radix(&hex_str[2..], 16) {
@@ -2939,9 +3717,22 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                             // Short strings (2-3 chars) only if inside a function call like printf(0x...)
                             let in_call = new_line[..abs_pos].contains('(');
                             let min_len = if in_call { 2 } else { 4 };
-                            if s.len() < min_len { search_from = hex_end; continue; }
-                            let escaped = format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"));
-                            new_line = format!("{}{}{}", &new_line[..abs_pos], escaped, &new_line[hex_end..]);
+                            if s.len() < min_len {
+                                search_from = hex_end;
+                                continue;
+                            }
+                            let escaped = format!(
+                                "\"{}\"",
+                                s.replace('\\', "\\\\")
+                                    .replace('"', "\\\"")
+                                    .replace('\n', "\\n")
+                            );
+                            new_line = format!(
+                                "{}{}{}",
+                                &new_line[..abs_pos],
+                                escaped,
+                                &new_line[hex_end..]
+                            );
                             search_from = abs_pos + escaped.len();
                             continue;
                         }
@@ -2950,7 +3741,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         // collide with GOT slot addresses of unrelated imports.
                         if val & 0xFFF != 0 {
                             if let Some(name) = ctx.imports.get(&val) {
-                                new_line = format!("{}{}{}", &new_line[..abs_pos], name, &new_line[hex_end..]);
+                                new_line = format!(
+                                    "{}{}{}",
+                                    &new_line[..abs_pos],
+                                    name,
+                                    &new_line[hex_end..]
+                                );
                                 search_from = abs_pos + name.len();
                                 continue;
                             }
@@ -2966,15 +3762,42 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // #NESTED: Remove void/IO function calls nested inside other call arguments.
     // Pattern: func2(func1("..."), size, stream)  →  func1("..."); func2(buf, size, stream)
     // Run iteratively to handle multiple levels of nesting.
-    let void_funcs = ["puts", "printf", "fprintf", "fputs", "perror",
-                       "exit", "abort", "_exit", "free",
-                       "write", "read", "fgets", "fread", "fwrite",
-                       "sprintf", "snprintf", "strcspn", "strtok", "strcmp",
-                       "fflush", "fclose", "fopen", "setvbuf",
-                       "__isoc99_scanf", "scanf", "sscanf",
-                       "memset", "memcpy", "strncpy", "strlen",
-                       "cout_write", "cin_read"];
-    for _round in 0..4 {  // iterate to peel nested layers
+    let void_funcs = [
+        "puts",
+        "printf",
+        "fprintf",
+        "fputs",
+        "perror",
+        "exit",
+        "abort",
+        "_exit",
+        "free",
+        "write",
+        "read",
+        "fgets",
+        "fread",
+        "fwrite",
+        "sprintf",
+        "snprintf",
+        "strcspn",
+        "strtok",
+        "strcmp",
+        "fflush",
+        "fclose",
+        "fopen",
+        "setvbuf",
+        "__isoc99_scanf",
+        "scanf",
+        "sscanf",
+        "memset",
+        "memcpy",
+        "strncpy",
+        "strlen",
+        "cout_write",
+        "cin_read",
+    ];
+    for _round in 0..4 {
+        // iterate to peel nested layers
         let mut changed = false;
         for line in &mut lines {
             let trimmed = line.trim().to_string();
@@ -2988,8 +3811,16 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                             let mut depth = 1;
                             let mut inner_end = inner_start;
                             for (i, c) in trimmed[inner_start..].char_indices() {
-                                if c == '(' { depth += 1; }
-                                if c == ')' { depth -= 1; if depth == 0 { inner_end = inner_start + i + 1; break; } }
+                                if c == '(' {
+                                    depth += 1;
+                                }
+                                if c == ')' {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        inner_end = inner_start + i + 1;
+                                        break;
+                                    }
+                                }
                             }
                             if depth == 0 {
                                 let inner_call = trimmed[inner_pos..inner_end].to_string();
@@ -3005,7 +3836,13 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                                 };
                                 let remaining = format!("{}buf{}", before_inner, after_clean);
                                 if remaining.contains('(') {
-                                    *line = format!("{}{};\n{}{}", pad, inner_call, pad, remaining.trim());
+                                    *line = format!(
+                                        "{}{};\n{}{}",
+                                        pad,
+                                        inner_call,
+                                        pad,
+                                        remaining.trim()
+                                    );
                                     changed = true;
                                     break;
                                 }
@@ -3015,9 +3852,14 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 }
             }
         }
-        if !changed { break; }
+        if !changed {
+            break;
+        }
         // Re-split lines after unwinding (unwinder inserts \n within entries)
-        lines = lines.iter().flat_map(|l| l.split('\n').map(|s| s.to_string())).collect();
+        lines = lines
+            .iter()
+            .flat_map(|l| l.split('\n').map(|s| s.to_string()))
+            .collect();
     }
 
     // #SETVBUF: Collapse setvbuf init boilerplate.
@@ -3028,7 +3870,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         while j < lines.len() {
             let lt = lines[j].trim();
             // Remove "RAX = *(stdout_sym);" — this is just loading stdout
-            if lt.starts_with("RAX = ") && (lt.contains("__TMC_END__") || lt.contains("stdout")) && lt.ends_with(';') {
+            if lt.starts_with("RAX = ")
+                && (lt.contains("__TMC_END__") || lt.contains("stdout"))
+                && lt.ends_with(';')
+            {
                 lines.remove(j);
                 continue;
             }
@@ -3042,7 +3887,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     // Multiple setvbuf calls — replace with a single comment
                     let indent = lines[j].len() - lines[j].trim_start().len();
                     let pad = " ".repeat(indent);
-                    for idx in (j + 1..=end).rev() { lines.remove(idx); }
+                    for idx in (j + 1..=end).rev() {
+                        lines.remove(idx);
+                    }
                     lines[j] = format!("{}// setvbuf init (stdout, stdin, stderr)", pad);
                     j += 1;
                     continue;
@@ -3076,7 +3923,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             ("var_", false), // Skip var_ patterns - those are correct
         ];
         let _ = re_patterns; // silence warning
-        // Use a simple approach: find ][...] patterns where the index is a known symbol
+                             // Use a simple approach: find ][...] patterns where the index is a known symbol
         let l = line.clone();
         for (_addr, name) in ctx.imports.iter() {
             let bracket_pattern = format!("[{}]", name);
@@ -3086,8 +3933,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     // Walk back to find the start of the base expression
                     let before = &l[..bp];
                     // Find the start of the identifier/expression before [
-                    let base_start = before.rfind(|c: char| !c.is_alphanumeric() && c != '_')
-                        .map(|p| p + 1).unwrap_or(0);
+                    let base_start = before
+                        .rfind(|c: char| !c.is_alphanumeric() && c != '_')
+                        .map(|p| p + 1)
+                        .unwrap_or(0);
                     let base = &l[base_start..bp];
                     if !base.is_empty() && base != name {
                         // Swap: base[name] → name[base]
@@ -3107,17 +3956,26 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         while i < lines.len() {
             let lt = lines[i].trim().to_string();
             // Match: IDENTIFIER = "...";
-            if lt.contains(" = \"") && lt.ends_with("\";") && !lt.starts_with("if ") && !lt.starts_with("while ") && !lt.starts_with("*(") {
+            if lt.contains(" = \"")
+                && lt.ends_with("\";")
+                && !lt.starts_with("if ")
+                && !lt.starts_with("while ")
+                && !lt.starts_with("*(")
+            {
                 let mut merged = String::new();
                 let mut end = i;
                 let mut count = 0;
                 for j in i..lines.len() {
                     let jt = lines[j].trim();
-                    if jt.contains(" = \"") && jt.ends_with("\";") && !jt.starts_with("if ") && !jt.starts_with("*(") {
+                    if jt.contains(" = \"")
+                        && jt.ends_with("\";")
+                        && !jt.starts_with("if ")
+                        && !jt.starts_with("*(")
+                    {
                         if let Some(q1) = jt.find('"') {
                             if let Some(q2) = jt.rfind('"') {
                                 if q2 > q1 {
-                                    merged.push_str(&jt[q1+1..q2]);
+                                    merged.push_str(&jt[q1 + 1..q2]);
                                     end = j;
                                     count += 1;
                                 }
@@ -3130,11 +3988,13 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 if count >= 3 && merged.len() >= 6 {
                     let unique: std::collections::HashSet<char> = merged.chars().collect();
                     if unique.len() >= 4 {
-                    let indent = lines[i].len() - lines[i].trim_start().len();
-                    let pad = " ".repeat(indent);
-                    let _var_name = lt.split(' ').next().unwrap_or("buf");
-                    for idx in (i + 1..=end).rev() { lines.remove(idx); }
-                    lines[i] = format!("{}// stack string: \"{}\"", pad, merged);
+                        let indent = lines[i].len() - lines[i].trim_start().len();
+                        let pad = " ".repeat(indent);
+                        let _var_name = lt.split(' ').next().unwrap_or("buf");
+                        for idx in (i + 1..=end).rev() {
+                            lines.remove(idx);
+                        }
+                        lines[i] = format!("{}// stack string: \"{}\"", pad, merged);
                     }
                 }
             }
@@ -3165,9 +4025,13 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let lt = lines[i].trim().to_string();
             let indent = lines[i].len() - lines[i].trim_start().len();
             // Only dedup function calls (contain "(" and end with ";")
-            if !lt.is_empty() && lt.contains('(') && lt.ends_with(';')
-                && !lt.starts_with("if ") && !lt.starts_with("while ")
-                && !lt.starts_with("for ") && !lt.starts_with("return ")
+            if !lt.is_empty()
+                && lt.contains('(')
+                && lt.ends_with(';')
+                && !lt.starts_with("if ")
+                && !lt.starts_with("while ")
+                && !lt.starts_with("for ")
+                && !lt.starts_with("return ")
             {
                 // Check if an identical line exists later at the same indent
                 // but only remove if there are >2 lines between (non-adjacent)
@@ -3180,7 +4044,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         continue;
                     }
                     // Stop at scope boundaries (different indent going down, or closing brace)
-                    if j_indent < indent && !jt.is_empty() { break; }
+                    if j_indent < indent && !jt.is_empty() {
+                        break;
+                    }
                     j += 1;
                 }
             }
@@ -3190,8 +4056,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
 
     // #ARGS: Strip extra arguments from known single-arg functions.
     // puts(msg, stale_reg) → puts(msg), exit(code, stale) → exit(code)
-    let single_arg_fns = ["puts", "exit", "abort", "perror", "free",
-                           "close", "putchar", "strlen"];
+    let single_arg_fns = [
+        "puts", "exit", "abort", "perror", "free", "close", "putchar", "strlen",
+    ];
     for line in &mut lines {
         for func in &single_arg_fns {
             let pat = format!("{}(", func);
@@ -3202,26 +4069,59 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let mut in_str = false;
                 let mut first_comma = None;
                 for (i, c) in line[args_start..].char_indices() {
-                    if c == '"' && !in_str { in_str = true; continue; }
-                    if c == '"' && in_str { in_str = false; continue; }
-                    if in_str { continue; }
-                    if c == '(' { depth += 1; }
-                    if c == ')' { if depth == 0 { break; } depth -= 1; }
-                    if c == ',' && depth == 0 { first_comma = Some(args_start + i); break; }
+                    if c == '"' && !in_str {
+                        in_str = true;
+                        continue;
+                    }
+                    if c == '"' && in_str {
+                        in_str = false;
+                        continue;
+                    }
+                    if in_str {
+                        continue;
+                    }
+                    if c == '(' {
+                        depth += 1;
+                    }
+                    if c == ')' {
+                        if depth == 0 {
+                            break;
+                        }
+                        depth -= 1;
+                    }
+                    if c == ',' && depth == 0 {
+                        first_comma = Some(args_start + i);
+                        break;
+                    }
                 }
                 if let Some(comma_pos) = first_comma {
                     // Find the closing paren
                     let mut d = 0;
                     let mut close = None;
                     for (i, c) in line[args_start..].char_indices() {
-                        if c == '(' { d += 1; }
-                        if c == ')' { if d == 0 { close = Some(args_start + i); break; } d -= 1; }
+                        if c == '(' {
+                            d += 1;
+                        }
+                        if c == ')' {
+                            if d == 0 {
+                                close = Some(args_start + i);
+                                break;
+                            }
+                            d -= 1;
+                        }
                     }
                     if let Some(close_pos) = close {
                         // Replace: func(arg1, arg2, ...) → func(arg1)
-                        let _new_line = format!("{}{}){}", &line[..comma_pos], "", &line[close_pos + 1..]);
+                        let _new_line =
+                            format!("{}{}){}", &line[..comma_pos], "", &line[close_pos + 1..]);
                         let first_arg = &line[args_start..comma_pos];
-                        *line = format!("{}{}({}){}", &line[..start], func, first_arg, &line[close_pos + 1..]);
+                        *line = format!(
+                            "{}{}({}){}",
+                            &line[..start],
+                            func,
+                            first_arg,
+                            &line[close_pos + 1..]
+                        );
                     }
                 }
             }
@@ -3260,8 +4160,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // Remove false short strings in arithmetic contexts:
             // pattern & "XYZ" or pattern & "XY"%" — these are addresses not strings
             // Detect: quoted strings inside & or | expressions (bitwise ops on "strings" = nonsense)
-            if (line.contains("& \"") || line.contains("| \"")) && !line.contains("printf")
-                && !line.contains("puts") && !line.contains("fwrite")
+            if (line.contains("& \"") || line.contains("| \""))
+                && !line.contains("printf")
+                && !line.contains("puts")
+                && !line.contains("fwrite")
             {
                 // Replace all short quoted strings (< 5 chars) with hex in this line
                 let mut result = String::new();
@@ -3270,7 +4172,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     if c == '"' {
                         let mut s = String::new();
                         while let Some(&nc) = chars.peek() {
-                            if nc == '"' { chars.next(); break; }
+                            if nc == '"' {
+                                chars.next();
+                                break;
+                            }
                             s.push(nc);
                             chars.next();
                         }
@@ -3296,10 +4201,18 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // going through the named SSA variable.
     if !param_names.is_empty() {
         let reg_to_param: Vec<(&str, &str)> = vec![
-            ("RDI", ""), ("EDI", ""), ("DIL", ""),  // param_0
-            ("RSI", ""), ("ESI", ""), ("SIL", ""),  // param_1
-            ("RDX", ""), ("EDX", ""), ("DL", ""),   // param_2
-            ("RCX", ""), ("ECX", ""), ("CL", ""),   // param_3
+            ("RDI", ""),
+            ("EDI", ""),
+            ("DIL", ""), // param_0
+            ("RSI", ""),
+            ("ESI", ""),
+            ("SIL", ""), // param_1
+            ("RDX", ""),
+            ("EDX", ""),
+            ("DL", ""), // param_2
+            ("RCX", ""),
+            ("ECX", ""),
+            ("CL", ""), // param_3
         ];
         // Map register base offset to param index
         let reg_param_map: &[(u64, usize)] = &[(56, 0), (48, 1), (16, 2), (8, 3)]; // RDI, RSI, RDX, RCX offsets
@@ -3308,8 +4221,14 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // Simple approach: in conditions and call args, replace bare register names
         // Only replace when the register appears as a standalone word (not part of a larger expr)
         let x86_arg_regs: [(&str, usize); 8] = [
-            ("RDI", 0), ("EDI", 0), ("RSI", 1), ("ESI", 1),
-            ("RDX", 2), ("EDX", 2), ("RCX", 3), ("ECX", 3),
+            ("RDI", 0),
+            ("EDI", 0),
+            ("RSI", 1),
+            ("ESI", 1),
+            ("RDX", 2),
+            ("EDX", 2),
+            ("RCX", 3),
+            ("ECX", 3),
         ];
         for line in &mut lines {
             for (reg, idx) in &x86_arg_regs {
@@ -3317,16 +4236,19 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let pname = &param_names[*idx];
                     // Only substitute if the param was given a real name (by DWARF),
                     // not a generic "param_N" which is no better than the register name
-                    if pname.starts_with("param_") { continue; }
+                    if pname.starts_with("param_") {
+                        continue;
+                    }
                     let l = line.clone();
                     let mut result = String::new();
                     let mut i = 0;
                     let bytes = l.as_bytes();
                     let rlen = reg.len();
                     while i < bytes.len() {
-                        if i + rlen <= bytes.len() && &l[i..i+rlen] == *reg {
-                            let before_ok = i == 0 || !bytes[i-1].is_ascii_alphanumeric();
-                            let after_ok = i + rlen >= bytes.len() || !bytes[i+rlen].is_ascii_alphanumeric();
+                        if i + rlen <= bytes.len() && &l[i..i + rlen] == *reg {
+                            let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+                            let after_ok =
+                                i + rlen >= bytes.len() || !bytes[i + rlen].is_ascii_alphanumeric();
                             if before_ok && after_ok {
                                 result.push_str(pname);
                                 i += rlen;
@@ -3348,7 +4270,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     if let Some(binary) = ctx.binary {
         for line in &mut lines {
             // Match: EXPR * *(0xNNN) or EXPR * *("") (false string from float constants)
-            if line.contains("* *(") && (line.contains("double)") || line.contains("XMM") || line.contains("FLOAT")) {
+            if line.contains("* *(")
+                && (line.contains("double)") || line.contains("XMM") || line.contains("FLOAT"))
+            {
                 // Find the *(addr) part
                 if let Some(star_pos) = line.rfind("* *(") {
                     let after = &line[star_pos + 4..];
@@ -3372,7 +4296,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                             // Try to read 8 bytes as a double
                             if let Some(fo) = va_to_file_offset(va, binary) {
                                 if fo + 8 <= binary.len() {
-                                    let bytes: [u8; 8] = binary[fo..fo+8].try_into().unwrap_or([0;8]);
+                                    let bytes: [u8; 8] =
+                                        binary[fo..fo + 8].try_into().unwrap_or([0; 8]);
                                     let fval = f64::from_le_bytes(bytes);
                                     if fval != 0.0 && fval.is_finite() {
                                         let recip = 1.0 / fval;
@@ -3381,7 +4306,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                                             let divisor = recip.round() as u64;
                                             let before = line[..star_pos].trim_end();
                                             let after_paren = &line[star_pos + 4 + close + 1..];
-                                            *line = format!("{} / {}.0{}", before, divisor, after_paren);
+                                            *line = format!(
+                                                "{} / {}.0{}",
+                                                before, divisor, after_paren
+                                            );
                                         }
                                     }
                                 }
@@ -3428,17 +4356,23 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                                     if let Some(fo) = va_to_file_offset(table_va, binary) {
                                         // Check if previous line has a bounds check: if (X > N)
                                         let max_case = if i > 0 {
-                                            let prev = lines[i.saturating_sub(6)..i].iter()
+                                            let prev = lines[i.saturating_sub(6)..i]
+                                                .iter()
                                                 .find(|l| l.trim().starts_with("if ("))
                                                 .map(|l| l.trim().to_string())
                                                 .unwrap_or_default();
                                             // Extract N from "if (param > N)" or "if (X > N)"
                                             if let Some(gt) = prev.find(" > ") {
                                                 let after_gt = &prev[gt + 3..];
-                                                let end = after_gt.find(')').unwrap_or(after_gt.len());
+                                                let end =
+                                                    after_gt.find(')').unwrap_or(after_gt.len());
                                                 after_gt[..end].parse::<usize>().ok()
-                                            } else { None }
-                                        } else { None };
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None
+                                        };
 
                                         let num_cases = max_case.unwrap_or(7).min(32) + 1;
                                         if fo + num_cases * 4 <= binary.len() {
@@ -3447,49 +4381,71 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                                             for c in 0..num_cases {
                                                 let entry_off = fo + c * 4;
                                                 let rel_offset = i32::from_le_bytes([
-                                                    binary[entry_off], binary[entry_off+1],
-                                                    binary[entry_off+2], binary[entry_off+3],
+                                                    binary[entry_off],
+                                                    binary[entry_off + 1],
+                                                    binary[entry_off + 2],
+                                                    binary[entry_off + 3],
                                                 ]);
-                                                let target_va = (table_va as i64 + rel_offset as i64) as u64;
+                                                let target_va =
+                                                    (table_va as i64 + rel_offset as i64) as u64;
                                                 // Try to read a string at the target
                                                 if let Some(s) = try_read_string(target_va, ctx) {
                                                     cases.push(format!("case {}: \"{}\"", c, s));
-                                                } else if let Some(name) = ctx.imports.get(&target_va) {
+                                                } else if let Some(name) =
+                                                    ctx.imports.get(&target_va)
+                                                {
                                                     cases.push(format!("case {}: {}", c, name));
                                                 } else {
-                                                    cases.push(format!("case {}: 0x{:x}", c, target_va));
-                                                    if target_va > 0x10000000 || (rel_offset.abs() as u64 > 0x10000) {
+                                                    cases.push(format!(
+                                                        "case {}: 0x{:x}",
+                                                        c, target_va
+                                                    ));
+                                                    if target_va > 0x10000000
+                                                        || (rel_offset.abs() as u64 > 0x10000)
+                                                    {
                                                         all_valid = false;
                                                     }
                                                 }
                                             }
                                             if all_valid && !cases.is_empty() {
-                                                let indent = lines[i].len() - lines[i].trim_start().len();
+                                                let indent =
+                                                    lines[i].len() - lines[i].trim_start().len();
                                                 let pad = " ".repeat(indent);
                                                 let inner_pad = format!("{}    ", pad);
                                                 // Find the switch variable from the bounds check
                                                 let switch_var = if i > 0 {
                                                     let prev_lines = &lines[i.saturating_sub(6)..i];
-                                                    prev_lines.iter().rev()
+                                                    prev_lines
+                                                        .iter()
+                                                        .rev()
                                                         .find(|l| l.trim().starts_with("if ("))
                                                         .and_then(|l| {
                                                             let t = l.trim();
-                                                            let after_if = t.strip_prefix("if (")?;
+                                                            let after_if =
+                                                                t.strip_prefix("if (")?;
                                                             let gt = after_if.find(" > ")?;
                                                             Some(after_if[..gt].to_string())
                                                         })
-                                                } else { None };
+                                                } else {
+                                                    None
+                                                };
                                                 let var_name = switch_var.as_deref().unwrap_or("?");
 
                                                 // Build switch/case block
                                                 let mut switch_lines = Vec::new();
-                                                switch_lines.push(format!("{}switch ({}) {{", pad, var_name));
+                                                switch_lines.push(format!(
+                                                    "{}switch ({}) {{",
+                                                    pad, var_name
+                                                ));
                                                 for case in &cases {
                                                     // Parse "case N: VALUE"
                                                     if let Some(colon) = case.find(": ") {
                                                         let case_num = &case[..colon];
                                                         let value = &case[colon + 2..];
-                                                        switch_lines.push(format!("{}{}: return {};", inner_pad, case_num, value));
+                                                        switch_lines.push(format!(
+                                                            "{}{}: return {};",
+                                                            inner_pad, case_num, value
+                                                        ));
                                                     }
                                                 }
                                                 switch_lines.push(format!("{}}}", pad));
@@ -3500,21 +4456,30 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                                                     // Look back for the if (var > N) line
                                                     let mut rs = i;
                                                     for k in (0..i).rev() {
-                                                        if lines[k].trim().starts_with("if (") && lines[k].trim().contains(" > ") {
+                                                        if lines[k].trim().starts_with("if (")
+                                                            && lines[k].trim().contains(" > ")
+                                                        {
                                                             rs = k;
                                                             break;
                                                         }
                                                     }
                                                     rs
-                                                } else { i };
+                                                } else {
+                                                    i
+                                                };
 
                                                 // Look forward for the closing } and return
                                                 let mut remove_end = i + 1;
                                                 for k in (i + 1)..lines.len().min(i + 5) {
                                                     let kt = lines[k].trim();
-                                                    if kt.starts_with("return") || kt == "}" || kt.starts_with("} else") {
+                                                    if kt.starts_with("return")
+                                                        || kt == "}"
+                                                        || kt.starts_with("} else")
+                                                    {
                                                         remove_end = k + 1;
-                                                    } else { break; }
+                                                    } else {
+                                                        break;
+                                                    }
                                                 }
 
                                                 // Replace the range with switch block
@@ -3543,8 +4508,13 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         let mut i = 0;
         while i < lines.len() {
             let lt = lines[i].trim().to_string();
-            let is_printf_call = printf_fns.iter().any(|f| lt.starts_with(&format!("{}(", f)));
-            if !is_printf_call { i += 1; continue; }
+            let is_printf_call = printf_fns
+                .iter()
+                .any(|f| lt.starts_with(&format!("{}(", f)));
+            if !is_printf_call {
+                i += 1;
+                continue;
+            }
 
             let mut fmt_str = String::new();
             let mut fmt_line = None;
@@ -3553,12 +4523,24 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
 
             for j in (0..i).rev() {
                 let jt = lines[j].trim();
-                if jt.is_empty() { continue; }
+                if jt.is_empty() {
+                    continue;
+                }
                 if jt.starts_with("RAX = \"") && jt.ends_with("\";") {
-                    fmt_str = jt.strip_prefix("RAX = ").unwrap_or("").trim_end_matches(';').trim().to_string();
+                    fmt_str = jt
+                        .strip_prefix("RAX = ")
+                        .unwrap_or("")
+                        .trim_end_matches(';')
+                        .trim()
+                        .to_string();
                     fmt_line = Some(j);
                 } else if jt.starts_with("XMM0 = ") && jt.ends_with(';') {
-                    xmm_expr = jt.strip_prefix("XMM0 = ").unwrap_or("").trim_end_matches(';').trim().to_string();
+                    xmm_expr = jt
+                        .strip_prefix("XMM0 = ")
+                        .unwrap_or("")
+                        .trim_end_matches(';')
+                        .trim()
+                        .to_string();
                     xmm_line = Some(j);
                 } else {
                     break;
@@ -3572,25 +4554,44 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let func_name = &lt[..paren];
                     let args_str = &lt[paren + 1..lt.len().saturating_sub(2)];
                     let args: Vec<&str> = args_str.splitn(3, ", ").collect();
-                    let has_float_fmt = fmt_str.contains("%f") || fmt_str.contains("%.1f")
-                        || fmt_str.contains("%.2f") || fmt_str.contains("%lf")
-                        || fmt_str.contains("%e") || fmt_str.contains("%g");
+                    let has_float_fmt = fmt_str.contains("%f")
+                        || fmt_str.contains("%.1f")
+                        || fmt_str.contains("%.2f")
+                        || fmt_str.contains("%lf")
+                        || fmt_str.contains("%e")
+                        || fmt_str.contains("%g");
                     let float_arg = if has_float_fmt && !xmm_expr.is_empty() {
                         format!(", {}", xmm_expr)
-                    } else { String::new() };
+                    } else {
+                        String::new()
+                    };
 
                     let new_call = if func_name == "printf" {
                         format!("{}printf({}{});", pad, fmt_str, float_arg)
                     } else if args.len() >= 2 {
-                        format!("{}{}({}, {}, {}{});", pad, func_name, args[0], args[1], fmt_str, float_arg)
-                    } else { lt.clone() };
+                        format!(
+                            "{}{}({}, {}, {}{});",
+                            pad, func_name, args[0], args[1], fmt_str, float_arg
+                        )
+                    } else {
+                        lt.clone()
+                    };
 
                     lines[i] = new_call;
                     let mut to_remove = Vec::new();
-                    if let Some(j) = fmt_line { to_remove.push(j); }
-                    if let Some(j) = xmm_line { to_remove.push(j); }
+                    if let Some(j) = fmt_line {
+                        to_remove.push(j);
+                    }
+                    if let Some(j) = xmm_line {
+                        to_remove.push(j);
+                    }
                     to_remove.sort_unstable();
-                    for j in to_remove.into_iter().rev() { lines.remove(j); if j < i { i -= 1; } }
+                    for j in to_remove.into_iter().rev() {
+                        lines.remove(j);
+                        if j < i {
+                            i -= 1;
+                        }
+                    }
                     continue;
                 }
             }
@@ -3616,10 +4617,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let next = lines[i + 1].trim().to_string();
             // Match: REG = expr; if (SUBREG ...)
             for (full_reg, sub_regs) in reg_pairs {
-                if lt.starts_with(&format!("{} = ", full_reg)) && lt.ends_with(';')
-                    && !lt.contains("return") && !lt.contains("if ")
+                if lt.starts_with(&format!("{} = ", full_reg))
+                    && lt.ends_with(';')
+                    && !lt.contains("return")
+                    && !lt.contains("if ")
                 {
-                    let expr = lt[full_reg.len() + 3..lt.len()-1].to_string();
+                    let expr = lt[full_reg.len() + 3..lt.len() - 1].to_string();
                     // Check if next line's condition uses a sub-register
                     if next.starts_with("if (") {
                         for sub in *sub_regs {
@@ -3651,9 +4654,15 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let lt = lines[i].trim().to_string();
             let next = lines[i + 1].trim().to_string();
             // Match: func_call(...); followed by if (0 == 0), if (0 != 0), if (EAX == 0), etc.
-            if lt.ends_with(';') && lt.contains('(') && !lt.contains(" = ")
-                && !lt.starts_with("if ") && !lt.starts_with("while ") && !lt.starts_with("return ")
-                && !lt.starts_with("//") && !lt.starts_with("var_") && !lt.starts_with("}")
+            if lt.ends_with(';')
+                && lt.contains('(')
+                && !lt.contains(" = ")
+                && !lt.starts_with("if ")
+                && !lt.starts_with("while ")
+                && !lt.starts_with("return ")
+                && !lt.starts_with("//")
+                && !lt.starts_with("var_")
+                && !lt.starts_with("}")
             {
                 // Extract the call expression (remove trailing ;)
                 let call_expr = lt.trim_end_matches(';').trim();
@@ -3670,8 +4679,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     || next.starts_with("if (EAX <= ")
                     || next.starts_with("if (EAX >= ");
                 // Also match: if (var_N == 0) right after a call — often the return check
-                let _is_var_zero = next.starts_with("if (var_") &&
-                    (next.contains(" == 0)") || next.contains(" != 0)"));
+                let _is_var_zero = next.starts_with("if (var_")
+                    && (next.contains(" == 0)") || next.contains(" != 0)"));
 
                 if is_zero_cond {
                     let indent = lines[i + 1].len() - lines[i + 1].trim_start().len();
@@ -3714,7 +4723,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let indent = lines[i].len() - lines[i].trim_start().len();
                     let pad = " ".repeat(indent);
                     lines[i] = format!("{}if (true) {{", pad);
-                } else if !lt.starts_with("if ") && !lt.starts_with("while ") && !lt.starts_with("} else") {
+                } else if !lt.starts_with("if ")
+                    && !lt.starts_with("while ")
+                    && !lt.starts_with("} else")
+                {
                     // Standalone SBORROW line — remove it
                     lines.remove(i);
                     continue;
@@ -3734,27 +4746,56 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         *line = line.replace("& 0xf000 == 32768", "& 0xf000) == 0x8000 /* S_ISREG */");
         // ASCII char constants in comparisons
         let ascii_chars: &[(i32, &str)] = &[
-            (9, "'\\t'"), (10, "'\\n'"), (13, "'\\r'"), (32, "' '"),
-            (34, "'\"'"), (39, "'\\''"), (44, "','"), (46, "'.'"),
-            (47, "'/'"), (48, "'0'"), (57, "'9'"), (58, "':'"),
-            (59, "';'"), (61, "'='"), (63, "'?'"), (65, "'A'"),
-            (70, "'F'"), (90, "'Z'"), (91, "'['"), (92, "'\\\\'"),
-            (93, "']'"), (95, "'_'"), (97, "'a'"), (102, "'f'"),
-            (122, "'z'"), (123, "'{'"), (125, "'}'"),
+            (9, "'\\t'"),
+            (10, "'\\n'"),
+            (13, "'\\r'"),
+            (32, "' '"),
+            (34, "'\"'"),
+            (39, "'\\''"),
+            (44, "','"),
+            (46, "'.'"),
+            (47, "'/'"),
+            (48, "'0'"),
+            (57, "'9'"),
+            (58, "':'"),
+            (59, "';'"),
+            (61, "'='"),
+            (63, "'?'"),
+            (65, "'A'"),
+            (70, "'F'"),
+            (90, "'Z'"),
+            (91, "'['"),
+            (92, "'\\\\'"),
+            (93, "']'"),
+            (95, "'_'"),
+            (97, "'a'"),
+            (102, "'f'"),
+            (122, "'z'"),
+            (123, "'{'"),
+            (125, "'}'"),
         ];
         for (val, ch) in ascii_chars {
             // Match: == N), != N), > N), < N), >= N), <= N) where N is the ASCII value
             // Only in conditions with byte-sized operands (string/char comparisons).
             // Guard: require a byte-sized context indicator — uint8_t cast, char pointer
             // deref *(s), or a known string function (strcmp, strncmp, fgets, etc.)
-            let has_byte_context = line.contains("uint8_t") || line.contains("*(s")
-                || line.contains("*(param_") || line.contains("strcmp")
-                || line.contains("strncmp") || line.contains("fgets")
-                || line.contains("char") || line.contains("[");
-            if !has_byte_context { continue; }
-            if line.contains(&format!("== {})", val)) || line.contains(&format!("!= {})", val))
-                || line.contains(&format!("> {})", val)) || line.contains(&format!("< {})", val))
-                || line.contains(&format!(">= {})", val)) || line.contains(&format!("<= {})", val))
+            let has_byte_context = line.contains("uint8_t")
+                || line.contains("*(s")
+                || line.contains("*(param_")
+                || line.contains("strcmp")
+                || line.contains("strncmp")
+                || line.contains("fgets")
+                || line.contains("char")
+                || line.contains("[");
+            if !has_byte_context {
+                continue;
+            }
+            if line.contains(&format!("== {})", val))
+                || line.contains(&format!("!= {})", val))
+                || line.contains(&format!("> {})", val))
+                || line.contains(&format!("< {})", val))
+                || line.contains(&format!(">= {})", val))
+                || line.contains(&format!("<= {})", val))
                 || line.contains(&format!("- {} ==", val))
             {
                 if !line.contains("\"") || line.contains("if (") || line.contains("while (") {
@@ -3797,7 +4838,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         let mut i = 0;
         while i + 1 < lines.len() {
             let lt = lines[i].trim();
-            let next = lines.get(i + 1).map(|l| l.trim().to_string()).unwrap_or_default();
+            let next = lines
+                .get(i + 1)
+                .map(|l| l.trim().to_string())
+                .unwrap_or_default();
             if lt.starts_with("while (") && lt.ends_with('{') && next == "}" {
                 lines.remove(i + 1);
                 lines.remove(i);
@@ -3817,16 +4861,31 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // Look for multiply by magic constant
             let lt = lines[i].trim().to_string();
             let mul_pos = lt.find(" * (int)0x").or_else(|| lt.find(" * 0x"));
-            let Some(mul_pos) = mul_pos else { i += 1; continue; };
+            let Some(mul_pos) = mul_pos else {
+                i += 1;
+                continue;
+            };
 
             // Extract magic constant
-            let hex_marker = if lt[mul_pos..].starts_with(" * (int)0x") { " * (int)0x" } else { " * 0x" };
+            let hex_marker = if lt[mul_pos..].starts_with(" * (int)0x") {
+                " * (int)0x"
+            } else {
+                " * 0x"
+            };
             let hex_start = mul_pos + hex_marker.len();
-            let hex_end = lt[hex_start..].find(|c: char| !c.is_ascii_hexdigit())
-                .map(|e| hex_start + e).unwrap_or(lt.len());
+            let hex_end = lt[hex_start..]
+                .find(|c: char| !c.is_ascii_hexdigit())
+                .map(|e| hex_start + e)
+                .unwrap_or(lt.len());
             let hex_str = lt[hex_start..hex_end].to_string();
-            let Ok(magic) = u64::from_str_radix(&hex_str, 16) else { i += 1; continue; };
-            if magic < 0x10000000 { i += 1; continue; } // too small to be a magic constant
+            let Ok(magic) = u64::from_str_radix(&hex_str, 16) else {
+                i += 1;
+                continue;
+            };
+            if magic < 0x10000000 {
+                i += 1;
+                continue;
+            } // too small to be a magic constant
 
             // Find the source variable (before the multiply)
             let eq_pos = lt.find(" = ");
@@ -3835,26 +4894,39 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 // Strip (int) cast if present
                 let clean = rhs.strip_prefix("(int)").unwrap_or(rhs);
                 clean.to_string()
-            } else { i += 1; continue; };
+            } else {
+                i += 1;
+                continue;
+            };
 
             // Find shift: same line or next line
             let shift = if let Some(shr_pos) = lt.find(">> ") {
                 let ns = shr_pos + 3;
-                let ne = lt[ns..].find(|c: char| !c.is_ascii_digit()).map(|e| ns + e).unwrap_or(lt.len());
+                let ne = lt[ns..]
+                    .find(|c: char| !c.is_ascii_digit())
+                    .map(|e| ns + e)
+                    .unwrap_or(lt.len());
                 lt[ns..ne].parse::<u32>().ok()
             } else {
                 // Scan forward (up to 3 lines) for the division shift (>> 32..38)
                 // Skip sign-extraction shifts (>> 31, >> 63)
                 let mut found_shift = None;
                 for look in 1..=3 {
-                    if i + look >= lines.len() { break; }
+                    if i + look >= lines.len() {
+                        break;
+                    }
                     let next = lines[i + look].trim().to_string();
                     if let Some(shr_pos) = next.find(">> ") {
                         let ns = shr_pos + 3;
-                        let ne = next[ns..].find(|c: char| !c.is_ascii_digit()).map(|e| ns + e).unwrap_or(next.len());
+                        let ne = next[ns..]
+                            .find(|c: char| !c.is_ascii_digit())
+                            .map(|e| ns + e)
+                            .unwrap_or(next.len());
                         if let Ok(s) = next[ns..ne].parse::<u32>() {
                             // Skip sign-extraction shifts (31 for 32-bit, 63 for 64-bit)
-                            if s == 31 || s == 63 { continue; }
+                            if s == 31 || s == 63 {
+                                continue;
+                            }
                             found_shift = Some(s);
                             break;
                         }
@@ -3863,19 +4935,32 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 found_shift
             };
 
-            let Some(shift) = shift else { i += 1; continue; };
-            if shift < 30 || shift > 40 { i += 1; continue; }
+            let Some(shift) = shift else {
+                i += 1;
+                continue;
+            };
+            if shift < 30 || shift > 40 {
+                i += 1;
+                continue;
+            }
 
             // Compute divisor: D = round(2^(32+shift-32) / magic) for shift > 32
             // or D = round(2^shift / magic) for general case
             let effective_shift = if shift >= 32 { shift } else { shift + 32 };
             let power = (1u128 << effective_shift) as f64;
             let divisor = (power / magic as f64).round() as u64;
-            if divisor < 2 || divisor > 1000 { i += 1; continue; }
+            if divisor < 2 || divisor > 1000 {
+                i += 1;
+                continue;
+            }
 
             // Replace multiply line with division
             let pad = " ".repeat(lines[i].len() - lines[i].trim_start().len());
-            let dest = if let Some(ep) = eq_pos { lt[..ep].to_string() } else { src_var.clone() };
+            let dest = if let Some(ep) = eq_pos {
+                lt[..ep].to_string()
+            } else {
+                src_var.clone()
+            };
 
             // Replace multiply line with division, remove shift and sign-extraction lines
             lines[i] = format!("{}{} = {} / {};", pad, dest.trim(), src_var, divisor);
@@ -3934,24 +5019,37 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                                         if let Some(eq) = prev.find(" = ") {
                                             let rhs = prev[eq + 3..].trim_end_matches(';');
                                             // Get the base variable (strip casts)
-                                            let clean = rhs.strip_prefix("(int)").unwrap_or(rhs)
-                                                .strip_prefix("(int64_t)").unwrap_or(rhs);
+                                            let clean = rhs
+                                                .strip_prefix("(int)")
+                                                .unwrap_or(rhs)
+                                                .strip_prefix("(int64_t)")
+                                                .unwrap_or(rhs);
                                             if !clean.contains(' ') && !clean.contains('(') {
                                                 Some(clean.to_string())
-                                            } else { None }
-                                        } else { None }
-                                    } else { None };
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    };
 
                                     // Divisor: this pattern is used for signed division
                                     // The actual divisor depends on the magic constant used in IMUL
                                     // For K=2: divisor is 7, for K=1: divisor is 3
                                     // But we don't have the magic constant here. Use a lookup:
                                     let divisor = match k {
-                                        1 => 3, 2 => 7, 3 => 9, _ => 0,
+                                        1 => 3,
+                                        2 => 7,
+                                        3 => 9,
+                                        _ => 0,
                                     };
                                     if divisor > 0 {
                                         let var = src_name.as_deref().unwrap_or(&src_reg);
-                                        let pad = " ".repeat(lines[i].len() - lines[i].trim_start().len());
+                                        let pad = " "
+                                            .repeat(lines[i].len() - lines[i].trim_start().len());
                                         lines[i] = format!("{}return {} / {};", pad, var, divisor);
                                         lines.remove(i + 2);
                                         lines.remove(i + 1);
@@ -3987,8 +5085,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     // Check if the var before "+" matches the var after "+"
                     let before_plus = &lt[..plus_pos];
                     // The var before "+" could be at the end of an expression like "ECX = RCX + RCX * 4"
-                    let var_before_plus = before_plus.rsplit(|c: char| c == '=' || c == '(')
-                        .next().unwrap_or("").trim();
+                    let var_before_plus = before_plus
+                        .rsplit(|c: char| c == '=' || c == '(')
+                        .next()
+                        .unwrap_or("")
+                        .trim();
                     if var_before_plus == var_after_plus && !var_before_plus.is_empty() {
                         if let Ok(n) = multiplier.parse::<u64>() {
                             let old = format!("{} + {} * {}", var_before_plus, var_after_plus, n);
@@ -4012,11 +5113,19 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let mut next_idx = i + 1;
             while next_idx < lines.len() {
                 let skip_t = lines[next_idx].trim();
-                if skip_t.contains(">> 32;") || skip_t.contains(">> 63;") || skip_t.contains(">> 31;") {
+                if skip_t.contains(">> 32;")
+                    || skip_t.contains(">> 63;")
+                    || skip_t.contains(">> 31;")
+                {
                     next_idx += 1;
-                } else { break; }
+                } else {
+                    break;
+                }
             }
-            if next_idx + 1 >= lines.len() { i += 1; continue; }
+            if next_idx + 1 >= lines.len() {
+                i += 1;
+                continue;
+            }
             let l1 = lines[next_idx].trim().to_string();
             let l2 = lines[next_idx + 1].trim().to_string();
 
@@ -4043,15 +5152,26 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                                         let ret_left = &r[..minus];
                                         let ret_right = &r[minus + 3..];
                                         // Check dest1 match (or alias)
-                                        if ret_right != dest1 { return false; }
+                                        if ret_right != dest1 {
+                                            return false;
+                                        }
                                         // Check dividend match (or register alias)
-                                        if ret_left == dividend { return true; }
+                                        if ret_left == dividend {
+                                            return true;
+                                        }
                                         // Handle EAX↔RAX aliasing
-                                        let aliases = [("RAX","EAX"),("RBX","EBX"),("RCX","ECX"),
-                                                       ("RDX","EDX"),("RSI","ESI"),("RDI","EDI")];
+                                        let aliases = [
+                                            ("RAX", "EAX"),
+                                            ("RBX", "EBX"),
+                                            ("RCX", "ECX"),
+                                            ("RDX", "EDX"),
+                                            ("RSI", "ESI"),
+                                            ("RDI", "EDI"),
+                                        ];
                                         for (r64, r32) in &aliases {
                                             if (ret_left == *r64 && dividend == *r32)
-                                                || (ret_left == *r32 && dividend == *r64) {
+                                                || (ret_left == *r32 && dividend == *r64)
+                                            {
                                                 return true;
                                             }
                                         }
@@ -4065,7 +5185,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                             lines[i] = format!("{}return {} % {};", pad, dividend, divisor);
                             // Remove all lines from i+1 through next_idx+1
                             for _ in 0..(next_idx + 2 - (i + 1)) {
-                                if i + 1 < lines.len() { lines.remove(i + 1); }
+                                if i + 1 < lines.len() {
+                                    lines.remove(i + 1);
+                                }
                             }
                             continue;
                         }
@@ -4087,10 +5209,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let l2 = lines[i + 2].trim().to_string();
             // Pattern: "if (COND) {\n __error();\n if (COND) {"
             // The inner __error + if is redundant
-            if lt.starts_with("if (") && lt.ends_with('{')
-                && l1.contains("__error()")
-                && l2 == lt
-            {
+            if lt.starts_with("if (") && lt.ends_with('{') && l1.contains("__error()") && l2 == lt {
                 // Remove __error() and the duplicate if, plus its closing brace
                 lines.remove(i + 2);
                 lines.remove(i + 1);
@@ -4130,7 +5249,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     }
                     // Also remove if RHS matches the return value
                     let rhs = lt[eq + 3..].trim_end_matches(';').trim();
-                    let ret_val = next.strip_prefix("return ").unwrap_or("").trim_end_matches(';').trim();
+                    let ret_val = next
+                        .strip_prefix("return ")
+                        .unwrap_or("")
+                        .trim_end_matches(';')
+                        .trim();
                     if rhs == ret_val {
                         lines.remove(i);
                         continue;
@@ -4161,7 +5284,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let jt = lines[j].trim();
                     let j_indent = lines[j].len() - lines[j].trim_start().len();
                     if j_indent == indent {
-                        if jt == "}" { depth += 1; }
+                        if jt == "}" {
+                            depth += 1;
+                        }
                         if jt.starts_with("} else {") {
                             in_else = true;
                             depth -= 1;
@@ -4171,8 +5296,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         }
                     }
                     if j_indent > indent && jt.starts_with("return ") {
-                        if in_else { has_then_return = true; }
-                        else { has_else_return = true; }
+                        if in_else {
+                            has_then_return = true;
+                        } else {
+                            has_else_return = true;
+                        }
                     }
                 }
                 if has_then_return && has_else_return {
@@ -4255,8 +5383,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let prev = lines[i - 1].trim().to_string();
                     if prev.ends_with(';') && prev.contains(" = ") && !prev.contains('(') {
                         Some((i - 1, prev))
-                    } else { None }
-                } else { None };
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 (i, init)
             } else {
                 i += 1;
@@ -4269,17 +5401,27 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let mut depth = 1i32;
             for j in (while_idx + 1)..lines.len() {
                 let jt = lines[j].trim();
-                if jt.ends_with('{') { depth += 1; }
-                if jt == "}" || jt.starts_with("} else") { depth -= 1; }
+                if jt.ends_with('{') {
+                    depth += 1;
+                }
+                if jt == "}" || jt.starts_with("} else") {
+                    depth -= 1;
+                }
                 if depth == 0 {
                     close_idx = Some(j);
                     break;
                 }
             }
-            let Some(close_idx) = close_idx else { i += 1; continue; };
+            let Some(close_idx) = close_idx else {
+                i += 1;
+                continue;
+            };
 
             // Check if the last statement before close brace is an increment
-            if close_idx <= while_idx + 1 { i += 1; continue; }
+            if close_idx <= while_idx + 1 {
+                i += 1;
+                continue;
+            }
             let last_body = lines[close_idx - 1].trim().to_string();
 
             // Match: "VAR = VAR + 1;" or "VAR = VAR + N;" or "VAR - 1"
@@ -4290,17 +5432,30 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     if rhs == format!("{} + 1", lhs) {
                         (Some(lhs.to_string()), Some(format!("{}++", lhs)))
                     } else if rhs.starts_with(&format!("{} + ", lhs)) {
-                        (Some(lhs.to_string()), Some(format!("{} += {}", lhs, &rhs[lhs.len() + 3..])))
+                        (
+                            Some(lhs.to_string()),
+                            Some(format!("{} += {}", lhs, &rhs[lhs.len() + 3..])),
+                        )
                     } else if rhs == format!("{} - 1", lhs) {
                         (Some(lhs.to_string()), Some(format!("{}--", lhs)))
                     } else {
                         (None, None)
                     }
-                } else { (None, None) }
-            } else { (None, None) };
+                } else {
+                    (None, None)
+                }
+            } else {
+                (None, None)
+            };
 
-            let Some(inc_var) = inc_var else { i += 1; continue; };
-            let Some(inc_expr) = inc_expr else { i += 1; continue; };
+            let Some(inc_var) = inc_var else {
+                i += 1;
+                continue;
+            };
+            let Some(inc_expr) = inc_expr else {
+                i += 1;
+                continue;
+            };
 
             // Extract while condition
             let while_text = lines[while_idx].trim();
@@ -4318,7 +5473,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let init = init_text.trim_end_matches(';');
                 lines[init_idx] = format!("{}for ({}; {}; {}) {{", pad, init, cond, inc_expr);
                 lines.remove(while_idx); // remove old while line (now at init_idx + 1)
-                // Remove the increment line (shifted by 1 due to removal)
+                                         // Remove the increment line (shifted by 1 due to removal)
                 let new_close = close_idx - 1;
                 if new_close > init_idx + 1 {
                     lines.remove(new_close - 1);
@@ -4348,19 +5503,24 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // Lines like "R14 = RBX + 8;" or "R15 = *(RSP);" where the register
     // doesn't appear in any subsequent line within the same scope.
     {
-        let x86_regs = ["RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP",
-                         "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15",
-                         "EAX", "EBX", "ECX", "EDX", "ESI", "EDI",
-                         "R8D", "R9D", "R10D", "R11D", "R12D", "R13D", "R14D", "R15D",
-                         "AL", "BL", "CL", "DL"];
+        let x86_regs = [
+            "RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP", "R8", "R9", "R10", "R11", "R12",
+            "R13", "R14", "R15", "EAX", "EBX", "ECX", "EDX", "ESI", "EDI", "R8D", "R9D", "R10D",
+            "R11D", "R12D", "R13D", "R14D", "R15D", "AL", "BL", "CL", "DL",
+        ];
         let mut i = 0;
         while i < lines.len() {
             let lt = lines[i].trim().to_string();
             // Match: REG = expr; (simple register assignment)
-            if lt.ends_with(';') && lt.contains(" = ") && !lt.starts_with("if ")
-                && !lt.starts_with("while ") && !lt.starts_with("return ")
-                && !lt.starts_with("//") && !lt.starts_with("var_")
-                && !lt.starts_with("*") && !lt.contains("->")
+            if lt.ends_with(';')
+                && lt.contains(" = ")
+                && !lt.starts_with("if ")
+                && !lt.starts_with("while ")
+                && !lt.starts_with("return ")
+                && !lt.starts_with("//")
+                && !lt.starts_with("var_")
+                && !lt.starts_with("*")
+                && !lt.contains("->")
                 && !lt.contains('[')
             {
                 let lhs = lt.split(" = ").next().unwrap_or("");
@@ -4372,8 +5532,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         let jt = lines[j].trim();
                         let j_indent = lines[j].len() - lines[j].trim_start().len();
                         // Stop at scope boundary
-                        if j_indent < my_indent && !jt.is_empty() { break; }
-                        if jt == "}" || jt.starts_with("} else") { break; }
+                        if j_indent < my_indent && !jt.is_empty() {
+                            break;
+                        }
+                        if jt == "}" || jt.starts_with("} else") {
+                            break;
+                        }
                         // Check if the register appears in this line (not as LHS of assignment)
                         if jt.contains(lhs) {
                             // Make sure it's not just another assignment to the same reg
@@ -4409,7 +5573,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 if let Some(eq) = lt.find(" = ") {
                     let var_name = &lt[..eq];
                     let rhs = &lt[eq + 3..lt.len() - 1]; // strip trailing ;
-                    if rhs == format!("{} + 1", var_name) && counter_idx < counter_names.len() as u8 {
+                    if rhs == format!("{} + 1", var_name) && counter_idx < counter_names.len() as u8
+                    {
                         // This var is a loop counter — but don't rename here, just note it
                         // (Renaming requires changing all references, which is complex)
                         let _ = counter_names[counter_idx as usize];
@@ -4428,7 +5593,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let lt = lines[i].trim().to_string();
             if lt.starts_with("RAX = ") && lt.ends_with(';') && !lt.contains("return") {
                 // Check if next non-empty line is } or end of function
-                let next = lines.get(i + 1).map(|l| l.trim().to_string()).unwrap_or_default();
+                let next = lines
+                    .get(i + 1)
+                    .map(|l| l.trim().to_string())
+                    .unwrap_or_default();
                 if next == "}" || next.is_empty() || next.starts_with('}') {
                     lines.remove(i);
                     continue;
@@ -4465,7 +5633,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         *line = line.replace("0xffffffffffffffff", "-1");
         *line = line.replace("4294967295", "-1");
         // Also 0xffffffff for 32-bit -1
-        if line.contains("0xffffffff") && !line.contains("0xffffffff0") && !line.contains("0xffffffff8") {
+        if line.contains("0xffffffff")
+            && !line.contains("0xffffffff0")
+            && !line.contains("0xffffffff8")
+        {
             *line = line.replace("0xffffffff", "-1");
         }
     }
@@ -4480,17 +5651,26 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let lt = lines[i].trim().to_string();
             let next = lines[i + 1].trim().to_string();
             // Match: call(...); if (SIMPLE_VAR == 0) or if (SIMPLE_VAR != 0)
-            if lt.ends_with(';') && lt.contains('(') && !lt.contains(" = ")
-                && !lt.starts_with("if ") && !lt.starts_with("while ")
-                && !lt.starts_with("return ") && !lt.starts_with("//") && !lt.starts_with("}")
+            if lt.ends_with(';')
+                && lt.contains('(')
+                && !lt.contains(" = ")
+                && !lt.starts_with("if ")
+                && !lt.starts_with("while ")
+                && !lt.starts_with("return ")
+                && !lt.starts_with("//")
+                && !lt.starts_with("}")
             {
                 let call_expr = lt.trim_end_matches(';').trim();
                 // Check for: if (var_N == 0), if (var_N != 0), if (param_N == 0)
-                let cond_inline = if next.starts_with("if (var_") || next.starts_with("if (param_") {
+                let cond_inline = if next.starts_with("if (var_") || next.starts_with("if (param_")
+                {
                     // Check it's a simple == 0 or != 0 check
                     (next.contains(" == 0)") || next.contains(" != 0)"))
-                        && !next.contains("&&") && !next.contains("||")
-                } else { false };
+                        && !next.contains("&&")
+                        && !next.contains("||")
+                } else {
+                    false
+                };
 
                 if cond_inline {
                     let indent = lines[i + 1].len() - lines[i + 1].trim_start().len();
@@ -4565,7 +5745,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let inner = &cond[..close];
                     if let Some(eq_pos) = inner.rfind(" == 0").or(inner.rfind(" != 0")) {
                         let before_eq = &inner[..eq_pos];
-                        let op = if inner[eq_pos..].starts_with(" == 0") { "==" } else { "!=" };
+                        let op = if inner[eq_pos..].starts_with(" == 0") {
+                            "=="
+                        } else {
+                            "!="
+                        };
                         if let Some(minus) = before_eq.rfind(" - ") {
                             let lhs = &before_eq[..minus];
                             let rhs_val = before_eq[minus + 3..].trim();
@@ -4593,31 +5777,43 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // Find "if (EXPR == N)" where the next else-if checks the same EXPR
             if lt.starts_with("if (") && lt.contains(" == ") && lt.ends_with(") {") {
                 // Extract the variable being compared
-                let cond = &lt[4..lt.len()-3]; // strip "if (" and ") {"
+                let cond = &lt[4..lt.len() - 3]; // strip "if (" and ") {"
                 if let Some(eq_pos) = cond.find(" == ") {
                     let var_name = &cond[..eq_pos];
-                    let first_val = &cond[eq_pos+4..];
+                    let first_val = &cond[eq_pos + 4..];
                     let mut cases = vec![first_val.to_string()];
                     let check = format!("if ({} == ", var_name);
                     let my_indent = lines[i].len() - lines[i].trim_start().len();
-                    for j in (i+1)..lines.len() {
+                    for j in (i + 1)..lines.len() {
                         let jt = lines[j].trim();
                         if jt.starts_with(&check) && jt.ends_with(") {") {
-                            let val = &jt[check.len()..jt.len()-3];
+                            let val = &jt[check.len()..jt.len() - 3];
                             cases.push(val.to_string());
                         }
                         // Stop at end of the outermost block
                         // (when we see a line at same or lesser indent that isn't part of the chain)
                         let j_indent = lines[j].len() - lines[j].trim_start().len();
-                        if j_indent <= my_indent && !jt.is_empty() && !jt.starts_with('}')
-                            && !jt.starts_with("if (") && !jt.starts_with("} else")
-                        { break; }
+                        if j_indent <= my_indent
+                            && !jt.is_empty()
+                            && !jt.starts_with('}')
+                            && !jt.starts_with("if (")
+                            && !jt.starts_with("} else")
+                        {
+                            break;
+                        }
                     }
                     if cases.len() >= 3 {
                         let indent = lines[i].len() - lines[i].trim_start().len();
                         let pad = " ".repeat(indent);
-                        let case_str = cases.iter().map(|c| format!("{}", c)).collect::<Vec<_>>().join(", ");
-                        lines.insert(i, format!("{}// switch({}) — cases: {}", pad, var_name, case_str));
+                        let case_str = cases
+                            .iter()
+                            .map(|c| format!("{}", c))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        lines.insert(
+                            i,
+                            format!("{}// switch({}) — cases: {}", pad, var_name, case_str),
+                        );
                         i += 1; // skip the comment we just inserted
                     }
                 }
@@ -4629,11 +5825,21 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // #SIZEOF: Annotate calloc/malloc with likely struct sizes.
     for line in &mut lines {
         // Common struct sizes from real-world code
-        if line.contains("calloc(1, 32)") { *line = line.replace("calloc(1, 32)", "calloc(1, 32) /* sizeof(struct) */"); }
-        if line.contains("calloc(1, 40)") { *line = line.replace("calloc(1, 40)", "calloc(1, 40) /* sizeof(struct) */"); }
-        if line.contains("calloc(1, 48)") { *line = line.replace("calloc(1, 48)", "calloc(1, 48) /* sizeof(struct) */"); }
-        if line.contains("calloc(1, 56)") { *line = line.replace("calloc(1, 56)", "calloc(1, 56) /* sizeof(struct) */"); }
-        if line.contains("calloc(1, 64)") { *line = line.replace("calloc(1, 64)", "calloc(1, 64) /* sizeof(struct) */"); }
+        if line.contains("calloc(1, 32)") {
+            *line = line.replace("calloc(1, 32)", "calloc(1, 32) /* sizeof(struct) */");
+        }
+        if line.contains("calloc(1, 40)") {
+            *line = line.replace("calloc(1, 40)", "calloc(1, 40) /* sizeof(struct) */");
+        }
+        if line.contains("calloc(1, 48)") {
+            *line = line.replace("calloc(1, 48)", "calloc(1, 48) /* sizeof(struct) */");
+        }
+        if line.contains("calloc(1, 56)") {
+            *line = line.replace("calloc(1, 56)", "calloc(1, 56) /* sizeof(struct) */");
+        }
+        if line.contains("calloc(1, 64)") {
+            *line = line.replace("calloc(1, 64)", "calloc(1, 64) /* sizeof(struct) */");
+        }
     }
 
     // #LLM: Clean up patterns that confuse LLM analysis.
@@ -4654,16 +5860,21 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         while i < lines.len() {
             let lt = lines[i].trim().to_string();
             // Remove "REG = void_call(...) + N;" or "REG = void_call(...) * N;"
-            let starts_with_reg = lt.starts_with("RAX = ") || lt.starts_with("RCX = ")
-                || lt.starts_with("RDX = ") || lt.starts_with("EAX = ")
-                || lt.starts_with("ECX = ") || lt.starts_with("EDX = ")
-                || lt.starts_with("R8D = ") || lt.starts_with("R9D = ");
+            let starts_with_reg = lt.starts_with("RAX = ")
+                || lt.starts_with("RCX = ")
+                || lt.starts_with("RDX = ")
+                || lt.starts_with("EAX = ")
+                || lt.starts_with("ECX = ")
+                || lt.starts_with("EDX = ")
+                || lt.starts_with("R8D = ")
+                || lt.starts_with("R9D = ");
             if starts_with_reg && lt.ends_with(';') {
                 let rhs = lt.split(" = ").nth(1).unwrap_or("");
                 // Remove "REG = call(...) + N;" or "REG = call(...) * N;"
                 // where the call is to a known void/output function
                 let is_void_call_noise = ["puts(", "printf(", "scanf(", "write("]
-                    .iter().any(|f| rhs.contains(f))
+                    .iter()
+                    .any(|f| rhs.contains(f))
                     && (rhs.contains(") +") || rhs.contains(") *") || rhs.contains(") -"));
                 // Remove "EAX = EAX & 0x7fffffff;" (sign mask noise)
                 let is_sign_mask = rhs.contains("& 0x7fffffff");
@@ -4672,8 +5883,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     && i + 1 < lines.len()
                     && lines[i + 1].trim().contains("chkstk");
                 // Remove "RAX = *(RSP);" after chkstk
-                let is_post_chkstk = lt == "RAX = *(RSP);"
-                    && i > 0 && lines[i - 1].trim().contains("chkstk");
+                let is_post_chkstk =
+                    lt == "RAX = *(RSP);" && i > 0 && lines[i - 1].trim().contains("chkstk");
                 if is_void_call_noise || is_sign_mask || is_stack_probe || is_post_chkstk {
                     lines.remove(i);
                     continue;
@@ -4700,7 +5911,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let inner = &cond[..close];
                     if let Some(eq_pos) = inner.rfind(" == 0").or(inner.rfind(" != 0")) {
                         let before_eq = &inner[..eq_pos];
-                        let op = if inner[eq_pos..].starts_with(" == 0") { "==" } else { "!=" };
+                        let op = if inner[eq_pos..].starts_with(" == 0") {
+                            "=="
+                        } else {
+                            "!="
+                        };
                         if let Some(minus) = before_eq.rfind(" - ") {
                             let lhs = &before_eq[..minus];
                             let rhs_val = before_eq[minus + 3..].trim();
@@ -4743,7 +5958,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         while i < lines.len() {
             let lt = lines[i].trim();
             if lt.starts_with("*(uint32_t*)(ESP) = ") || lt.starts_with("*(int*)(ESP) = ") {
-                let rhs = if let Some(r) = lt.find(" = ") { &lt[r + 3..] } else { "" };
+                let rhs = if let Some(r) = lt.find(" = ") {
+                    &lt[r + 3..]
+                } else {
+                    ""
+                };
                 let prev = lines[i - 1].trim();
                 // If the RHS matches the previous line exactly (with semicolon)
                 if !rhs.is_empty() && prev == rhs {
@@ -4813,7 +6032,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // Step 2: Remove thunk calls and GOT base addition lines
             lines.retain(|line| {
                 let t = line.trim();
-                if t.contains("__x86.get_pc_thunk") { return false; }
+                if t.contains("__x86.get_pc_thunk") {
+                    return false;
+                }
                 false == false // keep all others for now
             });
             // Re-find the GOT add line (index may have shifted)
@@ -4840,12 +6061,17 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         // Find .got or _GLOBAL_OFFSET_TABLE_ address
                         // Find the GOT base: prefer _GLOBAL_OFFSET_TABLE_ symbol
                         // (most accurate), then .got.plt section address.
-                        let got_addr = elf.syms.iter()
+                        let got_addr = elf
+                            .syms
+                            .iter()
                             .find(|s| elf.strtab.get_at(s.st_name) == Some("_GLOBAL_OFFSET_TABLE_"))
                             .map(|s| s.st_value)
                             .or_else(|| {
-                                elf.section_headers.iter()
-                                    .find(|sh| elf.shdr_strtab.get_at(sh.sh_name) == Some(".got.plt"))
+                                elf.section_headers
+                                    .iter()
+                                    .find(|sh| {
+                                        elf.shdr_strtab.get_at(sh.sh_name) == Some(".got.plt")
+                                    })
                                     .map(|sh| sh.sh_addr)
                             });
 
@@ -4858,23 +6084,31 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                                     let mut new_line = line.clone();
                                     while let Some(pos) = new_line.find(&pattern_minus) {
                                         let hex_start = pos + pattern_minus.len();
-                                        let hex_end = new_line[hex_start..].find(|c: char| !c.is_ascii_hexdigit())
-                                            .map(|e| hex_start + e).unwrap_or(new_line.len());
+                                        let hex_end = new_line[hex_start..]
+                                            .find(|c: char| !c.is_ascii_hexdigit())
+                                            .map(|e| hex_start + e)
+                                            .unwrap_or(new_line.len());
                                         let hex_str = &new_line[hex_start..hex_end];
                                         if let Ok(displacement) = u64::from_str_radix(hex_str, 16) {
                                             let resolved_addr = got_addr.wrapping_sub(displacement);
                                             // Try to read a string at this address
                                             if let Some(s) = try_read_string(resolved_addr, ctx) {
                                                 if s.len() >= 2 {
-                                                    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
-                                                    let old = format!("{}{}", pattern_minus, hex_str);
-                                                    new_line = new_line.replace(&old, &format!("\"{}\"", escaped));
+                                                    let escaped = s
+                                                        .replace('\\', "\\\\")
+                                                        .replace('"', "\\\"")
+                                                        .replace('\n', "\\n");
+                                                    let old =
+                                                        format!("{}{}", pattern_minus, hex_str);
+                                                    new_line = new_line
+                                                        .replace(&old, &format!("\"{}\"", escaped));
                                                     continue;
                                                 }
                                             }
                                             // Fall back to hex address
                                             let old = format!("{}{}", pattern_minus, hex_str);
-                                            new_line = new_line.replace(&old, &format!("0x{:x}", resolved_addr));
+                                            new_line = new_line
+                                                .replace(&old, &format!("0x{:x}", resolved_addr));
                                         }
                                         break; // avoid infinite loop
                                     }
@@ -4887,21 +6121,29 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                                     let mut new_line = line.clone();
                                     while let Some(pos) = new_line.find(&pattern_plus) {
                                         let hex_start = pos + pattern_plus.len();
-                                        let hex_end = new_line[hex_start..].find(|c: char| !c.is_ascii_hexdigit())
-                                            .map(|e| hex_start + e).unwrap_or(new_line.len());
+                                        let hex_end = new_line[hex_start..]
+                                            .find(|c: char| !c.is_ascii_hexdigit())
+                                            .map(|e| hex_start + e)
+                                            .unwrap_or(new_line.len());
                                         let hex_str = &new_line[hex_start..hex_end];
                                         if let Ok(displacement) = u64::from_str_radix(hex_str, 16) {
                                             let resolved_addr = got_addr.wrapping_sub(displacement);
                                             if let Some(s) = try_read_string(resolved_addr, ctx) {
                                                 if s.len() >= 2 {
-                                                    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
-                                                    let old = format!("{}{}", pattern_plus, hex_str);
-                                                    new_line = new_line.replace(&old, &format!("\"{}\"", escaped));
+                                                    let escaped = s
+                                                        .replace('\\', "\\\\")
+                                                        .replace('"', "\\\"")
+                                                        .replace('\n', "\\n");
+                                                    let old =
+                                                        format!("{}{}", pattern_plus, hex_str);
+                                                    new_line = new_line
+                                                        .replace(&old, &format!("\"{}\"", escaped));
                                                     continue;
                                                 }
                                             }
                                             let old = format!("{}{}", pattern_plus, hex_str);
-                                            new_line = new_line.replace(&old, &format!("0x{:x}", resolved_addr));
+                                            new_line = new_line
+                                                .replace(&old, &format!("0x{:x}", resolved_addr));
                                         }
                                         break;
                                     }
@@ -4923,16 +6165,25 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     lines.retain(|line| {
         let t = line.trim();
         // Remove "XMM0 = 0; // zero-init" and similar SSE register clears
-        if t.starts_with("XMM") && t.contains("= 0") && t.contains("zero-init") { return false; }
+        if t.starts_with("XMM") && t.contains("= 0") && t.contains("zero-init") {
+            return false;
+        }
         // Remove 128-bit stack stores that are zero-init
-        if t.starts_with("*(__uint128_t*)") && t.contains("RSP") && t.contains("= 0") { return false; }
+        if t.starts_with("*(__uint128_t*)") && t.contains("RSP") && t.contains("= 0") {
+            return false;
+        }
         // Remove "N[RSP] = 0;" patterns (stack zero-init)
-        if t.ends_with("[RSP] = 0;") || t.ends_with("[RSP] = 0; // zero-init") { return false; }
+        if t.ends_with("[RSP] = 0;") || t.ends_with("[RSP] = 0; // zero-init") {
+            return false;
+        }
         // Remove x86-64 RSP-relative shadow space stores: "N[RSP] = VALUE;"
         // These are Windows x64 shadow space (home area) or register save area.
         // Pattern: "16[RSP] = ...", "24[RSP] = ...", "32[RSP] = ...", etc.
-        if t.contains("[RSP]") && t.contains(" = ") && !t.contains("if ")
-            && !t.contains("while ") && !t.contains("return ")
+        if t.contains("[RSP]")
+            && t.contains(" = ")
+            && !t.contains("if ")
+            && !t.contains("while ")
+            && !t.contains("return ")
         {
             // N[RSP] = ... where N is a small numeric offset (shadow/home space)
             if let Some(bracket) = t.find('[') {
@@ -4943,10 +6194,18 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             }
         }
         // Remove "RSP = RSP + N;" and "RSP = RSP - N;" (stack adjustments)
-        if t.starts_with("RSP = RSP") && t.ends_with(';') { return false; }
+        if t.starts_with("RSP = RSP") && t.ends_with(';') {
+            return false;
+        }
         // Remove "RBP = RSP + N;" / "RBP = RSP;" / "RBP = -N + RSP;" (frame setup)
-        if t.starts_with("RBP = ") && t.contains("RSP") && t.ends_with(';')
-            && !t.contains("func_") && !t.contains("var_") { return false; }
+        if t.starts_with("RBP = ")
+            && t.contains("RSP")
+            && t.ends_with(';')
+            && !t.contains("func_")
+            && !t.contains("var_")
+        {
+            return false;
+        }
         true
     });
 
@@ -4986,7 +6245,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     }
 
     // #VOID_RETURN: Remove trailing "return;" in void functions (redundant).
-    if lines.first().map_or(false, |l| l.trim().starts_with("void ")) {
+    if lines
+        .first()
+        .map_or(false, |l| l.trim().starts_with("void "))
+    {
         // Remove the last "return;" before the closing "}"
         let mut i = lines.len();
         while i > 0 {
@@ -4996,7 +6258,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 lines.remove(i);
                 break;
             }
-            if t == "}" { continue; } // skip closing brace
+            if t == "}" {
+                continue;
+            } // skip closing brace
             break; // stop at first non-brace, non-return line
         }
     }
@@ -5006,72 +6270,82 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // binaries — numeric literals like `2` and `3` commonly show up as
     // enum / fd / flag values on Linux and have nothing to do with
     // CREATE_ALWAYS / OPEN_EXISTING.
-    let is_pe = ctx.binary.map_or(false, |b| b.len() > 2 && &b[0..2] == b"MZ");
+    let is_pe = ctx
+        .binary
+        .map_or(false, |b| b.len() > 2 && &b[0..2] == b"MZ");
     if is_pe {
-    for line in &mut lines {
-        // Process status
-        *line = line.replace("== 259)", "== 259 /* STILL_ACTIVE */)");
-        *line = line.replace("!= 259)", "!= 259 /* STILL_ACTIVE */)");
-        // GetStdHandle
-        *line = line.replace("(0xfffffff5)", "(STD_ERROR_HANDLE)");
-        *line = line.replace("(0xfffffff6)", "(STD_OUTPUT_HANDLE)");
-        *line = line.replace("(0xfffffff4)", "(STD_INPUT_HANDLE)");
-        // Memory protection
-        *line = line.replace(", 0x40)", ", PAGE_EXECUTE_READWRITE)");
-        *line = line.replace(", 0x04)", ", PAGE_READWRITE)");
-        *line = line.replace(", 0x20)", ", PAGE_EXECUTE_READ)");
-        // Allocation type
-        *line = line.replace(", 0x3000,", ", MEM_COMMIT|MEM_RESERVE,");
-        *line = line.replace(", 0x1000,", ", MEM_COMMIT,");
-        // Socket
-        *line = line.replace("socket(2, 1, 0)", "socket(AF_INET, SOCK_STREAM, 0)");
-        *line = line.replace("socket(2, 2, 0)", "socket(AF_INET, SOCK_DGRAM, 0)");
-        // Signal
-        *line = line.replace("signal(13, 1)", "signal(SIGPIPE, SIG_IGN)");
-        // File access
-        *line = line.replace(", 0x80000000)", ", GENERIC_READ)");
-        *line = line.replace(", 0xc0000000)", ", GENERIC_READ|GENERIC_WRITE)");
-        *line = line.replace(", 0x40000000)", ", GENERIC_WRITE)");
-        // CreateFile disposition
-        *line = line.replace(", 3)", ", OPEN_EXISTING)").replace(", 2)", ", CREATE_ALWAYS)");
-        // WaitForSingleObject
-        *line = line.replace(", 0xffffffff)", ", INFINITE)");
-        *line = line.replace(", -1)", ", INFINITE)");
-        // Registry
-        *line = line.replace("(0xffffffff80000001)", "(HKEY_CURRENT_USER)");
-        *line = line.replace("(0xffffffff80000002)", "(HKEY_LOCAL_MACHINE)");
-        *line = line.replace("(0x80000001)", "(HKEY_CURRENT_USER)");
-        *line = line.replace("(0x80000002)", "(HKEY_LOCAL_MACHINE)");
-        *line = line.replace("(0x80000000)", "(HKEY_CLASSES_ROOT)");
-        *line = line.replace("(0x80000003)", "(HKEY_USERS)");
-        *line = line.replace("(0x80000005)", "(HKEY_CURRENT_CONFIG)");
-        // Registry access rights
-        *line = line.replace("0x20019", "KEY_READ");
-        *line = line.replace("0x20006", "KEY_WRITE");
-        *line = line.replace("0xf003f", "KEY_ALL_ACCESS");
-        // Process access rights
-        *line = line.replace("0x1fffff", "PROCESS_ALL_ACCESS");
-        *line = line.replace("0x001f0fff", "PROCESS_ALL_ACCESS");
-        // Window messages
-        if line.contains("SendMessage") || line.contains("PostMessage") {
-            *line = line.replace(", 0x10,", ", WM_CLOSE,");
-            *line = line.replace(", 0x12,", ", WM_QUIT,");
-            *line = line.replace(", 0x111,", ", WM_COMMAND,");
-            *line = line.replace(", 0x100,", ", WM_KEYDOWN,");
-            *line = line.replace(", 0x101,", ", WM_KEYUP,");
-            *line = line.replace(", 0x402,", ", PBM_SETPOS,");
+        for line in &mut lines {
+            // Process status
+            *line = line.replace("== 259)", "== 259 /* STILL_ACTIVE */)");
+            *line = line.replace("!= 259)", "!= 259 /* STILL_ACTIVE */)");
+            // GetStdHandle
+            *line = line.replace("(0xfffffff5)", "(STD_ERROR_HANDLE)");
+            *line = line.replace("(0xfffffff6)", "(STD_OUTPUT_HANDLE)");
+            *line = line.replace("(0xfffffff4)", "(STD_INPUT_HANDLE)");
+            // Memory protection
+            *line = line.replace(", 0x40)", ", PAGE_EXECUTE_READWRITE)");
+            *line = line.replace(", 0x04)", ", PAGE_READWRITE)");
+            *line = line.replace(", 0x20)", ", PAGE_EXECUTE_READ)");
+            // Allocation type
+            *line = line.replace(", 0x3000,", ", MEM_COMMIT|MEM_RESERVE,");
+            *line = line.replace(", 0x1000,", ", MEM_COMMIT,");
+            // Socket
+            *line = line.replace("socket(2, 1, 0)", "socket(AF_INET, SOCK_STREAM, 0)");
+            *line = line.replace("socket(2, 2, 0)", "socket(AF_INET, SOCK_DGRAM, 0)");
+            // Signal
+            *line = line.replace("signal(13, 1)", "signal(SIGPIPE, SIG_IGN)");
+            // File access
+            *line = line.replace(", 0x80000000)", ", GENERIC_READ)");
+            *line = line.replace(", 0xc0000000)", ", GENERIC_READ|GENERIC_WRITE)");
+            *line = line.replace(", 0x40000000)", ", GENERIC_WRITE)");
+            // CreateFile disposition
+            *line = line
+                .replace(", 3)", ", OPEN_EXISTING)")
+                .replace(", 2)", ", CREATE_ALWAYS)");
+            // WaitForSingleObject
+            *line = line.replace(", 0xffffffff)", ", INFINITE)");
+            *line = line.replace(", -1)", ", INFINITE)");
+            // Registry
+            *line = line.replace("(0xffffffff80000001)", "(HKEY_CURRENT_USER)");
+            *line = line.replace("(0xffffffff80000002)", "(HKEY_LOCAL_MACHINE)");
+            *line = line.replace("(0x80000001)", "(HKEY_CURRENT_USER)");
+            *line = line.replace("(0x80000002)", "(HKEY_LOCAL_MACHINE)");
+            *line = line.replace("(0x80000000)", "(HKEY_CLASSES_ROOT)");
+            *line = line.replace("(0x80000003)", "(HKEY_USERS)");
+            *line = line.replace("(0x80000005)", "(HKEY_CURRENT_CONFIG)");
+            // Registry access rights
+            *line = line.replace("0x20019", "KEY_READ");
+            *line = line.replace("0x20006", "KEY_WRITE");
+            *line = line.replace("0xf003f", "KEY_ALL_ACCESS");
+            // Process access rights
+            *line = line.replace("0x1fffff", "PROCESS_ALL_ACCESS");
+            *line = line.replace("0x001f0fff", "PROCESS_ALL_ACCESS");
+            // Window messages
+            if line.contains("SendMessage") || line.contains("PostMessage") {
+                *line = line.replace(", 0x10,", ", WM_CLOSE,");
+                *line = line.replace(", 0x12,", ", WM_QUIT,");
+                *line = line.replace(", 0x111,", ", WM_COMMAND,");
+                *line = line.replace(", 0x100,", ", WM_KEYDOWN,");
+                *line = line.replace(", 0x101,", ", WM_KEYUP,");
+                *line = line.replace(", 0x402,", ", PBM_SETPOS,");
+            }
+            // ShowWindow
+            if line.contains("ShowWindow") {
+                *line = line
+                    .replace(", 0)", ", SW_HIDE)")
+                    .replace(", 1)", ", SW_SHOWNORMAL)")
+                    .replace(", 5)", ", SW_SHOW)")
+                    .replace(", 3)", ", SW_MAXIMIZE)");
+            }
+            // MessageBox type
+            if line.contains("MessageBox") {
+                *line = line
+                    .replace(", 0x30)", ", MB_ICONWARNING)")
+                    .replace(", 0x10)", ", MB_ICONERROR)")
+                    .replace(", 0x40)", ", MB_ICONINFORMATION)")
+                    .replace(", 0x4)", ", MB_YESNO)");
+            }
         }
-        // ShowWindow
-        if line.contains("ShowWindow") {
-            *line = line.replace(", 0)", ", SW_HIDE)").replace(", 1)", ", SW_SHOWNORMAL)")
-                .replace(", 5)", ", SW_SHOW)").replace(", 3)", ", SW_MAXIMIZE)");
-        }
-        // MessageBox type
-        if line.contains("MessageBox") {
-            *line = line.replace(", 0x30)", ", MB_ICONWARNING)").replace(", 0x10)", ", MB_ICONERROR)")
-                .replace(", 0x40)", ", MB_ICONINFORMATION)").replace(", 0x4)", ", MB_YESNO)");
-        }
-    }
     } // end if is_pe
 
     // #HEX_MAGIC: Annotate well-known hex magic constants.
@@ -5114,7 +6388,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // 1. A single large switch with 5+ cases
         // 2. Inside a while(true) or do-while
         // 3. Cases assign to the same variable (state variable)
-        let has_while_true = all_text.contains("while (1)") || all_text.contains("while (0 == 0)")
+        let has_while_true = all_text.contains("while (1)")
+            || all_text.contains("while (0 == 0)")
             || all_text.contains("do {");
         let switch_count = all_text.matches("switch (").count();
         let case_count = all_text.matches("case ").count();
@@ -5135,49 +6410,160 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // Each pattern is the first N bytes of the known constant table.
         let crypto_sigs: &[(&str, &[u8])] = &[
             // AES S-box (256 bytes): 63 7c 77 7b f2 6b 6f c5 30 01 67 2b fe d7 ab 76
-            ("AES S-box", &[0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76]),
+            (
+                "AES S-box",
+                &[
+                    0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe,
+                    0xd7, 0xab, 0x76,
+                ],
+            ),
             // AES inverse S-box: 52 09 6a d5 30 36 a5 38 bf 40 a3 9e 81 f3 d7 fb
-            ("AES inverse S-box", &[0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38, 0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3, 0xd7, 0xfb]),
+            (
+                "AES inverse S-box",
+                &[
+                    0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38, 0xbf, 0x40, 0xa3, 0x9e, 0x81,
+                    0xf3, 0xd7, 0xfb,
+                ],
+            ),
             // AES Rcon: 01 02 04 08 10 20 40 80 1b 36
-            ("AES Rcon", &[0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00]),
+            (
+                "AES Rcon",
+                &[
+                    0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x08,
+                    0x00, 0x00, 0x00,
+                ],
+            ),
             // SHA-256 round constants (K): 428a2f98 71374491 b5c0fbcf e9b5dba5
-            ("SHA-256 K table", &[0x98, 0x2f, 0x8a, 0x42, 0x91, 0x44, 0x37, 0x71, 0xcf, 0xfb, 0xc0, 0xb5, 0xa5, 0xdb, 0xb5, 0xe9]),
+            (
+                "SHA-256 K table",
+                &[
+                    0x98, 0x2f, 0x8a, 0x42, 0x91, 0x44, 0x37, 0x71, 0xcf, 0xfb, 0xc0, 0xb5, 0xa5,
+                    0xdb, 0xb5, 0xe9,
+                ],
+            ),
             // SHA-256 K big-endian variant
-            ("SHA-256 K table", &[0x42, 0x8a, 0x2f, 0x98, 0x71, 0x37, 0x44, 0x91, 0xb5, 0xc0, 0xfb, 0xcf, 0xe9, 0xb5, 0xdb, 0xa5]),
+            (
+                "SHA-256 K table",
+                &[
+                    0x42, 0x8a, 0x2f, 0x98, 0x71, 0x37, 0x44, 0x91, 0xb5, 0xc0, 0xfb, 0xcf, 0xe9,
+                    0xb5, 0xdb, 0xa5,
+                ],
+            ),
             // SHA-256 init hash (H0): 6a09e667 bb67ae85 3c6ef372 a54ff53a
-            ("SHA-256 init vector", &[0x67, 0xe6, 0x09, 0x6a, 0x85, 0xae, 0x67, 0xbb, 0x72, 0xf3, 0x6e, 0x3c, 0x3a, 0xf5, 0x4f, 0xa5]),
+            (
+                "SHA-256 init vector",
+                &[
+                    0x67, 0xe6, 0x09, 0x6a, 0x85, 0xae, 0x67, 0xbb, 0x72, 0xf3, 0x6e, 0x3c, 0x3a,
+                    0xf5, 0x4f, 0xa5,
+                ],
+            ),
             // SHA-256 init big-endian
-            ("SHA-256 init vector", &[0x6a, 0x09, 0xe6, 0x67, 0xbb, 0x67, 0xae, 0x85, 0x3c, 0x6e, 0xf3, 0x72, 0xa5, 0x4f, 0xf5, 0x3a]),
+            (
+                "SHA-256 init vector",
+                &[
+                    0x6a, 0x09, 0xe6, 0x67, 0xbb, 0x67, 0xae, 0x85, 0x3c, 0x6e, 0xf3, 0x72, 0xa5,
+                    0x4f, 0xf5, 0x3a,
+                ],
+            ),
             // SHA-1 init: 67452301 efcdab89 98badcfe 10325476 c3d2e1f0
-            ("SHA-1 init vector", &[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10]),
+            (
+                "SHA-1 init vector",
+                &[
+                    0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76,
+                    0x54, 0x32, 0x10,
+                ],
+            ),
             // SHA-1 K constants: 5a827999 6ed9eba1 8f1bbcdc ca62c1d6
             ("SHA-1 K constant", &[0x99, 0x79, 0x82, 0x5a]),
             // MD5 init: 67452301 efcdab89 98badcfe 10325476
-            ("MD5 init vector", &[0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54, 0x32, 0x10]),
+            (
+                "MD5 init vector",
+                &[
+                    0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76,
+                    0x54, 0x32, 0x10,
+                ],
+            ),
             // MD5 T table: d76aa478 e8c7b756 242070db c1bdceee
-            ("MD5 T table", &[0x78, 0xa4, 0x6a, 0xd7, 0x56, 0xb7, 0xc7, 0xe8, 0xdb, 0x70, 0x20, 0x24, 0xee, 0xce, 0xbd, 0xc1]),
+            (
+                "MD5 T table",
+                &[
+                    0x78, 0xa4, 0x6a, 0xd7, 0x56, 0xb7, 0xc7, 0xe8, 0xdb, 0x70, 0x20, 0x24, 0xee,
+                    0xce, 0xbd, 0xc1,
+                ],
+            ),
             // MD5 T big-endian
-            ("MD5 T table", &[0xd7, 0x6a, 0xa4, 0x78, 0xe8, 0xc7, 0xb7, 0x56, 0x24, 0x20, 0x70, 0xdb, 0xc1, 0xbd, 0xce, 0xee]),
+            (
+                "MD5 T table",
+                &[
+                    0xd7, 0x6a, 0xa4, 0x78, 0xe8, 0xc7, 0xb7, 0x56, 0x24, 0x20, 0x70, 0xdb, 0xc1,
+                    0xbd, 0xce, 0xee,
+                ],
+            ),
             // CRC32 table (IEEE polynomial 0xEDB88320): 00000000 77073096 ee0e612c 990951ba
-            ("CRC32 table", &[0x00, 0x00, 0x00, 0x00, 0x96, 0x30, 0x07, 0x77, 0x2c, 0x61, 0x0e, 0xee, 0xba, 0x51, 0x09, 0x99]),
+            (
+                "CRC32 table",
+                &[
+                    0x00, 0x00, 0x00, 0x00, 0x96, 0x30, 0x07, 0x77, 0x2c, 0x61, 0x0e, 0xee, 0xba,
+                    0x51, 0x09, 0x99,
+                ],
+            ),
             // CRC32 big-endian
-            ("CRC32 table", &[0x00, 0x00, 0x00, 0x00, 0x77, 0x07, 0x30, 0x96, 0xee, 0x0e, 0x61, 0x2c, 0x99, 0x09, 0x51, 0xba]),
+            (
+                "CRC32 table",
+                &[
+                    0x00, 0x00, 0x00, 0x00, 0x77, 0x07, 0x30, 0x96, 0xee, 0x0e, 0x61, 0x2c, 0x99,
+                    0x09, 0x51, 0xba,
+                ],
+            ),
             // Blowfish P-array: 243f6a88 85a308d3 13198a2e 03707344
-            ("Blowfish P-array", &[0x88, 0x6a, 0x3f, 0x24, 0xd3, 0x08, 0xa3, 0x85, 0x2e, 0x8a, 0x19, 0x13, 0x44, 0x73, 0x70, 0x03]),
+            (
+                "Blowfish P-array",
+                &[
+                    0x88, 0x6a, 0x3f, 0x24, 0xd3, 0x08, 0xa3, 0x85, 0x2e, 0x8a, 0x19, 0x13, 0x44,
+                    0x73, 0x70, 0x03,
+                ],
+            ),
             // Blowfish big-endian
-            ("Blowfish P-array", &[0x24, 0x3f, 0x6a, 0x88, 0x85, 0xa3, 0x08, 0xd3, 0x13, 0x19, 0x8a, 0x2e, 0x03, 0x70, 0x73, 0x44]),
+            (
+                "Blowfish P-array",
+                &[
+                    0x24, 0x3f, 0x6a, 0x88, 0x85, 0xa3, 0x08, 0xd3, 0x13, 0x19, 0x8a, 0x2e, 0x03,
+                    0x70, 0x73, 0x44,
+                ],
+            ),
             // ChaCha20/Salsa20 constant: "expand 32-byte k"
             ("ChaCha20/Salsa20 constant", b"expand 32-byte k"),
             // "expand 16-byte k"
             ("ChaCha20/Salsa20 constant", b"expand 16-byte k"),
             // DES initial permutation table: 58 50 42 34 26 18 10 08
-            ("DES permutation table", &[0x3a, 0x32, 0x2a, 0x22, 0x1a, 0x12, 0x0a, 0x02, 0x3c, 0x34, 0x2c, 0x24, 0x1c, 0x14, 0x0c, 0x04]),
+            (
+                "DES permutation table",
+                &[
+                    0x3a, 0x32, 0x2a, 0x22, 0x1a, 0x12, 0x0a, 0x02, 0x3c, 0x34, 0x2c, 0x24, 0x1c,
+                    0x14, 0x0c, 0x04,
+                ],
+            ),
             // Whirlpool S-box: 18 23 c6 e8 87 b8 01 4f
-            ("Whirlpool S-box", &[0x18, 0x23, 0xc6, 0xe8, 0x87, 0xb8, 0x01, 0x4f, 0x36, 0xa6, 0xd2, 0xf5, 0x79, 0x6f, 0x91, 0x52]),
+            (
+                "Whirlpool S-box",
+                &[
+                    0x18, 0x23, 0xc6, 0xe8, 0x87, 0xb8, 0x01, 0x4f, 0x36, 0xa6, 0xd2, 0xf5, 0x79,
+                    0x6f, 0x91, 0x52,
+                ],
+            ),
             // Twofish MDS matrix magic: 01 ef 5b 5b
-            ("Twofish MDS constant", &[0x01, 0xef, 0x5b, 0x5b, 0xef, 0x01, 0xef, 0x5b]),
+            (
+                "Twofish MDS constant",
+                &[0x01, 0xef, 0x5b, 0x5b, 0xef, 0x01, 0xef, 0x5b],
+            ),
             // CAST5 S-box 1: 30fb40d4 9fa0ff0b 6beccd2f 3f258c7a
-            ("CAST5 S-box", &[0xd4, 0x40, 0xfb, 0x30, 0x0b, 0xff, 0xa0, 0x9f, 0x2f, 0xcd, 0xec, 0x6b, 0x7a, 0x8c, 0x25, 0x3f]),
+            (
+                "CAST5 S-box",
+                &[
+                    0xd4, 0x40, 0xfb, 0x30, 0x0b, 0xff, 0xa0, 0x9f, 0x2f, 0xcd, 0xec, 0x6b, 0x7a,
+                    0x8c, 0x25, 0x3f,
+                ],
+            ),
         ];
 
         // Scan data sections for crypto signatures
@@ -5186,25 +6572,36 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let scan_sections: Vec<(u64, usize, usize)> = match &obj {
                 goblin::Object::PE(pe) => {
                     let base = pe.image_base as u64;
-                    pe.sections.iter()
+                    pe.sections
+                        .iter()
                         .filter(|s| s.characteristics & 0x20000000 == 0) // not executable
-                        .map(|s| (base + s.virtual_address as u64, s.pointer_to_raw_data as usize, s.virtual_size as usize))
+                        .map(|s| {
+                            (
+                                base + s.virtual_address as u64,
+                                s.pointer_to_raw_data as usize,
+                                s.virtual_size as usize,
+                            )
+                        })
                         .collect()
                 }
-                goblin::Object::Elf(elf) => {
-                    elf.section_headers.iter()
-                        .filter(|s| s.sh_flags & 0x4 == 0 && s.sh_flags & 0x2 != 0 && s.sh_type != 8)
-                        .map(|s| (s.sh_addr, s.sh_offset as usize, s.sh_size as usize))
-                        .collect()
-                }
+                goblin::Object::Elf(elf) => elf
+                    .section_headers
+                    .iter()
+                    .filter(|s| s.sh_flags & 0x4 == 0 && s.sh_flags & 0x2 != 0 && s.sh_type != 8)
+                    .map(|s| (s.sh_addr, s.sh_offset as usize, s.sh_size as usize))
+                    .collect(),
                 _ => vec![],
             };
 
             for (sec_va, sec_fo, sec_size) in &scan_sections {
-                if sec_fo + sec_size > binary.len() { continue; }
+                if sec_fo + sec_size > binary.len() {
+                    continue;
+                }
                 let sec_data = &binary[*sec_fo..*sec_fo + *sec_size];
                 for (name, pattern) in crypto_sigs {
-                    if pattern.len() > sec_data.len() { continue; }
+                    if pattern.len() > sec_data.len() {
+                        continue;
+                    }
                     // Search for the pattern in the section data
                     for i in 0..sec_data.len() - pattern.len() {
                         if &sec_data[i..i + pattern.len()] == *pattern {
@@ -5221,7 +6618,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // Annotate lines referencing crypto table addresses
         if !crypto_addrs.is_empty() {
             for line in &mut lines {
-                if line.contains("//") { continue; }
+                if line.contains("//") {
+                    continue;
+                }
                 for (&addr, &name) in &crypto_addrs {
                     // Match DAT_XXXXXXXX format
                     let dat = format!("{:x}", addr);
@@ -5241,38 +6640,62 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
 
     // Inline constant detection (for constants embedded directly in code)
     for line in &mut lines {
-        if line.contains("//") { continue; }
+        if line.contains("//") {
+            continue;
+        }
         let t = line.trim();
         // SHA-256 first round constant
-        if t.contains("0x428a2f98") { *line = format!("{} // SHA-256 round constant", line.trim_end()); }
+        if t.contains("0x428a2f98") {
+            *line = format!("{} // SHA-256 round constant", line.trim_end());
+        }
         // SHA-1 K constants
-        else if t.contains("0x5a827999") { *line = format!("{} // SHA-1 K constant", line.trim_end()); }
-        else if t.contains("0x6ed9eba1") { *line = format!("{} // SHA-1 K constant", line.trim_end()); }
-        else if t.contains("0x8f1bbcdc") { *line = format!("{} // SHA-1 K constant", line.trim_end()); }
-        else if t.contains("0xca62c1d6") { *line = format!("{} // SHA-1 K constant", line.trim_end()); }
+        else if t.contains("0x5a827999") {
+            *line = format!("{} // SHA-1 K constant", line.trim_end());
+        } else if t.contains("0x6ed9eba1") {
+            *line = format!("{} // SHA-1 K constant", line.trim_end());
+        } else if t.contains("0x8f1bbcdc") {
+            *line = format!("{} // SHA-1 K constant", line.trim_end());
+        } else if t.contains("0xca62c1d6") {
+            *line = format!("{} // SHA-1 K constant", line.trim_end());
+        }
         // CRC32 polynomial
-        else if t.contains("0xedb88320") { *line = format!("{} // CRC32 polynomial (IEEE)", line.trim_end()); }
-        else if t.contains("0x04c11db7") { *line = format!("{} // CRC32 polynomial (normal)", line.trim_end()); }
+        else if t.contains("0xedb88320") {
+            *line = format!("{} // CRC32 polynomial (IEEE)", line.trim_end());
+        } else if t.contains("0x04c11db7") {
+            *line = format!("{} // CRC32 polynomial (normal)", line.trim_end());
+        }
         // MD5 magic constants
-        else if t.contains("0xd76aa478") { *line = format!("{} // MD5 T[1]", line.trim_end()); }
+        else if t.contains("0xd76aa478") {
+            *line = format!("{} // MD5 T[1]", line.trim_end());
+        }
         // Blowfish Pi digits
-        else if t.contains("0x243f6a88") { *line = format!("{} // Blowfish P-array / Pi digits", line.trim_end()); }
+        else if t.contains("0x243f6a88") {
+            *line = format!("{} // Blowfish P-array / Pi digits", line.trim_end());
+        }
         // ChaCha20/Salsa20
-        else if t.contains("0x61707865") { *line = format!("{} // ChaCha20 constant \"expa\"", line.trim_end()); }
-        else if t.contains("0x3320646e") { *line = format!("{} // ChaCha20 constant \"nd 3\"", line.trim_end()); }
-        else if t.contains("0x79622d32") { *line = format!("{} // ChaCha20 constant \"2-by\"", line.trim_end()); }
-        else if t.contains("0x6b206574") { *line = format!("{} // ChaCha20 constant \"te k\"", line.trim_end()); }
+        else if t.contains("0x61707865") {
+            *line = format!("{} // ChaCha20 constant \"expa\"", line.trim_end());
+        } else if t.contains("0x3320646e") {
+            *line = format!("{} // ChaCha20 constant \"nd 3\"", line.trim_end());
+        } else if t.contains("0x79622d32") {
+            *line = format!("{} // ChaCha20 constant \"2-by\"", line.trim_end());
+        } else if t.contains("0x6b206574") {
+            *line = format!("{} // ChaCha20 constant \"te k\"", line.trim_end());
+        }
         // TEA/XTEA delta
-        else if t.contains("0x9e3779b9") { *line = format!("{} // TEA/XTEA delta (golden ratio)", line.trim_end()); }
+        else if t.contains("0x9e3779b9") {
+            *line = format!("{} // TEA/XTEA delta (golden ratio)", line.trim_end());
+        }
         // RSA F4 exponent
-        else if t.contains("0x10001") && (t.contains("RSA") || t.contains("exponent") || t.contains("pubkey")) {
+        else if t.contains("0x10001")
+            && (t.contains("RSA") || t.contains("exponent") || t.contains("pubkey"))
+        {
             *line = format!("{} // RSA public exponent (F4=65537)", line.trim_end());
         }
         // Base64 alphabet
         else if t.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/") {
             *line = format!("{} // Base64 alphabet", line.trim_end());
-        }
-        else if t.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_") {
+        } else if t.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_") {
             *line = format!("{} // Base64url alphabet", line.trim_end());
         }
     }
@@ -5292,27 +6715,39 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
 
             while j < lines.len() {
                 let t = lines[j].trim();
-                if !t.ends_with(';') { break; }
+                if !t.ends_with(';') {
+                    break;
+                }
                 // Skip lines that are function calls, contain string literals, or comments
-                if t.contains('(') && !t.contains("*(") { break; }
-                if t.contains('"') || t.contains("//") { break; }
+                if t.contains('(') && !t.contains("*(") {
+                    break;
+                }
+                if t.contains('"') || t.contains("//") {
+                    break;
+                }
 
                 // Pattern 1: *(type*)(EXPR) = 0xHH; (byte cast store)
                 let is_byte_cast = t.contains("= 0x")
-                    && (t.contains("*(uint8_t*)") || t.contains("*(char*)") || t.contains("*(byte*)"));
+                    && (t.contains("*(uint8_t*)")
+                        || t.contains("*(char*)")
+                        || t.contains("*(byte*)"));
 
                 // Pattern 2: local_N = 0xHH; or var_N = 0xHH; (simple hex assignment)
                 let is_local_hex = t.contains("= 0x")
-                    && (t.starts_with("local_") || t.starts_with("var_") || t.starts_with("-local_"));
+                    && (t.starts_with("local_")
+                        || t.starts_with("var_")
+                        || t.starts_with("-local_"));
 
                 // Pattern 3: local_N = NN; (decimal assignment in printable range)
                 let is_local_dec = !t.contains("0x")
-                    && (t.starts_with("local_") || t.starts_with("var_") || t.starts_with("-local_"))
+                    && (t.starts_with("local_")
+                        || t.starts_with("var_")
+                        || t.starts_with("-local_"))
                     && t.contains(" = ");
 
                 if is_byte_cast || is_local_hex {
                     if let Some(eq) = t.rfind("= 0x") {
-                        let hex_str = t[eq+4..].trim_end_matches(';').trim();
+                        let hex_str = t[eq + 4..].trim_end_matches(';').trim();
                         // Single byte (1-2 hex digits)
                         if hex_str.len() <= 2 {
                             if let Ok(val) = u8::from_str_radix(hex_str, 16) {
@@ -5329,7 +6764,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                                 let b = val.to_le_bytes();
                                 if b.iter().all(|&x| (x >= 0x20 && x < 0x7f) || x == 0) {
                                     for &byte in &b {
-                                        if byte == 0 { break; }
+                                        if byte == 0 {
+                                            break;
+                                        }
                                         string_bytes.push((j, byte));
                                     }
                                     j += 1;
@@ -5343,7 +6780,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                                 let b = val.to_le_bytes();
                                 if b.iter().all(|&x| (x >= 0x20 && x < 0x7f) || x == 0) {
                                     for &byte in &b {
-                                        if byte == 0 { break; }
+                                        if byte == 0 {
+                                            break;
+                                        }
                                         string_bytes.push((j, byte));
                                     }
                                     j += 1;
@@ -5354,7 +6793,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     }
                 } else if is_local_dec {
                     if let Some(eq) = t.rfind(" = ") {
-                        let val_str = t[eq+3..].trim_end_matches(';').trim();
+                        let val_str = t[eq + 3..].trim_end_matches(';').trim();
                         if let Ok(val) = val_str.parse::<u64>() {
                             if val >= 0x20 && val < 0x7f {
                                 string_bytes.push((j, val as u8));
@@ -5387,24 +6826,38 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         if let Some(xor_pos) = t.find("^ ") {
                             let after = &t[xor_pos + 2..];
                             if after.starts_with("0x") {
-                                let hex = after[2..].split(|c: char| !c.is_ascii_hexdigit()).next().unwrap_or("");
-                                if hex.len() <= 2 { return u8::from_str_radix(hex, 16).ok(); }
+                                let hex = after[2..]
+                                    .split(|c: char| !c.is_ascii_hexdigit())
+                                    .next()
+                                    .unwrap_or("");
+                                if hex.len() <= 2 {
+                                    return u8::from_str_radix(hex, 16).ok();
+                                }
                             } else {
-                                let dec = after.split(|c: char| !c.is_ascii_digit()).next().unwrap_or("");
+                                let dec = after
+                                    .split(|c: char| !c.is_ascii_digit())
+                                    .next()
+                                    .unwrap_or("");
                                 if let Ok(v) = dec.parse::<u64>() {
-                                    if v > 0 && v < 256 { return Some(v as u8); }
+                                    if v > 0 && v < 256 {
+                                        return Some(v as u8);
+                                    }
                                 }
                             }
                         }
                         None
                     });
                     let comment = if let Some(key) = xor_key {
-                        let decrypted: String = string_bytes.iter()
+                        let decrypted: String = string_bytes
+                            .iter()
                             .map(|(_, b)| (*b ^ key) as char)
                             .filter(|c| c.is_ascii_graphic() || *c == ' ')
                             .collect();
                         if decrypted.len() >= 4 {
-                            format!("{}// XOR-encrypted string (key=0x{:02x}): \"{}\"", pad, key, decrypted)
+                            format!(
+                                "{}// XOR-encrypted string (key=0x{:02x}): \"{}\"",
+                                pad, key, decrypted
+                            )
                         } else {
                             format!("{}// stack string: \"{}\"", pad, s)
                         }
@@ -5427,12 +6880,16 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // Also try XOR decryption on DAT_ addresses referenced near XOR operations.
     for line in &mut lines {
         let t = line.trim();
-        if t.contains("^ 0x") && (t.contains("local_") || t.contains("param_") || t.contains("DAT_")) {
+        if t.contains("^ 0x")
+            && (t.contains("local_") || t.contains("param_") || t.contains("DAT_"))
+        {
             if let Some(xor_pos) = t.find("^ 0x") {
                 let key_start = xor_pos + 4;
                 let mut key_end = key_start;
                 let bytes = t.as_bytes();
-                while key_end < bytes.len() && bytes[key_end].is_ascii_hexdigit() { key_end += 1; }
+                while key_end < bytes.len() && bytes[key_end].is_ascii_hexdigit() {
+                    key_end += 1;
+                }
                 if key_end > key_start && key_end - key_start <= 2 {
                     if let Ok(key) = u8::from_str_radix(&t[key_start..key_end], 16) {
                         if key > 0 && key != 0xFF && !line.contains("/*") && !line.contains("// ") {
@@ -5456,18 +6913,27 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             while let Some(dat_pos) = t[pos..].find("DAT_") {
                 let abs_pos = pos + dat_pos + 4;
                 let mut end = abs_pos;
-                while end < t.len() && t.as_bytes()[end].is_ascii_hexdigit() { end += 1; }
+                while end < t.len() && t.as_bytes()[end].is_ascii_hexdigit() {
+                    end += 1;
+                }
                 if end > abs_pos {
                     if let Ok(addr) = u64::from_str_radix(&t[abs_pos..end], 16) {
                         if !decrypted_addrs.contains_key(&addr) {
                             // Try single-byte XOR
                             if let Some((decrypted, key)) = try_xor_decrypt_single(addr, ctx) {
-                                decrypted_addrs.insert(addr, format!("\"{}\" (XOR 0x{:02x})", decrypted, key));
+                                decrypted_addrs
+                                    .insert(addr, format!("\"{}\" (XOR 0x{:02x})", decrypted, key));
                             }
                             // Try multi-byte XOR
-                            else if let Some((decrypted, key)) = try_xor_decrypt_multi(addr, ctx) {
-                                let key_str = key.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("");
-                                decrypted_addrs.insert(addr, format!("\"{}\" (XOR 0x{})", decrypted, key_str));
+                            else if let Some((decrypted, key)) = try_xor_decrypt_multi(addr, ctx)
+                            {
+                                let key_str = key
+                                    .iter()
+                                    .map(|b| format!("{:02x}", b))
+                                    .collect::<Vec<_>>()
+                                    .join("");
+                                decrypted_addrs
+                                    .insert(addr, format!("\"{}\" (XOR 0x{})", decrypted, key_str));
                             }
                         }
                     }
@@ -5482,7 +6948,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let dat_name = format!("DAT_{:08x}", addr);
                     let dat_name_upper = format!("DAT_{:X}", addr);
                     if (line.contains(&dat_name) || line.contains(&dat_name_upper))
-                        && !line.contains("// decrypted:") {
+                        && !line.contains("// decrypted:")
+                    {
                         *line = format!("{} // decrypted: {}", line.trim_end(), decrypted);
                         break;
                     }
@@ -5493,12 +6960,14 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
 
     // #BASE64_DECODE: Detect base64-encoded strings and show decoded value.
     for line in &mut lines {
-        if line.contains("// ") { continue; } // already annotated
-        // Find string literals that look like base64
+        if line.contains("// ") {
+            continue;
+        } // already annotated
+          // Find string literals that look like base64
         let t = line.trim();
         if let Some(q1) = t.find('"') {
-            if let Some(q2) = t[q1+1..].find('"') {
-                let s = &t[q1+1..q1+1+q2];
+            if let Some(q2) = t[q1 + 1..].find('"') {
+                let s = &t[q1 + 1..q1 + 1 + q2];
                 if s.len() >= 8 {
                     if let Some(decoded) = try_base64_decode(s) {
                         *line = format!("{} // base64 decoded: \"{}\"", line.trim_end(), decoded);
@@ -5510,11 +6979,13 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
 
     // #ROT13_DECODE: Detect ROT13-encoded strings and show decoded value.
     for line in &mut lines {
-        if line.contains("// ") { continue; }
+        if line.contains("// ") {
+            continue;
+        }
         let t = line.trim();
         if let Some(q1) = t.find('"') {
-            if let Some(q2) = t[q1+1..].find('"') {
-                let s = &t[q1+1..q1+1+q2];
+            if let Some(q2) = t[q1 + 1..].find('"') {
+                let s = &t[q1 + 1..q1 + 1 + q2];
                 if s.len() >= 8 {
                     if let Some(decoded) = try_rot13(s) {
                         *line = format!("{} // ROT13 decoded: \"{}\"", line.trim_end(), decoded);
@@ -5565,7 +7036,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // #STACK_COOKIE: Annotate XOR with RSP/RBP as security cookie check.
     for line in &mut lines {
         let t = line.trim();
-        if t.contains("^ RSP") || t.contains("^ RBP") || t.contains("^ ESP") || t.contains("^ EBP") {
+        if t.contains("^ RSP") || t.contains("^ RBP") || t.contains("^ ESP") || t.contains("^ EBP")
+        {
             if !t.contains("//") {
                 *line = format!("{} // stack cookie", line.trim_end());
             }
@@ -5578,8 +7050,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         while i < lines.len() {
             if lines[i].contains("GetProcAddress") && !lines[i].contains("//") {
                 // Check if nearby lines store to a global and call through it
-                for j in i+1..(i+4).min(lines.len()) {
-                    if lines[j].contains("(*") && lines[j].contains("DAT_") && !lines[j].contains("//") {
+                for j in i + 1..(i + 4).min(lines.len()) {
+                    if lines[j].contains("(*")
+                        && lines[j].contains("DAT_")
+                        && !lines[j].contains("//")
+                    {
                         *&mut lines[j] = format!("{} // call resolved API", lines[j].trim_end());
                         break;
                     }
@@ -5596,23 +7071,23 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // Input sources: (function_name, taint_arg_index)
         // -1 = return value is tainted, 0+ = that argument is the output buffer
         let taint_sources: &[(&str, i32)] = &[
-            ("scanf", 1),      // scanf(format, &buffer) — buffer at arg 1+
-            ("sscanf", 2),     // sscanf(str, format, &buffer)
-            ("fscanf", 2),     // fscanf(file, format, &buffer)
-            ("gets", 0),       // gets(buffer)
-            ("fgets", 0),      // fgets(buffer, size, stream)
-            ("fread", 0),      // fread(buffer, size, count, stream)
-            ("read", 1),       // read(fd, buffer, count)
-            ("getline", 0),    // getline(&buffer, &size, stream)
-            ("recv", 1),       // recv(sock, buffer, len, flags)
-            ("recvfrom", 1),   // recvfrom(sock, buffer, ...)
-            ("getenv", -1),    // return value is tainted
-            ("getchar", -1),   // return value
-            ("fgetc", -1),     // return value
-            ("ReadFile", 1),   // ReadFile(handle, buffer, ...)
-            ("GetDlgItemText", 2),  // GetDlgItemText(dlg, id, buffer, ...)
+            ("scanf", 1),          // scanf(format, &buffer) — buffer at arg 1+
+            ("sscanf", 2),         // sscanf(str, format, &buffer)
+            ("fscanf", 2),         // fscanf(file, format, &buffer)
+            ("gets", 0),           // gets(buffer)
+            ("fgets", 0),          // fgets(buffer, size, stream)
+            ("fread", 0),          // fread(buffer, size, count, stream)
+            ("read", 1),           // read(fd, buffer, count)
+            ("getline", 0),        // getline(&buffer, &size, stream)
+            ("recv", 1),           // recv(sock, buffer, len, flags)
+            ("recvfrom", 1),       // recvfrom(sock, buffer, ...)
+            ("getenv", -1),        // return value is tainted
+            ("getchar", -1),       // return value
+            ("fgetc", -1),         // return value
+            ("ReadFile", 1),       // ReadFile(handle, buffer, ...)
+            ("GetDlgItemText", 2), // GetDlgItemText(dlg, id, buffer, ...)
             ("GetDlgItemTextW", 2),
-            ("GetWindowText", 1),   // GetWindowText(hwnd, buffer, count)
+            ("GetWindowText", 1), // GetWindowText(hwnd, buffer, count)
             ("GetWindowTextW", 1),
             ("InternetReadFile", 1),
             ("RegQueryValueEx", 4), // ..., data, ...
@@ -5666,29 +7141,43 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         for (i, line) in lines.iter().enumerate() {
             let t = line.trim();
             // Skip function declarations and comments
-            if t.starts_with("//") || t.starts_with("void ") || t.starts_with("int ")
-                || t.starts_with("long ") || t.starts_with("char ") || t.starts_with("size_t ") {
+            if t.starts_with("//")
+                || t.starts_with("void ")
+                || t.starts_with("int ")
+                || t.starts_with("long ")
+                || t.starts_with("char ")
+                || t.starts_with("size_t ")
+            {
                 if t.contains("(void)") || t.contains("(int ") || t.contains("(long ") {
                     continue; // function declaration, not a call
                 }
             }
             for &(source, taint_arg_idx) in taint_sources {
                 let pattern = format!("{}(", source);
-                if !t.contains(&pattern) { continue; }
+                if !t.contains(&pattern) {
+                    continue;
+                }
                 // Verify word boundary: char before source must not be alphanumeric
                 if let Some(pos) = t.find(&pattern) {
-                    if pos > 0 && t.as_bytes()[pos - 1].is_ascii_alphanumeric() { continue; }
+                    if pos > 0 && t.as_bytes()[pos - 1].is_ascii_alphanumeric() {
+                        continue;
+                    }
                 }
                 // Verify it's a call, not a declaration: must have ; or be inside another expr
-                if !t.ends_with(';') && !t.ends_with('{') && !t.contains("if ") { continue; }
+                if !t.ends_with(';') && !t.ends_with('{') && !t.contains("if ") {
+                    continue;
+                }
 
                 if taint_arg_idx < 0 {
                     // Return value is tainted: var = source(...)
                     if let Some(eq_pos) = t.find(" = ") {
                         if t[eq_pos..].contains(&pattern) {
                             let var = t[..eq_pos].trim();
-                            if var.starts_with("param_") || var.starts_with("local_")
-                                || var.starts_with("lVar") || var.starts_with("iVar") {
+                            if var.starts_with("param_")
+                                || var.starts_with("local_")
+                                || var.starts_with("lVar")
+                                || var.starts_with("iVar")
+                            {
                                 tainted_vars.insert(var.to_string());
                                 source_info.push((i, var.to_string(), source.to_string()));
                             }
@@ -5703,7 +7192,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                             let args_str = &t[args_start..];
                             let args: Vec<&str> = args_str.split(',').collect();
                             if let Some(arg) = args.get(taint_arg_idx as usize) {
-                                let clean = arg.trim().trim_end_matches(')').trim_end_matches(';').trim();
+                                let clean = arg
+                                    .trim()
+                                    .trim_end_matches(')')
+                                    .trim_end_matches(';')
+                                    .trim();
                                 // Strip /*annotation*/ prefixes
                                 let clean = if clean.contains("*/") {
                                     clean.split("*/").last().unwrap_or(clean).trim()
@@ -5716,9 +7209,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                                 } else {
                                     clean
                                 };
-                                if clean.starts_with("param_") || clean.starts_with("local_")
-                                    || clean.starts_with("lVar") || clean.starts_with("iVar")
-                                    || clean.starts_with("buf") {
+                                if clean.starts_with("param_")
+                                    || clean.starts_with("local_")
+                                    || clean.starts_with("lVar")
+                                    || clean.starts_with("iVar")
+                                    || clean.starts_with("buf")
+                                {
                                     tainted_vars.insert(clean.to_string());
                                     source_info.push((i, clean.to_string(), source.to_string()));
                                 }
@@ -5733,7 +7229,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // "var2 = tainted_var" or "var2 = func(tainted_var)"
         let mut changed = true;
         for _round in 0..5 {
-            if !changed { break; }
+            if !changed {
+                break;
+            }
             changed = false;
             for line in lines.iter() {
                 let t = line.trim();
@@ -5743,8 +7241,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     // Check if RHS references any tainted variable
                     let rhs_tainted = tainted_vars.iter().any(|tv| rhs.contains(tv.as_str()));
                     if rhs_tainted && !tainted_vars.contains(lhs) {
-                        if lhs.starts_with("param_") || lhs.starts_with("local_")
-                            || lhs.starts_with("lVar") || lhs.starts_with("iVar") {
+                        if lhs.starts_with("param_")
+                            || lhs.starts_with("local_")
+                            || lhs.starts_with("lVar")
+                            || lhs.starts_with("iVar")
+                        {
                             tainted_vars.insert(lhs.to_string());
                             changed = true;
                         }
@@ -5756,20 +7257,29 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // Phase 3: Check if tainted variables reach sinks
         if !tainted_vars.is_empty() {
             for (i, line) in lines.iter_mut().enumerate() {
-                if line.contains("//") { continue; }
+                if line.contains("//") {
+                    continue;
+                }
                 let t = line.trim().to_string();
                 for &(sink, vuln_type) in taint_sinks {
                     if t.contains(sink) && t.contains('(') {
                         // Check if any tainted variable appears in the call arguments
                         let args_part = t.split('(').nth(1).unwrap_or("");
-                        let has_tainted_arg = tainted_vars.iter()
+                        let has_tainted_arg = tainted_vars
+                            .iter()
                             .any(|tv| args_part.contains(tv.as_str()));
                         if has_tainted_arg {
-                            let source_func = source_info.first()
+                            let source_func = source_info
+                                .first()
                                 .map(|(_, _, s)| s.as_str())
                                 .unwrap_or("input");
-                            *line = format!("{} // ⚠ TAINT: user input from {}() → {} ({})",
-                                line.trim_end(), source_func, sink, vuln_type);
+                            *line = format!(
+                                "{} // ⚠ TAINT: user input from {}() → {} ({})",
+                                line.trim_end(),
+                                source_func,
+                                sink,
+                                vuln_type
+                            );
                         }
                     }
                 }
@@ -5778,8 +7288,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // Annotate taint sources
             for (i, var, source) in &source_info {
                 if *i < lines.len() && !lines[*i].contains("// ⚠ TAINT") {
-                    lines[*i] = format!("{} // ⚠ TAINT SOURCE: {}() → {}",
-                        lines[*i].trim_end(), source, var);
+                    lines[*i] = format!(
+                        "{} // ⚠ TAINT SOURCE: {}() → {}",
+                        lines[*i].trim_end(),
+                        source,
+                        var
+                    );
                 }
             }
         }
@@ -5800,7 +7314,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 hex_end += 1;
             }
             let hex_str = &all_text[hex_start..hex_end];
-            if hex_str.len() >= 7 && hex_str.len() <= 16 { // address-length hex
+            if hex_str.len() >= 7 && hex_str.len() <= 16 {
+                // address-length hex
                 if let Ok(val) = u64::from_str_radix(hex_str, 16) {
                     // Only name addresses in data sections (not code)
                     if val > 0x1000 && !hex_str.starts_with("ffffff") {
@@ -5851,7 +7366,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // Re-indents body to match the original if-block level.
     {
         // Find the indent of the first "if (" at each nesting level
-        let base_indent = lines.iter()
+        let base_indent = lines
+            .iter()
             .find(|l| l.trim().starts_with("if (") && l.trim().ends_with('{'))
             .map(|l| l.len() - l.trim_start().len())
             .unwrap_or(0);
@@ -5870,7 +7386,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let mut close_to_remove = None;
                 for j in (i + 1)..lines.len() {
                     let jt = lines[j].trim().to_string();
-                    if jt.ends_with('{') { depth += 1; }
+                    if jt.ends_with('{') {
+                        depth += 1;
+                    }
                     if jt == "}" {
                         if depth == 0 {
                             close_to_remove = Some(j);
@@ -5896,193 +7414,386 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     {
         // Known Win32/POSIX struct layouts: (struct_name, [(offset, field_name, field_type)])
         let known_structs: &[(&str, &[(u64, &str, &str)])] = &[
-            ("STARTUPINFOW", &[
-                (0x00, "cb", "DWORD"), (0x08, "lpReserved", "LPWSTR"), (0x10, "lpDesktop", "LPWSTR"),
-                (0x18, "lpTitle", "LPWSTR"), (0x20, "dwX", "DWORD"), (0x24, "dwY", "DWORD"),
-                (0x28, "dwXSize", "DWORD"), (0x2c, "dwYSize", "DWORD"),
-                (0x30, "dwXCountChars", "DWORD"), (0x34, "dwYCountChars", "DWORD"),
-                (0x38, "dwFillAttribute", "DWORD"), (0x3c, "dwFlags", "DWORD"),
-                (0x40, "wShowWindow", "WORD"), (0x48, "hStdInput", "HANDLE"),
-                (0x50, "hStdOutput", "HANDLE"), (0x58, "hStdError", "HANDLE"),
-            ]),
-            ("PROCESS_INFORMATION", &[
-                (0x00, "hProcess", "HANDLE"), (0x08, "hThread", "HANDLE"),
-                (0x10, "dwProcessId", "DWORD"), (0x14, "dwThreadId", "DWORD"),
-            ]),
-            ("SECURITY_ATTRIBUTES", &[
-                (0x00, "nLength", "DWORD"), (0x08, "lpSecurityDescriptor", "LPVOID"),
-                (0x10, "bInheritHandle", "BOOL"),
-            ]),
-            ("WNDCLASSEXW", &[
-                (0x00, "cbSize", "UINT"), (0x04, "style", "UINT"), (0x08, "lpfnWndProc", "WNDPROC"),
-                (0x10, "cbClsExtra", "int"), (0x14, "cbWndExtra", "int"), (0x18, "hInstance", "HINSTANCE"),
-                (0x20, "hIcon", "HICON"), (0x28, "hCursor", "HCURSOR"), (0x30, "hbrBackground", "HBRUSH"),
-                (0x38, "lpszMenuName", "LPCWSTR"), (0x40, "lpszClassName", "LPCWSTR"),
-                (0x48, "hIconSm", "HICON"),
-            ]),
-            ("OSVERSIONINFOW", &[
-                (0x00, "dwOSVersionInfoSize", "DWORD"), (0x04, "dwMajorVersion", "DWORD"),
-                (0x08, "dwMinorVersion", "DWORD"), (0x0c, "dwBuildNumber", "DWORD"),
-                (0x10, "dwPlatformId", "DWORD"), (0x14, "szCSDVersion", "WCHAR[128]"),
-            ]),
-            ("EXCEPTION_RECORD", &[
-                (0x00, "ExceptionCode", "DWORD"), (0x04, "ExceptionFlags", "DWORD"),
-                (0x08, "ExceptionRecord", "void *"), (0x10, "ExceptionAddress", "void *"),
-                (0x18, "NumberParameters", "DWORD"),
-            ]),
-            ("CONTEXT", &[  // x86-64
-                (0x30, "MxCsr", "DWORD"), (0x38, "SegCs", "WORD"), (0x3a, "SegDs", "WORD"),
-                (0x44, "EFlags", "DWORD"), (0x48, "Rax", "uint64_t"), (0x50, "Rcx", "uint64_t"),
-                (0x58, "Rdx", "uint64_t"), (0x60, "Rbx", "uint64_t"), (0x68, "Rsp", "uint64_t"),
-                (0x70, "Rbp", "uint64_t"), (0x78, "Rsi", "uint64_t"), (0x80, "Rdi", "uint64_t"),
-                (0x88, "R8", "uint64_t"), (0x90, "R9", "uint64_t"), (0x98, "Rip", "uint64_t"),
-            ]),
-            ("WIN32_FIND_DATAW", &[
-                (0x00, "dwFileAttributes", "DWORD"), (0x04, "ftCreationTime", "FILETIME"),
-                (0x0c, "ftLastAccessTime", "FILETIME"), (0x14, "ftLastWriteTime", "FILETIME"),
-                (0x1c, "nFileSizeHigh", "DWORD"), (0x20, "nFileSizeLow", "DWORD"),
-                (0x28, "cFileName", "WCHAR[260]"),
-            ]),
-            ("OVERLAPPED", &[
-                (0x00, "Internal", "ULONG_PTR"), (0x08, "InternalHigh", "ULONG_PTR"),
-                (0x10, "Offset", "DWORD"), (0x14, "OffsetHigh", "DWORD"), (0x18, "hEvent", "HANDLE"),
-            ]),
+            (
+                "STARTUPINFOW",
+                &[
+                    (0x00, "cb", "DWORD"),
+                    (0x08, "lpReserved", "LPWSTR"),
+                    (0x10, "lpDesktop", "LPWSTR"),
+                    (0x18, "lpTitle", "LPWSTR"),
+                    (0x20, "dwX", "DWORD"),
+                    (0x24, "dwY", "DWORD"),
+                    (0x28, "dwXSize", "DWORD"),
+                    (0x2c, "dwYSize", "DWORD"),
+                    (0x30, "dwXCountChars", "DWORD"),
+                    (0x34, "dwYCountChars", "DWORD"),
+                    (0x38, "dwFillAttribute", "DWORD"),
+                    (0x3c, "dwFlags", "DWORD"),
+                    (0x40, "wShowWindow", "WORD"),
+                    (0x48, "hStdInput", "HANDLE"),
+                    (0x50, "hStdOutput", "HANDLE"),
+                    (0x58, "hStdError", "HANDLE"),
+                ],
+            ),
+            (
+                "PROCESS_INFORMATION",
+                &[
+                    (0x00, "hProcess", "HANDLE"),
+                    (0x08, "hThread", "HANDLE"),
+                    (0x10, "dwProcessId", "DWORD"),
+                    (0x14, "dwThreadId", "DWORD"),
+                ],
+            ),
+            (
+                "SECURITY_ATTRIBUTES",
+                &[
+                    (0x00, "nLength", "DWORD"),
+                    (0x08, "lpSecurityDescriptor", "LPVOID"),
+                    (0x10, "bInheritHandle", "BOOL"),
+                ],
+            ),
+            (
+                "WNDCLASSEXW",
+                &[
+                    (0x00, "cbSize", "UINT"),
+                    (0x04, "style", "UINT"),
+                    (0x08, "lpfnWndProc", "WNDPROC"),
+                    (0x10, "cbClsExtra", "int"),
+                    (0x14, "cbWndExtra", "int"),
+                    (0x18, "hInstance", "HINSTANCE"),
+                    (0x20, "hIcon", "HICON"),
+                    (0x28, "hCursor", "HCURSOR"),
+                    (0x30, "hbrBackground", "HBRUSH"),
+                    (0x38, "lpszMenuName", "LPCWSTR"),
+                    (0x40, "lpszClassName", "LPCWSTR"),
+                    (0x48, "hIconSm", "HICON"),
+                ],
+            ),
+            (
+                "OSVERSIONINFOW",
+                &[
+                    (0x00, "dwOSVersionInfoSize", "DWORD"),
+                    (0x04, "dwMajorVersion", "DWORD"),
+                    (0x08, "dwMinorVersion", "DWORD"),
+                    (0x0c, "dwBuildNumber", "DWORD"),
+                    (0x10, "dwPlatformId", "DWORD"),
+                    (0x14, "szCSDVersion", "WCHAR[128]"),
+                ],
+            ),
+            (
+                "EXCEPTION_RECORD",
+                &[
+                    (0x00, "ExceptionCode", "DWORD"),
+                    (0x04, "ExceptionFlags", "DWORD"),
+                    (0x08, "ExceptionRecord", "void *"),
+                    (0x10, "ExceptionAddress", "void *"),
+                    (0x18, "NumberParameters", "DWORD"),
+                ],
+            ),
+            (
+                "CONTEXT",
+                &[
+                    // x86-64
+                    (0x30, "MxCsr", "DWORD"),
+                    (0x38, "SegCs", "WORD"),
+                    (0x3a, "SegDs", "WORD"),
+                    (0x44, "EFlags", "DWORD"),
+                    (0x48, "Rax", "uint64_t"),
+                    (0x50, "Rcx", "uint64_t"),
+                    (0x58, "Rdx", "uint64_t"),
+                    (0x60, "Rbx", "uint64_t"),
+                    (0x68, "Rsp", "uint64_t"),
+                    (0x70, "Rbp", "uint64_t"),
+                    (0x78, "Rsi", "uint64_t"),
+                    (0x80, "Rdi", "uint64_t"),
+                    (0x88, "R8", "uint64_t"),
+                    (0x90, "R9", "uint64_t"),
+                    (0x98, "Rip", "uint64_t"),
+                ],
+            ),
+            (
+                "WIN32_FIND_DATAW",
+                &[
+                    (0x00, "dwFileAttributes", "DWORD"),
+                    (0x04, "ftCreationTime", "FILETIME"),
+                    (0x0c, "ftLastAccessTime", "FILETIME"),
+                    (0x14, "ftLastWriteTime", "FILETIME"),
+                    (0x1c, "nFileSizeHigh", "DWORD"),
+                    (0x20, "nFileSizeLow", "DWORD"),
+                    (0x28, "cFileName", "WCHAR[260]"),
+                ],
+            ),
+            (
+                "OVERLAPPED",
+                &[
+                    (0x00, "Internal", "ULONG_PTR"),
+                    (0x08, "InternalHigh", "ULONG_PTR"),
+                    (0x10, "Offset", "DWORD"),
+                    (0x14, "OffsetHigh", "DWORD"),
+                    (0x18, "hEvent", "HANDLE"),
+                ],
+            ),
             // Win32 GUI structs
-            ("RECT", &[
-                (0x00, "left", "LONG"), (0x04, "top", "LONG"),
-                (0x08, "right", "LONG"), (0x0c, "bottom", "LONG"),
-            ]),
-            ("POINT", &[
-                (0x00, "x", "LONG"), (0x04, "y", "LONG"),
-            ]),
-            ("MSG", &[
-                (0x00, "hwnd", "HWND"), (0x08, "message", "UINT"),
-                (0x10, "wParam", "WPARAM"), (0x18, "lParam", "LPARAM"),
-                (0x20, "time", "DWORD"), (0x24, "pt.x", "LONG"), (0x28, "pt.y", "LONG"),
-            ]),
-            ("PAINTSTRUCT", &[
-                (0x00, "hdc", "HDC"), (0x08, "fErase", "BOOL"),
-                (0x0c, "rcPaint.left", "LONG"), (0x10, "rcPaint.top", "LONG"),
-                (0x14, "rcPaint.right", "LONG"), (0x18, "rcPaint.bottom", "LONG"),
-            ]),
-            ("LOGFONTW", &[
-                (0x00, "lfHeight", "LONG"), (0x04, "lfWidth", "LONG"),
-                (0x08, "lfEscapement", "LONG"), (0x0c, "lfOrientation", "LONG"),
-                (0x10, "lfWeight", "LONG"), (0x14, "lfItalic", "BYTE"),
-                (0x15, "lfUnderline", "BYTE"), (0x16, "lfStrikeOut", "BYTE"),
-                (0x17, "lfCharSet", "BYTE"), (0x1c, "lfFaceName", "WCHAR[32]"),
-            ]),
-            ("BITMAP", &[
-                (0x00, "bmType", "LONG"), (0x04, "bmWidth", "LONG"),
-                (0x08, "bmHeight", "LONG"), (0x0c, "bmWidthBytes", "LONG"),
-                (0x10, "bmPlanes", "WORD"), (0x12, "bmBitsPixel", "WORD"),
-                (0x18, "bmBits", "LPVOID"),
-            ]),
+            (
+                "RECT",
+                &[
+                    (0x00, "left", "LONG"),
+                    (0x04, "top", "LONG"),
+                    (0x08, "right", "LONG"),
+                    (0x0c, "bottom", "LONG"),
+                ],
+            ),
+            ("POINT", &[(0x00, "x", "LONG"), (0x04, "y", "LONG")]),
+            (
+                "MSG",
+                &[
+                    (0x00, "hwnd", "HWND"),
+                    (0x08, "message", "UINT"),
+                    (0x10, "wParam", "WPARAM"),
+                    (0x18, "lParam", "LPARAM"),
+                    (0x20, "time", "DWORD"),
+                    (0x24, "pt.x", "LONG"),
+                    (0x28, "pt.y", "LONG"),
+                ],
+            ),
+            (
+                "PAINTSTRUCT",
+                &[
+                    (0x00, "hdc", "HDC"),
+                    (0x08, "fErase", "BOOL"),
+                    (0x0c, "rcPaint.left", "LONG"),
+                    (0x10, "rcPaint.top", "LONG"),
+                    (0x14, "rcPaint.right", "LONG"),
+                    (0x18, "rcPaint.bottom", "LONG"),
+                ],
+            ),
+            (
+                "LOGFONTW",
+                &[
+                    (0x00, "lfHeight", "LONG"),
+                    (0x04, "lfWidth", "LONG"),
+                    (0x08, "lfEscapement", "LONG"),
+                    (0x0c, "lfOrientation", "LONG"),
+                    (0x10, "lfWeight", "LONG"),
+                    (0x14, "lfItalic", "BYTE"),
+                    (0x15, "lfUnderline", "BYTE"),
+                    (0x16, "lfStrikeOut", "BYTE"),
+                    (0x17, "lfCharSet", "BYTE"),
+                    (0x1c, "lfFaceName", "WCHAR[32]"),
+                ],
+            ),
+            (
+                "BITMAP",
+                &[
+                    (0x00, "bmType", "LONG"),
+                    (0x04, "bmWidth", "LONG"),
+                    (0x08, "bmHeight", "LONG"),
+                    (0x0c, "bmWidthBytes", "LONG"),
+                    (0x10, "bmPlanes", "WORD"),
+                    (0x12, "bmBitsPixel", "WORD"),
+                    (0x18, "bmBits", "LPVOID"),
+                ],
+            ),
             // Win32 system structs
-            ("CRITICAL_SECTION", &[
-                (0x00, "DebugInfo", "void *"), (0x08, "LockCount", "LONG"),
-                (0x0c, "RecursionCount", "LONG"), (0x10, "OwningThread", "HANDLE"),
-                (0x18, "LockSemaphore", "HANDLE"), (0x20, "SpinCount", "ULONG_PTR"),
-            ]),
-            ("SYSTEM_INFO", &[
-                (0x00, "wProcessorArchitecture", "WORD"), (0x04, "dwPageSize", "DWORD"),
-                (0x08, "lpMinimumApplicationAddress", "LPVOID"),
-                (0x10, "lpMaximumApplicationAddress", "LPVOID"),
-                (0x18, "dwActiveProcessorMask", "DWORD_PTR"),
-                (0x20, "dwNumberOfProcessors", "DWORD"),
-                (0x24, "dwProcessorType", "DWORD"),
-                (0x28, "dwAllocationGranularity", "DWORD"),
-                (0x2c, "wProcessorLevel", "WORD"), (0x2e, "wProcessorRevision", "WORD"),
-            ]),
-            ("MEMORY_BASIC_INFORMATION", &[
-                (0x00, "BaseAddress", "PVOID"), (0x08, "AllocationBase", "PVOID"),
-                (0x10, "AllocationProtect", "DWORD"), (0x18, "RegionSize", "SIZE_T"),
-                (0x20, "State", "DWORD"), (0x24, "Protect", "DWORD"), (0x28, "Type", "DWORD"),
-            ]),
-            ("FILETIME", &[
-                (0x00, "dwLowDateTime", "DWORD"), (0x04, "dwHighDateTime", "DWORD"),
-            ]),
-            ("LARGE_INTEGER", &[
-                (0x00, "LowPart", "DWORD"), (0x04, "HighPart", "LONG"),
-            ]),
+            (
+                "CRITICAL_SECTION",
+                &[
+                    (0x00, "DebugInfo", "void *"),
+                    (0x08, "LockCount", "LONG"),
+                    (0x0c, "RecursionCount", "LONG"),
+                    (0x10, "OwningThread", "HANDLE"),
+                    (0x18, "LockSemaphore", "HANDLE"),
+                    (0x20, "SpinCount", "ULONG_PTR"),
+                ],
+            ),
+            (
+                "SYSTEM_INFO",
+                &[
+                    (0x00, "wProcessorArchitecture", "WORD"),
+                    (0x04, "dwPageSize", "DWORD"),
+                    (0x08, "lpMinimumApplicationAddress", "LPVOID"),
+                    (0x10, "lpMaximumApplicationAddress", "LPVOID"),
+                    (0x18, "dwActiveProcessorMask", "DWORD_PTR"),
+                    (0x20, "dwNumberOfProcessors", "DWORD"),
+                    (0x24, "dwProcessorType", "DWORD"),
+                    (0x28, "dwAllocationGranularity", "DWORD"),
+                    (0x2c, "wProcessorLevel", "WORD"),
+                    (0x2e, "wProcessorRevision", "WORD"),
+                ],
+            ),
+            (
+                "MEMORY_BASIC_INFORMATION",
+                &[
+                    (0x00, "BaseAddress", "PVOID"),
+                    (0x08, "AllocationBase", "PVOID"),
+                    (0x10, "AllocationProtect", "DWORD"),
+                    (0x18, "RegionSize", "SIZE_T"),
+                    (0x20, "State", "DWORD"),
+                    (0x24, "Protect", "DWORD"),
+                    (0x28, "Type", "DWORD"),
+                ],
+            ),
+            (
+                "FILETIME",
+                &[
+                    (0x00, "dwLowDateTime", "DWORD"),
+                    (0x04, "dwHighDateTime", "DWORD"),
+                ],
+            ),
+            (
+                "LARGE_INTEGER",
+                &[(0x00, "LowPart", "DWORD"), (0x04, "HighPart", "LONG")],
+            ),
             // Win32 network structs
-            ("WSADATA", &[
-                (0x00, "wVersion", "WORD"), (0x02, "wHighVersion", "WORD"),
-                (0x04, "iMaxSockets", "unsigned short"), (0x06, "iMaxUdpDg", "unsigned short"),
-                (0x08, "lpVendorInfo", "char *"),
-            ]),
+            (
+                "WSADATA",
+                &[
+                    (0x00, "wVersion", "WORD"),
+                    (0x02, "wHighVersion", "WORD"),
+                    (0x04, "iMaxSockets", "unsigned short"),
+                    (0x06, "iMaxUdpDg", "unsigned short"),
+                    (0x08, "lpVendorInfo", "char *"),
+                ],
+            ),
             // Win32 service structs
-            ("SERVICE_STATUS", &[
-                (0x00, "dwServiceType", "DWORD"), (0x04, "dwCurrentState", "DWORD"),
-                (0x08, "dwControlsAccepted", "DWORD"), (0x0c, "dwWin32ExitCode", "DWORD"),
-                (0x10, "dwServiceSpecificExitCode", "DWORD"), (0x14, "dwCheckPoint", "DWORD"),
-                (0x18, "dwWaitHint", "DWORD"),
-            ]),
-            ("SERVICE_TABLE_ENTRYW", &[
-                (0x00, "lpServiceName", "LPWSTR"), (0x08, "lpServiceProc", "LPSERVICE_MAIN_FUNCTION"),
-            ]),
+            (
+                "SERVICE_STATUS",
+                &[
+                    (0x00, "dwServiceType", "DWORD"),
+                    (0x04, "dwCurrentState", "DWORD"),
+                    (0x08, "dwControlsAccepted", "DWORD"),
+                    (0x0c, "dwWin32ExitCode", "DWORD"),
+                    (0x10, "dwServiceSpecificExitCode", "DWORD"),
+                    (0x14, "dwCheckPoint", "DWORD"),
+                    (0x18, "dwWaitHint", "DWORD"),
+                ],
+            ),
+            (
+                "SERVICE_TABLE_ENTRYW",
+                &[
+                    (0x00, "lpServiceName", "LPWSTR"),
+                    (0x08, "lpServiceProc", "LPSERVICE_MAIN_FUNCTION"),
+                ],
+            ),
             // POSIX/Linux structs (x86-64 layout)
-            ("stat", &[
-                (0x00, "st_dev", "dev_t"), (0x08, "st_ino", "ino_t"),
-                (0x10, "st_nlink", "nlink_t"), (0x18, "st_mode", "mode_t"),
-                (0x1c, "st_uid", "uid_t"), (0x20, "st_gid", "gid_t"),
-                (0x28, "st_rdev", "dev_t"), (0x30, "st_size", "off_t"),
-                (0x38, "st_blksize", "blksize_t"), (0x40, "st_blocks", "blkcnt_t"),
-                (0x48, "st_atim", "timespec"), (0x58, "st_mtim", "timespec"),
-                (0x68, "st_ctim", "timespec"),
-            ]),
-            ("sockaddr_in", &[
-                (0x00, "sin_family", "sa_family_t"), (0x02, "sin_port", "in_port_t"),
-                (0x04, "sin_addr", "in_addr"),
-            ]),
-            ("addrinfo", &[
-                (0x00, "ai_flags", "int"), (0x04, "ai_family", "int"),
-                (0x08, "ai_socktype", "int"), (0x0c, "ai_protocol", "int"),
-                (0x10, "ai_addrlen", "socklen_t"), (0x18, "ai_addr", "struct sockaddr *"),
-                (0x20, "ai_canonname", "char *"), (0x28, "ai_next", "struct addrinfo *"),
-            ]),
-            ("timeval", &[
-                (0x00, "tv_sec", "time_t"), (0x08, "tv_usec", "suseconds_t"),
-            ]),
-            ("iovec", &[
-                (0x00, "iov_base", "void *"), (0x08, "iov_len", "size_t"),
-            ]),
-            ("pollfd", &[
-                (0x00, "fd", "int"), (0x04, "events", "short"), (0x06, "revents", "short"),
-            ]),
-            ("sigaction", &[
-                (0x00, "sa_handler", "sighandler_t"), (0x08, "sa_flags", "int"),
-                (0x10, "sa_restorer", "void (*)(void)"), (0x18, "sa_mask", "sigset_t"),
-            ]),
-            ("pthread_attr_t", &[
-                (0x00, "flags", "unsigned long"), (0x08, "stacksize", "size_t"),
-                (0x10, "guardsize", "size_t"), (0x18, "stackaddr", "void *"),
-            ]),
+            (
+                "stat",
+                &[
+                    (0x00, "st_dev", "dev_t"),
+                    (0x08, "st_ino", "ino_t"),
+                    (0x10, "st_nlink", "nlink_t"),
+                    (0x18, "st_mode", "mode_t"),
+                    (0x1c, "st_uid", "uid_t"),
+                    (0x20, "st_gid", "gid_t"),
+                    (0x28, "st_rdev", "dev_t"),
+                    (0x30, "st_size", "off_t"),
+                    (0x38, "st_blksize", "blksize_t"),
+                    (0x40, "st_blocks", "blkcnt_t"),
+                    (0x48, "st_atim", "timespec"),
+                    (0x58, "st_mtim", "timespec"),
+                    (0x68, "st_ctim", "timespec"),
+                ],
+            ),
+            (
+                "sockaddr_in",
+                &[
+                    (0x00, "sin_family", "sa_family_t"),
+                    (0x02, "sin_port", "in_port_t"),
+                    (0x04, "sin_addr", "in_addr"),
+                ],
+            ),
+            (
+                "addrinfo",
+                &[
+                    (0x00, "ai_flags", "int"),
+                    (0x04, "ai_family", "int"),
+                    (0x08, "ai_socktype", "int"),
+                    (0x0c, "ai_protocol", "int"),
+                    (0x10, "ai_addrlen", "socklen_t"),
+                    (0x18, "ai_addr", "struct sockaddr *"),
+                    (0x20, "ai_canonname", "char *"),
+                    (0x28, "ai_next", "struct addrinfo *"),
+                ],
+            ),
+            (
+                "timeval",
+                &[(0x00, "tv_sec", "time_t"), (0x08, "tv_usec", "suseconds_t")],
+            ),
+            (
+                "iovec",
+                &[(0x00, "iov_base", "void *"), (0x08, "iov_len", "size_t")],
+            ),
+            (
+                "pollfd",
+                &[
+                    (0x00, "fd", "int"),
+                    (0x04, "events", "short"),
+                    (0x06, "revents", "short"),
+                ],
+            ),
+            (
+                "sigaction",
+                &[
+                    (0x00, "sa_handler", "sighandler_t"),
+                    (0x08, "sa_flags", "int"),
+                    (0x10, "sa_restorer", "void (*)(void)"),
+                    (0x18, "sa_mask", "sigset_t"),
+                ],
+            ),
+            (
+                "pthread_attr_t",
+                &[
+                    (0x00, "flags", "unsigned long"),
+                    (0x08, "stacksize", "size_t"),
+                    (0x10, "guardsize", "size_t"),
+                    (0x18, "stackaddr", "void *"),
+                ],
+            ),
             // Network (both Win32 and POSIX)
-            ("SOCKADDR_IN", &[
-                (0x00, "sin_family", "ADDRESS_FAMILY"), (0x02, "sin_port", "USHORT"),
-                (0x04, "sin_addr", "IN_ADDR"),
-            ]),
+            (
+                "SOCKADDR_IN",
+                &[
+                    (0x00, "sin_family", "ADDRESS_FAMILY"),
+                    (0x02, "sin_port", "USHORT"),
+                    (0x04, "sin_addr", "IN_ADDR"),
+                ],
+            ),
             // Win32 file dialog
-            ("OPENFILENAMEW", &[
-                (0x00, "lStructSize", "DWORD"), (0x08, "hwndOwner", "HWND"),
-                (0x10, "hInstance", "HINSTANCE"), (0x18, "lpstrFilter", "LPCWSTR"),
-                (0x28, "nFilterIndex", "DWORD"), (0x30, "lpstrFile", "LPWSTR"),
-                (0x38, "nMaxFile", "DWORD"), (0x40, "lpstrFileTitle", "LPWSTR"),
-                (0x48, "nMaxFileTitle", "DWORD"), (0x50, "lpstrInitialDir", "LPCWSTR"),
-                (0x58, "lpstrTitle", "LPCWSTR"), (0x60, "Flags", "DWORD"),
-            ]),
+            (
+                "OPENFILENAMEW",
+                &[
+                    (0x00, "lStructSize", "DWORD"),
+                    (0x08, "hwndOwner", "HWND"),
+                    (0x10, "hInstance", "HINSTANCE"),
+                    (0x18, "lpstrFilter", "LPCWSTR"),
+                    (0x28, "nFilterIndex", "DWORD"),
+                    (0x30, "lpstrFile", "LPWSTR"),
+                    (0x38, "nMaxFile", "DWORD"),
+                    (0x40, "lpstrFileTitle", "LPWSTR"),
+                    (0x48, "nMaxFileTitle", "DWORD"),
+                    (0x50, "lpstrInitialDir", "LPCWSTR"),
+                    (0x58, "lpstrTitle", "LPCWSTR"),
+                    (0x60, "Flags", "DWORD"),
+                ],
+            ),
             // Go runtime header types (Go 1.17+). Used by the matcher
             // when offset sets line up exactly.
-            ("GoSlice", &[
-                (0x00, "data", "void *"), (0x08, "len", "long"), (0x10, "cap", "long"),
-            ]),
-            ("GoIface", &[
-                (0x00, "tab", "void *"), (0x08, "data", "void *"),
-            ]),
-            ("GoString", &[
-                (0x00, "data", "char *"), (0x08, "len", "long"),
-            ]),
+            (
+                "GoSlice",
+                &[
+                    (0x00, "data", "void *"),
+                    (0x08, "len", "long"),
+                    (0x10, "cap", "long"),
+                ],
+            ),
+            (
+                "GoIface",
+                &[(0x00, "tab", "void *"), (0x08, "data", "void *")],
+            ),
+            (
+                "GoString",
+                &[(0x00, "data", "char *"), (0x08, "len", "long")],
+            ),
         ];
 
         let mut param_fields: HashMap<String, std::collections::BTreeSet<u64>> = HashMap::new();
@@ -6096,21 +7807,37 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let mut base_start = base_end;
                     while base_start > 0 {
                         let c = text.as_bytes()[base_start - 1];
-                        if c.is_ascii_alphanumeric() || c == b'_' || c == b'*' { base_start -= 1; } else { break; }
+                        if c.is_ascii_alphanumeric() || c == b'_' || c == b'*' {
+                            base_start -= 1;
+                        } else {
+                            break;
+                        }
                     }
                     let base = text[base_start..base_end].trim_start_matches('*');
                     let hex_start = abs_start + 8;
                     let mut hex_end = hex_start;
-                    while hex_end < text.len() && text.as_bytes()[hex_end].is_ascii_hexdigit() { hex_end += 1; }
+                    while hex_end < text.len() && text.as_bytes()[hex_end].is_ascii_hexdigit() {
+                        hex_end += 1;
+                    }
                     if hex_end > hex_start {
                         if let Ok(offset) = u64::from_str_radix(&text[hex_start..hex_end], 16) {
-                            if !base.is_empty() && base.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_') {
-                                param_fields.entry(base.to_string()).or_default().insert(offset);
+                            if !base.is_empty()
+                                && base
+                                    .chars()
+                                    .next()
+                                    .map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+                            {
+                                param_fields
+                                    .entry(base.to_string())
+                                    .or_default()
+                                    .insert(offset);
                             }
                         }
                     }
                     pos = hex_end;
-                } else { break; }
+                } else {
+                    break;
+                }
             }
         }
 
@@ -6119,7 +7846,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         for line in &lines {
             let text = line.trim();
             // Pattern: *(uint32_t*)(varname + N) or *(uint64_t*)(varname)
-            for cast in ["uint8_t", "uint16_t", "uint32_t", "uint64_t", "int", "long", "char"] {
+            for cast in [
+                "uint8_t", "uint16_t", "uint32_t", "uint64_t", "int", "long", "char",
+            ] {
                 let prefix = format!("*({}*)(", cast);
                 let mut search_from = 0;
                 while let Some(star_pos) = text[search_from..].find(&prefix) {
@@ -6132,20 +7861,32 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         if let Some(plus) = inner.find(" + ") {
                             let base = inner[..plus].trim();
                             let offset_str = inner[plus + 3..].trim();
-                            if !base.is_empty() && base.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+                            if !base.is_empty()
+                                && base
+                                    .chars()
+                                    .next()
+                                    .map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
                                 && !base.contains(' ')
                             {
-                                let offset = offset_str.strip_prefix("0x")
+                                let offset = offset_str
+                                    .strip_prefix("0x")
                                     .and_then(|h| u64::from_str_radix(h, 16).ok())
                                     .or_else(|| offset_str.parse::<u64>().ok());
                                 if let Some(off) = offset {
-                                    param_fields.entry(base.to_string()).or_default().insert(off);
+                                    param_fields
+                                        .entry(base.to_string())
+                                        .or_default()
+                                        .insert(off);
                                 }
                             }
                         } else {
                             // No offset — field at offset 0
                             let base = inner.trim();
-                            if !base.is_empty() && base.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+                            if !base.is_empty()
+                                && base
+                                    .chars()
+                                    .next()
+                                    .map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
                                 && !base.contains(' ')
                             {
                                 param_fields.entry(base.to_string()).or_default().insert(0);
@@ -6243,13 +7984,16 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         // Simple arg extraction: split by ", " and take the Nth
                         let arg_parts: Vec<&str> = args.split(", ").collect();
                         if let Some(arg) = arg_parts.get(*param_idx) {
-                            let clean = arg.trim()
+                            let clean = arg
+                                .trim()
                                 .trim_end_matches(|c: char| c == ')' || c == ';' || c == ',')
                                 .trim();
                             let clean = clean.strip_prefix("(void *)").unwrap_or(clean).trim();
                             let clean = clean.trim_start_matches('(').trim_end_matches(')');
-                            if clean.starts_with("param_") || clean.starts_with("local_")
-                                || clean.starts_with("lVar") {
+                            if clean.starts_with("param_")
+                                || clean.starts_with("local_")
+                                || clean.starts_with("lVar")
+                            {
                                 api_type_hints.insert(clean.to_string(), struct_type);
                             }
                         }
@@ -6267,30 +8011,48 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             if let Some(func_start) = t.find("func_") {
                 let hex_start = func_start + 5;
                 let mut hex_end = hex_start;
-                while hex_end < t.len() && t.as_bytes()[hex_end].is_ascii_hexdigit() { hex_end += 1; }
+                while hex_end < t.len() && t.as_bytes()[hex_end].is_ascii_hexdigit() {
+                    hex_end += 1;
+                }
                 if hex_end > hex_start && hex_end < t.len() && t.as_bytes()[hex_end] == b'(' {
                     if let Ok(callee_addr) = u64::from_str_radix(&t[hex_start..hex_end], 16) {
-                        let callee_structs = crate::signatures::lookup_all_struct_params(callee_addr);
+                        let callee_structs =
+                            crate::signatures::lookup_all_struct_params(callee_addr);
                         if !callee_structs.is_empty() {
                             let args_str = &t[hex_end + 1..];
                             let arg_parts: Vec<&str> = args_str.split(", ").collect();
                             for (param_idx, struct_name) in &callee_structs {
                                 if let Some(arg) = arg_parts.get(*param_idx as usize) {
-                                    let clean = arg.trim()
-                                        .trim_end_matches(|c: char| c == ')' || c == ';' || c == ',')
+                                    let clean = arg
+                                        .trim()
+                                        .trim_end_matches(|c: char| {
+                                            c == ')' || c == ';' || c == ','
+                                        })
                                         .trim();
-                                    let clean = clean.strip_prefix("(void *)").unwrap_or(clean).trim();
+                                    let clean =
+                                        clean.strip_prefix("(void *)").unwrap_or(clean).trim();
                                     // Extract just the base variable name (before any ->field_ or [])
-                                    let base = clean.split("->").next().unwrap_or(clean)
-                                        .split('[').next().unwrap_or(clean)
-                                        .trim_start_matches('*').trim_start_matches('&');
+                                    let base = clean
+                                        .split("->")
+                                        .next()
+                                        .unwrap_or(clean)
+                                        .split('[')
+                                        .next()
+                                        .unwrap_or(clean)
+                                        .trim_start_matches('*')
+                                        .trim_start_matches('&');
                                     // Validate: must be a clean variable name (alphanumeric + underscore only)
                                     let is_valid_var = !base.is_empty()
-                                        && base.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                                        && (base.starts_with("param_") || base.starts_with("local_")
-                                            || base.starts_with("lVar") || base.starts_with("iVar"));
+                                        && base
+                                            .chars()
+                                            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                                        && (base.starts_with("param_")
+                                            || base.starts_with("local_")
+                                            || base.starts_with("lVar")
+                                            || base.starts_with("iVar"));
                                     if is_valid_var && !api_type_hints.contains_key(base) {
-                                        let leaked: &'static str = Box::leak(struct_name.clone().into_boxed_str());
+                                        let leaked: &'static str =
+                                            Box::leak(struct_name.clone().into_boxed_str());
                                         api_type_hints.insert(base.to_string(), leaked);
                                     }
                                 }
@@ -6318,79 +8080,126 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
 
         for (base, fields) in &param_fields {
-            if struct_matches.contains_key(base) { continue; } // already identified by API
-            if fields.is_empty() { continue; }
+            if struct_matches.contains_key(base) {
+                continue;
+            } // already identified by API
+            if fields.is_empty() {
+                continue;
+            }
 
             // Try each known struct — score by how many of our fields match (need 3+).
             // Filter by binary type: Win32 structs only for PE, POSIX only for ELF.
-            if fields.len() < 3 { /* skip known struct matching, fall through to unknown */ }
-            else {
-            let is_pe = matches!(ctx.arch, Architecture::X86_64 | Architecture::X86_32)
-                && ctx.binary.map_or(false, |b| b.len() > 2 && b[0] == b'M' && b[1] == b'Z');
-            let posix_structs = ["stat", "sockaddr_in", "addrinfo", "timeval", "iovec",
-                "pollfd", "sigaction", "pthread_attr_t"];
-            let win32_only_structs = ["STARTUPINFOW", "PROCESS_INFORMATION", "WNDCLASSEXW",
-                "OSVERSIONINFOW", "WIN32_FIND_DATAW", "OPENFILENAMEW", "WSADATA",
-                "SERVICE_STATUS", "SERVICE_TABLE_ENTRYW", "MSG", "PAINTSTRUCT", "LOGFONTW",
-                "BITMAP", "SYSTEM_INFO", "MEMORY_BASIC_INFORMATION", "SOCKADDR_IN",
-                "CRITICAL_SECTION", "OVERLAPPED", "RECT", "POINT", "EXCEPTION_RECORD",
-                "CONTEXT", "FILETIME", "LARGE_INTEGER", "SECURITY_ATTRIBUTES"];
-            // Detect Go binary once — relaxes threshold for Go-specific
-            // 2-field header types (GoIface, GoString).
-            let is_go = ctx.binary.map_or(false, |b| {
-                goblin::Object::parse(b).ok().map_or(false, |obj| match &obj {
-                    goblin::Object::Elf(elf) => elf.section_headers.iter().any(|sh| {
-                        elf.shdr_strtab.get_at(sh.sh_name) == Some(".gopclntab")
-                    }),
-                    _ => false,
-                })
-            });
-            let go_small_types = ["GoIface", "GoString"];
-            let go_full_types = ["GoSlice", "GoIface", "GoString"];
+            if fields.len() < 3 { /* skip known struct matching, fall through to unknown */
+            } else {
+                let is_pe = matches!(ctx.arch, Architecture::X86_64 | Architecture::X86_32)
+                    && ctx
+                        .binary
+                        .map_or(false, |b| b.len() > 2 && b[0] == b'M' && b[1] == b'Z');
+                let posix_structs = [
+                    "stat",
+                    "sockaddr_in",
+                    "addrinfo",
+                    "timeval",
+                    "iovec",
+                    "pollfd",
+                    "sigaction",
+                    "pthread_attr_t",
+                ];
+                let win32_only_structs = [
+                    "STARTUPINFOW",
+                    "PROCESS_INFORMATION",
+                    "WNDCLASSEXW",
+                    "OSVERSIONINFOW",
+                    "WIN32_FIND_DATAW",
+                    "OPENFILENAMEW",
+                    "WSADATA",
+                    "SERVICE_STATUS",
+                    "SERVICE_TABLE_ENTRYW",
+                    "MSG",
+                    "PAINTSTRUCT",
+                    "LOGFONTW",
+                    "BITMAP",
+                    "SYSTEM_INFO",
+                    "MEMORY_BASIC_INFORMATION",
+                    "SOCKADDR_IN",
+                    "CRITICAL_SECTION",
+                    "OVERLAPPED",
+                    "RECT",
+                    "POINT",
+                    "EXCEPTION_RECORD",
+                    "CONTEXT",
+                    "FILETIME",
+                    "LARGE_INTEGER",
+                    "SECURITY_ATTRIBUTES",
+                ];
+                // Detect Go binary once — relaxes threshold for Go-specific
+                // 2-field header types (GoIface, GoString).
+                let is_go = ctx.binary.map_or(false, |b| {
+                    goblin::Object::parse(b)
+                        .ok()
+                        .map_or(false, |obj| match &obj {
+                            goblin::Object::Elf(elf) => elf
+                                .section_headers
+                                .iter()
+                                .any(|sh| elf.shdr_strtab.get_at(sh.sh_name) == Some(".gopclntab")),
+                            _ => false,
+                        })
+                });
+                let go_small_types = ["GoIface", "GoString"];
+                let go_full_types = ["GoSlice", "GoIface", "GoString"];
 
-            let mut best_match: Option<(&str, usize)> = None;
-            for (struct_name, struct_fields) in known_structs {
-                if !is_pe && win32_only_structs.contains(struct_name) { continue; }
-                if is_pe && posix_structs.contains(struct_name) { continue; }
-                // Skip Go types on non-Go binaries; require exact fit
-                // on Go binaries.
-                let is_go_struct = go_full_types.contains(struct_name);
-                if is_go_struct && !is_go { continue; }
-
-                let struct_offsets: std::collections::BTreeSet<u64> = struct_fields.iter().map(|(o, _, _)| *o).collect();
-                let matching = fields.intersection(&struct_offsets).count();
-
-                let min_match = if is_go_struct && go_small_types.contains(struct_name) {
-                    2
-                } else {
-                    3
-                };
-                // Require exact subset match (no extra fields outside
-                // struct layout) for Go 2-field types to avoid false
-                // positives. Full threshold: matching >= N and 50% cover.
-                let extra = fields.difference(&struct_offsets).count();
-                let go_exact_ok = is_go_struct && go_small_types.contains(struct_name) && extra == 0;
-                let generic_ok = matching >= min_match && matching * 2 >= fields.len();
-                if (go_exact_ok && matching >= 2) || (!is_go_struct && generic_ok)
-                    || (is_go_struct && !go_small_types.contains(struct_name) && generic_ok)
-                {
-                    if best_match.map_or(true, |(_, best)| matching > best) {
-                        best_match = Some((struct_name, matching));
+                let mut best_match: Option<(&str, usize)> = None;
+                for (struct_name, struct_fields) in known_structs {
+                    if !is_pe && win32_only_structs.contains(struct_name) {
+                        continue;
                     }
-                }
-            }
+                    if is_pe && posix_structs.contains(struct_name) {
+                        continue;
+                    }
+                    // Skip Go types on non-Go binaries; require exact fit
+                    // on Go binaries.
+                    let is_go_struct = go_full_types.contains(struct_name);
+                    if is_go_struct && !is_go {
+                        continue;
+                    }
 
-            if let Some((struct_name, _)) = best_match {
-                struct_matches.insert(base.clone(), struct_name);
-                // Populate field name map
-                for (sname, sfields) in known_structs {
-                    if *sname == struct_name {
-                        for (offset, fname, ftype) in *sfields {
-                            field_names.insert((base.clone(), *offset), (fname, ftype));
+                    let struct_offsets: std::collections::BTreeSet<u64> =
+                        struct_fields.iter().map(|(o, _, _)| *o).collect();
+                    let matching = fields.intersection(&struct_offsets).count();
+
+                    let min_match = if is_go_struct && go_small_types.contains(struct_name) {
+                        2
+                    } else {
+                        3
+                    };
+                    // Require exact subset match (no extra fields outside
+                    // struct layout) for Go 2-field types to avoid false
+                    // positives. Full threshold: matching >= N and 50% cover.
+                    let extra = fields.difference(&struct_offsets).count();
+                    let go_exact_ok =
+                        is_go_struct && go_small_types.contains(struct_name) && extra == 0;
+                    let generic_ok = matching >= min_match && matching * 2 >= fields.len();
+                    if (go_exact_ok && matching >= 2)
+                        || (!is_go_struct && generic_ok)
+                        || (is_go_struct && !go_small_types.contains(struct_name) && generic_ok)
+                    {
+                        if best_match.map_or(true, |(_, best)| matching > best) {
+                            best_match = Some((struct_name, matching));
                         }
                     }
                 }
-            }
+
+                if let Some((struct_name, _)) = best_match {
+                    struct_matches.insert(base.clone(), struct_name);
+                    // Populate field name map
+                    for (sname, sfields) in known_structs {
+                        if *sname == struct_name {
+                            for (offset, fname, ftype) in *sfields {
+                                field_names.insert((base.clone(), *offset), (fname, ftype));
+                            }
+                        }
+                    }
+                }
             } // close the fields.len() >= 3 gate
         }
 
@@ -6414,9 +8223,15 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         let mut struct_comments: Vec<String> = Vec::new();
         // Comments for variables with field accesses
         for (base, fields) in &param_fields {
-            if fields.is_empty() { continue; }
+            if fields.is_empty() {
+                continue;
+            }
             // Skip register names — only process variable names
-            if base.len() <= 3 && base.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) {
+            if base.len() <= 3
+                && base
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+            {
                 continue; // RAX, RCX, etc. — not struct variables
             }
             let fv: Vec<u64> = fields.iter().copied().collect();
@@ -6432,7 +8247,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let mut int_count = 0u32;
                 let mut ptr_count = 0u32;
                 for (i, &offset) in fv.iter().enumerate() {
-                    let sz = if i + 1 < fv.len() { (fv[i+1] - offset).min(8) } else { 8 };
+                    let sz = if i + 1 < fv.len() {
+                        (fv[i + 1] - offset).min(8)
+                    } else {
+                        8
+                    };
 
                     // Usage-based type inference from the output text
                     let field_pat = format!("{}->field_{:x}", base, offset);
@@ -6451,17 +8270,37 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         ("char *", format!("str_{:x}", offset))
                     } else if is_dereferenced || (sz >= 8 && is_compared_to_zero) {
                         ptr_count += 1;
-                        let name = if ptr_count == 1 && sz >= 8 { "next".to_string() }
-                            else { format!("ptr_{:x}", offset) };
+                        let name = if ptr_count == 1 && sz >= 8 {
+                            "next".to_string()
+                        } else {
+                            format!("ptr_{:x}", offset)
+                        };
                         ("void *", name)
                     } else if sz <= 4 {
                         int_count += 1;
-                        let name = if int_count == 1 && offset == 0 { "value".to_string() }
-                            else { format!("field_{:x}", offset) };
-                        (match sz { 1 => "uint8_t", 2 => "uint16_t", _ => "int" }, name)
+                        let name = if int_count == 1 && offset == 0 {
+                            "value".to_string()
+                        } else {
+                            format!("field_{:x}", offset)
+                        };
+                        (
+                            match sz {
+                                1 => "uint8_t",
+                                2 => "uint16_t",
+                                _ => "int",
+                            },
+                            name,
+                        )
                     } else {
-                        (match sz { 1 => "byte", 2 => "short", 4 => "int", _ => "long" },
-                         format!("field_{:x}", offset))
+                        (
+                            match sz {
+                                1 => "byte",
+                                2 => "short",
+                                4 => "int",
+                                _ => "long",
+                            },
+                            format!("field_{:x}", offset),
+                        )
                     };
 
                     // Populate field_names for renaming
@@ -6470,9 +8309,14 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let leaked_type: &'static str = Box::leak(ty_name.to_string().into_boxed_str());
                     field_names.insert((base.clone(), offset), (leaked_name, leaked_type));
 
-                    if i > 0 { def.push_str(", "); }
+                    if i > 0 {
+                        def.push_str(", ");
+                    }
                     def.push_str(&format!("+0x{:x} {} {}", offset, ty_name, field_name));
-                    if i >= 12 { def.push_str(", ..."); break; }
+                    if i >= 12 {
+                        def.push_str(", ...");
+                        break;
+                    }
                 }
                 if fv.len() >= 4 {
                     struct_comments.push(def);
@@ -6482,9 +8326,14 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // Comments for cross-function propagated structs (variables without field accesses)
         for (var_name, struct_type) in &struct_matches {
             if !param_fields.contains_key(var_name) || param_fields[var_name].len() < 3 {
-                let already_commented = struct_comments.iter().any(|c| c.contains(&format!("{} is", var_name)));
+                let already_commented = struct_comments
+                    .iter()
+                    .any(|c| c.contains(&format!("{} is", var_name)));
                 if !already_commented {
-                    struct_comments.push(format!("// {} is {} * (from callee)", var_name, struct_type));
+                    struct_comments.push(format!(
+                        "// {} is {} * (from callee)",
+                        var_name, struct_type
+                    ));
                 }
             }
         }
@@ -6521,7 +8370,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     // Pattern 3: *(typeN*)(base + offset) → base->fieldName
                     // Matches: *(uint32_t*)(base + 8), *(uint64_t*)(base), etc.
                     if *offset > 0 {
-                        for cast in ["uint8_t", "uint16_t", "uint32_t", "uint64_t", "int", "long", "char"] {
+                        for cast in [
+                            "uint8_t", "uint16_t", "uint32_t", "uint64_t", "int", "long", "char",
+                        ] {
                             let old_cast = format!("*({}*)({} + {})", cast, base, offset);
                             if line.contains(&old_cast) {
                                 let new_field = format!("{}->{}", base, fname);
@@ -6536,7 +8387,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         }
                     } else {
                         // Offset 0: *(typeN*)(base) → base->fieldName (or just *(base) for first field)
-                        for cast in ["uint8_t", "uint16_t", "uint32_t", "uint64_t", "int", "long", "char"] {
+                        for cast in [
+                            "uint8_t", "uint16_t", "uint32_t", "uint64_t", "int", "long", "char",
+                        ] {
                             let old_cast = format!("*({}*)({})", cast, base);
                             if line.contains(&old_cast) {
                                 let new_field = format!("{}->{}", base, fname);
@@ -6559,7 +8412,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             ("__security_check_cookie", "__security_check_cookie"),
             ("__report_rangecheckfailure", "__report_rangecheckfailure"),
             ("__GSHandlerCheck", "__GSHandlerCheck"),
-            ("_invalid_parameter_noinfo_noreturn", "_invalid_parameter_noinfo"),
+            (
+                "_invalid_parameter_noinfo_noreturn",
+                "_invalid_parameter_noinfo",
+            ),
             ("terminate()", "std::terminate"),
             ("_CxxThrowException", "_CxxThrowException"),
             ("_purecall", "_purecall"),
@@ -6588,12 +8444,16 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
 
         // Also detect stack cookie check: func_XXX(VAR ^ RSP) → __security_check_cookie
         for line in &lines {
-            if line.contains("^ RSP)") && line.contains("func_") && line.contains("// stack cookie") {
+            if line.contains("^ RSP)") && line.contains("func_") && line.contains("// stack cookie")
+            {
                 if let Some(pos) = line.find("func_") {
                     let end = line[pos..].find('(').unwrap_or(line.len() - pos);
                     let wrapper_name = &line[pos..pos + end];
                     if wrapper_name.starts_with("func_") {
-                        wrapper_renames.push((wrapper_name.to_string(), "__security_check_cookie".to_string()));
+                        wrapper_renames.push((
+                            wrapper_name.to_string(),
+                            "__security_check_cookie".to_string(),
+                        ));
                     }
                 }
             }
@@ -6612,10 +8472,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
 
     // #PUTCHAR_ASCII: Display putchar(10) as putchar('\n'), etc.
     for line in &mut lines {
-        *line = line.replace("putchar(10)", "putchar('\\n')")
-                    .replace("putchar(9)", "putchar('\\t')")
-                    .replace("putchar(13)", "putchar('\\r')")
-                    .replace("putchar(0)", "putchar('\\0')");
+        *line = line
+            .replace("putchar(10)", "putchar('\\n')")
+            .replace("putchar(9)", "putchar('\\t')")
+            .replace("putchar(13)", "putchar('\\r')")
+            .replace("putchar(0)", "putchar('\\0')");
     }
 
     // #SIMPLIFY_DEREF: Clean up pointer dereference syntax.
@@ -6624,14 +8485,22 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // *(lVar_N) → *lVar_N
     for line in &mut lines {
         // Typed casts: *(uint64_t*)(VAR) → *VAR
-        for cast in ["*(uint64_t*)(", "*(int*)(", "*(long*)(", "*(uint32_t*)(", "*(int64_t*)("] {
+        for cast in [
+            "*(uint64_t*)(",
+            "*(int*)(",
+            "*(long*)(",
+            "*(uint32_t*)(",
+            "*(int64_t*)(",
+        ] {
             while line.contains(cast) {
                 if let Some(start) = line.find(cast) {
                     let inner_start = start + cast.len();
                     if let Some(close) = line[inner_start..].find(')') {
                         let inner = &line[inner_start..inner_start + close].to_string();
-                        if (inner.starts_with("param_") || inner.starts_with("lVar")
-                            || inner.starts_with("iVar") || inner.starts_with("local_"))
+                        if (inner.starts_with("param_")
+                            || inner.starts_with("lVar")
+                            || inner.starts_with("iVar")
+                            || inner.starts_with("local_"))
                             && !inner.contains(' ')
                         {
                             let old = format!("{}{})", cast, inner);
@@ -6651,7 +8520,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             for prefix in ["*(param_", "*(lVar", "*(iVar"] {
                 if let Some(start) = line.find(prefix) {
                     // Check it's not *(*(... — double deref
-                    if start > 0 && line.as_bytes()[start - 1] == b'(' { break; }
+                    if start > 0 && line.as_bytes()[start - 1] == b'(' {
+                        break;
+                    }
                     let inner_start = start + 2; // skip "*("
                     if let Some(close) = line[inner_start..].find(')') {
                         let inner = line[inner_start..inner_start + close].to_string();
@@ -6665,7 +8536,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     }
                 }
             }
-            if !replaced { break; }
+            if !replaced {
+                break;
+            }
         }
     }
 
@@ -6674,16 +8547,21 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     for line in &mut lines {
         // & 0xff → (uint8_t) for byte truncation
         if line.contains("& 0xff)") || line.contains("& 255)") {
-            *line = line.replace("& 0xff)", "& 0xff) /* (uint8_t) */")
+            *line = line
+                .replace("& 0xff)", "& 0xff) /* (uint8_t) */")
                 .replace("& 255)", "& 255) /* (uint8_t) */");
         }
         // & 0xffff → (uint16_t) for short truncation
         if line.contains("& 0xffff)") || line.contains("& 65535)") {
-            *line = line.replace("& 0xffff)", "& 0xffff) /* (uint16_t) */")
+            *line = line
+                .replace("& 0xffff)", "& 0xffff) /* (uint16_t) */")
                 .replace("& 65535)", "& 65535) /* (uint16_t) */");
         }
         // & 0xffffffff → (uint32_t) for int truncation (only in 64-bit context)
-        if line.contains("& 0xffffffff)") && !line.contains("INVALID_HANDLE") && !line.contains("/*") {
+        if line.contains("& 0xffffffff)")
+            && !line.contains("INVALID_HANDLE")
+            && !line.contains("/*")
+        {
             *line = line.replace("& 0xffffffff)", "& 0xffffffff) /* (uint32_t) */");
         }
     }
@@ -6708,7 +8586,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let mut end = pos + 1;
                 while end < bytes.len() {
                     let b = bytes[end];
-                    if b.is_ascii_alphanumeric() || b == b'@' || b == b'$' || b == b'?' || b == b'_' {
+                    if b.is_ascii_alphanumeric() || b == b'@' || b == b'$' || b == b'?' || b == b'_'
+                    {
                         end += 1;
                     } else {
                         break;
@@ -6718,7 +8597,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 // Only try to demangle if it looks like a real MSVC name (has @ and is > 5 chars)
                 if mangled.len() > 5 && mangled.contains('@') && !seen.contains(mangled) {
                     seen.insert(mangled.to_string());
-                    if let Ok(demangled) = msvc_demangler::demangle(mangled, msvc_demangler::DemangleFlags::llvm()) {
+                    if let Ok(demangled) =
+                        msvc_demangler::demangle(mangled, msvc_demangler::DemangleFlags::llvm())
+                    {
                         // Simplify the demangled name for readability
                         let simple = simplify_msvc_name(&demangled);
                         if simple != mangled && simple.len() < mangled.len() {
@@ -6753,14 +8634,19 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         let mut pos = 0;
         let bytes = all_text.as_bytes();
         while pos < bytes.len() {
-            if bytes[pos] == b'$' && pos + 1 < bytes.len()
+            if bytes[pos] == b'$'
+                && pos + 1 < bytes.len()
                 && (bytes[pos + 1] == b's' || bytes[pos + 1] == b'S')
             {
                 let start = pos;
                 let mut end = pos + 2;
                 while end < bytes.len() {
                     let b = bytes[end];
-                    if b.is_ascii_alphanumeric() || b == b'_' { end += 1; } else { break; }
+                    if b.is_ascii_alphanumeric() || b == b'_' {
+                        end += 1;
+                    } else {
+                        break;
+                    }
                 }
                 let mangled = &all_text[start..end];
                 if mangled.len() > 4 && !seen.contains(mangled) {
@@ -6796,8 +8682,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // Phase 1: Detect which func_XXX is the cout << wrapper.
         // Heuristic: if a function is called 3+ times with cout as first arg, it's operator<<
         let _all_text = lines.join("\n");
-        let mut cout_call_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-        let mut cin_call_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut cout_call_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut cin_call_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
 
         // Count calls with cout/cin as first arg
         for line in &lines {
@@ -6805,8 +8693,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // func_XXXX(cout, ...) or func_XXXX(cout)
             if let Some(paren) = t.find("(cout") {
                 let func_end = paren;
-                let func_start = t[..func_end].rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                    .map(|p| p + 1).unwrap_or(0);
+                let func_start = t[..func_end]
+                    .rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .map(|p| p + 1)
+                    .unwrap_or(0);
                 let fname = &t[func_start..func_end];
                 if fname.starts_with("func_") {
                     *cout_call_counts.entry(fname.to_string()).or_insert(0) += 1;
@@ -6814,8 +8704,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             }
             if let Some(paren) = t.find("(cin") {
                 let func_end = paren;
-                let func_start = t[..func_end].rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                    .map(|p| p + 1).unwrap_or(0);
+                let func_start = t[..func_end]
+                    .rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .map(|p| p + 1)
+                    .unwrap_or(0);
                 let fname = &t[func_start..func_end];
                 if fname.starts_with("func_") {
                     *cin_call_counts.entry(fname.to_string()).or_insert(0) += 1;
@@ -6824,11 +8716,13 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
 
         // Functions called 3+ times with cout are operator<<
-        let cout_wrappers: Vec<String> = cout_call_counts.into_iter()
+        let cout_wrappers: Vec<String> = cout_call_counts
+            .into_iter()
             .filter(|(_, count)| *count >= 3)
             .map(|(name, _)| name)
             .collect();
-        let _cin_wrappers: Vec<String> = cin_call_counts.into_iter()
+        let _cin_wrappers: Vec<String> = cin_call_counts
+            .into_iter()
             .filter(|(_, count)| *count >= 2)
             .map(|(name, _)| name)
             .collect();
@@ -6848,8 +8742,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         let mut pos = inner_start;
                         let bytes = line.as_bytes();
                         while pos < bytes.len() && depth > 0 {
-                            if bytes[pos] == b'(' { depth += 1; }
-                            if bytes[pos] == b')' { depth -= 1; }
+                            if bytes[pos] == b'(' {
+                                depth += 1;
+                            }
+                            if bytes[pos] == b')' {
+                                depth -= 1;
+                            }
                             pos += 1;
                         }
                         if depth == 0 {
@@ -6876,8 +8774,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         let mut pos = inner_start;
                         let bytes = line.as_bytes();
                         while pos < bytes.len() && depth > 0 {
-                            if bytes[pos] == b'(' { depth += 1; }
-                            if bytes[pos] == b')' { depth -= 1; }
+                            if bytes[pos] == b'(' {
+                                depth += 1;
+                            }
+                            if bytes[pos] == b')' {
+                                depth -= 1;
+                            }
                             pos += 1;
                         }
                         if depth == 0 {
@@ -6897,7 +8799,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     }
                 }
             }
-            if !changed { break; }
+            if !changed {
+                break;
+            }
         }
     }
 
@@ -6908,11 +8812,17 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     lines.retain(|line| {
         let t = line.trim();
         // XMM zero-init
-        if t.starts_with("XMM") && t.ends_with("= 0;") { return false; }
+        if t.starts_with("XMM") && t.ends_with("= 0;") {
+            return false;
+        }
         // XMM = value >> 96 (SSE partial load — boilerplate)
-        if t.starts_with("XMM") && t.contains(">> 96") && t.ends_with(';') { return false; }
+        if t.starts_with("XMM") && t.contains(">> 96") && t.ends_with(';') {
+            return false;
+        }
         // XMM = value >> 64 (similar SSE partial)
-        if t.starts_with("XMM") && t.contains(">> 64") && t.ends_with(';') { return false; }
+        if t.starts_with("XMM") && t.contains(">> 64") && t.ends_with(';') {
+            return false;
+        }
         true
     });
 
@@ -6944,9 +8854,15 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // Also: "*(param_N) == 4" after __error → "errno == EINTR"
     {
         let errno_names: &[(i64, &str)] = &[
-            (4, "EINTR"), (9, "EBADF"), (12, "ENOMEM"), (13, "EACCES"),
-            (22, "EINVAL"), (35, "EAGAIN"), (36, "EINPROGRESS"),
-            (54, "ECONNRESET"), (61, "ECONNREFUSED"),
+            (4, "EINTR"),
+            (9, "EBADF"),
+            (12, "ENOMEM"),
+            (13, "EACCES"),
+            (22, "EINVAL"),
+            (35, "EAGAIN"),
+            (36, "EINPROGRESS"),
+            (54, "ECONNRESET"),
+            (61, "ECONNREFUSED"),
         ];
         let errno_map: HashMap<i64, &str> = errno_names.iter().copied().collect();
 
@@ -6963,7 +8879,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                             let val_str = next[eq + 3..].trim_end_matches(';').trim();
                             if let Ok(val) = val_str.parse::<i64>() {
                                 let pad = " ".repeat(lines[i].len() - lines[i].trim_start().len());
-                                let name = errno_map.get(&val).map(|s| format!(" /* {} */", s)).unwrap_or_default();
+                                let name = errno_map
+                                    .get(&val)
+                                    .map(|s| format!(" /* {} */", s))
+                                    .unwrap_or_default();
                                 lines[i] = format!("{}errno = {}{};", pad, val, name);
                                 lines.remove(i + 1);
                                 continue;
@@ -7007,8 +8926,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // so they should be auto-named. Only skip them in x86-64 SysV mode.
         let all_text_check = lines.join("");
         let is_arm64 = matches!(ctx.arch, Architecture::AArch64)
-            || all_text_check.contains("x19") || all_text_check.contains("x29");
-        let is_32bit = !is_arm64 && !all_text_check.contains("RSP") && !all_text_check.contains("RBP")
+            || all_text_check.contains("x19")
+            || all_text_check.contains("x29");
+        let is_32bit = !is_arm64
+            && !all_text_check.contains("RSP")
+            && !all_text_check.contains("RBP")
             && !all_text_check.contains("fparam_"); // fparam_ indicates x86-64 SysV float ABI
 
         // AArch64: dynamic skip list — only x0..x(param_count-1) are actual params
@@ -7020,24 +8942,34 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // so count DISTINCT `param_<N>` / DWARF identifiers to get the real count.
         let arm64_skip_owned: Vec<String> = if is_arm64 {
             let mut unique: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-            for p in param_names { unique.insert(p.as_str()); }
+            for p in param_names {
+                unique.insert(p.as_str());
+            }
             let pc = unique.len().min(8);
             let mut v: Vec<String> = Vec::new();
             for i in 0..pc {
                 v.push(format!("x{}", i));
                 v.push(format!("w{}", i));
             }
-            v.extend(["x29", "x30", "sp",
-                      "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7"]
-                     .iter().map(|s| s.to_string()));
+            v.extend(
+                [
+                    "x29", "x30", "sp", "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7",
+                ]
+                .iter()
+                .map(|s| s.to_string()),
+            );
             v
-        } else { Vec::new() };
+        } else {
+            Vec::new()
+        };
         let arm64_skip_refs: Vec<&str> = arm64_skip_owned.iter().map(|s| s.as_str()).collect();
         let skip_regs: &[&str] = if is_arm64 {
             &arm64_skip_refs
         } else if is_32bit {
-            &["RSP", "ESP", "RBP", "EBP", "RIP", "EIP",
-              "XMM0", "XMM1", "XMM2", "XMM3", "XMM4", "XMM5"]
+            &[
+                "RSP", "ESP", "RBP", "EBP", "RIP", "EIP", "XMM0", "XMM1", "XMM2", "XMM3", "XMM4",
+                "XMM5",
+            ]
         } else {
             // x86-64: only skip stack/frame/instruction pointers.
             // Param registers and XMM are NOT skipped — they get auto-named.
@@ -7050,45 +8982,137 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // dynamic skip_regs above) get auto-renamed to lVar/iVar. Params stay
             // in skip_regs so the earlier x0..x(count-1) → param_N pass owns them.
             &[
-                ("x0", "l"), ("x1", "l"), ("x2", "l"), ("x3", "l"),
-                ("x4", "l"), ("x5", "l"), ("x6", "l"), ("x7", "l"),
-                ("w0", "i"), ("w1", "i"), ("w2", "i"), ("w3", "i"),
-                ("w4", "i"), ("w5", "i"), ("w6", "i"), ("w7", "i"),
-                ("x8", "l"), ("x9", "l"), ("x10", "l"), ("x11", "l"),
-                ("x12", "l"), ("x13", "l"), ("x14", "l"), ("x15", "l"),
-                ("x16", "l"), ("x17", "l"), ("x18", "l"),
-                ("x19", "l"), ("x20", "l"), ("x21", "l"), ("x22", "l"),
-                ("x23", "l"), ("x24", "l"), ("x25", "l"), ("x26", "l"),
-                ("x27", "l"), ("x28", "l"),
-                ("w8", "i"), ("w9", "i"), ("w10", "i"), ("w11", "i"),
-                ("w12", "i"), ("w13", "i"), ("w14", "i"), ("w15", "i"),
-                ("w16", "i"), ("w17", "i"), ("w18", "i"),
-                ("w19", "i"), ("w20", "i"), ("w21", "i"), ("w22", "i"),
-                ("w23", "i"), ("w24", "i"), ("w25", "i"),
-                ("w26", "i"), ("w27", "i"), ("w28", "i"),
+                ("x0", "l"),
+                ("x1", "l"),
+                ("x2", "l"),
+                ("x3", "l"),
+                ("x4", "l"),
+                ("x5", "l"),
+                ("x6", "l"),
+                ("x7", "l"),
+                ("w0", "i"),
+                ("w1", "i"),
+                ("w2", "i"),
+                ("w3", "i"),
+                ("w4", "i"),
+                ("w5", "i"),
+                ("w6", "i"),
+                ("w7", "i"),
+                ("x8", "l"),
+                ("x9", "l"),
+                ("x10", "l"),
+                ("x11", "l"),
+                ("x12", "l"),
+                ("x13", "l"),
+                ("x14", "l"),
+                ("x15", "l"),
+                ("x16", "l"),
+                ("x17", "l"),
+                ("x18", "l"),
+                ("x19", "l"),
+                ("x20", "l"),
+                ("x21", "l"),
+                ("x22", "l"),
+                ("x23", "l"),
+                ("x24", "l"),
+                ("x25", "l"),
+                ("x26", "l"),
+                ("x27", "l"),
+                ("x28", "l"),
+                ("w8", "i"),
+                ("w9", "i"),
+                ("w10", "i"),
+                ("w11", "i"),
+                ("w12", "i"),
+                ("w13", "i"),
+                ("w14", "i"),
+                ("w15", "i"),
+                ("w16", "i"),
+                ("w17", "i"),
+                ("w18", "i"),
+                ("w19", "i"),
+                ("w20", "i"),
+                ("w21", "i"),
+                ("w22", "i"),
+                ("w23", "i"),
+                ("w24", "i"),
+                ("w25", "i"),
+                ("w26", "i"),
+                ("w27", "i"),
+                ("w28", "i"),
             ]
         } else {
             &[
-                ("RAX", "l"), ("RBX", "l"), ("R12", "l"), ("R13", "l"),
-                ("R14", "l"), ("R15", "l"), ("R10", "l"), ("R11", "l"),
+                ("RAX", "l"),
+                ("RBX", "l"),
+                ("R12", "l"),
+                ("R13", "l"),
+                ("R14", "l"),
+                ("R15", "l"),
+                ("R10", "l"),
+                ("R11", "l"),
                 // Param registers — renamed when used as intermediates in the body
-                ("RDI", "l"), ("RSI", "l"), ("RDX", "l"), ("RCX", "l"),
-                ("R8", "l"), ("R9", "l"),
-                ("EAX", "i"), ("EBX", "i"), ("ECX", "i"), ("EDX", "i"),
-                ("ESI", "i"), ("EDI", "i"), ("R8D", "i"), ("R9D", "i"),
-                ("R12D", "i"), ("R13D", "i"),
-                ("R14D", "i"), ("R15D", "i"), ("R10D", "i"), ("R11D", "i"),
-                ("AL", "b"), ("BL", "b"), ("AH", "b"), ("BH", "b"),
-                ("DIL", "b"), ("SIL", "b"), ("DL", "b"), ("CL", "b"),
-                ("CH", "b"), ("DH", "b"),
-                ("R8B", "b"), ("R9B", "b"), ("R10B", "b"), ("R11B", "b"),
-                ("R12B", "b"), ("R13B", "b"), ("R14B", "b"), ("R15B", "b"),
-                ("AX", "w"), ("BX", "w"), ("CX", "w"), ("DX", "w"), ("SI", "w"), ("DI", "w"),
+                ("RDI", "l"),
+                ("RSI", "l"),
+                ("RDX", "l"),
+                ("RCX", "l"),
+                ("R8", "l"),
+                ("R9", "l"),
+                ("EAX", "i"),
+                ("EBX", "i"),
+                ("ECX", "i"),
+                ("EDX", "i"),
+                ("ESI", "i"),
+                ("EDI", "i"),
+                ("R8D", "i"),
+                ("R9D", "i"),
+                ("R12D", "i"),
+                ("R13D", "i"),
+                ("R14D", "i"),
+                ("R15D", "i"),
+                ("R10D", "i"),
+                ("R11D", "i"),
+                ("AL", "b"),
+                ("BL", "b"),
+                ("AH", "b"),
+                ("BH", "b"),
+                ("DIL", "b"),
+                ("SIL", "b"),
+                ("DL", "b"),
+                ("CL", "b"),
+                ("CH", "b"),
+                ("DH", "b"),
+                ("R8B", "b"),
+                ("R9B", "b"),
+                ("R10B", "b"),
+                ("R11B", "b"),
+                ("R12B", "b"),
+                ("R13B", "b"),
+                ("R14B", "b"),
+                ("R15B", "b"),
+                ("AX", "w"),
+                ("BX", "w"),
+                ("CX", "w"),
+                ("DX", "w"),
+                ("SI", "w"),
+                ("DI", "w"),
                 // XMM registers → dVar (double/SSE)
-                ("XMM0", "d"), ("XMM1", "d"), ("XMM2", "d"), ("XMM3", "d"),
-                ("XMM4", "d"), ("XMM5", "d"), ("XMM6", "d"), ("XMM7", "d"),
-                ("XMM8", "d"), ("XMM9", "d"), ("XMM10", "d"), ("XMM11", "d"),
-                ("XMM12", "d"), ("XMM13", "d"), ("XMM14", "d"), ("XMM15", "d"),
+                ("XMM0", "d"),
+                ("XMM1", "d"),
+                ("XMM2", "d"),
+                ("XMM3", "d"),
+                ("XMM4", "d"),
+                ("XMM5", "d"),
+                ("XMM6", "d"),
+                ("XMM7", "d"),
+                ("XMM8", "d"),
+                ("XMM9", "d"),
+                ("XMM10", "d"),
+                ("XMM11", "d"),
+                ("XMM12", "d"),
+                ("XMM13", "d"),
+                ("XMM14", "d"),
+                ("XMM15", "d"),
             ]
         };
 
@@ -7098,16 +9122,20 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         let mut counters: HashMap<String, usize> = HashMap::new();
 
         for (reg, prefix) in reg_candidates {
-            if skip_regs.contains(reg) { continue; }
+            if skip_regs.contains(reg) {
+                continue;
+            }
             // Check if this register appears as a standalone word in the output
             // (not inside a string literal or as part of another identifier)
             let appears = all_text.contains(reg) && {
                 // Verify it's not only inside quotes
-                let outside_quotes: String = all_text.split('"')
+                let outside_quotes: String = all_text
+                    .split('"')
                     .enumerate()
                     .filter(|(i, _)| i % 2 == 0) // outside quotes
                     .map(|(_, s)| s)
-                    .collect::<Vec<_>>().join("");
+                    .collect::<Vec<_>>()
+                    .join("");
                 outside_quotes.contains(reg)
             };
 
@@ -7123,7 +9151,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         if !rename_map.is_empty() {
             for line in &mut lines {
                 for (old_reg, new_name) in &rename_map {
-                    if !line.contains(old_reg.as_str()) { continue; }
+                    if !line.contains(old_reg.as_str()) {
+                        continue;
+                    }
                     // Replace as whole-word only (not inside function names or strings)
                     // Use byte-safe whole-word replacement
                     // Split on the register name, check word boundaries at each split point
@@ -7137,9 +9167,15 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         {
                             let before = if pos > 0 { bytes[pos - 1] } else { b' ' };
                             let after_pos = pos + old_bytes.len();
-                            let after = if after_pos < bytes.len() { bytes[after_pos] } else { b' ' };
-                            let is_word = !before.is_ascii_alphanumeric() && before != b'_'
-                                && !after.is_ascii_alphanumeric() && after != b'_';
+                            let after = if after_pos < bytes.len() {
+                                bytes[after_pos]
+                            } else {
+                                b' '
+                            };
+                            let is_word = !before.is_ascii_alphanumeric()
+                                && before != b'_'
+                                && !after.is_ascii_alphanumeric()
+                                && after != b'_';
                             if is_word {
                                 result.push_str(new_name);
                                 pos += old_bytes.len();
@@ -7147,10 +9183,15 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                             }
                         }
                         // Advance by one UTF-8 character
-                        let ch_len = if bytes[pos] < 0x80 { 1 }
-                            else if bytes[pos] < 0xE0 { 2 }
-                            else if bytes[pos] < 0xF0 { 3 }
-                            else { 4 };
+                        let ch_len = if bytes[pos] < 0x80 {
+                            1
+                        } else if bytes[pos] < 0xE0 {
+                            2
+                        } else if bytes[pos] < 0xF0 {
+                            3
+                        } else {
+                            4
+                        };
                         let end = (pos + ch_len).min(bytes.len());
                         if let Ok(s) = std::str::from_utf8(&bytes[pos..end]) {
                             result.push_str(s);
@@ -7188,7 +9229,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     // Collect digits after prefix
                     let digit_start = abs_pos + prefix.len();
                     let mut digit_end = digit_start;
-                    while digit_end < all_text.len() && all_text.as_bytes()[digit_end].is_ascii_digit() {
+                    while digit_end < all_text.len()
+                        && all_text.as_bytes()[digit_end].is_ascii_digit()
+                    {
                         digit_end += 1;
                     }
                     if digit_end > digit_start {
@@ -7219,7 +9262,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 if before_ok {
                     let hex_start = abs_pos + 4; // after "var_"
                     let mut hex_end = hex_start;
-                    while hex_end < all_text.len() && all_text.as_bytes()[hex_end].is_ascii_hexdigit() {
+                    while hex_end < all_text.len()
+                        && all_text.as_bytes()[hex_end].is_ascii_hexdigit()
+                    {
                         hex_end += 1;
                     }
                     if hex_end > hex_start {
@@ -7269,20 +9314,28 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // Sort offsets ascending. For x86-32 EBP frames, locals are at negative
             // offsets: local_4 = EBP-4 (highest addr), local_22c = EBP-0x22c (lowest).
             // Size of each local = gap to next higher offset (or 4 for the topmost).
-            let mut offsets: Vec<(u64, &str)> = stack_vars.iter().filter_map(|vname| {
-                let off_str = vname.strip_prefix("var_")?;
-                let off = u64::from_str_radix(off_str, 16).ok()?;
-                Some((off, off_str))
-            }).collect();
+            let mut offsets: Vec<(u64, &str)> = stack_vars
+                .iter()
+                .filter_map(|vname| {
+                    let off_str = vname.strip_prefix("var_")?;
+                    let off = u64::from_str_radix(off_str, 16).ok()?;
+                    Some((off, off_str))
+                })
+                .collect();
             offsets.sort_by_key(|(off, _)| *off);
 
             // Detect wide string usage: check if any W-suffix Win32 call references
             // a local buffer (heuristic for WCHAR vs char arrays)
-            let uses_wide = all_text.contains("lstrcatW") || all_text.contains("lstrlenW")
-                || all_text.contains("lstrcpyW") || all_text.contains("wsprintfW")
-                || all_text.contains("RegEnumKeyW") || all_text.contains("RegEnumValueW")
-                || all_text.contains("GetModuleFileNameW") || all_text.contains("FindFirstFileW")
-                || all_text.contains("CreateDirectoryW") || all_text.contains("GetTempPathW")
+            let uses_wide = all_text.contains("lstrcatW")
+                || all_text.contains("lstrlenW")
+                || all_text.contains("lstrcpyW")
+                || all_text.contains("wsprintfW")
+                || all_text.contains("RegEnumKeyW")
+                || all_text.contains("RegEnumValueW")
+                || all_text.contains("GetModuleFileNameW")
+                || all_text.contains("FindFirstFileW")
+                || all_text.contains("CreateDirectoryW")
+                || all_text.contains("GetTempPathW")
                 || all_text.contains("SearchPathW");
 
             for i in 0..offsets.len() {
@@ -7349,7 +9402,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // offset divisible by 4 but not 8 → [N/4] (32-bit int array)
     // otherwise keep ->fieldN (likely a real struct field)
     for line in &mut lines {
-        if !line.contains("->field") { continue; }
+        if !line.contains("->field") {
+            continue;
+        }
         let mut result_line = String::new();
         let bytes = line.as_bytes();
         let mut pos = 0;
@@ -7402,8 +9457,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         let bytes = all_text.as_bytes();
         while pos + 4 < bytes.len() {
             // Look for "(0x" pattern
-            if bytes[pos] == b'(' && pos + 3 < bytes.len()
-                && bytes[pos+1] == b'0' && bytes[pos+2] == b'x'
+            if bytes[pos] == b'('
+                && pos + 3 < bytes.len()
+                && bytes[pos + 1] == b'0'
+                && bytes[pos + 2] == b'x'
             {
                 let hex_start = pos + 3;
                 let mut hex_end = hex_start;
@@ -7447,7 +9504,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // Check for digit(s) followed by '['
             if bytes[i].is_ascii_digit() {
                 let digit_start = i;
-                while i < bytes.len() && bytes[i].is_ascii_digit() { i += 1; }
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
                 if i < bytes.len() && bytes[i] == b'[' {
                     // Check word boundary before — must not be preceded by alnum or _
                     let before_ok = digit_start == 0 || {
@@ -7461,8 +9520,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         let mut depth = 1;
                         i += 1;
                         while i < bytes.len() && depth > 0 {
-                            if bytes[i] == b'[' { depth += 1; }
-                            if bytes[i] == b']' { depth -= 1; }
+                            if bytes[i] == b'[' {
+                                depth += 1;
+                            }
+                            if bytes[i] == b']' {
+                                depth -= 1;
+                            }
                             i += 1;
                         }
                         let inner = &line[bracket_start + 1..i - 1];
@@ -7516,8 +9579,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let mut depth = 1i32;
                     while j < lines.len() {
                         let lt = lines[j].trim();
-                        if lt.ends_with('{') { depth += 1; }
-                        if lt == "}" || lt.starts_with("} ") { depth -= 1; }
+                        if lt.ends_with('{') {
+                            depth += 1;
+                        }
+                        if lt == "}" || lt.starts_with("} ") {
+                            depth -= 1;
+                        }
                         if depth == 0 {
                             // Found closing of this case
                             let line_text = lines[j].trim().to_string();
@@ -7540,9 +9607,15 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                                 let mut def_depth = 1i32;
                                 while j < lines.len() {
                                     let dlt = lines[j].trim();
-                                    if dlt.ends_with('{') { def_depth += 1; }
-                                    if dlt == "}" { def_depth -= 1; }
-                                    if def_depth == 0 { break; }
+                                    if dlt.ends_with('{') {
+                                        def_depth += 1;
+                                    }
+                                    if dlt == "}" {
+                                        def_depth -= 1;
+                                    }
+                                    if def_depth == 0 {
+                                        break;
+                                    }
                                     default_lines.push(lines[j].clone());
                                     j += 1;
                                 }
@@ -7560,8 +9633,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         body.push(lines[j].clone());
                         j += 1;
                     }
-                    if j >= lines.len() || !success && depth != 0 { break; }
-                    if success { break; }
+                    if j >= lines.len() || !success && depth != 0 {
+                        break;
+                    }
+                    if success {
+                        break;
+                    }
                 }
 
                 // Only convert if we collected 3+ cases
@@ -7591,7 +9668,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
 
                     // Replace the range
                     let remove_count = end - i + 1;
-                    for _ in 0..remove_count { lines.remove(i); }
+                    for _ in 0..remove_count {
+                        lines.remove(i);
+                    }
                     for (k, nl) in new_lines.into_iter().enumerate() {
                         lines.insert(i + k, nl);
                     }
@@ -7613,8 +9692,13 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let mut has_return = false;
                 for j in (0..i).rev() {
                     let lt = lines[j].trim();
-                    if lt.starts_with("return ") { has_return = true; break; }
-                    if lt == "}" || lt.starts_with("if ") || lt.starts_with("while ") { break; }
+                    if lt.starts_with("return ") {
+                        has_return = true;
+                        break;
+                    }
+                    if lt == "}" || lt.starts_with("if ") || lt.starts_with("while ") {
+                        break;
+                    }
                 }
                 if has_return {
                     // Find the matching closing }
@@ -7623,16 +9707,22 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let mut end = i + 1;
                     while end < lines.len() {
                         let lt = lines[end].trim();
-                        if lt.ends_with('{') { depth += 1; }
-                        if lt == "}" { depth -= 1; }
-                        if depth == 0 { break; }
+                        if lt.ends_with('{') {
+                            depth += 1;
+                        }
+                        if lt == "}" {
+                            depth -= 1;
+                        }
+                        if depth == 0 {
+                            break;
+                        }
                         end += 1;
                     }
                     if end < lines.len() && depth == 0 {
                         // Remove "} else {" and the closing "}"
                         lines.remove(end); // remove closing }
-                        lines.remove(i);   // remove } else {
-                        // Dedent the body lines
+                        lines.remove(i); // remove } else {
+                                         // Dedent the body lines
                         for j in i..end - 1 {
                             if j < lines.len() {
                                 let line = &lines[j];
@@ -7662,8 +9752,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let mut open_indent = current_indent;
                 for j in (0..i).rev() {
                     let lt = lines[j].trim();
-                    if lt == "}" || lt.starts_with("} else") { depth += 1; }
-                    if lt.ends_with('{') && !lt.starts_with("} else") { depth -= 1; }
+                    if lt == "}" || lt.starts_with("} else") {
+                        depth += 1;
+                    }
+                    if lt.ends_with('{') && !lt.starts_with("} else") {
+                        depth -= 1;
+                    }
                     if depth < 0 {
                         open_indent = lines[j].len() - lines[j].trim_start().len();
                         break;
@@ -7684,17 +9778,26 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // spec uses coprocessor encoding), annotate them with their float semantics.
     if matches!(ctx.arch, Architecture::ARM32) {
         for line in &mut lines {
-            if line.contains("//") { continue; }
+            if line.contains("//") {
+                continue;
+            }
             let has_cdp_p11 = line.contains("cdp") && line.contains("p11");
             let has_ldcl_p11 = line.contains("ldcl") && line.contains("p11");
             let has_mcrr_p11 = line.contains("mcrr") && line.contains("p11");
-            let has_mcr_p11 = line.contains("mcr") && line.contains("p11") && !line.contains("mcrr");
+            let has_mcr_p11 =
+                line.contains("mcr") && line.contains("p11") && !line.contains("mcrr");
             if has_cdp_p11 {
-                let annotation = if line.contains("0x2") { "VMUL.F64 (float multiply)" }
-                    else if line.contains("0x3") { "VADD.F64 (float add)" }
-                    else if line.contains("0x4") { "VDIV.F64 (float divide)" }
-                    else if line.contains("0x1") { "VNMUL.F64 (float negate-multiply)" }
-                    else { "VFP float op" };
+                let annotation = if line.contains("0x2") {
+                    "VMUL.F64 (float multiply)"
+                } else if line.contains("0x3") {
+                    "VADD.F64 (float add)"
+                } else if line.contains("0x4") {
+                    "VDIV.F64 (float divide)"
+                } else if line.contains("0x1") {
+                    "VNMUL.F64 (float negate-multiply)"
+                } else {
+                    "VFP float op"
+                };
                 *line = format!("{} // {}", line.trim_end(), annotation);
             } else if has_ldcl_p11 {
                 *line = format!("{} // VLDR (float load)", line.trim_end());
@@ -7708,7 +9811,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
 
     // #CONST_CASTS: Add type casts to large hex constants in comparisons and assignments.
     for line in &mut lines {
-        if line.contains("//") { continue; }
+        if line.contains("//") {
+            continue;
+        }
         let t = line.trim();
         // Cast large 64-bit hex constants as (long) — these are addresses or large values
         // Pattern: == 0xNNNNNNNNNNNNNNNN or != 0x... (16+ hex digits)
@@ -7716,8 +9821,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             if let Some(pos) = t.find(op) {
                 let after = &t[pos + op.len()..];
                 if after.starts_with("0x") {
-                    let hex_end = after[2..].find(|c: char| !c.is_ascii_hexdigit())
-                        .map(|e| e + 2).unwrap_or(after.len());
+                    let hex_end = after[2..]
+                        .find(|c: char| !c.is_ascii_hexdigit())
+                        .map(|e| e + 2)
+                        .unwrap_or(after.len());
                     let hex_len = hex_end - 2;
                     if hex_len >= 9 && !after[..hex_end].starts_with("0x0") {
                         // 64-bit constant: add (long) cast
@@ -7732,8 +9839,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         // 32-bit constant: add (DWORD) cast for common patterns
                         let val_str = &after[..hex_end];
                         // Only cast known magic values or large constants
-                        if val_str.starts_with("0x8000") || val_str.starts_with("0xC000")
-                            || val_str.starts_with("0xe") || val_str.starts_with("0xF")
+                        if val_str.starts_with("0x8000")
+                            || val_str.starts_with("0xC000")
+                            || val_str.starts_with("0xe")
+                            || val_str.starts_with("0xF")
                             || hex_len >= 7
                         {
                             let old = format!("{}{}", op, val_str);
@@ -7757,9 +9866,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         if t.starts_with("return ") && t.ends_with(';') && t.contains("func_") && !t.contains('(') {
             // return lVar; — if lVar is a long but function is int, cast
             // Simple heuristic: if the return expression is a long variable, add (int) cast
-            let expr = &t[7..t.len()-1]; // strip "return " and ";"
+            let expr = &t[7..t.len() - 1]; // strip "return " and ";"
             if expr.starts_with("lVar") && !expr.contains('(') {
-                *line = line.replace(&format!("return {};", expr), &format!("return (int){};", expr));
+                *line = line.replace(
+                    &format!("return {};", expr),
+                    &format!("return (int){};", expr),
+                );
             }
         }
     }
@@ -7783,26 +9895,49 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let mut search_from = 0usize;
             loop {
                 let remaining = &line[search_from..];
-                let Some(rel_start) = remaining.find("param_") else { break };
+                let Some(rel_start) = remaining.find("param_") else {
+                    break;
+                };
                 let start = search_from + rel_start;
                 let after_param = &line[start..];
-                let Some(bracket_rel) = after_param.find("[RSP") else { search_from = start + 6; continue; };
+                let Some(bracket_rel) = after_param.find("[RSP") else {
+                    search_from = start + 6;
+                    continue;
+                };
                 let abs_bracket = start + bracket_rel;
                 let idx_str = &line[start + 6..abs_bracket];
-                let Ok(offset) = idx_str.parse::<u64>() else { search_from = start + 6; continue; };
-                if offset < 8 { search_from = start + 6; continue; }
+                let Ok(offset) = idx_str.parse::<u64>() else {
+                    search_from = start + 6;
+                    continue;
+                };
+                if offset < 8 {
+                    search_from = start + 6;
+                    continue;
+                }
                 let mut depth = 1;
                 let mut pos = abs_bracket + 1;
                 let bytes = line.as_bytes();
                 while pos < bytes.len() && depth > 0 {
-                    if bytes[pos] == b'[' { depth += 1; }
-                    if bytes[pos] == b']' { depth -= 1; }
+                    if bytes[pos] == b'[' {
+                        depth += 1;
+                    }
+                    if bytes[pos] == b']' {
+                        depth -= 1;
+                    }
                     pos += 1;
                 }
-                if depth != 0 { search_from = start + 6; continue; }
+                if depth != 0 {
+                    search_from = start + 6;
+                    continue;
+                }
                 let abs_close = pos - 1;
                 let replacement = format!("local_{:x}", offset);
-                *line = format!("{}{}{}", &line[..start], replacement, &line[abs_close + 1..]);
+                *line = format!(
+                    "{}{}{}",
+                    &line[..start],
+                    replacement,
+                    &line[abs_close + 1..]
+                );
             }
         }
 
@@ -7810,11 +9945,18 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         for line in &mut lines {
             while let Some(pos) = line.find("RBP + ") {
                 let after = &line[pos + 6..];
-                let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+                let end = after
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(after.len());
                 if end > 0 {
                     if let Ok(offset) = after[..end].parse::<u64>() {
                         if offset > 0 {
-                            *line = format!("{}local_{:x}{}", &line[..pos], offset, &line[pos + 6 + end..]);
+                            *line = format!(
+                                "{}local_{:x}{}",
+                                &line[..pos],
+                                offset,
+                                &line[pos + 6 + end..]
+                            );
                             continue;
                         }
                     }
@@ -7827,11 +9969,19 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         for line in &mut lines {
             while let Some(pos) = line.find(" + RSP") {
                 let before = &line[..pos];
-                let num_start = before.rfind(|c: char| !c.is_ascii_digit()).map(|p| p + 1).unwrap_or(0);
+                let num_start = before
+                    .rfind(|c: char| !c.is_ascii_digit())
+                    .map(|p| p + 1)
+                    .unwrap_or(0);
                 if num_start < pos {
                     if let Ok(offset) = line[num_start..pos].parse::<u64>() {
                         if offset > 0 && offset < 0x10000 {
-                            *line = format!("{}local_{:x}{}", &line[..num_start], offset, &line[pos + 6..]);
+                            *line = format!(
+                                "{}local_{:x}{}",
+                                &line[..num_start],
+                                offset,
+                                &line[pos + 6..]
+                            );
                             continue;
                         }
                     }
@@ -7844,7 +9994,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         for line in &mut lines {
             for prefix in ["*(param_", "*(lVar", "*(iVar"] {
                 while let Some(start) = line.find(prefix) {
-                    if start > 0 && line.as_bytes()[start - 1] == b'(' { break; }
+                    if start > 0 && line.as_bytes()[start - 1] == b'(' {
+                        break;
+                    }
                     let inner_start = start + 2;
                     if let Some(close) = line[inner_start..].find(')') {
                         let inner = line[inner_start..inner_start + close].to_string();
@@ -7865,39 +10017,59 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         let has_bare_rbp = lines.iter().any(|l| {
             let t = l.trim();
             // Only rename if RBP appears as a value, not in local_XX patterns
-            t.contains("RBP") && !t.contains("RBP + ") && !t.contains("RBP -")
-                && !t.starts_with("-local_") && !t.starts_with("local_")
+            t.contains("RBP")
+                && !t.contains("RBP + ")
+                && !t.contains("RBP -")
+                && !t.starts_with("-local_")
+                && !t.starts_with("local_")
         });
         if has_bare_rbp {
             // Find the next available lVar index
-            let max_lvar = lines.iter().filter_map(|l| {
-                let mut max = 0usize;
-                let mut pos = 0;
-                while let Some(idx) = l[pos..].find("lVar") {
-                    let start = pos + idx + 4;
-                    let end = l[start..].find(|c: char| !c.is_ascii_digit()).map(|e| start + e).unwrap_or(l.len());
-                    if end > start {
-                        if let Ok(n) = l[start..end].parse::<usize>() {
-                            if n > max { max = n; }
+            let max_lvar = lines
+                .iter()
+                .filter_map(|l| {
+                    let mut max = 0usize;
+                    let mut pos = 0;
+                    while let Some(idx) = l[pos..].find("lVar") {
+                        let start = pos + idx + 4;
+                        let end = l[start..]
+                            .find(|c: char| !c.is_ascii_digit())
+                            .map(|e| start + e)
+                            .unwrap_or(l.len());
+                        if end > start {
+                            if let Ok(n) = l[start..end].parse::<usize>() {
+                                if n > max {
+                                    max = n;
+                                }
+                            }
                         }
+                        pos = end;
                     }
-                    pos = end;
-                }
-                if max > 0 { Some(max) } else { None }
-            }).max().unwrap_or(0);
+                    if max > 0 {
+                        Some(max)
+                    } else {
+                        None
+                    }
+                })
+                .max()
+                .unwrap_or(0);
             let rbp_var = format!("lVar{}", max_lvar + 1);
             let ebp_var = format!("iVar{}", max_lvar + 1);
             for line in &mut lines {
                 // Don't rename in callee-saved spill lines (already handled by elision)
-                if line.trim().starts_with("-local_") { continue; }
+                if line.trim().starts_with("-local_") {
+                    continue;
+                }
                 // Replace bare RBP (word boundary: not preceded/followed by alphanumeric)
                 let mut result_line = String::new();
                 let mut remaining = line.as_str();
                 while let Some(pos) = remaining.find("RBP") {
                     // Check word boundaries
-                    let before_ok = pos == 0 || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric();
+                    let before_ok =
+                        pos == 0 || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric();
                     let after_pos = pos + 3;
-                    let after_ok = after_pos >= remaining.len() || !remaining.as_bytes()[after_pos].is_ascii_alphanumeric();
+                    let after_ok = after_pos >= remaining.len()
+                        || !remaining.as_bytes()[after_pos].is_ascii_alphanumeric();
                     if before_ok && after_ok {
                         // Don't rename RBP + N (frame pointer offset) — should already be converted
                         let after = &remaining[after_pos..];
@@ -7921,13 +10093,17 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             }
             // Same for EBP
             for line in &mut lines {
-                if line.trim().starts_with("-local_") { continue; }
+                if line.trim().starts_with("-local_") {
+                    continue;
+                }
                 let mut result_line = String::new();
                 let mut remaining = line.as_str();
                 while let Some(pos) = remaining.find("EBP") {
-                    let before_ok = pos == 0 || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric();
+                    let before_ok =
+                        pos == 0 || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric();
                     let after_pos = pos + 3;
-                    let after_ok = after_pos >= remaining.len() || !remaining.as_bytes()[after_pos].is_ascii_alphanumeric();
+                    let after_ok = after_pos >= remaining.len()
+                        || !remaining.as_bytes()[after_pos].is_ascii_alphanumeric();
                     if before_ok && after_ok {
                         result_line.push_str(&remaining[..pos]);
                         result_line.push_str(&ebp_var);
@@ -7958,18 +10134,23 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let mut depth = 1;
                 while end < lines.len() && depth > 0 {
                     let et = lines[end].trim();
-                    if et.ends_with('{') { depth += 1; }
-                    if et == "}" { depth -= 1; }
+                    if et.ends_with('{') {
+                        depth += 1;
+                    }
+                    if et == "}" {
+                        depth -= 1;
+                    }
                     end += 1;
                 }
                 // Check that the body only contains pc/goto/trap — no real logic
                 let body_is_trap = (i + 1..end).all(|j| {
                     let jt = lines[j].trim();
-                    jt.starts_with("pc =") || jt.starts_with("goto ") || jt == "}"
-                        || jt.is_empty()
+                    jt.starts_with("pc =") || jt.starts_with("goto ") || jt == "}" || jt.is_empty()
                 });
                 if body_is_trap {
-                    for _ in i..end { lines.remove(i); }
+                    for _ in i..end {
+                        lines.remove(i);
+                    }
                     continue;
                 }
             }
@@ -7996,8 +10177,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             return false;
         }
         // return sp... patterns (epilogue return address), including *(sp) variant
-        if (t.starts_with("return sp") || t.starts_with("return *(sp)")) && t.ends_with(';')
-            && !t.contains("func_") && !t.contains("param_")
+        if (t.starts_with("return sp") || t.starts_with("return *(sp)"))
+            && t.ends_with(';')
+            && !t.contains("func_")
+            && !t.contains("param_")
         {
             return false;
         }
@@ -8017,7 +10200,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // go through named locals or DAT_/string labels.
     {
         let looks_like_adrp_line = |t: &str| -> bool {
-            if !t.ends_with(';') { return false; }
+            if !t.ends_with(';') {
+                return false;
+            }
             let core = t.trim_end_matches(';');
             let (lhs, rhs) = match core.split_once(" = ") {
                 Some(pair) => pair,
@@ -8032,16 +10217,24 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 && lhs.len() >= 2
                 && lhs[1..].chars().all(|c| c.is_ascii_digit())
                 && lhs[1..].parse::<u32>().map(|n| n <= 30).unwrap_or(false);
-            let is_param_alias = lhs.starts_with("param_")
-                && lhs[6..].chars().all(|c| c.is_ascii_digit());
+            let is_param_alias =
+                lhs.starts_with("param_") && lhs[6..].chars().all(|c| c.is_ascii_digit());
             let is_local_alias = (lhs.starts_with("lVar") || lhs.starts_with("iVar"))
                 && lhs[4..].chars().all(|c| c.is_ascii_alphanumeric());
-            if !(is_xreg || is_param_alias || is_local_alias) { return false; }
+            if !(is_xreg || is_param_alias || is_local_alias) {
+                return false;
+            }
             // RHS must be `0xHEX` ending in `000` (page-aligned, at least 0x1000)
-            if !rhs.starts_with("0x") { return false; }
+            if !rhs.starts_with("0x") {
+                return false;
+            }
             let hex = &rhs[2..];
-            if hex.len() < 4 { return false; } // at least 0x1000
-            if !hex.chars().all(|c| c.is_ascii_hexdigit()) { return false; }
+            if hex.len() < 4 {
+                return false;
+            } // at least 0x1000
+            if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return false;
+            }
             hex.ends_with("000")
         };
         lines.retain(|line| !looks_like_adrp_line(line.trim()));
@@ -8060,7 +10253,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // or if there's a loop boundary between them
             let indent1 = lines[i].len() - lines[i].trim_start().len();
             let indent2 = lines[i + 1].len() - lines[i + 1].trim_start().len();
-            if indent2 > indent1 { i += 1; continue; }
+            if indent2 > indent1 {
+                i += 1;
+                continue;
+            }
             if let (Some(eq1), Some(eq2)) = (l1.find(" = "), l2.find(" = ")) {
                 let lhs1 = &l1[..eq1];
                 let rhs1 = l1[eq1 + 3..].trim_end_matches(';');
@@ -8116,11 +10312,17 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let mut last_stmt_idx = None;
             for k in (j + 1)..lines.len() {
                 let t = lines[k].trim();
-                if t.ends_with("{") { depth += 1; continue; }
+                if t.ends_with("{") {
+                    depth += 1;
+                    continue;
+                }
                 if t == "}" {
                     let ci = lines[k].len() - lines[k].trim_start().len();
                     depth -= 1;
-                    if depth == 0 && ci == open_indent { close_idx = Some(k); break; }
+                    if depth == 0 && ci == open_indent {
+                        close_idx = Some(k);
+                        break;
+                    }
                     continue;
                 }
                 if depth == 1 && !t.is_empty() {
@@ -8129,7 +10331,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             }
             let (close, last_stmt) = match (close_idx, last_stmt_idx) {
                 (Some(c), Some(l)) => (c, l),
-                _ => { j += 1; continue; }
+                _ => {
+                    j += 1;
+                    continue;
+                }
             };
             // Parse INCREMENT: `var++;` or `var += N;` or `var = var + N;`
             let inc_text = lines[last_stmt].trim().trim_end_matches(';').trim();
@@ -8139,14 +10344,26 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 Some(v.trim().to_string())
             } else if let Some((lhs, rhs)) = inc_text.split_once(" += ") {
                 let lhs = lhs.trim();
-                if rhs.trim().chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == 'x') {
+                if rhs
+                    .trim()
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == 'x')
+                {
                     Some(lhs.to_string())
-                } else { None }
+                } else {
+                    None
+                }
             } else if let Some((lhs, rhs)) = inc_text.split_once(" -= ") {
                 let lhs = lhs.trim();
-                if rhs.trim().chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == 'x') {
+                if rhs
+                    .trim()
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == 'x')
+                {
                     Some(lhs.to_string())
-                } else { None }
+                } else {
+                    None
+                }
             } else if let Some((lhs, rhs)) = inc_text.split_once(" = ") {
                 let lhs = lhs.trim();
                 let rhs = rhs.trim();
@@ -8154,14 +10371,23 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     || rhs.starts_with(&format!("{} - ", lhs))
                 {
                     Some(lhs.to_string())
-                } else { None }
+                } else {
+                    None
+                }
             } else {
                 None
             };
             let inc_var = match inc_var {
-                Some(v) if !v.is_empty()
-                    && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => v,
-                _ => { j += 1; continue; }
+                Some(v)
+                    if !v.is_empty()
+                        && v.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') =>
+                {
+                    v
+                }
+                _ => {
+                    j += 1;
+                    continue;
+                }
             };
             // The while cond must reference inc_var.
             let cond_start = wt.find('(').unwrap() + 1;
@@ -8182,23 +10408,34 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         let rhs_ok = after >= bytes.len()
                             || !matches!(bytes[after],
                                 b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
-                        if lhs_ok && rhs_ok { found = true; break; }
+                        if lhs_ok && rhs_ok {
+                            found = true;
+                            break;
+                        }
                     }
                     p += 1;
                 }
                 found
             };
-            if !var_re { j += 1; continue; }
+            if !var_re {
+                j += 1;
+                continue;
+            }
             // Find INIT line directly before the while: `IDENT = ...;` at
             // outer indent that assigns inc_var. Scan backward up to 5
             // lines; allow intervening lines that don't reference inc_var.
-            if j == 0 { j += 1; continue; }
+            if j == 0 {
+                j += 1;
+                continue;
+            }
             let mut init_idx: Option<usize> = None;
             let lo = j.saturating_sub(5);
             for k in (lo..j).rev() {
                 let line_k = lines[k].trim();
                 // Stop if we cross a block boundary.
-                if line_k.ends_with("{") || line_k == "}" { break; }
+                if line_k.ends_with("{") || line_k == "}" {
+                    break;
+                }
                 if line_k.starts_with(&format!("{} = ", inc_var)) && line_k.ends_with(';') {
                     init_idx = Some(k);
                     break;
@@ -8211,19 +10448,30 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     break;
                 }
             }
-            let init_idx = match init_idx { Some(i) => i, None => { j += 1; continue; } };
+            let init_idx = match init_idx {
+                Some(i) => i,
+                None => {
+                    j += 1;
+                    continue;
+                }
+            };
             let init_line = lines[init_idx].trim();
             let init_str = init_line.trim_end_matches(';').to_string();
 
             // Build the for-loop. Drop init line, replace while with for,
             // drop the trailing increment statement.
             let pad = " ".repeat(open_indent);
-            let new_for = format!("{}for ({}; {}; {}) {{",
-                pad, init_str, cond_str.trim(), inc_text.trim());
+            let new_for = format!(
+                "{}for ({}; {}; {}) {{",
+                pad,
+                init_str,
+                cond_str.trim(),
+                inc_text.trim()
+            );
             lines[j] = new_for;
-            lines.remove(last_stmt);   // drop increment
-            lines.remove(init_idx);    // drop init (j shifts -1)
-            // Skip past converted block; close index shifted -1 too.
+            lines.remove(last_stmt); // drop increment
+            lines.remove(init_idx); // drop init (j shifts -1)
+                                    // Skip past converted block; close index shifted -1 too.
             j = close.saturating_sub(1);
         }
     }
@@ -8238,9 +10486,16 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // The increment is after the last ";"
             if let Some(last_semi) = t.rfind("; ") {
                 let increment = t[last_semi + 2..]
-                    .trim_end_matches('{').trim().trim_end_matches(')').trim();
+                    .trim_end_matches('{')
+                    .trim()
+                    .trim_end_matches(')')
+                    .trim();
                 let loop_var = increment.trim_end_matches("++").trim();
-                if !loop_var.is_empty() && loop_var.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                if !loop_var.is_empty()
+                    && loop_var
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
                     // Replace "for (; " with "for (loop_var = 0; "
                     let indent = line.len() - line.trim_start().len();
                     let pad = " ".repeat(indent);
@@ -8264,8 +10519,13 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let expr = t[eq_pos + 3..].trim_end_matches(';');
                 // Only substitute for simple variable names (not registers, not complex LHS)
                 let is_simple_var = !var_name.is_empty()
-                    && var_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                    && var_name.chars().next().map_or(false, |c| c.is_ascii_lowercase())
+                    && var_name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    && var_name
+                        .chars()
+                        .next()
+                        .map_or(false, |c| c.is_ascii_lowercase())
                     && !var_name.starts_with("if ")
                     && !var_name.starts_with("while ")
                     && !var_name.starts_with("return ");
@@ -8293,7 +10553,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     continue;
                 }
                 // Only substitute in conditions and array accesses, not assignments
-                if t.starts_with(&format!("{} = ", var_name)) { continue; } // skip self-assign
+                if t.starts_with(&format!("{} = ", var_name)) {
+                    continue;
+                } // skip self-assign
                 if line.contains(expr.as_str()) {
                     *line = line.replace(expr.as_str(), var_name);
                 }
@@ -8320,7 +10582,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     || all_text.contains(&format!("{} += 1", var));
                 if is_counter && counter_idx < counter_names.len() {
                     // Don't rename if already used elsewhere with a meaningful role
-                    if !renames.iter().any(|(_, to)| to == counter_names[counter_idx]) {
+                    if !renames
+                        .iter()
+                        .any(|(_, to)| to == counter_names[counter_idx])
+                    {
                         renames.push((var, counter_names[counter_idx].to_string()));
                         counter_idx += 1;
                     }
@@ -8331,17 +10596,19 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // Apply renames with word-boundary matching
         for (from, to) in &renames {
             for line in &mut lines {
-                if !line.contains(from) { continue; }
+                if !line.contains(from) {
+                    continue;
+                }
                 let mut new_line = String::new();
                 let mut remaining = line.as_str();
                 while let Some(pos) = remaining.find(from.as_str()) {
                     let before_ok = pos == 0
                         || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric()
-                        && remaining.as_bytes()[pos - 1] != b'_';
+                            && remaining.as_bytes()[pos - 1] != b'_';
                     let after_pos = pos + from.len();
                     let after_ok = after_pos >= remaining.len()
                         || !remaining.as_bytes()[after_pos].is_ascii_alphanumeric()
-                        && remaining.as_bytes()[after_pos] != b'_';
+                            && remaining.as_bytes()[after_pos] != b'_';
                     if before_ok && after_ok {
                         new_line.push_str(&remaining[..pos]);
                         new_line.push_str(to);
@@ -8367,7 +10634,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             || (lines.iter().any(|l| {
                 let t = l.trim();
                 t.contains("x0 ") || t.contains("x19") || t.contains("x29") || t.contains("x30")
-            }) && !lines.iter().any(|l| l.contains("RAX") || l.contains("RBP") || l.contains("ESP")));
+            }) && !lines
+                .iter()
+                .any(|l| l.contains("RAX") || l.contains("RBP") || l.contains("ESP")));
 
         if is_aarch64 {
             for line in &mut lines {
@@ -8400,13 +10669,15 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     for prefix in &['x', 'w'] {
                         let reg = format!("{}{}", prefix, reg_idx);
                         let param = distinct_param_names[reg_idx as usize].clone();
-                        if !line.contains(&reg) { continue; }
+                        if !line.contains(&reg) {
+                            continue;
+                        }
                         let mut new_line = String::new();
                         let mut remaining = line.as_str();
                         while let Some(pos) = remaining.find(&reg) {
                             let before_ok = pos == 0
                                 || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric()
-                                && remaining.as_bytes()[pos - 1] != b'_';
+                                    && remaining.as_bytes()[pos - 1] != b'_';
                             let after_pos = pos + reg.len();
                             let after_ok = after_pos >= remaining.len()
                                 || (!remaining.as_bytes()[after_pos].is_ascii_alphanumeric()
@@ -8440,7 +10711,6 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     }
                 }
             }
-
         }
     }
 
@@ -8449,7 +10719,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // Go binaries where SSA emits `param_-IDENT` because the leading
     // token is an empty-suffix `param_`. Patch both shapes.
     for line in &mut lines {
-        if !line.contains("param_-") { continue; }
+        if !line.contains("param_-") {
+            continue;
+        }
         let mut new = line.clone();
         for n in (1..=256).rev() {
             let pat = format!("param_-{}", n);
@@ -8483,15 +10755,24 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     {
         fn parse_num(s: &str) -> Option<i64> {
             let s = s.trim();
-            if let Some(h) = s.strip_prefix("0x") { i64::from_str_radix(h, 16).ok() }
-            else if let Some(h) = s.strip_prefix("0X") { i64::from_str_radix(h, 16).ok() }
-            else { s.parse::<i64>().ok() }
+            if let Some(h) = s.strip_prefix("0x") {
+                i64::from_str_radix(h, 16).ok()
+            } else if let Some(h) = s.strip_prefix("0X") {
+                i64::from_str_radix(h, 16).ok()
+            } else {
+                s.parse::<i64>().ok()
+            }
         }
         fn fmt_num(n: i64) -> String {
-            if n >= 0 && n < 16 { format!("{}", n) }
-            else if n >= 0 { format!("0x{:x}", n) }
-            else if n > -16 { format!("{}", n) }
-            else { format!("-0x{:x}", -n) }
+            if n >= 0 && n < 16 {
+                format!("{}", n)
+            } else if n >= 0 {
+                format!("0x{:x}", n)
+            } else if n > -16 {
+                format!("{}", n)
+            } else {
+                format!("-0x{:x}", -n)
+            }
         }
         // Scan for ` OP C1 OP C2` where OP is + or -, C1/C2 are numeric literals.
         // Returns (start, end, replacement) for the combined constant pair found.
@@ -8501,27 +10782,44 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // Find any " + " or " - " followed by a number
             let mut i = 0;
             while i + 3 < bytes.len() {
-                let is_plus = bytes[i] == b' ' && bytes[i+1] == b'+' && bytes[i+2] == b' ';
-                let is_minus = bytes[i] == b' ' && bytes[i+1] == b'-' && bytes[i+2] == b' ';
-                if !(is_plus || is_minus) { i += 1; continue; }
+                let is_plus = bytes[i] == b' ' && bytes[i + 1] == b'+' && bytes[i + 2] == b' ';
+                let is_minus = bytes[i] == b' ' && bytes[i + 1] == b'-' && bytes[i + 2] == b' ';
+                if !(is_plus || is_minus) {
+                    i += 1;
+                    continue;
+                }
                 let sign1 = if is_plus { 1 } else { -1 };
                 let num1_start = i + 3;
                 // Match number (decimal or 0xHEX)
                 let (num1_end, num1_val) = match parse_leading_num(&line[num1_start..]) {
                     Some(x) => (num1_start + x.0, x.1),
-                    None => { i += 1; continue; }
+                    None => {
+                        i += 1;
+                        continue;
+                    }
                 };
                 // Require a following " + " or " - " immediately
-                if num1_end + 3 > bytes.len() { i += 1; continue; }
+                if num1_end + 3 > bytes.len() {
+                    i += 1;
+                    continue;
+                }
                 let after = &bytes[num1_end..];
-                let is_plus2 = after.len() >= 3 && after[0] == b' ' && after[1] == b'+' && after[2] == b' ';
-                let is_minus2 = after.len() >= 3 && after[0] == b' ' && after[1] == b'-' && after[2] == b' ';
-                if !(is_plus2 || is_minus2) { i += 1; continue; }
+                let is_plus2 =
+                    after.len() >= 3 && after[0] == b' ' && after[1] == b'+' && after[2] == b' ';
+                let is_minus2 =
+                    after.len() >= 3 && after[0] == b' ' && after[1] == b'-' && after[2] == b' ';
+                if !(is_plus2 || is_minus2) {
+                    i += 1;
+                    continue;
+                }
                 let sign2 = if is_plus2 { 1 } else { -1 };
                 let num2_start = num1_end + 3;
                 let (num2_end, num2_val) = match parse_leading_num(&line[num2_start..]) {
                     Some(x) => (num2_start + x.0, x.1),
-                    None => { i += 1; continue; }
+                    None => {
+                        i += 1;
+                        continue;
+                    }
                 };
                 let total = sign1 * num1_val + sign2 * num2_val;
                 let replacement = if total >= 0 {
@@ -8535,21 +10833,34 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
         fn parse_leading_num(s: &str) -> Option<(usize, i64)> {
             let bytes = s.as_bytes();
-            if bytes.is_empty() { return None; }
+            if bytes.is_empty() {
+                return None;
+            }
             let neg = bytes[0] == b'-';
             let start = if neg { 1 } else { 0 };
-            if start >= bytes.len() { return None; }
-            let is_hex = start + 1 < bytes.len() && bytes[start] == b'0'
+            if start >= bytes.len() {
+                return None;
+            }
+            let is_hex = start + 1 < bytes.len()
+                && bytes[start] == b'0'
                 && (bytes[start + 1] == b'x' || bytes[start + 1] == b'X');
             let num_start = if is_hex { start + 2 } else { start };
             let mut end = num_start;
             while end < bytes.len() {
                 let c = bytes[end];
-                let ok = if is_hex { c.is_ascii_hexdigit() } else { c.is_ascii_digit() };
-                if !ok { break; }
+                let ok = if is_hex {
+                    c.is_ascii_hexdigit()
+                } else {
+                    c.is_ascii_digit()
+                };
+                if !ok {
+                    break;
+                }
                 end += 1;
             }
-            if end == num_start { return None; }
+            if end == num_start {
+                return None;
+            }
             let digits = &s[num_start..end];
             let v = if is_hex {
                 i64::from_str_radix(digits, 16).ok()?
@@ -8570,7 +10881,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     changed = true;
                 }
             }
-            if !changed { break; }
+            if !changed {
+                break;
+            }
         }
         // Silence unused warnings if compiler complains
         let _ = parse_num;
@@ -8587,8 +10900,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // simple identifier (no `->`, `*`, `[`) to avoid dropping a real store.
     {
         let is_simple_lhs = |lhs: &str| -> bool {
-            !lhs.contains("->") && !lhs.contains('*') && !lhs.contains('[')
-                && !lhs.contains('.') && !lhs.contains('(')
+            !lhs.contains("->")
+                && !lhs.contains('*')
+                && !lhs.contains('[')
+                && !lhs.contains('.')
+                && !lhs.contains('(')
                 && !lhs.is_empty()
         };
         let line_reads = |line: &str, sym: &str| -> bool {
@@ -8602,9 +10918,15 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             while let Some(p) = s.find(sym) {
                 let before = if p == 0 { b' ' } else { s.as_bytes()[p - 1] };
                 let after_pos = p + sym.len();
-                let after = if after_pos < s.len() { s.as_bytes()[after_pos] } else { b' ' };
-                if !before.is_ascii_alphanumeric() && before != b'_'
-                    && !after.is_ascii_alphanumeric() && after != b'_'
+                let after = if after_pos < s.len() {
+                    s.as_bytes()[after_pos]
+                } else {
+                    b' '
+                };
+                if !before.is_ascii_alphanumeric()
+                    && before != b'_'
+                    && !after.is_ascii_alphanumeric()
+                    && after != b'_'
                 {
                     return true;
                 }
@@ -8622,11 +10944,17 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             }
             let (lhs1, rhs1) = match t1.trim_end_matches(';').split_once(" = ") {
                 Some(p) => p,
-                None => { i += 1; continue; }
+                None => {
+                    i += 1;
+                    continue;
+                }
             };
             let (lhs2, _rhs2) = match t2.trim_end_matches(';').split_once(" = ") {
                 Some(p) => p,
-                None => { i += 1; continue; }
+                None => {
+                    i += 1;
+                    continue;
+                }
             };
             let lhs1 = lhs1.trim();
             let lhs2 = lhs2.trim();
@@ -8659,18 +10987,26 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     for line in lines.iter_mut() {
         let mut search_from = 0usize;
         loop {
-            let Some(star_rel) = line[search_from..].find("*(uint") else { break };
+            let Some(star_rel) = line[search_from..].find("*(uint") else {
+                break;
+            };
             let star_pos = search_from + star_rel;
-            let Some(close_rel) = line[star_pos..].find("*)(") else { break };
+            let Some(close_rel) = line[star_pos..].find("*)(") else {
+                break;
+            };
             let paren_open = star_pos + close_rel + 2;
             // Find matching close paren for the (BASE + OFFSET) group.
             let mut depth = 0i32;
             let mut close: Option<usize> = None;
             for (i, b) in line[paren_open..].bytes().enumerate() {
-                if b == b'(' { depth += 1; }
-                else if b == b')' {
+                if b == b'(' {
+                    depth += 1;
+                } else if b == b')' {
                     depth -= 1;
-                    if depth == 0 { close = Some(paren_open + i); break; }
+                    if depth == 0 {
+                        close = Some(paren_open + i);
+                        break;
+                    }
                 }
             }
             let Some(close) = close else { break };
@@ -8685,14 +11021,19 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let offset = parts[1].trim();
             // Base must be a simple identifier.
             let base_ok = !base.is_empty()
-                && base.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+                && base
+                    .chars()
+                    .next()
+                    .map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
                 && base.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
             // Offset must parse as hex/decimal.
             let off_val: Option<u64> = if let Some(h) = offset.strip_prefix("0x") {
                 u64::from_str_radix(h, 16).ok()
             } else if offset.chars().all(|c| c.is_ascii_digit()) {
                 offset.parse::<u64>().ok()
-            } else { None };
+            } else {
+                None
+            };
             if !base_ok || off_val.is_none() {
                 search_from = close + 1;
                 continue;
@@ -8723,7 +11064,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // byte before `(` is an identifier char or `]`. Dropping there
             // produces `freelocal_0` from `free(local_0)`, `func_X(local_0)`
             // → `func_Xlocal_0`, etc.
-            let prev = if open == 0 { b' ' } else { line.as_bytes()[open - 1] };
+            let prev = if open == 0 {
+                b' '
+            } else {
+                line.as_bytes()[open - 1]
+            };
             if prev.is_ascii_alphanumeric() || prev == b'_' || prev == b']' {
                 search_from = open + 1;
                 continue;
@@ -8731,18 +11076,25 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let inner_start = open + 1;
             let name_end = inner_start + "local_".len();
             let after = &line[name_end..];
-            let hex_end = after.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(after.len());
-            if hex_end == 0 { search_from = open + 1; continue; }
+            let hex_end = after
+                .find(|c: char| !c.is_ascii_hexdigit())
+                .unwrap_or(after.len());
+            if hex_end == 0 {
+                search_from = open + 1;
+                continue;
+            }
             let close_pos = name_end + hex_end;
             if line.as_bytes().get(close_pos).copied() != Some(b')') {
                 search_from = open + 1;
                 continue;
             }
             // Replace `(local_HEX)` with `local_HEX`.
-            *line = format!("{}{}{}",
+            *line = format!(
+                "{}{}{}",
                 &line[..open],
                 &line[inner_start..close_pos],
-                &line[close_pos + 1..]);
+                &line[close_pos + 1..]
+            );
         }
     }
 
@@ -8755,7 +11107,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     for line in lines.iter_mut() {
         let mut search_from = 0usize;
         loop {
-            let Some(rel) = line[search_from..].find("*(") else { break };
+            let Some(rel) = line[search_from..].find("*(") else {
+                break;
+            };
             let pos = search_from + rel;
             // Don't match `*((uintN_t*)...` — typed form handled elsewhere.
             let open_paren = pos + 2;
@@ -8767,8 +11121,15 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let mut depth = 1i32;
             let mut close: Option<usize> = None;
             for (i, b) in line[open_paren..].bytes().enumerate() {
-                if b == b'(' { depth += 1; }
-                else if b == b')' { depth -= 1; if depth == 0 { close = Some(open_paren + i); break; } }
+                if b == b'(' {
+                    depth += 1;
+                } else if b == b')' {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(open_paren + i);
+                        break;
+                    }
+                }
             }
             let Some(close) = close else { break };
             let inner = &line[open_paren..close];
@@ -8786,7 +11147,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // Base must be simple identifier.
             let base = base.trim();
             if base.is_empty()
-                || !base.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+                || !base
+                    .chars()
+                    .next()
+                    .map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
                 || !base.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
             {
                 search_from = pos + 2;
@@ -8798,8 +11162,13 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 i64::from_str_radix(h, 16).ok()
             } else if off_str.chars().all(|c| c.is_ascii_digit()) {
                 off_str.parse::<i64>().ok()
-            } else { None };
-            let Some(off) = off else { search_from = close + 1; continue; };
+            } else {
+                None
+            };
+            let Some(off) = off else {
+                search_from = close + 1;
+                continue;
+            };
             if op == '-' {
                 // Keep negative offsets as-is (rare).
                 search_from = close + 1;
@@ -8825,24 +11194,30 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // Prev line: `IDENT = <call_expr>;` — call expression ends in `)`
             //            and the LHS is a param_N or simple ident.
             let Some((prev_lhs, prev_rhs)) = t_prev.trim_end_matches(';').split_once(" = ") else {
-                i += 1; continue;
+                i += 1;
+                continue;
             };
             let prev_lhs = prev_lhs.trim();
             let prev_rhs = prev_rhs.trim();
             // Only consider call-like RHS (ends with `)` and contains `(`).
             if !prev_rhs.ends_with(')') || !prev_rhs.contains('(') {
-                i += 1; continue;
+                i += 1;
+                continue;
             }
             // LHS must be a simple identifier.
             if prev_lhs.is_empty()
-                || prev_lhs.contains(' ') || prev_lhs.contains('-')
-                || prev_lhs.contains('[') || prev_lhs.contains('.')
+                || prev_lhs.contains(' ')
+                || prev_lhs.contains('-')
+                || prev_lhs.contains('[')
+                || prev_lhs.contains('.')
             {
-                i += 1; continue;
+                i += 1;
+                continue;
             }
             // Current line: `SOMETHING = ?;` — strip the placeholder.
             if !t_cur.ends_with(" = ?;") {
-                i += 1; continue;
+                i += 1;
+                continue;
             }
             // Apply substitution preserving indentation.
             let indent = lines[i + 1].len() - lines[i + 1].trim_start().len();
@@ -8852,10 +11227,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // Simpler: replace `= ?;` with `= <prev_lhs>;`
             let orig = &lines[i + 1];
             if let Some(eq_pos) = orig.rfind(" = ?;") {
-                lines[i + 1] = format!("{} = {};", &orig[..eq_pos], prev_lhs)
-                    .replacen("", "", 0); // no-op, just makes ownership clean
-                // preserve trailing newline if any
-                let _ = pad; let _ = new_tail; let _ = fixed;
+                lines[i + 1] = format!("{} = {};", &orig[..eq_pos], prev_lhs).replacen("", "", 0); // no-op, just makes ownership clean
+                                                                                                   // preserve trailing newline if any
+                let _ = pad;
+                let _ = new_tail;
+                let _ = fixed;
             }
             i += 1;
         }
@@ -8866,11 +11242,16 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // downstream passes didn't fold.
     lines.retain(|line| {
         let t = line.trim();
-        let core = match t.strip_suffix(';') { Some(c) => c, None => return true };
+        let core = match t.strip_suffix(';') {
+            Some(c) => c,
+            None => return true,
+        };
         if let Some((lhs, rhs)) = core.split_once(" = ") {
             let l = lhs.trim();
             let r = rhs.trim();
-            if !l.is_empty() && l == r { return false; }
+            if !l.is_empty() && l == r {
+                return false;
+            }
         }
         true
     });
@@ -8896,15 +11277,25 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     changed = true;
                 }
             }
-            if !changed { break; }
+            if !changed {
+                break;
+            }
         }
     }
 
     // Redundant `(uint)3` / `(uint)N` casts on bare integer constants — C
     // implicit-conversion already handles these in every arithmetic context.
     for line in lines.iter_mut() {
-        for pat_prefix in &["(uint)", "(uint32_t)", "(uint8_t)", "(uint16_t)",
-                            "(int)", "(long)", "(short)", "(char)"] {
+        for pat_prefix in &[
+            "(uint)",
+            "(uint32_t)",
+            "(uint8_t)",
+            "(uint16_t)",
+            "(int)",
+            "(long)",
+            "(short)",
+            "(char)",
+        ] {
             let mut search_from = 0usize;
             while let Some(rel) = line[search_from..].find(pat_prefix) {
                 let pos = search_from + rel;
@@ -8912,11 +11303,21 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 // Accept if followed by decimal digit or 0xHEX — plain literal.
                 let tail_len: usize = if after.starts_with("0x") {
                     let rest = &after[2..];
-                    let end = rest.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(rest.len());
-                    if end == 0 { 0 } else { 2 + end }
+                    let end = rest
+                        .find(|c: char| !c.is_ascii_hexdigit())
+                        .unwrap_or(rest.len());
+                    if end == 0 {
+                        0
+                    } else {
+                        2 + end
+                    }
                 } else if after.chars().next().map_or(false, |c| c.is_ascii_digit()) {
-                    after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len())
-                } else { 0 };
+                    after
+                        .find(|c: char| !c.is_ascii_digit())
+                        .unwrap_or(after.len())
+                } else {
+                    0
+                };
                 if tail_len == 0 {
                     search_from = pos + pat_prefix.len();
                     continue;
@@ -8935,10 +11336,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // the hint is redundant and even misleading.
     lines.retain(|line| {
         let t = line.trim();
-        if !t.starts_with("//") { return true; }
-        if t.contains("struct layout for local_0")
-            || t.contains("struct layout for sp")
-        { return false; }
+        if !t.starts_with("//") {
+            return true;
+        }
+        if t.contains("struct layout for local_0") || t.contains("struct layout for sp") {
+            return false;
+        }
         true
     });
 
@@ -8953,36 +11356,54 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         let mut sig_idx: Option<usize> = None;
         let mut value_expr: Option<String> = None;
         let flush = |sig_idx: &mut Option<usize>,
-                      hvr: &mut bool, hvo: &mut bool,
-                      ve: &mut Option<String>,
-                      lines: &mut Vec<String>| {
+                     hvr: &mut bool,
+                     hvo: &mut bool,
+                     ve: &mut Option<String>,
+                     lines: &mut Vec<String>| {
             if let Some(i) = *sig_idx {
                 let line = lines[i].clone();
                 if !*hvr && *hvo && (line.starts_with("long ") || line.starts_with("int ")) {
                     // long/int func(... → void func(...
-                    let rest = if line.starts_with("long ") { &line[5..] } else { &line[4..] };
+                    let rest = if line.starts_with("long ") {
+                        &line[5..]
+                    } else {
+                        &line[4..]
+                    };
                     lines[i] = format!("void {}", rest);
                 } else if *hvr && !*hvo && line.starts_with("void ") && ve.is_some() {
                     // void func(... but returns a value — promote to long.
                     lines[i] = format!("long {}", &line[5..]);
                 }
             }
-            *sig_idx = None; *hvr = false; *hvo = false; *ve = None;
+            *sig_idx = None;
+            *hvr = false;
+            *hvo = false;
+            *ve = None;
         };
         let mut i = 0;
         while i < lines.len() {
             let t = lines[i].trim();
             // Function signature line: starts with a return type keyword and
             // contains `func_` or a demangled name and ends with `{`.
-            let is_sig = t.ends_with('{') && (
-                t.starts_with("long ") || t.starts_with("int ")
-                    || t.starts_with("void ") || t.starts_with("uint64_t ")
-                    || t.starts_with("uint ") || t.starts_with("char ")
-                    || t.starts_with("bool ") || t.starts_with("double ")
-                    || t.starts_with("float ")
-            ) && t.contains('(');
+            let is_sig = t.ends_with('{')
+                && (t.starts_with("long ")
+                    || t.starts_with("int ")
+                    || t.starts_with("void ")
+                    || t.starts_with("uint64_t ")
+                    || t.starts_with("uint ")
+                    || t.starts_with("char ")
+                    || t.starts_with("bool ")
+                    || t.starts_with("double ")
+                    || t.starts_with("float "))
+                && t.contains('(');
             if is_sig {
-                flush(&mut sig_idx, &mut has_value_return, &mut has_void_return, &mut value_expr, &mut lines);
+                flush(
+                    &mut sig_idx,
+                    &mut has_value_return,
+                    &mut has_void_return,
+                    &mut value_expr,
+                    &mut lines,
+                );
                 sig_idx = Some(i);
             } else if t.starts_with("return ") && t.ends_with(';') && !t.contains('(') {
                 has_value_return = true;
@@ -8995,7 +11416,13 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             }
             i += 1;
         }
-        flush(&mut sig_idx, &mut has_value_return, &mut has_void_return, &mut value_expr, &mut lines);
+        flush(
+            &mut sig_idx,
+            &mut has_value_return,
+            &mut has_void_return,
+            &mut value_expr,
+            &mut lines,
+        );
     }
 
     // Unused-variable-declaration DCE.
@@ -9012,11 +11439,16 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // `TYPE name;` declaration pattern — must start with a common C
             // type keyword, end in `;`, and have no `=` (otherwise it's an
             // initializer and has side effects).
-            let is_decl_keyword = t.starts_with("long ") || t.starts_with("int ")
-                || t.starts_with("uint64_t ") || t.starts_with("uint32_t ")
-                || t.starts_with("uint16_t ") || t.starts_with("uint8_t ")
-                || t.starts_with("char ") || t.starts_with("short ")
-                || t.starts_with("float ") || t.starts_with("double ")
+            let is_decl_keyword = t.starts_with("long ")
+                || t.starts_with("int ")
+                || t.starts_with("uint64_t ")
+                || t.starts_with("uint32_t ")
+                || t.starts_with("uint16_t ")
+                || t.starts_with("uint8_t ")
+                || t.starts_with("char ")
+                || t.starts_with("short ")
+                || t.starts_with("float ")
+                || t.starts_with("double ")
                 || t.starts_with("bool ");
             if !is_decl_keyword || !t.ends_with(';') || t.contains('=') {
                 i += 1;
@@ -9024,16 +11456,22 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             }
             // Pull the name: `<type> name;` — after the first space.
             let core = t.trim_end_matches(';');
-            let Some(sp) = core.find(' ') else { i += 1; continue; };
+            let Some(sp) = core.find(' ') else {
+                i += 1;
+                continue;
+            };
             let name = core[sp + 1..].trim();
             // Reject arrays / multi-part decls (contain [ ,): treat conservatively.
             if name.contains('[') || name.contains(',') || name.is_empty() {
-                i += 1; continue;
+                i += 1;
+                continue;
             }
             // Scan all other lines for a word-boundary match on `name`.
             let mut used = false;
             for (j, other) in lines.iter().enumerate() {
-                if j == i { continue; }
+                if j == i {
+                    continue;
+                }
                 let bytes = other.as_bytes();
                 let mut k = 0;
                 while k + name.len() <= bytes.len() {
@@ -9041,13 +11479,20 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         let before = if k > 0 { bytes[k - 1] } else { b' ' };
                         let after_idx = k + name.len();
                         let after = bytes.get(after_idx).copied().unwrap_or(b' ');
-                        let word = !before.is_ascii_alphanumeric() && before != b'_'
-                            && !after.is_ascii_alphanumeric() && after != b'_';
-                        if word { used = true; break; }
+                        let word = !before.is_ascii_alphanumeric()
+                            && before != b'_'
+                            && !after.is_ascii_alphanumeric()
+                            && after != b'_';
+                        if word {
+                            used = true;
+                            break;
+                        }
                     }
                     k += 1;
                 }
-                if used { break; }
+                if used {
+                    break;
+                }
             }
             if !used {
                 lines.remove(i);
@@ -9085,8 +11530,14 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let trimmed = line.trim_start();
             let body = if let Some(eq_pos) = trimmed.find(" = ") {
                 let lhs = &trimmed[..eq_pos];
-                if lhs == sym { &trimmed[eq_pos + 3..] } else { trimmed }
-            } else { trimmed };
+                if lhs == sym {
+                    &trimmed[eq_pos + 3..]
+                } else {
+                    trimmed
+                }
+            } else {
+                trimmed
+            };
             let bytes = body.as_bytes();
             let mut i = 0;
             while i + sym.len() <= bytes.len() {
@@ -9094,17 +11545,25 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let before = if i > 0 { bytes[i - 1] } else { b' ' };
                     let after_idx = i + sym.len();
                     let after = bytes.get(after_idx).copied().unwrap_or(b' ');
-                    let word = !before.is_ascii_alphanumeric() && before != b'_'
-                        && !after.is_ascii_alphanumeric() && after != b'_';
-                    if word { return true; }
+                    let word = !before.is_ascii_alphanumeric()
+                        && before != b'_'
+                        && !after.is_ascii_alphanumeric()
+                        && after != b'_';
+                    if word {
+                        return true;
+                    }
                 }
                 i += 1;
             }
             false
         };
         let is_simple_lhs = |lhs: &str| -> bool {
-            !lhs.contains("->") && !lhs.contains('*') && !lhs.contains('[')
-                && !lhs.contains('.') && !lhs.contains('(') && !lhs.is_empty()
+            !lhs.contains("->")
+                && !lhs.contains('*')
+                && !lhs.contains('[')
+                && !lhs.contains('.')
+                && !lhs.contains('(')
+                && !lhs.is_empty()
         };
         // Only act on RHS that makes DCE safe: the value has no side effect
         // beyond the assignment itself. A trailing `)` signals a call, which
@@ -9117,12 +11576,21 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let ls_count = l.len() - l.trim_start().len();
                 (&l[..ls_count], l[ls_count..].trim_end().to_string())
             };
-            if !t.ends_with(';') { i += 1; continue; }
+            if !t.ends_with(';') {
+                i += 1;
+                continue;
+            }
             let core = t.trim_end_matches(';');
-            let Some((lhs, rhs)) = core.split_once(" = ") else { i += 1; continue; };
+            let Some((lhs, rhs)) = core.split_once(" = ") else {
+                i += 1;
+                continue;
+            };
             let lhs = lhs.trim();
             let rhs = rhs.trim();
-            if !is_simple_lhs(lhs) { i += 1; continue; }
+            if !is_simple_lhs(lhs) {
+                i += 1;
+                continue;
+            }
             // Bail if the LHS is a real function parameter (param_N where N < the
             // function's declared param count). We still want to DCE scratch
             // writes to x0 = param_0 inside the body, so don't bail on `param_0`
@@ -9130,7 +11598,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // function genuinely rebinds a parameter to a new value that is
             // never used further (that's legitimate noise too, so keep the pass).
             // If RHS references LHS, skip (self-ref).
-            if reads_var_outside_lhs(rhs, lhs) { i += 1; continue; }
+            if reads_var_outside_lhs(rhs, lhs) {
+                i += 1;
+                continue;
+            }
 
             // Scan forward for next touch of this LHS. Track brace depth so we
             // don't mistake a block-closing `}` (inside an if / while / for) for
@@ -9149,24 +11620,29 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let was_depth = brace_depth;
                 brace_depth += opens - closes;
                 // End-of-function: pre-update depth was 0 and closes > 0.
-                if was_depth <= 0 && closes > 0
-                    && !l2.trim_start().starts_with("} else")
-                {
+                if was_depth <= 0 && closes > 0 && !l2.trim_start().starts_with("} else") {
                     next_is_write = true;
                     break;
                 }
                 // Skip pure comment lines.
                 let t2 = l2.trim();
-                if t2.is_empty() || t2.starts_with("//") || t2.starts_with("/*")
+                if t2.is_empty()
+                    || t2.starts_with("//")
+                    || t2.starts_with("/*")
                     || t2.starts_with("*")
-                { continue; }
+                {
+                    continue;
+                }
                 // Check for write first: `LHS = ...;`
                 let t2_trim = t2.trim_end_matches(';');
                 if let Some((l2_lhs, l2_rhs)) = t2_trim.split_once(" = ") {
                     let l2_lhs = l2_lhs.trim();
                     let l2_rhs = l2_rhs.trim();
                     // If the RHS reads our LHS, that's a read even though line is a write.
-                    if reads_var_outside_lhs(l2_rhs, lhs) { found_read = true; break; }
+                    if reads_var_outside_lhs(l2_rhs, lhs) {
+                        found_read = true;
+                        break;
+                    }
                     if l2_lhs == lhs {
                         // A clean overwrite with no read in RHS.
                         next_is_write = true;
@@ -9175,7 +11651,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 }
                 // Non-assignment line (standalone call, control-flow condition):
                 // treat any appearance of the LHS as a read.
-                if reads_var_outside_lhs(t2, lhs) { found_read = true; break; }
+                if reads_var_outside_lhs(t2, lhs) {
+                    found_read = true;
+                    break;
+                }
             }
 
             if next_is_write && !found_read {
@@ -9189,10 +11668,21 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     // args of a subsequent call (`func(..., the_value, ...)`)
                     // because the register tracker may have inlined the value
                     // directly, leaving no textual `LHS` reference.
-                    let is_alloc_like = ["operator new", "operator new[]",
-                        "malloc(", "calloc(", "realloc(", "strdup(", "strndup(",
-                        "mmap(", "fopen(", "opendir(", "open("]
-                        .iter().any(|s| rhs.starts_with(s) || rhs.contains(s));
+                    let is_alloc_like = [
+                        "operator new",
+                        "operator new[]",
+                        "malloc(",
+                        "calloc(",
+                        "realloc(",
+                        "strdup(",
+                        "strndup(",
+                        "mmap(",
+                        "fopen(",
+                        "opendir(",
+                        "open(",
+                    ]
+                    .iter()
+                    .any(|s| rhs.starts_with(s) || rhs.contains(s));
                     if !is_alloc_like {
                         lines[i] = format!("{}{};", leading, rhs);
                     }
@@ -9207,11 +11697,17 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // DCE so any bare deref that surfaced from LHS stripping also gets dropped.
     lines.retain(|line| {
         let t = line.trim();
-        if !t.ends_with(';') { return true; }
+        if !t.ends_with(';') {
+            return true;
+        }
         let body = t.trim_end_matches(';').trim();
-        if !body.starts_with("*(") || !body.ends_with(')') { return true; }
+        if !body.starts_with("*(") || !body.ends_with(')') {
+            return true;
+        }
         let inner = &body[2..body.len() - 1];
-        if inner.contains('(') { return true; }
+        if inner.contains('(') {
+            return true;
+        }
         false
     });
 
@@ -9229,7 +11725,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         while let Some(rel) = line[search_from..].find("::") {
             let abs = search_from + rel;
             let rest = &line[abs..];
-            let Some(open_rel) = rest.find('(') else { break };
+            let Some(open_rel) = rest.find('(') else {
+                break;
+            };
             let open = abs + open_rel;
             let after_paren = open + 1;
             if line[after_paren..].starts_with("?, ") {
@@ -9243,8 +11741,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // `strlen(?)` / other well-known C libc calls whose first arg is
         // obviously a pointer — strip the lone `?` when it's the only arg so
         // the call reads `strlen()`. Keeps `strlen(?, extra)` untouched.
-        for marker in &["strlen(", "strcpy(", "strcmp(", "strcat(", "strdup(",
-                        "puts(", "fputs(", "free(", "close("] {
+        for marker in &[
+            "strlen(", "strcpy(", "strcmp(", "strcat(", "strdup(", "puts(", "fputs(", "free(",
+            "close(",
+        ] {
             let mut search_from = 0usize;
             while let Some(rel) = line[search_from..].find(marker) {
                 let open = search_from + rel + marker.len() - 1;
@@ -9257,8 +11757,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         }
         // Also cover `operator NAME(?, ...)` / `operator NAME(?)` —
         // operators, like methods, take `this` as their first (hidden) arg.
-        for marker in &["operator new(", "operator delete(", "operator new[](",
-                        "operator delete[]("] {
+        for marker in &[
+            "operator new(",
+            "operator delete(",
+            "operator new[](",
+            "operator delete[](",
+        ] {
             let mut search_from = 0usize;
             while let Some(rel) = line[search_from..].find(marker) {
                 let open = search_from + rel + marker.len() - 1;
@@ -9281,16 +11785,30 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // pointers stored in the frame.
     for line in lines.iter_mut() {
         while let Some(pos) = line.find("local_0->field_") {
-            let prev = if pos == 0 { b' ' } else { line.as_bytes()[pos - 1] };
-            if prev.is_ascii_alphanumeric() || prev == b'_' { break; }
+            let prev = if pos == 0 {
+                b' '
+            } else {
+                line.as_bytes()[pos - 1]
+            };
+            if prev.is_ascii_alphanumeric() || prev == b'_' {
+                break;
+            }
             let after_start = pos + "local_0->field_".len();
             let after = &line[after_start..];
-            let end = after.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(after.len());
-            if end == 0 { break; }
+            let end = after
+                .find(|c: char| !c.is_ascii_hexdigit())
+                .unwrap_or(after.len());
+            if end == 0 {
+                break;
+            }
             if let Ok(off) = u64::from_str_radix(&after[..end], 16) {
                 let replacement = format!("local_{:x}", off);
-                *line = format!("{}{}{}",
-                    &line[..pos], replacement, &line[after_start + end..]);
+                *line = format!(
+                    "{}{}{}",
+                    &line[..pos],
+                    replacement,
+                    &line[after_start + end..]
+                );
                 continue;
             }
             break;
@@ -9309,14 +11827,35 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // not conflict with the read of `lines[i]`.
             let (lhs, rhs) = {
                 let t = lines[i].trim();
-                let core = match t.strip_suffix(';') { Some(c) => c, None => { i += 1; continue; } };
-                let pair = match core.split_once(" = ") { Some(p) => p, None => { i += 1; continue; } };
+                let core = match t.strip_suffix(';') {
+                    Some(c) => c,
+                    None => {
+                        i += 1;
+                        continue;
+                    }
+                };
+                let pair = match core.split_once(" = ") {
+                    Some(p) => p,
+                    None => {
+                        i += 1;
+                        continue;
+                    }
+                };
                 (pair.0.trim().to_string(), pair.1.trim().to_string())
             };
-            if rhs != "local_0" { i += 1; continue; }
-            if lhs.is_empty() || lhs.contains('[') || lhs.contains('.')
-                || lhs.contains(' ') || lhs.contains("->")
-            { i += 1; continue; }
+            if rhs != "local_0" {
+                i += 1;
+                continue;
+            }
+            if lhs.is_empty()
+                || lhs.contains('[')
+                || lhs.contains('.')
+                || lhs.contains(' ')
+                || lhs.contains("->")
+            {
+                i += 1;
+                continue;
+            }
             let alias_prefix = format!("{}->field_", lhs);
             let mut rewrote_any = false;
             let mut other_use = false;
@@ -9325,16 +11864,25 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let l2 = &mut lines[j];
                 // First, rewrite all `ALIAS->field_HEX` occurrences.
                 while let Some(pos) = l2.find(alias_prefix.as_str()) {
-                    let prev = if pos == 0 { b' ' } else { l2.as_bytes()[pos - 1] };
-                    if prev.is_ascii_alphanumeric() || prev == b'_' { break; }
+                    let prev = if pos == 0 {
+                        b' '
+                    } else {
+                        l2.as_bytes()[pos - 1]
+                    };
+                    if prev.is_ascii_alphanumeric() || prev == b'_' {
+                        break;
+                    }
                     let after_start = pos + alias_prefix.len();
                     let after = &l2[after_start..];
-                    let end = after.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(after.len());
-                    if end == 0 { break; }
+                    let end = after
+                        .find(|c: char| !c.is_ascii_hexdigit())
+                        .unwrap_or(after.len());
+                    if end == 0 {
+                        break;
+                    }
                     if let Ok(off) = u64::from_str_radix(&after[..end], 16) {
                         let replacement = format!("local_{:x}", off);
-                        *l2 = format!("{}{}{}",
-                            &l2[..pos], replacement, &l2[after_start + end..]);
+                        *l2 = format!("{}{}{}", &l2[..pos], replacement, &l2[after_start + end..]);
                         rewrote_any = true;
                         continue;
                     }
@@ -9348,13 +11896,20 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         let before = if k > 0 { bytes[k - 1] } else { b' ' };
                         let after_idx = k + lhs.len();
                         let after = bytes.get(after_idx).copied().unwrap_or(b' ');
-                        let word = !before.is_ascii_alphanumeric() && before != b'_'
-                            && !after.is_ascii_alphanumeric() && after != b'_';
-                        if word { other_use = true; break; }
+                        let word = !before.is_ascii_alphanumeric()
+                            && before != b'_'
+                            && !after.is_ascii_alphanumeric()
+                            && after != b'_';
+                        if word {
+                            other_use = true;
+                            break;
+                        }
                     }
                     k += 1;
                 }
-                if other_use { break; }
+                if other_use {
+                    break;
+                }
             }
             if rewrote_any && !other_use {
                 lines.remove(i);
@@ -9374,13 +11929,19 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         let mut search_from = 0usize;
         while let Some(rel) = line[search_from..].find("local_") {
             let pos = search_from + rel;
-            let prev = if pos == 0 { b' ' } else { line.as_bytes()[pos - 1] };
+            let prev = if pos == 0 {
+                b' '
+            } else {
+                line.as_bytes()[pos - 1]
+            };
             if prev.is_ascii_alphanumeric() || prev == b'_' {
                 search_from = pos + 6;
                 continue;
             }
             let after = &line[pos + 6..];
-            let end_digits = after.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(after.len());
+            let end_digits = after
+                .find(|c: char| !c.is_ascii_hexdigit())
+                .unwrap_or(after.len());
             if end_digits == 0 {
                 search_from = pos + 6;
                 continue;
@@ -9398,8 +11959,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 continue;
             }
             // Replace `local_N->field_0` with `local_N` in place.
-            let new_line = format!("{}{}{}",
-                &line[..tail_start], "", &line[tail_start + 9..]);
+            let new_line = format!("{}{}{}", &line[..tail_start], "", &line[tail_start + 9..]);
             *line = new_line;
             // Don't advance — the next search starts from the same pos since
             // the replacement shortened the line.
@@ -9423,18 +11983,24 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 //    generic `->field_N` and DWARF-resolved names like `->st_gid`
                 //  - `(expr)->field_` form with parenthesized base
                 let is_literal = after.starts_with('0')
-                    && after.as_bytes().get(1).map_or(true,
-                        |&c| !c.is_ascii_alphanumeric() && c != b'_' && c != b'x');
+                    && after.as_bytes().get(1).map_or(true, |&c| {
+                        !c.is_ascii_alphanumeric() && c != b'_' && c != b'x'
+                    });
                 let is_deref = after.starts_with('*');
-                let is_ident_field = after.starts_with(|c: char|
-                        c.is_ascii_alphabetic() || c == '_')
+                let is_ident_field = after
+                    .starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
                     && after.contains("->");
                 let is_paren_field = after.starts_with('(')
-                    && after.find("->").map_or(false,
-                        |arrow| arrow < after.find(|c: char| c == ';' || c == ',' || c == ')' && false)
-                            .unwrap_or(after.len()));
+                    && after.find("->").map_or(false, |arrow| {
+                        arrow
+                            < after
+                                .find(|c: char| c == ';' || c == ',' || c == ')' && false)
+                                .unwrap_or(after.len())
+                    });
                 let ok = is_literal || is_deref || is_ident_field || is_paren_field;
-                if !ok { break; }
+                if !ok {
+                    break;
+                }
                 let new_line = format!("{}{}", &line[..pos], after);
                 *line = new_line;
             }
@@ -9469,30 +12035,53 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let cond_match = t1.starts_with("while ((!tmp_")
                 && t1.contains(") ? 1 : tmp_")
                 && t1.ends_with(") {");
-            if !cond_match { i += 1; continue; }
-            let body_op = if t2.ends_with(" - 1;") { '-' }
-                else if t2.ends_with(" + 1;") { '+' }
-                else { i += 1; continue; };
-            if t3 != "}" { i += 1; continue; }
+            if !cond_match {
+                i += 1;
+                continue;
+            }
+            let body_op = if t2.ends_with(" - 1;") {
+                '-'
+            } else if t2.ends_with(" + 1;") {
+                '+'
+            } else {
+                i += 1;
+                continue;
+            };
+            if t3 != "}" {
+                i += 1;
+                continue;
+            }
             // Parse `LHS = *RHS ± 1;` and require LHS's base points at the
             // same counter as RHS (same pointer, possibly with a field suffix).
             let body = t2.trim_end_matches(';').trim();
             let body = body.trim_end_matches(" - 1").trim_end_matches(" + 1");
             let (lhs, rhs) = match body.split_once(" = *") {
-                Some((l, r)) => (l.trim(), r.trim().trim_start_matches('(').trim_end_matches(')')),
-                None => { i += 1; continue; },
+                Some((l, r)) => (
+                    l.trim(),
+                    r.trim().trim_start_matches('(').trim_end_matches(')'),
+                ),
+                None => {
+                    i += 1;
+                    continue;
+                }
             };
             // Canonical counter expression: RHS if LHS doesn't add a field
             // offset; otherwise RHS if RHS equals LHS's base (before `->field_`).
             let counter_expr = {
                 let lhs_base = lhs.split("->field_").next().unwrap_or(lhs);
-                if lhs_base == rhs { rhs.to_string() }
-                else { rhs.to_string() }
+                if lhs_base == rhs {
+                    rhs.to_string()
+                } else {
+                    rhs.to_string()
+                }
             };
             let indent = " ".repeat(lines[i].len() - lines[i].trim_start().len());
             let op_name = if body_op == '-' { "dec" } else { "inc" };
             let op_c = if body_op == '-' { "--" } else { "++" };
-            let replacement = format!("{}{}(*{}); // atomic {}", indent, op_c, counter_expr, op_name);
+            let replacement = format!(
+                "{}{}(*{}); // atomic {}",
+                indent, op_c, counter_expr, op_name
+            );
             lines[i] = replacement;
             lines.remove(i + 1);
             lines.remove(i + 1); // the `}` line
@@ -9509,7 +12098,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // the substitution (so equal temps remain visibly equal) while making the
     // names readable.
     {
-        let mut tmp_map: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+        let mut tmp_map: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
         let mut next_idx: usize = 0;
         // Phase 1: collect distinct tmp_HEX names (only those with long hex offsets,
         // so we don't accidentally renumber a meaningful `tmp_0` already in use).
@@ -9517,7 +12107,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let mut s = line.as_str();
             while let Some(pos) = s.find("tmp_") {
                 let after = &s[pos + 4..];
-                let end = after.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(after.len());
+                let end = after
+                    .find(|c: char| !c.is_ascii_hexdigit())
+                    .unwrap_or(after.len());
                 if end >= 4 {
                     let original = format!("tmp_{}", &after[..end]);
                     tmp_map.entry(original).or_insert_with(|| {
@@ -9548,8 +12140,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // been dropped.
     lines.retain(|line| {
         let t = line.trim();
-        if !(t.ends_with(" = x30;") || t.ends_with(" = x29;")) { return true; }
-        if t.starts_with("local_") || t.starts_with("sp[") { return false; }
+        if !(t.ends_with(" = x30;") || t.ends_with(" = x29;")) {
+            return true;
+        }
+        if t.starts_with("local_") || t.starts_with("sp[") {
+            return false;
+        }
         true
     });
 
@@ -9559,16 +12155,28 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // unsigned integer width cast forms and simple fundamental types.
     for line in lines.iter_mut() {
         for prefix in &[
-            "*(uint8_t*)", "*(uint16_t*)", "*(uint32_t*)", "*(uint64_t*)",
-            "*(int8_t*)",  "*(int16_t*)",  "*(int32_t*)",  "*(int64_t*)",
-            "*(char*)", "*(short*)", "*(int*)", "*(long*)", "*(uint*)",
+            "*(uint8_t*)",
+            "*(uint16_t*)",
+            "*(uint32_t*)",
+            "*(uint64_t*)",
+            "*(int8_t*)",
+            "*(int16_t*)",
+            "*(int32_t*)",
+            "*(int64_t*)",
+            "*(char*)",
+            "*(short*)",
+            "*(int*)",
+            "*(long*)",
+            "*(uint*)",
         ] {
             let mut search_from = 0usize;
             loop {
-                let Some(rel) = line[search_from..].find(prefix) else { break };
+                let Some(rel) = line[search_from..].find(prefix) else {
+                    break;
+                };
                 let star_pos = search_from + rel;
                 let paren_open = star_pos + prefix.len() - 1; // `)` before `(`
-                // `prefix` ends in `)`; the next char is `(` opening the arg.
+                                                              // `prefix` ends in `)`; the next char is `(` opening the arg.
                 let open = star_pos + prefix.len();
                 if line.as_bytes().get(open).copied() != Some(b'(') {
                     search_from = star_pos + prefix.len();
@@ -9577,15 +12185,23 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let mut depth = 0i32;
                 let mut close: Option<usize> = None;
                 for (i, b) in line[open..].bytes().enumerate() {
-                    if b == b'(' { depth += 1; }
-                    else if b == b')' { depth -= 1;
-                        if depth == 0 { close = Some(open + i); break; }
+                    if b == b'(' {
+                        depth += 1;
+                    } else if b == b')' {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(open + i);
+                            break;
+                        }
                     }
                 }
                 let Some(close) = close else { break };
                 let inner = &line[open + 1..close];
                 let is_simple_ident = !inner.is_empty()
-                    && inner.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+                    && inner
+                        .chars()
+                        .next()
+                        .map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
                     && inner.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
                 if !is_simple_ident {
                     search_from = close + 1;
@@ -9611,7 +12227,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let mut search_from = 0usize;
             while let Some(rel) = line[search_from..].find(kw) {
                 let pos = search_from + rel;
-                let prev = if pos == 0 { b' ' } else { line.as_bytes()[pos - 1] };
+                let prev = if pos == 0 {
+                    b' '
+                } else {
+                    line.as_bytes()[pos - 1]
+                };
                 if prev.is_ascii_alphanumeric() || prev == b'_' {
                     search_from = pos + kw.len();
                     continue;
@@ -9620,10 +12240,14 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let after = &line[after_start..];
                 let (num_len, val_opt): (usize, Option<u64>) = if after.starts_with("0x") {
                     let rest = &after[2..];
-                    let end = rest.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(rest.len());
+                    let end = rest
+                        .find(|c: char| !c.is_ascii_hexdigit())
+                        .unwrap_or(rest.len());
                     (2 + end, u64::from_str_radix(&rest[..end], 16).ok())
                 } else {
-                    let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+                    let end = after
+                        .find(|c: char| !c.is_ascii_digit())
+                        .unwrap_or(after.len());
                     (end, after[..end].parse::<u64>().ok())
                 };
                 if num_len == 0 || val_opt.is_none() {
@@ -9640,8 +12264,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 } else {
                     format!("local_fpp{:x}", v)
                 };
-                *line = format!("{}{}{}",
-                    &line[..pos], replacement, &line[after_start + num_len..]);
+                *line = format!(
+                    "{}{}{}",
+                    &line[..pos],
+                    replacement,
+                    &line[after_start + num_len..]
+                );
                 search_from = pos + replacement.len();
             }
         }
@@ -9656,25 +12284,39 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         let mut search_from = 0usize;
         while let Some(rel) = line[search_from..].find("sp->field_") {
             let pos = search_from + rel;
-            let prev = if pos == 0 { b' ' } else { line.as_bytes()[pos - 1] };
+            let prev = if pos == 0 {
+                b' '
+            } else {
+                line.as_bytes()[pos - 1]
+            };
             if prev.is_ascii_alphanumeric() || prev == b'_' {
                 search_from = pos + "sp->field_".len();
                 continue;
             }
             let after_start = pos + "sp->field_".len();
             let after = &line[after_start..];
-            let end = after.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(after.len());
-            if end == 0 { search_from = after_start; continue; }
+            let end = after
+                .find(|c: char| !c.is_ascii_hexdigit())
+                .unwrap_or(after.len());
+            if end == 0 {
+                search_from = after_start;
+                continue;
+            }
             let Ok(off) = u64::from_str_radix(&after[..end], 16) else {
-                search_from = after_start + end; continue;
+                search_from = after_start + end;
+                continue;
             };
             if off > 0x1000 {
                 search_from = after_start + end;
                 continue;
             }
             let replacement = format!("local_{:x}", off);
-            *line = format!("{}{}{}",
-                &line[..pos], replacement, &line[after_start + end..]);
+            *line = format!(
+                "{}{}{}",
+                &line[..pos],
+                replacement,
+                &line[after_start + end..]
+            );
             search_from = pos + replacement.len();
         }
     }
@@ -9688,7 +12330,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             // Skip when the `(` is a call's open paren (preceded by an
             // identifier char) — stripping there produces garbage like
             // `freelocal_0` from `free(local_0)`.
-            let prev = if open == 0 { b' ' } else { line.as_bytes()[open - 1] };
+            let prev = if open == 0 {
+                b' '
+            } else {
+                line.as_bytes()[open - 1]
+            };
             if prev.is_ascii_alphanumeric() || prev == b'_' || prev == b']' {
                 search_from = open + 1;
                 continue;
@@ -9696,17 +12342,24 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let inner_start = open + 1;
             let name_end = inner_start + "local_".len();
             let after = &line[name_end..];
-            let hex_end = after.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(after.len());
-            if hex_end == 0 { search_from = open + 1; continue; }
+            let hex_end = after
+                .find(|c: char| !c.is_ascii_hexdigit())
+                .unwrap_or(after.len());
+            if hex_end == 0 {
+                search_from = open + 1;
+                continue;
+            }
             let close_pos = name_end + hex_end;
             if line.as_bytes().get(close_pos).copied() != Some(b')') {
                 search_from = open + 1;
                 continue;
             }
-            *line = format!("{}{}{}",
+            *line = format!(
+                "{}{}{}",
                 &line[..open],
                 &line[inner_start..close_pos],
-                &line[close_pos + 1..]);
+                &line[close_pos + 1..]
+            );
         }
     }
 
@@ -9721,7 +12374,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let t = lines[i].trim();
             // Single-line: `if (...) { }` or `} else { }`
             if (t.starts_with("if (") || t.starts_with("} else if") || t == "} else {")
-                && t.contains('{') && t.contains('}')
+                && t.contains('{')
+                && t.contains('}')
                 && !t.contains("//")
             {
                 // Extract body between { and }, ensure empty
@@ -9752,7 +12406,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             }
             i += 1;
         }
-        if !changed { break; }
+        if !changed {
+            break;
+        }
     }
 
     // Final RSP/ESP → local_N sweep at end of pipeline. Downstream passes
@@ -9764,7 +12420,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let mut search_from = 0usize;
             while let Some(rel) = line[search_from..].find(prefix) {
                 let pos = search_from + rel;
-                let prev = if pos == 0 { b' ' } else { line.as_bytes()[pos - 1] };
+                let prev = if pos == 0 {
+                    b' '
+                } else {
+                    line.as_bytes()[pos - 1]
+                };
                 if prev.is_ascii_alphanumeric() || prev == b'_' {
                     search_from = pos + prefix.len();
                     continue;
@@ -9772,10 +12432,14 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let after = &line[pos + prefix.len()..];
                 let (num_len, parsed): (usize, Option<u64>) = if after.starts_with("0x") {
                     let rest = &after[2..];
-                    let end = rest.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(rest.len());
+                    let end = rest
+                        .find(|c: char| !c.is_ascii_hexdigit())
+                        .unwrap_or(rest.len());
                     (2 + end, u64::from_str_radix(&rest[..end], 16).ok())
                 } else {
-                    let end = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+                    let end = after
+                        .find(|c: char| !c.is_ascii_digit())
+                        .unwrap_or(after.len());
                     (end, after[..end].parse::<u64>().ok())
                 };
                 if num_len == 0 || parsed.is_none() {
@@ -9788,8 +12452,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     continue;
                 }
                 let replacement = format!("local_{:x}", off);
-                *line = format!("{}{}{}", &line[..pos], replacement,
-                                &line[pos + prefix.len() + num_len..]);
+                *line = format!(
+                    "{}{}{}",
+                    &line[..pos],
+                    replacement,
+                    &line[pos + prefix.len() + num_len..]
+                );
                 search_from = pos + replacement.len();
             }
         }
@@ -9797,9 +12465,13 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         for suffix in &[" + RSP", " + ESP"] {
             while let Some(pos) = line.find(suffix) {
                 let before = &line[..pos];
-                let num_start = before.rfind(|c: char| !c.is_ascii_hexdigit() && c != 'x')
-                    .map(|p| p + 1).unwrap_or(0);
-                if num_start >= pos { break; }
+                let num_start = before
+                    .rfind(|c: char| !c.is_ascii_hexdigit() && c != 'x')
+                    .map(|p| p + 1)
+                    .unwrap_or(0);
+                if num_start >= pos {
+                    break;
+                }
                 let num_str = &line[num_start..pos];
                 let parsed: Option<u64> = if let Some(h) = num_str.strip_prefix("0x") {
                     u64::from_str_radix(h, 16).ok()
@@ -9809,8 +12481,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 if let Some(off) = parsed {
                     if off > 0 && off < 0x10000 {
                         let replacement = format!("local_{:x}", off);
-                        *line = format!("{}{}{}", &line[..num_start], replacement,
-                                        &line[pos + suffix.len()..]);
+                        *line = format!(
+                            "{}{}{}",
+                            &line[..num_start],
+                            replacement,
+                            &line[pos + suffix.len()..]
+                        );
                         continue;
                     }
                 }
@@ -9820,11 +12496,19 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // `*RSP` / `*ESP` (no paren) → `local_0`
         for pat in &["*RSP", "*ESP"] {
             while let Some(pos) = line.find(pat) {
-                let before = if pos == 0 { b' ' } else { line.as_bytes()[pos - 1] };
-                if before.is_ascii_alphanumeric() || before == b'_' { break; }
+                let before = if pos == 0 {
+                    b' '
+                } else {
+                    line.as_bytes()[pos - 1]
+                };
+                if before.is_ascii_alphanumeric() || before == b'_' {
+                    break;
+                }
                 let after_pos = pos + pat.len();
                 let after = line.as_bytes().get(after_pos).copied().unwrap_or(b' ');
-                if after.is_ascii_alphanumeric() || after == b'_' { break; }
+                if after.is_ascii_alphanumeric() || after == b'_' {
+                    break;
+                }
                 *line = format!("{}local_0{}", &line[..pos], &line[after_pos..]);
             }
         }
@@ -9836,14 +12520,25 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // Keep `break;`, `continue;`, `return;` — those are real control flow.
     lines.retain(|line| {
         let t = line.trim();
-        if !t.ends_with(';') { return true; }
+        if !t.ends_with(';') {
+            return true;
+        }
         let body = t.trim_end_matches(';').trim();
-        if body.is_empty() { return true; }
+        if body.is_empty() {
+            return true;
+        }
         // Simple identifier: alnum/underscore, starts alpha/underscore
-        let simple = body.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+        let simple = body
+            .chars()
+            .next()
+            .map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
             && body.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-        if !simple { return true; }
-        if matches!(body, "break" | "continue" | "return") { return true; }
+        if !simple {
+            return true;
+        }
+        if matches!(body, "break" | "continue" | "return") {
+            return true;
+        }
         false
     });
 
@@ -9852,11 +12547,17 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // `(uint)*(param_0);` → `*(param_0);`) is caught.
     lines.retain(|line| {
         let t = line.trim();
-        if !t.ends_with(';') { return true; }
+        if !t.ends_with(';') {
+            return true;
+        }
         let body = t.trim_end_matches(';').trim();
-        if !body.starts_with("*(") || !body.ends_with(')') { return true; }
+        if !body.starts_with("*(") || !body.ends_with(')') {
+            return true;
+        }
         let inner = &body[2..body.len() - 1];
-        if inner.contains('(') { return true; }
+        if inner.contains('(') {
+            return true;
+        }
         false
     });
 
@@ -9896,10 +12597,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                             if k_end > field_start {
                                 let n_str = &l[n_start..n_end];
                                 let k_str = &l[field_start..k_end];
-                                if let (Ok(n), Ok(k)) =
-                                    (u64::from_str_radix(n_str, 16),
-                                     u64::from_str_radix(k_str, 16))
-                                {
+                                if let (Ok(n), Ok(k)) = (
+                                    u64::from_str_radix(n_str, 16),
+                                    u64::from_str_radix(k_str, 16),
+                                ) {
                                     if k <= n {
                                         let new_name = format!("local_{:x}", n - k);
                                         out.push_str(&new_name);
@@ -9983,11 +12684,18 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 //  - *NAME (direct single-star deref, not **)
                 //  - *(NAME)  / *(NAME  (paren-wrapped deref)
                 //  - *(NAME + K) / *(NAME - K)
-                let prev1 = if i >= 1 { Some(l.as_bytes()[i - 1]) } else { None };
-                let prev2 = if i >= 2 { Some(l.as_bytes()[i - 2]) } else { None };
+                let prev1 = if i >= 1 {
+                    Some(l.as_bytes()[i - 1])
+                } else {
+                    None
+                };
+                let prev2 = if i >= 2 {
+                    Some(l.as_bytes()[i - 2])
+                } else {
+                    None
+                };
                 let star_deref = prev1 == Some(b'*') && prev2 != Some(b'*');
-                let paren_star_deref =
-                    prev1 == Some(b'(') && prev2 == Some(b'*');
+                let paren_star_deref = prev1 == Some(b'(') && prev2 == Some(b'*');
                 let pointerish = after.starts_with("->")
                     || after.starts_with('[')
                     || star_deref
@@ -10053,21 +12761,45 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // any other line of the output, drop the decl.
     {
         let type_tokens: &[&str] = &[
-            "long", "int", "short", "char", "bool", "float", "double",
-            "void *", "int *", "short *", "char *", "long *",
-            "unsigned int", "unsigned short", "unsigned long",
-            "int8_t", "int16_t", "int32_t", "int64_t",
-            "uint8_t", "uint16_t", "uint32_t", "uint64_t",
-            "size_t", "ssize_t", "ptrdiff_t",
+            "long",
+            "int",
+            "short",
+            "char",
+            "bool",
+            "float",
+            "double",
+            "void *",
+            "int *",
+            "short *",
+            "char *",
+            "long *",
+            "unsigned int",
+            "unsigned short",
+            "unsigned long",
+            "int8_t",
+            "int16_t",
+            "int32_t",
+            "int64_t",
+            "uint8_t",
+            "uint16_t",
+            "uint32_t",
+            "uint64_t",
+            "size_t",
+            "ssize_t",
+            "ptrdiff_t",
         ];
         // Walk once, collect (idx, name) candidates. Then check usage in
         // the remaining lines. Remove in descending index.
         let mut to_remove: Vec<usize> = Vec::new();
         for (idx, l) in lines.iter().enumerate() {
             let t = l.trim();
-            if !t.ends_with(';') { continue; }
+            if !t.ends_with(';') {
+                continue;
+            }
             let indent = l.len() - l.trim_start().len();
-            if indent == 0 { continue; }
+            if indent == 0 {
+                continue;
+            }
             // Strip trailing ';'
             let head = &t[..t.len() - 1];
             let name = type_tokens.iter().find_map(|ty| {
@@ -10078,8 +12810,12 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let nm = rest.split('[').next()?.trim();
                     if !nm.is_empty() && nm.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                         Some(nm.to_string())
-                    } else { None }
-                } else { None }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             });
             if let Some(nm) = name {
                 let pat = &nm;
@@ -10089,7 +12825,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 let mut read_uses = 0usize;
                 let mut write_lines: Vec<usize> = Vec::new();
                 for (i, other) in lines.iter().enumerate() {
-                    if i == idx { continue; }
+                    if i == idx {
+                        continue;
+                    }
                     let ot = other.as_str();
                     // Detect top-level `NAME = ...;` LHS write.
                     let trimmed = ot.trim();
@@ -10097,7 +12835,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         let lhs = &trimmed[..eq];
                         let root = lhs.split("->").next().unwrap_or(lhs).trim();
                         root == pat.as_str()
-                    } else { false };
+                    } else {
+                        false
+                    };
                     if is_lhs_write {
                         write_lines.push(i);
                         // Also count RHS identifier references on the SAME line.
@@ -10172,9 +12912,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             if let Some(eq) = t.find(" = ") {
                 let lhs = &t[..eq];
                 let root = lhs.split("->").next().unwrap_or(lhs).trim();
-                if !root.is_empty()
-                    && root.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                {
+                if !root.is_empty() && root.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                     ever_defined.insert(root.to_string());
                 }
             }
@@ -10182,9 +12920,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
         // Incremental linear scan: `assigned` grows as we walk forward.
         let mut assigned: std::collections::HashSet<String> = std::collections::HashSet::new();
         let _ = &ever_defined; // referenced below
-        // Identifier token regex in RHS: strings of [A-Za-z0-9_]+ that
-        // don't start with a digit. For a token to be "initialized" it must
-        // be in `assigned`, be a param_N, or be a literal/keyword.
+                               // Identifier token regex in RHS: strings of [A-Za-z0-9_]+ that
+                               // don't start with a digit. For a token to be "initialized" it must
+                               // be in `assigned`, be a param_N, or be a literal/keyword.
         let is_identish = |tok: &str| -> bool {
             !tok.is_empty()
                 && tok.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -10198,8 +12936,18 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 || tok.starts_with("PTR_")
                 || tok.starts_with("FUN_")
                 || tok.starts_with("func_")
-                || matches!(tok, "sp" | "lr" | "fp" | "pc" | "x29" | "x30"
-                    | "true" | "false" | "NULL" | "nullptr")
+                || matches!(
+                    tok,
+                    "sp" | "lr"
+                        | "fp"
+                        | "pc"
+                        | "x29"
+                        | "x30"
+                        | "true"
+                        | "false"
+                        | "NULL"
+                        | "nullptr"
+                )
         };
         let mut j = 0;
         while j < lines.len() {
@@ -10274,7 +13022,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let t = lines[j].trim();
             let is_classic = t.starts_with("while (")
                 && t.ends_with("{")
-                && lines.get(j + 1).map(|l| l.contains("runtime_morestack_noctxt")).unwrap_or(false)
+                && lines
+                    .get(j + 1)
+                    .map(|l| l.contains("runtime_morestack_noctxt"))
+                    .unwrap_or(false)
                 && lines.get(j + 2).map(|l| l.trim() == "}").unwrap_or(false);
             if is_classic {
                 lines.drain(j..=j + 2);
@@ -10303,9 +13054,17 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // can distinguish. Applies to all s_/slice_ prefixes.
     {
         use std::collections::HashMap;
-        let prefixes: [&str; 5] = ["s_data_", "s_len_", "slice_data_", "slice_len_", "slice_cap_"];
+        let prefixes: [&str; 5] = [
+            "s_data_",
+            "s_len_",
+            "slice_data_",
+            "slice_len_",
+            "slice_cap_",
+        ];
         let mut occurrence: HashMap<&str, Vec<u32>> = HashMap::new();
-        for pref in &prefixes { occurrence.insert(pref, Vec::new()); }
+        for pref in &prefixes {
+            occurrence.insert(pref, Vec::new());
+        }
         for line in &lines {
             for pref in &prefixes {
                 let mut rest = line.as_str();
@@ -10315,7 +13074,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     if n_end > 0 {
                         if let Ok(n) = after[..n_end].parse::<u32>() {
                             let v = occurrence.get_mut(pref).unwrap();
-                            if !v.contains(&n) { v.push(n); }
+                            if !v.contains(&n) {
+                                v.push(n);
+                            }
                         }
                     }
                     rest = &rest[p + pref.len() + n_end..];
@@ -10341,8 +13102,11 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // with bare `return;` regardless of function signature.
     for l in &mut lines {
         let t = l.trim();
-        if t == "return RSP;" || t == "return ESP;" || t == "return SP;"
-            || t == "return sp;" || t == "return x31;"
+        if t == "return RSP;"
+            || t == "return ESP;"
+            || t == "return SP;"
+            || t == "return sp;"
+            || t == "return x31;"
         {
             let indent = l.len() - l.trim_start().len();
             *l = format!("{}return;", &l[..indent]);
@@ -10355,9 +13119,13 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     {
         lines.retain(|l| {
             let t = l.trim();
-            if !t.ends_with("= ?;") { return true; }
+            if !t.ends_with("= ?;") {
+                return true;
+            }
             let head = t.trim_end_matches("= ?;").trim();
-            if head.is_empty() { return true; }
+            if head.is_empty() {
+                return true;
+            }
             !head.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         });
     }
@@ -10380,9 +13148,14 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let bt = lines[k].trim();
                     if bt == "}" {
                         let close_indent = lines[k].len() - lines[k].trim_start().len();
-                        if close_indent == open_indent { break; }
+                        if close_indent == open_indent {
+                            break;
+                        }
                     }
-                    if !bt.is_empty() { all_blank = false; break; }
+                    if !bt.is_empty() {
+                        all_blank = false;
+                        break;
+                    }
                     k += 1;
                 }
                 if all_blank && k < lines.len() && lines[k].trim() == "}" {
@@ -10400,7 +13173,8 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                             if bytes[i + 1] == b'('
                                 && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
                             {
-                                found = true; break;
+                                found = true;
+                                break;
                             }
                         }
                         found
@@ -10432,7 +13206,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         || lhs.starts_with("lVar")
                         || lhs.starts_with("uVar")
                         || lhs.starts_with("iVar"))
-                        && lhs.chars().skip(4).all(|c| c.is_ascii_alphanumeric() || c == '_');
+                        && lhs
+                            .chars()
+                            .skip(4)
+                            .all(|c| c.is_ascii_alphanumeric() || c == '_');
                     if is_local {
                         let hex_val = &lt[eq_pos + 3..lt.len() - 1];
                         if hex_val.len() > 4 {
@@ -10449,7 +13226,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
     // First: materialize `result` from `lines` (blank-line dedup preserved).
     for line in &lines {
         let is_blank = line.trim().is_empty();
-        if is_blank && prev_blank { continue; }
+        if is_blank && prev_blank {
+            continue;
+        }
         result.push_str(line);
         result.push('\n');
         prev_blank = is_blank;
@@ -10471,9 +13250,7 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
             let t = line.trim();
             if let Some(eq) = t.find(" = ") {
                 let lhs = &t[..eq];
-                if !lhs.is_empty()
-                    && lhs.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                {
+                if !lhs.is_empty() && lhs.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
                     return Some(lhs.to_string());
                 }
             }
@@ -10487,26 +13264,39 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                 ret_idx = Some(k);
                 break;
             }
-            if t == "}" || t.is_empty() { continue; }
+            if t == "}" || t.is_empty() {
+                continue;
+            }
             break;
         }
         if let Some(r) = ret_idx {
             let ret_t = lines2[r].trim();
             let ret_expr = ret_t["return ".len()..ret_t.len() - 1].trim();
-            let ret_var = ret_expr.split(&[' ', '+', '-'][..]).next().unwrap_or("").to_string();
+            let ret_var = ret_expr
+                .split(&[' ', '+', '-'][..])
+                .next()
+                .unwrap_or("")
+                .to_string();
             let is_ident = !ret_var.is_empty()
-                && ret_var.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                && ret_var
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_');
             if is_ident {
                 let lo = r.saturating_sub(8);
                 let mut xor_idx: Option<usize> = None;
                 let mut xor_lhs: Option<String> = None;
                 for k in (lo..r).rev() {
                     let t = lines2[k].trim();
-                    if !t.contains(" ^ ") { continue; }
+                    if !t.contains(" ^ ") {
+                        continue;
+                    }
                     if let Some(lhs) = take_lhs(t) {
                         // Either (a) xor lhs IS ret_var (result-return pattern),
                         // or (b) xor consumes ret_var (check-then-return pattern).
-                        if lhs == ret_var || t.contains(&format!(" {}", ret_var)) || t.contains(&format!("{} ", ret_var)) {
+                        if lhs == ret_var
+                            || t.contains(&format!(" {}", ret_var))
+                            || t.contains(&format!("{} ", ret_var))
+                        {
                             xor_idx = Some(k);
                             xor_lhs = Some(lhs);
                             break;
@@ -10519,7 +13309,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                     let mut to_remove: Vec<usize> = vec![xi];
                     for k in (xi + 1)..r {
                         let t = lines2[k].trim();
-                        if t.is_empty() { continue; }
+                        if t.is_empty() {
+                            continue;
+                        }
                         if let Some(_) = take_lhs(t) {
                             to_remove.push(k);
                         } else {
@@ -10535,8 +13327,10 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         .split(" ^ ")
                         .flat_map(|p| p.split(&[' ', '=', ';', '(', ')'][..]))
                         .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty()
-                            && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+                        .filter(|s| {
+                            !s.is_empty()
+                                && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        })
                         .collect();
                     let xl = xor_lhs.unwrap_or_default();
                     let lo2 = xi.saturating_sub(6);
@@ -10547,7 +13341,9 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                                 if let Some(eq) = t.find(" = ") {
                                     let rhs = t[eq + 3..].trim_end_matches(';').trim();
                                     let simple = !rhs.is_empty()
-                                        && rhs.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                                        && rhs
+                                            .chars()
+                                            .all(|c| c.is_ascii_alphanumeric() || c == '_');
                                     if simple {
                                         to_remove.push(k);
                                         break;
@@ -10561,9 +13357,13 @@ fn post_process(out: &mut String, aliases: &std::collections::HashMap<String, St
                         lines2[r] = format!("{}return;", &lines2[r][..indent_end]);
                         to_remove.sort_unstable_by(|a, b| b.cmp(a));
                         to_remove.dedup();
-                        for idx in to_remove { lines2.remove(idx); }
+                        for idx in to_remove {
+                            lines2.remove(idx);
+                        }
                         result = lines2.join("\n");
-                        if !result.ends_with('\n') { result.push('\n'); }
+                        if !result.ends_with('\n') {
+                            result.push('\n');
+                        }
                     }
                 }
             }
@@ -10588,7 +13388,8 @@ fn generate_function_signature(out: &mut String, ssa: &SsaCfg, func_name: &str) 
     // If this function has a known signature, use it for return type
     let sig = crate::signatures::lookup(func_name);
     // Also check learned types by address (from two-pass interprocedural analysis)
-    let learned_sig = func_name.strip_prefix("func_")
+    let learned_sig = func_name
+        .strip_prefix("func_")
         .and_then(|hex| u64::from_str_radix(hex, 16).ok())
         .and_then(crate::signatures::lookup_addr);
 
@@ -10612,8 +13413,10 @@ fn generate_function_signature(out: &mut String, ssa: &SsaCfg, func_name: &str) 
             }
         }
         // If no return terminator has a value, check learned types from call-site analysis
-        let has_return_val = ssa.blocks.iter().any(|b|
-            matches!(&b.terminator, SsaTerminator::Return(Some(_))));
+        let has_return_val = ssa
+            .blocks
+            .iter()
+            .any(|b| matches!(&b.terminator, SsaTerminator::Return(Some(_))));
         if !has_return_val {
             if let Some(lsig) = learned_sig {
                 return_type = lsig.ret.c_str();
@@ -10643,10 +13446,19 @@ fn generate_function_signature(out: &mut String, ssa: &SsaCfg, func_name: &str) 
     // underscore-number suffix (e.g. `s_data_0`, `slice_len_1`). Extract
     // for ordering so the renamed params keep their slot.
     let param_slot = |name: &str| -> u32 {
-        if let Some(rest) = name.strip_prefix("param_").or_else(|| name.strip_prefix("fparam_")) {
+        if let Some(rest) = name
+            .strip_prefix("param_")
+            .or_else(|| name.strip_prefix("fparam_"))
+        {
             return rest.parse::<u32>().unwrap_or(999);
         }
-        for pat in &["s_data_", "s_len_", "slice_data_", "slice_len_", "slice_cap_"] {
+        for pat in &[
+            "s_data_",
+            "s_len_",
+            "slice_data_",
+            "slice_len_",
+            "slice_cap_",
+        ] {
             if let Some(rest) = name.strip_prefix(pat) {
                 if let Ok(n) = rest.parse::<u32>() {
                     return n;
@@ -10660,13 +13472,22 @@ fn generate_function_signature(out: &mut String, ssa: &SsaCfg, func_name: &str) 
         let idx_b = param_slot(&b.0);
         let is_float_a = a.0.starts_with("fparam_");
         let is_float_b = b.0.starts_with("fparam_");
-        is_float_a.cmp(&is_float_b).then(idx_a.cmp(&idx_b)).then(a.0.cmp(&b.0))
+        is_float_a
+            .cmp(&is_float_b)
+            .then(idx_a.cmp(&idx_b))
+            .then(a.0.cmp(&b.0))
     });
 
     // Strip the `_N` sort suffix from Go-header names for display. Kept
     // only to preserve slot order in the sort above.
     let display_name = |n: &str| -> String {
-        for pat in &["s_data_", "s_len_", "slice_data_", "slice_len_", "slice_cap_"] {
+        for pat in &[
+            "s_data_",
+            "s_len_",
+            "slice_data_",
+            "slice_len_",
+            "slice_cap_",
+        ] {
             if let Some(rest) = n.strip_prefix(pat) {
                 if rest.parse::<u32>().is_ok() {
                     return pat.trim_end_matches('_').to_string();
@@ -10676,27 +13497,37 @@ fn generate_function_signature(out: &mut String, ssa: &SsaCfg, func_name: &str) 
         n.to_string()
     };
     // Format parameter list — use display_type > signature > InferredType
-    let param_strs: Vec<String> = params.iter().enumerate().map(|(i, (name, size, ty, disp))| {
-        let type_name = if let Some(d) = disp {
-            // display_type set by signature propagation (e.g., "HANDLE", "DWORD")
-            *d
-        } else if let Some(sig) = sig {
-            if i < sig.params.len() {
-                sig.params[i].ty.c_str()
+    let param_strs: Vec<String> = params
+        .iter()
+        .enumerate()
+        .map(|(i, (name, size, ty, disp))| {
+            let type_name = if let Some(d) = disp {
+                // display_type set by signature propagation (e.g., "HANDLE", "DWORD")
+                *d
+            } else if let Some(sig) = sig {
+                if i < sig.params.len() {
+                    sig.params[i].ty.c_str()
+                } else {
+                    inferred_type_to_c(*ty, *size)
+                }
             } else {
                 inferred_type_to_c(*ty, *size)
-            }
-        } else {
-            inferred_type_to_c(*ty, *size)
-        };
-        // Override type for Go-header names.
-        let type_name = if name.starts_with("s_data_") { "char *" }
-            else if name.starts_with("slice_data_") { "void *" }
-            else if name.starts_with("s_len_") || name.starts_with("slice_len_") { "long" }
-            else if name.starts_with("slice_cap_") { "long" }
-            else { type_name };
-        format!("{} {}", type_name, display_name(name))
-    }).collect();
+            };
+            // Override type for Go-header names.
+            let type_name = if name.starts_with("s_data_") {
+                "char *"
+            } else if name.starts_with("slice_data_") {
+                "void *"
+            } else if name.starts_with("s_len_") || name.starts_with("slice_len_") {
+                "long"
+            } else if name.starts_with("slice_cap_") {
+                "long"
+            } else {
+                type_name
+            };
+            format!("{} {}", type_name, display_name(name))
+        })
+        .collect();
 
     let params_str = if param_strs.is_empty() {
         "void".to_string()
@@ -10704,7 +13535,10 @@ fn generate_function_signature(out: &mut String, ssa: &SsaCfg, func_name: &str) 
         param_strs.join(", ")
     };
 
-    out.push_str(&format!("{} {}({}) {{\n", return_type, func_name, params_str));
+    out.push_str(&format!(
+        "{} {}({}) {{\n",
+        return_type, func_name, params_str
+    ));
 }
 
 /// Map InferredType + size to a C type string.
@@ -10731,7 +13565,11 @@ fn sigtype_to_cast(ty: crate::signatures::SigType) -> Option<&'static str> {
     match ty {
         SigType::Int => Some("int"),
         SigType::UInt | SigType::DWord | SigType::RegSam => Some("DWORD"),
-        SigType::Long | SigType::LResult | SigType::LStatus | SigType::Ntstatus | SigType::HResult => Some("long"),
+        SigType::Long
+        | SigType::LResult
+        | SigType::LStatus
+        | SigType::Ntstatus
+        | SigType::HResult => Some("long"),
         SigType::ULong => Some("unsigned long"),
         SigType::SizeT => Some("size_t"),
         SigType::CharPtr | SigType::LpStr | SigType::LpCStr => Some("char *"),
@@ -10776,13 +13614,20 @@ fn sigtype_to_cast(ty: crate::signatures::SigType) -> Option<&'static str> {
 }
 
 fn filter_boilerplate(stmts: &[StructuredStmt], ssa: &SsaCfg) -> Vec<StructuredStmt> {
-    stmts.iter().filter(|stmt| {
-        match stmt {
+    stmts
+        .iter()
+        .filter(|stmt| match stmt {
             StructuredStmt::Assign { lhs, .. } => {
                 let vdef = ssa.var(*lhs);
-                if is_stack_management(vdef, ssa) { return false; }
-                if is_frame_pointer_op(vdef) { return false; }
-                if vdef.varnode.space == AddressSpaceId::Register && vdef.varnode.offset == RIP_OFFSET {
+                if is_stack_management(vdef, ssa) {
+                    return false;
+                }
+                if is_frame_pointer_op(vdef) {
+                    return false;
+                }
+                if vdef.varnode.space == AddressSpaceId::Register
+                    && vdef.varnode.offset == RIP_OFFSET
+                {
                     return false;
                 }
                 true
@@ -10790,18 +13635,26 @@ fn filter_boilerplate(stmts: &[StructuredStmt], ssa: &SsaCfg) -> Vec<StructuredS
             StructuredStmt::Store { addr, val: _ } => {
                 let addr_def = ssa.var(*addr);
                 if addr_def.varnode.space == AddressSpaceId::Register
-                    && (addr_def.varnode.offset == RSP_OFFSET || addr_def.varnode.offset == ESP_OFFSET)
-                { return false; }
-                if is_sp_expr(&addr_def.expr, ssa) { return false; }
+                    && (addr_def.varnode.offset == RSP_OFFSET
+                        || addr_def.varnode.offset == ESP_OFFSET)
+                {
+                    return false;
+                }
+                if is_sp_expr(&addr_def.expr, ssa) {
+                    return false;
+                }
                 true
             }
             _ => true,
-        }
-    }).cloned().collect()
+        })
+        .cloned()
+        .collect()
 }
 
 fn is_stack_management(vdef: &VarDef, ssa: &SsaCfg) -> bool {
-    if vdef.varnode.space != AddressSpaceId::Register { return false; }
+    if vdef.varnode.space != AddressSpaceId::Register {
+        return false;
+    }
     if vdef.varnode.offset == RSP_OFFSET {
         if let Expr::BinOp(BinOpKind::Add | BinOpKind::Sub, l, _) = &vdef.expr {
             let lv = ssa.var(*l);
@@ -10828,9 +13681,13 @@ fn is_stack_management(vdef: &VarDef, ssa: &SsaCfg) -> bool {
 }
 
 fn is_frame_pointer_op(vdef: &VarDef) -> bool {
-    if vdef.varnode.space != AddressSpaceId::Register { return false; }
-    if vdef.varnode.offset == RBP_OFFSET || vdef.varnode.offset == RSP_OFFSET
-        || vdef.varnode.offset == EBP_OFFSET || vdef.varnode.offset == ESP_OFFSET
+    if vdef.varnode.space != AddressSpaceId::Register {
+        return false;
+    }
+    if vdef.varnode.offset == RBP_OFFSET
+        || vdef.varnode.offset == RSP_OFFSET
+        || vdef.varnode.offset == EBP_OFFSET
+        || vdef.varnode.offset == ESP_OFFSET
     {
         match &vdef.expr {
             Expr::Var(_) => true,
@@ -10879,36 +13736,70 @@ fn is_body_empty(stmts: &[StructuredStmt], ssa: &SsaCfg) -> bool {
         match stmt {
             StructuredStmt::Assign { lhs, .. } => {
                 let vdef = ssa.var(*lhs);
-                if vdef.varnode.space == AddressSpaceId::Unique { continue; }
-                if vdef.varnode.space == AddressSpaceId::Register && is_flag(vdef.varnode.offset) { continue; }
-                if matches!(&vdef.expr, Expr::Phi(_)) { continue; }
-                if is_zext_artifact(vdef, ssa) { continue; }
-                if is_self_assign(vdef, ssa) { continue; }
+                if vdef.varnode.space == AddressSpaceId::Unique {
+                    continue;
+                }
+                if vdef.varnode.space == AddressSpaceId::Register && is_flag(vdef.varnode.offset) {
+                    continue;
+                }
+                if matches!(&vdef.expr, Expr::Phi(_)) {
+                    continue;
+                }
+                if is_zext_artifact(vdef, ssa) {
+                    continue;
+                }
+                if is_self_assign(vdef, ssa) {
+                    continue;
+                }
                 // Stack management (ESP/RSP arithmetic) is filtered in output
-                if is_stack_management(vdef, ssa) { continue; }
-                if is_frame_pointer_op(vdef) { continue; }
-                if vdef.varnode.space == AddressSpaceId::Register && vdef.varnode.offset == RIP_OFFSET { continue; }
+                if is_stack_management(vdef, ssa) {
+                    continue;
+                }
+                if is_frame_pointer_op(vdef) {
+                    continue;
+                }
+                if vdef.varnode.space == AddressSpaceId::Register
+                    && vdef.varnode.offset == RIP_OFFSET
+                {
+                    continue;
+                }
                 // Call returns with use_count <= 1 are inlined at use site
-                if vdef.call_return && vdef.use_count <= 1 { continue; }
+                if vdef.call_return && vdef.use_count <= 1 {
+                    continue;
+                }
                 // Arg register assigns consumed by a call
-                if is_arg_consumed_by_call(*lhs, ssa) { continue; }
+                if is_arg_consumed_by_call(*lhs, ssa) {
+                    continue;
+                }
                 return false;
             }
             StructuredStmt::Store { addr, .. } => {
                 // ESP/RSP-derived stores are filtered in output
                 let addr_def = ssa.var(*addr);
                 if addr_def.varnode.space == AddressSpaceId::Register
-                    && (addr_def.varnode.offset == RSP_OFFSET || addr_def.varnode.offset == ESP_OFFSET)
-                { continue; }
-                if is_sp_expr(&addr_def.expr, ssa) { continue; }
+                    && (addr_def.varnode.offset == RSP_OFFSET
+                        || addr_def.varnode.offset == ESP_OFFSET)
+                {
+                    continue;
+                }
+                if is_sp_expr(&addr_def.expr, ssa) {
+                    continue;
+                }
                 return false;
             }
             StructuredStmt::Return(_)
-            | StructuredStmt::Call { .. } | StructuredStmt::While { .. }
-            | StructuredStmt::DoWhile { .. } | StructuredStmt::Switch { .. }
-            | StructuredStmt::Break | StructuredStmt::Continue
+            | StructuredStmt::Call { .. }
+            | StructuredStmt::While { .. }
+            | StructuredStmt::DoWhile { .. }
+            | StructuredStmt::Switch { .. }
+            | StructuredStmt::Break
+            | StructuredStmt::Continue
             | StructuredStmt::Goto(_) => return false,
-            StructuredStmt::IfElse { then_body, else_body, .. } => {
+            StructuredStmt::IfElse {
+                then_body,
+                else_body,
+                ..
+            } => {
                 if !is_body_empty(then_body, ssa) || !is_body_empty(else_body, ssa) {
                     return false;
                 }
@@ -10919,7 +13810,13 @@ fn is_body_empty(stmts: &[StructuredStmt], ssa: &SsaCfg) -> bool {
     true
 }
 
-fn print_stmts(stmts: &[StructuredStmt], ssa: &SsaCfg, ctx: &PrintCtx, indent: usize, out: &mut String) {
+fn print_stmts(
+    stmts: &[StructuredStmt],
+    ssa: &SsaCfg,
+    ctx: &PrintCtx,
+    indent: usize,
+    out: &mut String,
+) {
     let mut tracker = RegTracker::new();
     for (i, stmt) in stmts.iter().enumerate() {
         print_stmt_tracked(stmt, stmts, i, ssa, ctx, indent, out, &mut tracker);
@@ -10996,7 +13893,16 @@ impl RegTracker {
     }
 }
 
-fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx: usize, ssa: &SsaCfg, ctx: &PrintCtx, indent: usize, out: &mut String, tracker: &mut RegTracker) {
+fn print_stmt_tracked(
+    stmt: &StructuredStmt,
+    stmts: &[StructuredStmt],
+    stmt_idx: usize,
+    ssa: &SsaCfg,
+    ctx: &PrintCtx,
+    indent: usize,
+    out: &mut String,
+    tracker: &mut RegTracker,
+) {
     let pad: String = "    ".repeat(indent);
 
     match stmt {
@@ -11015,7 +13921,8 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                         return;
                     }
                     let name = pcodeop_name(ctx.arch, *func_id);
-                    let args: Vec<String> = inputs.iter()
+                    let args: Vec<String> = inputs
+                        .iter()
                         .map(|v| format_var_tracked(*v, ssa, ctx, tracker))
                         .collect();
                     // x86-64 `syscall` annotation: when preceded by a constant
@@ -11023,18 +13930,27 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                     // Win11 24H2 ntdll table and annotate. Windows build-specific
                     // — treated as a hint, not a rewrite.
                     let mut trailing = String::new();
-                    if matches!(ctx.arch, Architecture::X86_64)
-                        && *func_id == 5  // syscall pcodeop id
+                    if matches!(ctx.arch, Architecture::X86_64) && *func_id == 5
+                    // syscall pcodeop id
                     {
                         if let Some(num) = resolve_syscall_number_from_block(stmts, stmt_idx, ssa) {
                             if let Some(api) = crate::syscall_table::resolve_x64_syscall(num) {
-                                trailing = format!("  // syscall 0x{:x} -> likely {} (Win11 24H2)", num, api);
+                                trailing = format!(
+                                    "  // syscall 0x{:x} -> likely {} (Win11 24H2)",
+                                    num, api
+                                );
                             } else {
                                 trailing = format!("  // syscall 0x{:x} (unresolved)", num);
                             }
                         }
                     }
-                    out.push_str(&format!("{}{}({});{}\n", pad, name, args.join(", "), trailing));
+                    out.push_str(&format!(
+                        "{}{}({});{}\n",
+                        pad,
+                        name,
+                        args.join(", "),
+                        trailing
+                    ));
                     return;
                 }
             }
@@ -11050,26 +13966,43 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
             {
                 return;
             }
-            if vdef.varnode.space == AddressSpaceId::Unique { return; }
-            if vdef.varnode.space == AddressSpaceId::Register && is_flag(vdef.varnode.offset) { return; }
+            if vdef.varnode.space == AddressSpaceId::Unique {
+                return;
+            }
+            if vdef.varnode.space == AddressSpaceId::Register && is_flag(vdef.varnode.offset) {
+                return;
+            }
             // Skip unnamed Phi nodes; named loop Phis render as initialization (e.g., "iVar1 = 0")
-            if matches!(&vdef.expr, Expr::Phi(_)) && vdef.param_name.is_none() { return; }
-            if is_zext_artifact(vdef, ssa) { return; }
-            if is_self_assign(vdef, ssa) { return; }
-            if vdef.call_return && vdef.use_count <= 1 { return; }
-            if is_arg_consumed_by_call(*lhs, ssa) { return; }
+            if matches!(&vdef.expr, Expr::Phi(_)) && vdef.param_name.is_none() {
+                return;
+            }
+            if is_zext_artifact(vdef, ssa) {
+                return;
+            }
+            if is_self_assign(vdef, ssa) {
+                return;
+            }
+            if vdef.call_return && vdef.use_count <= 1 {
+                return;
+            }
+            if is_arg_consumed_by_call(*lhs, ssa) {
+                return;
+            }
 
             // Inside loop bodies (no Return in stmt list), elide register
             // assignments that feed into a Store to a stack variable.
             let has_return_in_list = stmts.iter().any(|s| matches!(s, StructuredStmt::Return(_)));
-            let has_store_in_list = stmts.iter().any(|s| matches!(s, StructuredStmt::Store { .. }));
+            let has_store_in_list = stmts
+                .iter()
+                .any(|s| matches!(s, StructuredStmt::Store { .. }));
             if vdef.varnode.space == AddressSpaceId::Register && indent > 0 && !has_return_in_list {
                 // In loop bodies with Stores: elide simple register setup
                 // (copies, sign extensions, loads) that feed into the Store.
                 // In loop bodies WITHOUT Stores (-O2 code): keep them visible.
                 if has_store_in_list {
-                    if let Expr::Var(_) | Expr::UnaryOp(UnaryOpKind::Sext | UnaryOpKind::Zext, _)
-                        | Expr::Load(_) = &vdef.expr
+                    if let Expr::Var(_)
+                    | Expr::UnaryOp(UnaryOpKind::Sext | UnaryOpKind::Zext, _)
+                    | Expr::Load(_) = &vdef.expr
                     {
                         return; // Intermediate register setup feeding a Store
                     }
@@ -11094,12 +14027,20 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                             }
                             StructuredStmt::Assign { lhs: next_lhs, .. } => {
                                 let nv = ssa.var(*next_lhs);
-                                if nv.varnode.space == AddressSpaceId::Unique { continue; }
+                                if nv.varnode.space == AddressSpaceId::Unique {
+                                    continue;
+                                }
                                 if nv.varnode.space == AddressSpaceId::Register
-                                    && is_flag(nv.varnode.offset) { continue; }
+                                    && is_flag(nv.varnode.offset)
+                                {
+                                    continue;
+                                }
                                 // Skip assigns to the same register (computation chain)
                                 if nv.varnode.space == AddressSpaceId::Register
-                                    && nv.varnode.offset == vdef.varnode.offset { continue; }
+                                    && nv.varnode.offset == vdef.varnode.offset
+                                {
+                                    continue;
+                                }
                                 break; // Different visible assign, stop looking
                             }
                             _ => break,
@@ -11114,7 +14055,9 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                     let src = ssa.var(*src_id);
                     if src.varnode.space == AddressSpaceId::Register {
                         // Check if source register has an inlined call return expression
-                        if let Some(expr_str) = tracker.get_expr_str(src.varnode.offset, src.varnode.size) {
+                        if let Some(expr_str) =
+                            tracker.get_expr_str(src.varnode.offset, src.varnode.size)
+                        {
                             let s = expr_str.to_string();
                             tracker.set_call_return(vdef.varnode.offset, vdef.varnode.size, s);
                             return; // Elided: call return propagated through register copy
@@ -11136,7 +14079,9 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                     }
                 } else if let Expr::Load(ptr) = &vdef.expr {
                     // REG = Load(addr): track so later uses resolve to the stack var
-                    let had_call_return = tracker.get_expr_str(vdef.varnode.offset, vdef.varnode.size).is_some();
+                    let had_call_return = tracker
+                        .get_expr_str(vdef.varnode.offset, vdef.varnode.size)
+                        .is_some();
                     tracker.set(vdef.varnode.offset, vdef.varnode.size, *lhs);
                     // Skip printing if this register is just used as an intermediate
                     // to pass a stack value to another assignment or call.
@@ -11145,7 +14090,9 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                     // - use_count <= 1: only used once (tracked at use site)
                     // - had_call_return: this is a restore after a call (tracked)
                     // - use_count <= 2 AND all uses are copies to other regs/stack
-                    if get_rbp_offset(*ptr, ssa).is_some() && (vdef.use_count <= 2 || had_call_return) {
+                    if get_rbp_offset(*ptr, ssa).is_some()
+                        && (vdef.use_count <= 2 || had_call_return)
+                    {
                         return; // Elided: stack Load tracked
                     }
                 } else {
@@ -11192,27 +14139,31 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                     tracker.invalidate(vdef.varnode.offset, vdef.varnode.size);
                 }
             }
-            if rhs == name { return; }
+            if rhs == name {
+                return;
+            }
 
             // Fold "REG = expr; return;" into "return expr;" when this is the
             // last visible assignment before a Return in the same statement list
             if vdef.varnode.space == AddressSpaceId::Register
-                && (vdef.varnode.offset == 0 || vdef.varnode.offset == 4608) // RAX/EAX or XMM0 — return value register
+                && (vdef.varnode.offset == 0 || vdef.varnode.offset == 4608)
+            // RAX/EAX or XMM0 — return value register
             {
                 // Only fold into return if there's an actual Return in the remaining stmts
-                let has_return = stmts[stmt_idx + 1..].iter().any(|s|
-                    matches!(s, StructuredStmt::Return(_)));
-                let next_is_return = has_return && stmts[stmt_idx + 1..].iter().all(|s| {
-                    match s {
+                let has_return = stmts[stmt_idx + 1..]
+                    .iter()
+                    .any(|s| matches!(s, StructuredStmt::Return(_)));
+                let next_is_return = has_return
+                    && stmts[stmt_idx + 1..].iter().all(|s| match s {
                         StructuredStmt::Return(_) => true,
                         StructuredStmt::Assign { lhs, .. } => {
                             let v = ssa.var(*lhs);
                             v.varnode.space == AddressSpaceId::Unique
-                                || (v.varnode.space == AddressSpaceId::Register && is_flag(v.varnode.offset))
+                                || (v.varnode.space == AddressSpaceId::Register
+                                    && is_flag(v.varnode.offset))
                         }
                         _ => false,
-                    }
-                });
+                    });
                 if next_is_return {
                     // For named loop Phis: the assignment is "iVar1 = 0" (initialization),
                     // so don't fold it into "return 0". Instead, print the assignment
@@ -11241,8 +14192,11 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
             // Skip truly dead stores: var_X with use_count 0 AND a simple value.
             // Don't skip computed expressions (they may feed back through a loop).
             if name.starts_with("var_") && vdef.use_count == 0 {
-                let is_simple_dead = !rhs.contains('+') && !rhs.contains('-')
-                    && !rhs.contains('*') && !rhs.contains('[') && !rhs.contains('(');
+                let is_simple_dead = !rhs.contains('+')
+                    && !rhs.contains('-')
+                    && !rhs.contains('*')
+                    && !rhs.contains('[')
+                    && !rhs.contains('(');
                 if is_simple_dead {
                     return; // Dead store of a simple value
                 }
@@ -11270,7 +14224,9 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                 let existing = tracker.stack_alias.get(&stack_name);
                 let is_param_alias = existing.map_or(false, |v| v.starts_with("param_"));
                 if !is_param_alias {
-                    tracker.stack_alias.insert(stack_name.clone(), val_expr.clone());
+                    tracker
+                        .stack_alias
+                        .insert(stack_name.clone(), val_expr.clone());
                 } else {
                     // Keep the param alias but use it as val_expr for display purposes
                     let val_expr_ref = existing.unwrap().clone();
@@ -11278,9 +14234,13 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                     let val_expr = val_expr_ref;
 
                     // Same skip checks as below but with the param alias
-                    if val_expr == stack_name { return; }
+                    if val_expr == stack_name {
+                        return;
+                    }
                     let is_param = val_expr.starts_with("param_");
-                    if is_param { return; } // Hide param store
+                    if is_param {
+                        return;
+                    } // Hide param store
                     return; // Don't print — the param alias is sufficient
                 }
 
@@ -11293,12 +14253,17 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                 }
                 // Hide simple parameter/variable alias stores (e.g., var_8 = param_0)
                 // but NOT register stores or computed expressions
-                let is_param = val_expr.starts_with("param_")
-                    || ssa.var(*val).param_name.is_some();
+                let is_param = val_expr.starts_with("param_") || ssa.var(*val).param_name.is_some();
                 let is_var_alias = val_expr.starts_with("var_") && !val_expr.contains(' ');
-                let is_dwarf_name = !val_expr.starts_with("var_") && !val_expr.starts_with("param_")
-                    && val_expr.chars().next().map_or(false, |c| c.is_ascii_lowercase())
-                    && val_expr.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                let is_dwarf_name = !val_expr.starts_with("var_")
+                    && !val_expr.starts_with("param_")
+                    && val_expr
+                        .chars()
+                        .next()
+                        .map_or(false, |c| c.is_ascii_lowercase())
+                    && val_expr
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_')
                     && !val_expr.chars().all(|c| c.is_ascii_digit() || c == 'x');
                 // Hide simple alias stores and register saves.
                 // These are tracked for resolution at use sites.
@@ -11306,11 +14271,15 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                     return; // Simple alias — tracked for later use
                 }
                 // Hide var_X = REG stores (register holding a tracked value)
-                let val_is_reg = val_expr.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
-                    && val_expr.len() >= 2 && val_expr.len() <= 3;
+                let val_is_reg = val_expr
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+                    && val_expr.len() >= 2
+                    && val_expr.len() <= 3;
                 // Hide var_X = func() stores where the value is a function call result
                 // Don't match pointer dereferences *(addr) — those are array loads
-                let val_is_call = val_expr.contains('(') && val_expr.contains(')')
+                let val_is_call = val_expr.contains('(')
+                    && val_expr.contains(')')
                     && !val_expr.starts_with("*(")
                     && !val_expr.contains(" + *(")
                     && !val_expr.contains(" - *(");
@@ -11321,10 +14290,17 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                 // these are real assignments that update loop state or function locals
                 out.push_str(&format!("{}{} = {};\n", pad, stack_name, val_expr));
             } else {
-                out.push_str(&format!("{}*({}*)({}) = {};\n", pad, type_name, addr_str, val_expr));
+                out.push_str(&format!(
+                    "{}*({}*)({}) = {};\n",
+                    pad, type_name, addr_str, val_expr
+                ));
             }
         }
-        StructuredStmt::Call { target, args, out: call_out } => {
+        StructuredStmt::Call {
+            target,
+            args,
+            out: call_out,
+        } => {
             let target_name = format_call_target(target, ssa, ctx);
 
             // ObjC message send: format as [receiver selector:arg1 param:arg2]
@@ -11357,7 +14333,10 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                         } else {
                             args
                         }
-                    } else if !sig.variadic && !sig.params.is_empty() && args.len() > sig.params.len() {
+                    } else if !sig.variadic
+                        && !sig.params.is_empty()
+                        && args.len() > sig.params.len()
+                    {
                         &args[..sig.params.len()]
                     } else {
                         args
@@ -11366,7 +14345,9 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                     args
                 };
 
-                let args_str: Vec<String> = effective_args.iter().enumerate()
+                let args_str: Vec<String> = effective_args
+                    .iter()
+                    .enumerate()
                     .map(|(i, a)| {
                         let vdef = ssa.var(*a);
                         let mut expr_str = format_vardef_expr(vdef, ssa, ctx, tracker);
@@ -11379,20 +14360,22 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                                         && !expr_str.starts_with('(') // already cast
                                         && expr_str != "0"
                                         && !expr_str.contains(cast); // already has the type
-                                    // Only cast numeric-looking args, variables, and pointer exprs
-                                    // Don't cast if it's already a function call result
-                                    let is_castable = needs_cast && (
-                                        expr_str.starts_with("0x")
-                                        || expr_str.starts_with("local_")
-                                        || expr_str.starts_with("param_")
-                                        || expr_str.starts_with("lVar")
-                                        || expr_str.starts_with("iVar")
-                                        || expr_str.starts_with("bVar")
-                                        || expr_str.starts_with("wVar")
-                                        || expr_str.starts_with("dVar")
-                                        || expr_str.starts_with("DAT_")
-                                        || expr_str.chars().next().map_or(false, |c| c.is_ascii_digit())
-                                    );
+                                                                     // Only cast numeric-looking args, variables, and pointer exprs
+                                                                     // Don't cast if it's already a function call result
+                                    let is_castable = needs_cast
+                                        && (expr_str.starts_with("0x")
+                                            || expr_str.starts_with("local_")
+                                            || expr_str.starts_with("param_")
+                                            || expr_str.starts_with("lVar")
+                                            || expr_str.starts_with("iVar")
+                                            || expr_str.starts_with("bVar")
+                                            || expr_str.starts_with("wVar")
+                                            || expr_str.starts_with("dVar")
+                                            || expr_str.starts_with("DAT_")
+                                            || expr_str
+                                                .chars()
+                                                .next()
+                                                .map_or(false, |c| c.is_ascii_digit()));
                                     if is_castable {
                                         expr_str = format!("({}){}", cast, expr_str);
                                     }
@@ -11456,8 +14439,12 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                             sv.varnode.space == AddressSpaceId::Register
                                 && sv.varnode.offset == 0
                                 && is_arg_consumed_by_call(*lhs, ssa)
-                        } else { false }
-                    } else { false }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
                 });
 
                 // Check if the NEXT statement stores the return value to a stack variable.
@@ -11469,14 +14456,18 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                         vdef.varnode.space == AddressSpaceId::Register
                             && vdef.varnode.offset == 0 // RAX/EAX
                             && try_stack_var_name(*addr, ssa).is_some()
-                    } else { false }
+                    } else {
+                        false
+                    }
                 });
 
                 if !next_reads_eax {
                     // For allocation functions, show the return assignment
                     // since the pointer is always used afterwards.
-                    let is_alloc = target_name == "malloc" || target_name == "calloc"
-                        || target_name == "realloc" || target_name == "mmap"
+                    let is_alloc = target_name == "malloc"
+                        || target_name == "calloc"
+                        || target_name == "realloc"
+                        || target_name == "mmap"
                         || target_name == "strdup";
                     if is_alloc {
                         out.push_str(&format!("{}ptr = {};\n", pad, call_expr));
@@ -11495,9 +14486,12 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                 // If the result is stored to stack, invalidate the call_return tracker
                 // AFTER the store is printed, so the stack var name is used for later refs.
                 // But for alloc calls we already set tracker to "ptr" above.
-                if next_stores_to_stack && !target_name.starts_with("malloc")
-                    && !target_name.starts_with("calloc") && !target_name.starts_with("realloc")
-                    && !target_name.starts_with("mmap") && !target_name.starts_with("strdup")
+                if next_stores_to_stack
+                    && !target_name.starts_with("malloc")
+                    && !target_name.starts_with("calloc")
+                    && !target_name.starts_with("realloc")
+                    && !target_name.starts_with("mmap")
+                    && !target_name.starts_with("strdup")
                 {
                     tracker.invalidate(0, 8);
                     tracker.invalidate(0, 4);
@@ -11506,12 +14500,15 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
         }
         StructuredStmt::Return(val) => {
             // Skip if the return was already folded into a preceding assignment
-            if tracker.get_expr_str(0, 0).map_or(false, |s| s == "<<returned>>") {
+            if tracker
+                .get_expr_str(0, 0)
+                .map_or(false, |s| s == "<<returned>>")
+            {
                 return;
             }
             if let Some(v) = val {
                 let vdef = ssa.var(*v);
-                
+
                 // For return values, resolve through the SSA expression to find
                 // the actual stack variable being returned, not the tracker alias.
                 let expr = if let Expr::Load(ptr) = &vdef.expr {
@@ -11543,17 +14540,24 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                 out.push_str(&format!("{}return;\n", pad));
             }
         }
-        StructuredStmt::IfElse { cond, then_body, else_body } => {
+        StructuredStmt::IfElse {
+            cond,
+            then_body,
+            else_body,
+        } => {
             let cv = ssa.var(*cond);
             if let Expr::BinOp(k, l, r) = &cv.expr {
-                let lv = ssa.var(*l); let rv = ssa.var(*r);
+                let lv = ssa.var(*l);
+                let rv = ssa.var(*r);
             }
             let cond_expr = format_condition_tracked(*cond, ssa, ctx, tracker);
             let then_filtered = filter_boilerplate(then_body, ssa);
             let else_filtered = filter_boilerplate(else_body, ssa);
             let then_empty = is_body_empty(&then_filtered, ssa);
             let else_empty = is_body_empty(&else_filtered, ssa);
-            if then_empty && else_empty { return; }
+            if then_empty && else_empty {
+                return;
+            }
             if then_empty && !else_empty {
                 let neg_cond = negate_condition(&cond_expr);
                 out.push_str(&format!("{}if ({}) {{\n", pad, neg_cond));
@@ -11591,10 +14595,11 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
             };
             // If the condition is always-false (e.g., "1 < 0", "1 > 1"), or the body
             // unconditionally returns, the loop executes at most once — emit straight-line.
-            let is_always_false = matches!(display_cond.as_str(),
-                "1 < 0" | "1 > 1" | "0 > 0" | "0 != 0" | "1 == 0" | "0 > 1");
-            let body_returns = matches!(body_filtered.last(),
-                Some(StructuredStmt::Return(_)));
+            let is_always_false = matches!(
+                display_cond.as_str(),
+                "1 < 0" | "1 > 1" | "0 > 0" | "0 != 0" | "1 == 0" | "0 > 1"
+            );
+            let body_returns = matches!(body_filtered.last(), Some(StructuredStmt::Return(_)));
             if is_always_false || body_returns {
                 print_stmts(&body_filtered, ssa, ctx, indent, out);
             } else {
@@ -11603,7 +14608,11 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                 out.push_str(&format!("{}}} while ({});\n", pad, display_cond));
             }
         }
-        StructuredStmt::Switch { expr, cases, default } => {
+        StructuredStmt::Switch {
+            expr,
+            cases,
+            default,
+        } => {
             let expr_str = format_var_tracked(*expr, ssa, ctx, tracker);
             out.push_str(&format!("{}switch ({}) {{\n", pad, expr_str));
             for (vals, body) in cases {
@@ -11613,7 +14622,10 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
                 let body_filtered = filter_boilerplate(body, ssa);
                 print_stmts(&body_filtered, ssa, ctx, indent + 2, out);
                 // Add break if body doesn't end with return
-                if !body_filtered.iter().any(|s| matches!(s, StructuredStmt::Return(_))) {
+                if !body_filtered
+                    .iter()
+                    .any(|s| matches!(s, StructuredStmt::Return(_)))
+                {
                     out.push_str(&format!("{}        break;\n", pad));
                 }
             }
@@ -11642,11 +14654,11 @@ fn print_stmt_tracked(stmt: &StructuredStmt, stmts: &[StructuredStmt], stmt_idx:
 /// Check if a named loop Phi exists for the same register as the given VarDef.
 /// Returns the Phi's param_name if found.
 fn find_register_loop_phi(vdef: &VarDef, ssa: &SsaCfg) -> Option<String> {
-    if vdef.varnode.space != AddressSpaceId::Register { return None; }
+    if vdef.varnode.space != AddressSpaceId::Register {
+        return None;
+    }
     for v in &ssa.vars {
-        if v.varnode.space == AddressSpaceId::Register
-            && v.varnode.offset == vdef.varnode.offset
-        {
+        if v.varnode.space == AddressSpaceId::Register && v.varnode.offset == vdef.varnode.offset {
             if let Some(ref name) = v.param_name {
                 if matches!(&v.expr, Expr::Phi(_)) {
                     return Some(name.clone());
@@ -11660,7 +14672,9 @@ fn find_register_loop_phi(vdef: &VarDef, ssa: &SsaCfg) -> Option<String> {
 /// Follow Var/BinOp/UnaryOp chains to find a named variable (param_name set).
 /// Returns the name if found within `depth` hops, None otherwise.
 fn resolve_to_named_var(id: VarId, ssa: &SsaCfg, depth: u32) -> Option<String> {
-    if depth == 0 { return None; }
+    if depth == 0 {
+        return None;
+    }
     let vdef = ssa.var(id);
     if let Some(ref name) = vdef.param_name {
         return Some(name.clone());
@@ -11678,10 +14692,8 @@ fn resolve_to_named_var(id: VarId, ssa: &SsaCfg, depth: u32) -> Option<String> {
         Expr::UnaryOp(UnaryOpKind::Zext | UnaryOpKind::Sext, inner) => {
             resolve_to_named_var(*inner, ssa, depth - 1)
         }
-        Expr::BinOp(_, l, r) => {
-            resolve_to_named_var(*l, ssa, depth - 1)
-                .or_else(|| resolve_to_named_var(*r, ssa, depth - 1))
-        }
+        Expr::BinOp(_, l, r) => resolve_to_named_var(*l, ssa, depth - 1)
+            .or_else(|| resolve_to_named_var(*r, ssa, depth - 1)),
         _ => None,
     }
 }
@@ -11707,9 +14719,9 @@ fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTrac
     // that merges the entry param value with a loop-modified value.
     if vdef.varnode.space == AddressSpaceId::Register {
         let param = match &vdef.expr {
-            Expr::Phi(inputs) => inputs.iter().find_map(|inp| {
-                ssa.var(*inp).param_name.as_ref().cloned()
-            }),
+            Expr::Phi(inputs) => inputs
+                .iter()
+                .find_map(|inp| ssa.var(*inp).param_name.as_ref().cloned()),
             Expr::Var(src) => ssa.var(*src).param_name.as_ref().cloned(),
             _ => None,
         };
@@ -11769,13 +14781,17 @@ fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTrac
             let lv = ssa.var(*left);
             let rv = ssa.var(*right);
             let l_tracked = (lv.varnode.space == AddressSpaceId::Register
-                    && (tracker.get(lv.varnode.offset, lv.varnode.size).is_some()
-                        || tracker.get_expr_str(lv.varnode.offset, lv.varnode.size).is_some()))
+                && (tracker.get(lv.varnode.offset, lv.varnode.size).is_some()
+                    || tracker
+                        .get_expr_str(lv.varnode.offset, lv.varnode.size)
+                        .is_some()))
                 || (lv.varnode.space == AddressSpaceId::Unique
                     && expr_has_tracked_reg(&lv.expr, ssa, tracker));
             let r_tracked = (rv.varnode.space == AddressSpaceId::Register
-                    && (tracker.get(rv.varnode.offset, rv.varnode.size).is_some()
-                        || tracker.get_expr_str(rv.varnode.offset, rv.varnode.size).is_some()))
+                && (tracker.get(rv.varnode.offset, rv.varnode.size).is_some()
+                    || tracker
+                        .get_expr_str(rv.varnode.offset, rv.varnode.size)
+                        .is_some()))
                 || (rv.varnode.space == AddressSpaceId::Unique
                     && expr_has_tracked_reg(&rv.expr, ssa, tracker));
             if l_tracked || r_tracked {
@@ -11803,7 +14819,9 @@ fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTrac
         }
         // Also check smaller sizes at same offset (RAX → EAX tracking)
         for sz in [4u32, 8, 2, 1] {
-            if sz == vdef.varnode.size { continue; }
+            if sz == vdef.varnode.size {
+                continue;
+            }
             if let Some(expr_str) = tracker.get_expr_str(vdef.varnode.offset, sz) {
                 return expr_str.to_string();
             }
@@ -11818,13 +14836,17 @@ fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTrac
             let mut cur_expr = &vdef.expr;
             let mut depth = 0;
             while let Expr::Var(src) = cur_expr {
-                if depth > 5 { break; }
+                if depth > 5 {
+                    break;
+                }
                 cur_id = *src;
                 cur_expr = &ssa.var(*src).expr;
                 depth += 1;
             }
             match cur_expr {
-                Expr::Load(_) | Expr::BinOp(_, _, _) | Expr::UnaryOp(_, _)
+                Expr::Load(_)
+                | Expr::BinOp(_, _, _)
+                | Expr::UnaryOp(_, _)
                 | Expr::Ternary(_, _, _) => {
                     return format_vardef_expr(ssa.var(cur_id), ssa, ctx, tracker);
                 }
@@ -11832,11 +14854,14 @@ fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTrac
             }
         }
 
-        let tracked_id = tracker.get(vdef.varnode.offset, vdef.varnode.size)
+        let tracked_id = tracker
+            .get(vdef.varnode.offset, vdef.varnode.size)
             .or_else(|| {
                 // Try sub-register sizes
                 for sz in [4u32, 8, 2, 1] {
-                    if sz == vdef.varnode.size { continue; }
+                    if sz == vdef.varnode.size {
+                        continue;
+                    }
                     if let Some(id) = tracker.get(vdef.varnode.offset, sz) {
                         return Some(id);
                     }
@@ -11869,7 +14894,9 @@ fn expr_has_tracked_reg(expr: &Expr, ssa: &SsaCfg, tracker: &RegTracker) -> bool
             let iv = ssa.var(*inner);
             if iv.varnode.space == AddressSpaceId::Register {
                 return tracker.get(iv.varnode.offset, iv.varnode.size).is_some()
-                    || tracker.get_expr_str(iv.varnode.offset, iv.varnode.size).is_some();
+                    || tracker
+                        .get_expr_str(iv.varnode.offset, iv.varnode.size)
+                        .is_some();
             }
             if iv.varnode.space == AddressSpaceId::Unique {
                 return expr_has_tracked_reg(&iv.expr, ssa, tracker);
@@ -11880,7 +14907,9 @@ fn expr_has_tracked_reg(expr: &Expr, ssa: &SsaCfg, tracker: &RegTracker) -> bool
             let iv = ssa.var(*inner);
             if iv.varnode.space == AddressSpaceId::Register {
                 return tracker.get(iv.varnode.offset, iv.varnode.size).is_some()
-                    || tracker.get_expr_str(iv.varnode.offset, iv.varnode.size).is_some();
+                    || tracker
+                        .get_expr_str(iv.varnode.offset, iv.varnode.size)
+                        .is_some();
             }
             if iv.varnode.space == AddressSpaceId::Unique {
                 return expr_has_tracked_reg(&iv.expr, ssa, tracker);
@@ -11899,9 +14928,12 @@ fn expr_has_tracked_reg(expr: &Expr, ssa: &SsaCfg, tracker: &RegTracker) -> bool
 /// var_c → var_8 → param_0
 fn resolve_stack_alias(name: &str, tracker: &RegTracker) -> String {
     let mut current = name.to_string();
-    for _ in 0..5 { // max depth
+    for _ in 0..5 {
+        // max depth
         if let Some(alias) = tracker.stack_alias.get(&current) {
-            if alias == &current { break; }
+            if alias == &current {
+                break;
+            }
             current = alias.clone();
         } else {
             break;
@@ -11911,7 +14943,13 @@ fn resolve_stack_alias(name: &str, tracker: &RegTracker) -> String {
 }
 
 /// Format an Objective-C message send as bracket syntax: [receiver selector:arg1 param:arg2]
-fn format_objc_call(selector: &str, args: &[VarId], ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> String {
+fn format_objc_call(
+    selector: &str,
+    args: &[VarId],
+    ssa: &SsaCfg,
+    ctx: &PrintCtx,
+    tracker: &RegTracker,
+) -> String {
     // First argument is the receiver (self or class).
     // In AArch64 ObjC ABI, x0 holds self/class before the call.
     // Try: explicit arg first, then tracker for x0 register.
@@ -11920,12 +14958,20 @@ fn format_objc_call(selector: &str, args: &[VarId], ssa: &SsaCfg, ctx: &PrintCtx
         let r = format_vardef_expr(vdef, ssa, ctx, tracker);
         // Clean up common receiver patterns
         // ObjC ARC calls in x0 are not the actual receiver — the previous message result is
-        let r = if r.starts_with("objc_retain") || r.starts_with("objc_release")
-            || r.starts_with("[super") || r.starts_with("[[")
+        let r = if r.starts_with("objc_retain")
+            || r.starts_with("objc_release")
+            || r.starts_with("[super")
+            || r.starts_with("[[")
         {
             "self".to_string()
-        } else { r };
-        if r.starts_with("param_") || r.starts_with("self") || r.starts_with("lVar") || r.starts_with("iVar") {
+        } else {
+            r
+        };
+        if r.starts_with("param_")
+            || r.starts_with("self")
+            || r.starts_with("lVar")
+            || r.starts_with("iVar")
+        {
             r
         } else if r.contains("OBJC_CLASS") || r.starts_with("*(") {
             // Class method: extract class name if possible
@@ -11933,12 +14979,20 @@ fn format_objc_call(selector: &str, args: &[VarId], ssa: &SsaCfg, ctx: &PrintCtx
                 if let Some(cls) = cls.strip_suffix(")") {
                     if cls.contains("OBJC_CLASS") {
                         // *(PTR__OBJC_CLASS___UIColor...) → UIColor
-                        cls.rsplit("___").next()
+                        cls.rsplit("___")
+                            .next()
                             .and_then(|s| s.split('_').next())
-                            .unwrap_or(cls).to_string()
-                    } else { r }
-                } else { r }
-            } else { r }
+                            .unwrap_or(cls)
+                            .to_string()
+                    } else {
+                        r
+                    }
+                } else {
+                    r
+                }
+            } else {
+                r
+            }
         } else {
             r
         }
@@ -11961,10 +15015,14 @@ fn format_objc_call(selector: &str, args: &[VarId], ssa: &SsaCfg, ctx: &PrintCtx
     // The remaining arguments (after receiver, skipping selector which is implicit in the name)
     // In AArch64 ObjC ABI: x0=self, x1=_cmd (selector), x2..=actual args
     // Our call args may or may not include x1 depending on how they were collected
-    let extra_args: Vec<String> = args.iter().skip(1).map(|a| {
-        let vdef = ssa.var(*a);
-        format_vardef_expr(vdef, ssa, ctx, tracker)
-    }).collect();
+    let extra_args: Vec<String> = args
+        .iter()
+        .skip(1)
+        .map(|a| {
+            let vdef = ssa.var(*a);
+            format_vardef_expr(vdef, ssa, ctx, tracker)
+        })
+        .collect();
 
     // Parse selector parts (split by ':')
     let parts: Vec<&str> = selector.split(':').collect();
@@ -11977,7 +15035,9 @@ fn format_objc_call(selector: &str, args: &[VarId], ssa: &SsaCfg, ctx: &PrintCtx
         // Interleave selector parts with arguments
         let mut result = format!("[{}", receiver);
         for (i, part) in parts.iter().enumerate() {
-            if part.is_empty() { continue; }
+            if part.is_empty() {
+                continue;
+            }
             if i < extra_args.len() {
                 result.push_str(&format!(" {}:{}", part, extra_args[i]));
             } else {
@@ -11992,7 +15052,12 @@ fn format_objc_call(selector: &str, args: &[VarId], ssa: &SsaCfg, ctx: &PrintCtx
         if args_str.is_empty() {
             format!("[{} {}]", receiver, selector.trim_end_matches(':'))
         } else {
-            format!("[{} {} {}]", receiver, selector.trim_end_matches(':'), args_str)
+            format!(
+                "[{} {} {}]",
+                receiver,
+                selector.trim_end_matches(':'),
+                args_str
+            )
         }
     }
 }
@@ -12029,8 +15094,14 @@ fn simplify_msvc_name(name: &str) -> String {
     for pat in basic_istream_patterns {
         s = s.replace(pat, "std::istream");
     }
-    s = s.replace("std::basic_string<char, std::char_traits<char>, std::allocator<char>>", "std::string");
-    s = s.replace("std::basic_string<char,std::char_traits<char>,std::allocator<char> >", "std::string");
+    s = s.replace(
+        "std::basic_string<char, std::char_traits<char>, std::allocator<char>>",
+        "std::string",
+    );
+    s = s.replace(
+        "std::basic_string<char,std::char_traits<char>,std::allocator<char> >",
+        "std::string",
+    );
     // Remove "class " and "struct " prefixes
     s = s.replace("class ", "").replace("struct ", "");
     // Simplify operator calls
@@ -12041,13 +15112,26 @@ fn simplify_msvc_name(name: &str) -> String {
         return "cin >>".to_string();
     }
     // Simplify global objects
-    if s.contains("std::ostream") && s.contains("cout") { return "cout".to_string(); }
-    if s.contains("std::istream") && s.contains("cin") { return "cin".to_string(); }
-    s = s.replace("std::cout", "cout").replace("std::cin", "cin").replace("std::endl", "endl");
+    if s.contains("std::ostream") && s.contains("cout") {
+        return "cout".to_string();
+    }
+    if s.contains("std::istream") && s.contains("cin") {
+        return "cin".to_string();
+    }
+    s = s
+        .replace("std::cout", "cout")
+        .replace("std::cin", "cin")
+        .replace("std::endl", "endl");
     // Remove calling convention and access specifiers
-    s = s.replace("public: ", "").replace("private: ", "").replace("protected: ", "");
+    s = s
+        .replace("public: ", "")
+        .replace("private: ", "")
+        .replace("protected: ", "");
     s = s.replace("virtual ", "");
-    s = s.replace("__cdecl ", "").replace("__thiscall ", "").replace("__stdcall ", "");
+    s = s
+        .replace("__cdecl ", "")
+        .replace("__thiscall ", "")
+        .replace("__stdcall ", "");
     // Remove return type prefix for method calls: "int std::istream::get" → "cin.get"
     if let Some(last_space) = s.rfind(' ') {
         let after = &s[last_space + 1..];
@@ -12056,7 +15140,9 @@ fn simplify_msvc_name(name: &str) -> String {
         }
     }
     // Simplify std::istream::method → cin.method, std::ostream::method → cout.method
-    s = s.replace("std::istream::", "cin.").replace("std::ostream::", "cout.");
+    s = s
+        .replace("std::istream::", "cin.")
+        .replace("std::ostream::", "cout.");
     s = s.trim().to_string();
     s
 }
@@ -12114,7 +15200,10 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
             }
             // CDQ+IDIV simplification: SDiv/SRem of 64-bit concatenation → 32-bit division
             // Pattern: SDiv(Or(Lsl(x, 32), Zext(val)), Sext/Zext(divisor)) → val / divisor
-            if matches!(kind, BinOpKind::SDiv | BinOpKind::SRem | BinOpKind::Div | BinOpKind::Rem) {
+            if matches!(
+                kind,
+                BinOpKind::SDiv | BinOpKind::SRem | BinOpKind::Div | BinOpKind::Rem
+            ) {
                 if let Some(val_id) = extract_concat_low_half(*left, ssa) {
                     let divisor_id = unwrap_ext(*right, ssa);
                     let l = format_var_tracked(val_id, ssa, ctx, tracker);
@@ -12125,7 +15214,10 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
             }
 
             // Simplify x + 0 → x, x - 0 → x, x * 1 → x, x | 0 → x, x & -1 → x
-            if matches!(kind, BinOpKind::Add | BinOpKind::Sub | BinOpKind::Or | BinOpKind::Xor) {
+            if matches!(
+                kind,
+                BinOpKind::Add | BinOpKind::Sub | BinOpKind::Or | BinOpKind::Xor
+            ) {
                 if let Expr::Const(0, _) = &ssa.var(*right).expr {
                     return format_var_tracked(*left, ssa, ctx, tracker);
                 }
@@ -12167,19 +15259,33 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
                     // Skip cast for Unknown/Signed types at native int size (4 bytes)
                     let needs_l_cast = lv.inferred_type == InferredType::Unsigned
                         || (lv.inferred_type != InferredType::Signed && lv.size < 4);
-                    if needs_l_cast && !l.starts_with('(')
-                        && !l.starts_with('-') && !l.starts_with('"') && l != "0"
+                    if needs_l_cast
+                        && !l.starts_with('(')
+                        && !l.starts_with('-')
+                        && !l.starts_with('"')
+                        && l != "0"
                     {
-                        let cast = match lv.size { 1 => "(char)", 2 => "(short)", _ => "(int)" };
+                        let cast = match lv.size {
+                            1 => "(char)",
+                            2 => "(short)",
+                            _ => "(int)",
+                        };
                         l = format!("{}{}", cast, l);
                     }
                     let needs_r_cast = rv.inferred_type == InferredType::Unsigned
                         || (rv.inferred_type != InferredType::Signed && rv.size < 4);
-                    if needs_r_cast && !r.starts_with('(')
-                        && !r.starts_with('-') && !r.starts_with('"') && r != "0"
+                    if needs_r_cast
+                        && !r.starts_with('(')
+                        && !r.starts_with('-')
+                        && !r.starts_with('"')
+                        && r != "0"
                         && !r.chars().next().map_or(false, |c| c.is_ascii_digit())
                     {
-                        let cast = match rv.size { 1 => "(char)", 2 => "(short)", _ => "(int)" };
+                        let cast = match rv.size {
+                            1 => "(char)",
+                            2 => "(short)",
+                            _ => "(int)",
+                        };
                         r = format!("{}{}", cast, r);
                     }
                 }
@@ -12188,13 +15294,22 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
                     let rv = ssa.var(*right);
                     // Cast to unsigned for explicitly unsigned comparisons/arithmetic
                     if lv.inferred_type == InferredType::Signed && !l.starts_with('(') {
-                        let cast = match lv.size { 1 => "(uint8_t)", 2 => "(uint16_t)", _ => "(uint)" };
+                        let cast = match lv.size {
+                            1 => "(uint8_t)",
+                            2 => "(uint16_t)",
+                            _ => "(uint)",
+                        };
                         l = format!("{}{}", cast, l);
                     }
-                    if rv.inferred_type == InferredType::Signed && !r.starts_with('(')
+                    if rv.inferred_type == InferredType::Signed
+                        && !r.starts_with('(')
                         && !r.chars().next().map_or(false, |c| c.is_ascii_digit())
                     {
-                        let cast = match rv.size { 1 => "(uint8_t)", 2 => "(uint16_t)", _ => "(uint)" };
+                        let cast = match rv.size {
+                            1 => "(uint8_t)",
+                            2 => "(uint16_t)",
+                            _ => "(uint)",
+                        };
                         r = format!("{}{}", cast, r);
                     }
                 }
@@ -12202,7 +15317,12 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
                 BinOpKind::Asr => {
                     let lv = ssa.var(*left);
                     if lv.inferred_type != InferredType::Signed && !l.starts_with('(') {
-                        let cast = match lv.size { 1 => "(char)", 2 => "(short)", 4 => "(int)", _ => "(long)" };
+                        let cast = match lv.size {
+                            1 => "(char)",
+                            2 => "(short)",
+                            4 => "(int)",
+                            _ => "(long)",
+                        };
                         l = format!("{}{}", cast, l);
                     }
                 }
@@ -12210,16 +15330,28 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
                 BinOpKind::Lsr => {
                     let lv = ssa.var(*left);
                     if lv.inferred_type == InferredType::Signed && !l.starts_with('(') {
-                        let cast = match lv.size { 1 => "(uint8_t)", 2 => "(uint16_t)", 4 => "(uint)", _ => "(uint64_t)" };
+                        let cast = match lv.size {
+                            1 => "(uint8_t)",
+                            2 => "(uint16_t)",
+                            4 => "(uint)",
+                            _ => "(uint64_t)",
+                        };
                         l = format!("{}{}", cast, l);
                     }
                 }
                 // Bitwise AND/OR/XOR: cast to unsigned when operating on signed values
                 BinOpKind::And | BinOpKind::Or | BinOpKind::Xor => {
                     let lv = ssa.var(*left);
-                    if lv.inferred_type == InferredType::Signed && !l.starts_with('(')
-                        && !l.starts_with('-') {
-                        let cast = match lv.size { 1 => "(uint8_t)", 2 => "(uint16_t)", 4 => "(uint)", _ => "(uint64_t)" };
+                    if lv.inferred_type == InferredType::Signed
+                        && !l.starts_with('(')
+                        && !l.starts_with('-')
+                    {
+                        let cast = match lv.size {
+                            1 => "(uint8_t)",
+                            2 => "(uint16_t)",
+                            4 => "(uint)",
+                            _ => "(uint64_t)",
+                        };
                         l = format!("{}{}", cast, l);
                     }
                 }
@@ -12316,23 +15448,43 @@ fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegT
 }
 
 #[allow(dead_code)]
-fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, indent: usize, out: &mut String) {
+fn print_stmt(
+    stmt: &StructuredStmt,
+    ssa: &SsaCfg,
+    ctx: &PrintCtx,
+    indent: usize,
+    out: &mut String,
+) {
     let pad: String = "    ".repeat(indent);
 
     match stmt {
         StructuredStmt::Assign { lhs, .. } => {
             let vdef = ssa.var(*lhs);
-            if vdef.varnode.space == AddressSpaceId::Unique { return; }
-            if vdef.varnode.space == AddressSpaceId::Register && is_flag(vdef.varnode.offset) { return; }
-            if matches!(&vdef.expr, Expr::Phi(_)) { return; }
-            if is_zext_artifact(vdef, ssa) { return; }
-            if is_self_assign(vdef, ssa) { return; }
+            if vdef.varnode.space == AddressSpaceId::Unique {
+                return;
+            }
+            if vdef.varnode.space == AddressSpaceId::Register && is_flag(vdef.varnode.offset) {
+                return;
+            }
+            if matches!(&vdef.expr, Expr::Phi(_)) {
+                return;
+            }
+            if is_zext_artifact(vdef, ssa) {
+                return;
+            }
+            if is_self_assign(vdef, ssa) {
+                return;
+            }
             // Skip call return value captures (e.g., ECX = EAX after a call)
             // when the var is only used once — it will be inlined at the use site
-            if vdef.call_return && vdef.use_count <= 1 { return; }
+            if vdef.call_return && vdef.use_count <= 1 {
+                return;
+            }
             // Skip argument register assignments that are consumed by a call
             // (they're shown inline in the call's argument list)
-            if is_arg_consumed_by_call(*lhs, ssa) { return; }
+            if is_arg_consumed_by_call(*lhs, ssa) {
+                return;
+            }
 
             let name = var_name(&vdef.varnode, ctx);
             let rhs = format_expr(&vdef.expr, ssa, ctx);
@@ -12349,13 +15501,21 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, indent: usize
             if let Some(stack_name) = try_stack_var_name(*addr, ssa) {
                 out.push_str(&format!("{}{} = {};\n", pad, stack_name, val_expr));
             } else {
-                out.push_str(&format!("{}*({}*)({}) = {};\n", pad, type_name, addr_str, val_expr));
+                out.push_str(&format!(
+                    "{}*({}*)({}) = {};\n",
+                    pad, type_name, addr_str, val_expr
+                ));
             }
         }
-        StructuredStmt::Call { target, args, out: call_out } => {
+        StructuredStmt::Call {
+            target,
+            args,
+            out: call_out,
+        } => {
             let target_name = format_call_target(target, ssa, ctx);
             // Show argument VALUES (the expression assigned to the arg register)
-            let args_str: Vec<String> = args.iter()
+            let args_str: Vec<String> = args
+                .iter()
                 .map(|a| {
                     let vdef = ssa.var(*a);
                     // Show the RHS of the arg register assignment, not "RDI"
@@ -12364,9 +15524,20 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, indent: usize
                 .collect();
             if let Some(out_var) = call_out {
                 let name = var_name(&ssa.var(*out_var).varnode, ctx);
-                out.push_str(&format!("{}{} = {}({});\n", pad, name, target_name, args_str.join(", ")));
+                out.push_str(&format!(
+                    "{}{} = {}({});\n",
+                    pad,
+                    name,
+                    target_name,
+                    args_str.join(", ")
+                ));
             } else {
-                out.push_str(&format!("{}{}({});\n", pad, target_name, args_str.join(", ")));
+                out.push_str(&format!(
+                    "{}{}({});\n",
+                    pad,
+                    target_name,
+                    args_str.join(", ")
+                ));
             }
         }
         StructuredStmt::Return(val) => {
@@ -12379,14 +15550,20 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, indent: usize
                 out.push_str(&format!("{}return;\n", pad));
             }
         }
-        StructuredStmt::IfElse { cond, then_body, else_body } => {
+        StructuredStmt::IfElse {
+            cond,
+            then_body,
+            else_body,
+        } => {
             let cond_expr = format_condition(*cond, ssa, ctx);
             let then_filtered = filter_boilerplate(then_body, ssa);
             let else_filtered = filter_boilerplate(else_body, ssa);
             let then_empty = is_body_empty(&then_filtered, ssa);
             let else_empty = is_body_empty(&else_filtered, ssa);
 
-            if then_empty && else_empty { return; }
+            if then_empty && else_empty {
+                return;
+            }
             if then_empty && !else_empty {
                 let neg_cond = negate_condition(&cond_expr);
                 out.push_str(&format!("{}if ({}) {{\n", pad, neg_cond));
@@ -12404,7 +15581,11 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, indent: usize
         }
         StructuredStmt::While { cond, negate, body } => {
             let cond_expr = format_condition(*cond, ssa, ctx);
-            let display_cond = if *negate { negate_condition(&cond_expr) } else { cond_expr };
+            let display_cond = if *negate {
+                negate_condition(&cond_expr)
+            } else {
+                cond_expr
+            };
             let body_filtered = filter_boilerplate(body, ssa);
             out.push_str(&format!("{}while ({}) {{\n", pad, display_cond));
             print_stmts(&body_filtered, ssa, ctx, indent + 1, out);
@@ -12413,11 +15594,16 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, indent: usize
         StructuredStmt::DoWhile { cond, negate, body } => {
             let body_filtered = filter_boilerplate(body, ssa);
             let cond_expr = format_condition(*cond, ssa, ctx);
-            let display_cond = if *negate { negate_condition(&cond_expr) } else { cond_expr };
-            let is_always_false = matches!(display_cond.as_str(),
-                "1 < 0" | "1 > 1" | "0 > 0" | "0 != 0" | "1 == 0" | "0 > 1");
-            let body_returns = matches!(body_filtered.last(),
-                Some(StructuredStmt::Return(_)));
+            let display_cond = if *negate {
+                negate_condition(&cond_expr)
+            } else {
+                cond_expr
+            };
+            let is_always_false = matches!(
+                display_cond.as_str(),
+                "1 < 0" | "1 > 1" | "0 > 0" | "0 != 0" | "1 == 0" | "0 > 1"
+            );
+            let body_returns = matches!(body_filtered.last(), Some(StructuredStmt::Return(_)));
             if is_always_false || body_returns {
                 print_stmts(&body_filtered, ssa, ctx, indent, out);
             } else {
@@ -12426,7 +15612,11 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, indent: usize
                 out.push_str(&format!("{}}} while ({});\n", pad, display_cond));
             }
         }
-        StructuredStmt::Switch { expr, cases, default } => {
+        StructuredStmt::Switch {
+            expr,
+            cases,
+            default,
+        } => {
             let expr_str = format_var(*expr, ssa, ctx);
             out.push_str(&format!("{}switch ({}) {{\n", pad, expr_str));
             for (vals, body) in cases {
@@ -12435,7 +15625,10 @@ fn print_stmt(stmt: &StructuredStmt, ssa: &SsaCfg, ctx: &PrintCtx, indent: usize
                 }
                 let body_filtered = filter_boilerplate(body, ssa);
                 print_stmts(&body_filtered, ssa, ctx, indent + 2, out);
-                if !body_filtered.iter().any(|s| matches!(s, StructuredStmt::Return(_))) {
+                if !body_filtered
+                    .iter()
+                    .any(|s| matches!(s, StructuredStmt::Return(_)))
+                {
                     out.push_str(&format!("{}        break;\n", pad));
                 }
             }
@@ -12468,7 +15661,12 @@ fn format_condition(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
     format_condition_tracked(id, ssa, ctx, &RegTracker::new())
 }
 
-fn format_condition_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> String {
+fn format_condition_tracked(
+    id: VarId,
+    ssa: &SsaCfg,
+    ctx: &PrintCtx,
+    tracker: &RegTracker,
+) -> String {
     let vdef = ssa.var(id);
 
     if let Expr::BinOp(kind, left, right) = &vdef.expr {
@@ -12506,42 +15704,78 @@ fn format_condition_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &R
                     // Only cast when operand is explicitly unsigned or sub-int sized
                     let needs_l = lv.inferred_type == InferredType::Unsigned
                         || (lv.inferred_type != InferredType::Signed && lv.size < 4);
-                    if needs_l && !l.starts_with('(')
-                        && !l.starts_with('-') && l != "0" {
-                        let cast = match lv.size { 1 => "(char)", 2 => "(short)", _ => "(int)" };
+                    if needs_l && !l.starts_with('(') && !l.starts_with('-') && l != "0" {
+                        let cast = match lv.size {
+                            1 => "(char)",
+                            2 => "(short)",
+                            _ => "(int)",
+                        };
                         l = format!("{}{}", cast, l);
                     }
                     let needs_r = rv.inferred_type == InferredType::Unsigned
                         || (rv.inferred_type != InferredType::Signed && rv.size < 4);
-                    if needs_r && !r.starts_with('(')
-                        && !r.starts_with('-') && !r.chars().next().map_or(false, |c| c.is_ascii_digit()) {
-                        let cast = match rv.size { 1 => "(char)", 2 => "(short)", _ => "(int)" };
+                    if needs_r
+                        && !r.starts_with('(')
+                        && !r.starts_with('-')
+                        && !r.chars().next().map_or(false, |c| c.is_ascii_digit())
+                    {
+                        let cast = match rv.size {
+                            1 => "(char)",
+                            2 => "(short)",
+                            _ => "(int)",
+                        };
                         r = format!("{}{}", cast, r);
                     }
                 }
                 BinOpKind::Less | BinOpKind::LessEq => {
                     // Unsigned comparison: cast signed operands to unsigned
                     if lv.inferred_type == InferredType::Signed && !l.starts_with('(') {
-                        let cast = match lv.size { 1 => "(uint8_t)", 2 => "(uint16_t)", _ => "(uint)" };
+                        let cast = match lv.size {
+                            1 => "(uint8_t)",
+                            2 => "(uint16_t)",
+                            _ => "(uint)",
+                        };
                         l = format!("{}{}", cast, l);
                     }
-                    if rv.inferred_type == InferredType::Signed && !r.starts_with('(')
-                        && !r.chars().next().map_or(false, |c| c.is_ascii_digit()) {
-                        let cast = match rv.size { 1 => "(uint8_t)", 2 => "(uint16_t)", _ => "(uint)" };
+                    if rv.inferred_type == InferredType::Signed
+                        && !r.starts_with('(')
+                        && !r.chars().next().map_or(false, |c| c.is_ascii_digit())
+                    {
+                        let cast = match rv.size {
+                            1 => "(uint8_t)",
+                            2 => "(uint16_t)",
+                            _ => "(uint)",
+                        };
                         r = format!("{}{}", cast, r);
                     }
                 }
                 BinOpKind::Eq | BinOpKind::NotEq => {
                     // Size mismatch: cast smaller operand to match larger
-                    if lv.size != rv.size && lv.size > 0 && rv.size > 0
-                        && !l.starts_with('(') && !r.starts_with('(') {
-                        if lv.size < rv.size && l != "0"
-                            && !l.chars().next().map_or(false, |c| c.is_ascii_digit()) {
-                            let cast = match rv.size { 8 => "(long)", 4 => "(int)", _ => "(int)" };
+                    if lv.size != rv.size
+                        && lv.size > 0
+                        && rv.size > 0
+                        && !l.starts_with('(')
+                        && !r.starts_with('(')
+                    {
+                        if lv.size < rv.size
+                            && l != "0"
+                            && !l.chars().next().map_or(false, |c| c.is_ascii_digit())
+                        {
+                            let cast = match rv.size {
+                                8 => "(long)",
+                                4 => "(int)",
+                                _ => "(int)",
+                            };
                             l = format!("{}{}", cast, l);
-                        } else if rv.size < lv.size && r != "0"
-                            && !r.chars().next().map_or(false, |c| c.is_ascii_digit()) {
-                            let cast = match lv.size { 8 => "(long)", 4 => "(int)", _ => "(int)" };
+                        } else if rv.size < lv.size
+                            && r != "0"
+                            && !r.chars().next().map_or(false, |c| c.is_ascii_digit())
+                        {
+                            let cast = match lv.size {
+                                8 => "(long)",
+                                4 => "(int)",
+                                _ => "(int)",
+                            };
                             r = format!("{}{}", cast, r);
                         }
                     }
@@ -12574,8 +15808,15 @@ fn format_condition_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &R
 }
 
 fn is_comparison(kind: BinOpKind) -> bool {
-    matches!(kind, BinOpKind::Eq | BinOpKind::NotEq | BinOpKind::Less
-        | BinOpKind::LessEq | BinOpKind::SLess | BinOpKind::SLessEq)
+    matches!(
+        kind,
+        BinOpKind::Eq
+            | BinOpKind::NotEq
+            | BinOpKind::Less
+            | BinOpKind::LessEq
+            | BinOpKind::SLess
+            | BinOpKind::SLessEq
+    )
 }
 
 /// Format a condition operand, preferring the SSA expression over the tracker.
@@ -12592,10 +15833,17 @@ fn format_cond_operand(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTra
             let name = format!("var_{:x}", offset);
             let resolved = resolve_stack_alias(&name, tracker);
             let is_good_name = resolved.starts_with("param_")
-                || (resolved != name && !resolved.contains('(') && !resolved.contains(' ')
-                    && resolved.chars().next().map_or(false, |c| c.is_ascii_lowercase())
+                || (resolved != name
+                    && !resolved.contains('(')
+                    && !resolved.contains(' ')
+                    && resolved
+                        .chars()
+                        .next()
+                        .map_or(false, |c| c.is_ascii_lowercase())
                     && !resolved.chars().all(|c| c.is_ascii_digit() || c == 'x')
-                    && resolved.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+                    && resolved
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_'));
             if is_good_name {
                 return resolved;
             }
@@ -12682,7 +15930,12 @@ fn format_cond_operand(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTra
                 if let Some(offset) = get_rbp_offset(*ptr, ssa) {
                     let name = format!("var_{:x}", offset);
                     let resolved = resolve_stack_alias(&name, tracker);
-                    if resolved != name && resolved.chars().next().map_or(false, |c| c.is_ascii_lowercase()) {
+                    if resolved != name
+                        && resolved
+                            .chars()
+                            .next()
+                            .map_or(false, |c| c.is_ascii_lowercase())
+                    {
                         return resolved;
                     }
                 }
@@ -12697,9 +15950,15 @@ fn format_cond_operand(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTra
 fn find_balanced_comma(s: &str) -> Option<usize> {
     let mut depth = 0;
     for (i, ch) in s.char_indices() {
-        if ch == '(' { depth += 1; }
-        if ch == ')' { depth -= 1; }
-        if ch == ',' && depth == 0 { return Some(i); }
+        if ch == '(' {
+            depth += 1;
+        }
+        if ch == ')' {
+            depth -= 1;
+        }
+        if ch == ',' && depth == 0 {
+            return Some(i);
+        }
     }
     None
 }
@@ -12732,17 +15991,35 @@ fn find_array_split(inner: &str) -> Option<usize> {
 /// Must be a simple variable name that plausibly holds a pointer.
 fn is_valid_array_base(s: &str) -> bool {
     let s = s.trim_start_matches('*');
-    if s.is_empty() || s.contains(' ') { return false; }
+    if s.is_empty() || s.contains(' ') {
+        return false;
+    }
     // Must be alphanumeric + underscores only
-    if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') { return false; }
+    if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return false;
+    }
     // Must start with a letter or underscore
-    if !s.chars().next().map_or(false, |c| c.is_ascii_alphabetic() || c == '_') { return false; }
+    if !s
+        .chars()
+        .next()
+        .map_or(false, |c| c.is_ascii_alphabetic() || c == '_')
+    {
+        return false;
+    }
     // Accept: param_N, arr, ptr, buf, str, lVar, local_N, DAT_N, and other pointer-like names
     // Reject: short loop variable names that are clearly not pointers
-    if s.starts_with("param_") || s.starts_with("local_") || s.starts_with("lVar")
-        || s.starts_with("DAT_") || s.starts_with("arr") || s.starts_with("ptr")
-        || s.starts_with("buf") || s.starts_with("str") || s.starts_with("func_")
-        || s.starts_with("iVar") || s.starts_with("x29") || s.starts_with("sp")
+    if s.starts_with("param_")
+        || s.starts_with("local_")
+        || s.starts_with("lVar")
+        || s.starts_with("DAT_")
+        || s.starts_with("arr")
+        || s.starts_with("ptr")
+        || s.starts_with("buf")
+        || s.starts_with("str")
+        || s.starts_with("func_")
+        || s.starts_with("iVar")
+        || s.starts_with("x29")
+        || s.starts_with("sp")
     {
         return true;
     }
@@ -12772,19 +16049,54 @@ fn count_format_specifiers(expr: &str) -> usize {
     while i < bytes.len() {
         if bytes[i] == b'%' {
             i += 1;
-            if i >= bytes.len() { break; }
+            if i >= bytes.len() {
+                break;
+            }
             // Skip %% (literal percent)
-            if bytes[i] == b'%' { i += 1; continue; }
+            if bytes[i] == b'%' {
+                i += 1;
+                continue;
+            }
             // Skip flags, width, precision: [-+ 0#]*[0-9]*[.][0-9]*
-            while i < bytes.len() && matches!(bytes[i], b'-' | b'+' | b' ' | b'0' | b'#') { i += 1; }
-            while i < bytes.len() && bytes[i].is_ascii_digit() { i += 1; }
-            if i < bytes.len() && bytes[i] == b'.' { i += 1; }
-            while i < bytes.len() && bytes[i].is_ascii_digit() { i += 1; }
+            while i < bytes.len() && matches!(bytes[i], b'-' | b'+' | b' ' | b'0' | b'#') {
+                i += 1;
+            }
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b'.' {
+                i += 1;
+            }
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
             // Skip length modifiers: h, hh, l, ll, L, z, j, t, q
-            while i < bytes.len() && matches!(bytes[i], b'h' | b'l' | b'L' | b'z' | b'j' | b't' | b'q') { i += 1; }
+            while i < bytes.len()
+                && matches!(bytes[i], b'h' | b'l' | b'L' | b'z' | b'j' | b't' | b'q')
+            {
+                i += 1;
+            }
             // The conversion specifier
-            if i < bytes.len() && matches!(bytes[i], b'd' | b'i' | b'u' | b'x' | b'X' | b'o'
-                | b's' | b'c' | b'p' | b'f' | b'e' | b'E' | b'g' | b'G' | b'n' | b'a' | b'A')
+            if i < bytes.len()
+                && matches!(
+                    bytes[i],
+                    b'd' | b'i'
+                        | b'u'
+                        | b'x'
+                        | b'X'
+                        | b'o'
+                        | b's'
+                        | b'c'
+                        | b'p'
+                        | b'f'
+                        | b'e'
+                        | b'E'
+                        | b'g'
+                        | b'G'
+                        | b'n'
+                        | b'a'
+                        | b'A'
+                )
             {
                 count += 1;
             }
@@ -12799,8 +16111,15 @@ fn count_format_specifiers(expr: &str) -> usize {
 fn find_matching_paren(s: &str, pos: usize) -> Option<usize> {
     let mut depth = 0;
     for (ci, ch) in s[pos..].char_indices() {
-        if ch == '(' { depth += 1; }
-        if ch == ')' { depth -= 1; if depth == 0 { return Some(pos + ci); } }
+        if ch == '(' {
+            depth += 1;
+        }
+        if ch == ')' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(pos + ci);
+            }
+        }
     }
     None
 }
@@ -12818,8 +16137,14 @@ fn negate_condition(cond: &str) -> String {
         return inner.to_string();
     }
     // Try to find and flip the operator
-    for (op, neg) in [(" <= ", " > "), (" >= ", " < "), (" < ", " >= "), (" > ", " <= "),
-                       (" == ", " != "), (" != ", " == ")] {
+    for (op, neg) in [
+        (" <= ", " > "),
+        (" >= ", " < "),
+        (" < ", " >= "),
+        (" > ", " <= "),
+        (" == ", " != "),
+        (" != ", " == "),
+    ] {
         if let Some(pos) = cond.find(op) {
             return format!("{}{}{}", &cond[..pos], neg, &cond[pos + op.len()..]);
         }
@@ -12892,10 +16217,18 @@ fn get_rbp_offset(id: VarId, ssa: &SsaCfg) -> Option<u64> {
         {
             let off_val = get_const_val(*off_id, ssa)?;
             // Convert to negative offset (two's complement)
-            if off_val >= 0x80 && off_val < 0x100 { return Some(0x100 - off_val); }
-            if off_val >= 0x8000 && off_val < 0x10000 { return Some(0x10000 - off_val); }
-            if off_val >= 0x80000000 && off_val < 0x100000000 { return Some(0x100000000u64 - off_val); }
-            if off_val > 0x7fffffffffffffff { return Some((!off_val).wrapping_add(1)); }
+            if off_val >= 0x80 && off_val < 0x100 {
+                return Some(0x100 - off_val);
+            }
+            if off_val >= 0x8000 && off_val < 0x10000 {
+                return Some(0x10000 - off_val);
+            }
+            if off_val >= 0x80000000 && off_val < 0x100000000 {
+                return Some(0x100000000u64 - off_val);
+            }
+            if off_val > 0x7fffffffffffffff {
+                return Some((!off_val).wrapping_add(1));
+            }
             return None; // Positive offset — not a local variable
         }
     }
@@ -12949,7 +16282,11 @@ fn get_const_val_expr(expr: &Expr, ssa: &SsaCfg) -> Option<u64> {
         Expr::Const(val, _) => Some(*val),
         Expr::Var(inner) => {
             let inner_def = ssa.var(*inner);
-            if let Expr::Const(val, _) = &inner_def.expr { Some(*val) } else { None }
+            if let Expr::Const(val, _) = &inner_def.expr {
+                Some(*val)
+            } else {
+                None
+            }
         }
         _ => None,
     }
@@ -12992,11 +16329,21 @@ fn format_addr(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
 }
 
 fn format_rbp_offset(val: u64) -> String {
-    if val >= 0x80 && val < 0x100 { return format!("RBP - 0x{:x}", 0x100 - val); }
-    if val >= 0x8000 && val < 0x10000 { return format!("RBP - 0x{:x}", 0x10000 - val); }
-    if val >= 0x80000000 && val < 0x100000000 { return format!("RBP - 0x{:x}", 0x100000000u64 - val); }
-    if val > 0x7fffffffffffffff { return format!("RBP - 0x{:x}", (!val).wrapping_add(1)); }
-    if val == 0 { return "RBP".to_string(); }
+    if val >= 0x80 && val < 0x100 {
+        return format!("RBP - 0x{:x}", 0x100 - val);
+    }
+    if val >= 0x8000 && val < 0x10000 {
+        return format!("RBP - 0x{:x}", 0x10000 - val);
+    }
+    if val >= 0x80000000 && val < 0x100000000 {
+        return format!("RBP - 0x{:x}", 0x100000000u64 - val);
+    }
+    if val > 0x7fffffffffffffff {
+        return format!("RBP - 0x{:x}", (!val).wrapping_add(1));
+    }
+    if val == 0 {
+        return "RBP".to_string();
+    }
     format!("RBP + 0x{:x}", val)
 }
 
@@ -13031,7 +16378,9 @@ impl FormatVarGuard {
     fn enter() -> Option<Self> {
         FORMAT_VAR_DEPTH.with(|d| {
             let cur = d.get();
-            if cur >= FORMAT_VAR_MAX_DEPTH { return None; }
+            if cur >= FORMAT_VAR_MAX_DEPTH {
+                return None;
+            }
             d.set(cur + 1);
             Some(FormatVarGuard)
         })
@@ -13122,7 +16471,10 @@ fn format_var(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
     // Keeps parity with Ghidra's "pointer-to-undefined-8" naming for 64-bit
     // vars that survive into final output without explicit typing.
     if vdef.inferred_type == crate::ir::InferredType::Pointer {
-        if let Some(num) = name.strip_prefix("lVar").or_else(|| name.strip_prefix("iVar")) {
+        if let Some(num) = name
+            .strip_prefix("lVar")
+            .or_else(|| name.strip_prefix("iVar"))
+        {
             return format!("puVar{}", num);
         }
     }
@@ -13263,16 +16615,28 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
                 UnaryOpKind::Zext => {
                     let sz = input_def.size;
                     if sz <= 4 && sz > 0 {
-                        let cast = match sz { 1 => "uint8_t", 2 => "uint16_t", _ => "uint" };
+                        let cast = match sz {
+                            1 => "uint8_t",
+                            2 => "uint16_t",
+                            _ => "uint",
+                        };
                         format!("({}){}", cast, i)
-                    } else { i }
+                    } else {
+                        i
+                    }
                 }
                 UnaryOpKind::Sext => {
                     let sz = input_def.size;
                     if sz <= 4 && sz > 0 {
-                        let cast = match sz { 1 => "char", 2 => "short", _ => "int" };
+                        let cast = match sz {
+                            1 => "char",
+                            2 => "short",
+                            _ => "int",
+                        };
                         format!("({}){}", cast, i)
-                    } else { i }
+                    } else {
+                        i
+                    }
                 }
                 UnaryOpKind::Int2Float => format!("(float){}", i),
                 UnaryOpKind::Trunc => format!("(int){}", i),
@@ -13291,9 +16655,13 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
                 if let Some(addr) = ptr_val {
                     if let Some(fo) = va_to_file_offset(addr, binary) {
                         if fo + 8 <= binary.len() {
-                            let bytes: [u8; 8] = binary[fo..fo+8].try_into().unwrap_or([0;8]);
+                            let bytes: [u8; 8] = binary[fo..fo + 8].try_into().unwrap_or([0; 8]);
                             let fval = f64::from_le_bytes(bytes);
-                            if fval != 0.0 && fval.is_finite() && fval.abs() < 1.0e20 && fval.abs() > 1.0e-20 {
+                            if fval != 0.0
+                                && fval.is_finite()
+                                && fval.abs() < 1.0e20
+                                && fval.abs() > 1.0e-20
+                            {
                                 // Check if it's a clean value
                                 let recip = 1.0 / fval;
                                 if recip > 1.0 && (recip - recip.round()).abs() < 0.001 {
@@ -13302,7 +16670,9 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
                                 }
                                 // Clean float constant
                                 let s = format!("{}", fval);
-                                if s.len() <= 12 { return s; }
+                                if s.len() <= 12 {
+                                    return s;
+                                }
                             }
                         }
                     }
@@ -13320,7 +16690,9 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
             }
         }
         Expr::Phi(inputs) => {
-            if inputs.len() == 1 { return format_var(inputs[0], ssa, ctx); }
+            if inputs.len() == 1 {
+                return format_var(inputs[0], ssa, ctx);
+            }
             let args: Vec<String> = inputs.iter().map(|i| format_var(*i, ssa, ctx)).collect();
             format!("phi({})", args.join(", "))
         }
@@ -13332,9 +16704,7 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
         }
         Expr::UserOp { func_id, inputs } => {
             let name = pcodeop_name(ctx.arch, *func_id);
-            let args: Vec<String> = inputs.iter()
-                .map(|v| format_var(*v, ssa, ctx))
-                .collect();
+            let args: Vec<String> = inputs.iter().map(|v| format_var(*v, ssa, ctx)).collect();
             format!("{}({})", name, args.join(", "))
         }
         Expr::Unknown => "?".to_string(),
@@ -13352,7 +16722,11 @@ fn format_expr(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
 /// The RegTracker path doesn't help here — it intentionally skips Const sources
 /// so the printer can inline them at the use site, but for the syscall
 /// annotation we need the Const visible on its own.
-fn resolve_syscall_number_from_block(stmts: &[StructuredStmt], cur_idx: usize, ssa: &SsaCfg) -> Option<u32> {
+fn resolve_syscall_number_from_block(
+    stmts: &[StructuredStmt],
+    cur_idx: usize,
+    ssa: &SsaCfg,
+) -> Option<u32> {
     // Only scan within the current block — bound look-back to prevent
     // picking up a stale RAX write from a far-earlier control-flow path.
     let lower = cur_idx.saturating_sub(8);
@@ -13406,31 +16780,31 @@ fn is_elidable_pcodeop(arch: Architecture, id: u64) -> bool {
 fn pcodeop_name(arch: Architecture, id: u64) -> String {
     if matches!(arch, Architecture::X86_64 | Architecture::X86_32) {
         const X86_PCODEOPS: &[&str] = &[
-            "segment",      // 0
-            "in",           // 1
-            "out",          // 2
-            "sysenter",     // 3
-            "sysexit",      // 4
-            "syscall",      // 5
-            "sysret",       // 6
-            "swapgs",       // 7
-            "invlpg",       // 8
-            "invlpga",      // 9
-            "invpcid",      // 10
-            "rdtscp",       // 11
-            "mwait",        // 12
-            "mwaitx",       // 13
-            "monitor",      // 14
-            "monitorx",     // 15
-            "swi",          // 16 (INT)
-            "LOCK",         // 17
-            "UNLOCK",       // 18
-            "XACQUIRE",     // 19
-            "XRELEASE",     // 20
-            "clgi",         // 21
-            "stgi",         // 22
-            "vmload",       // 23
-            "vmmcall",      // 24
+            "segment",  // 0
+            "in",       // 1
+            "out",      // 2
+            "sysenter", // 3
+            "sysexit",  // 4
+            "syscall",  // 5
+            "sysret",   // 6
+            "swapgs",   // 7
+            "invlpg",   // 8
+            "invlpga",  // 9
+            "invpcid",  // 10
+            "rdtscp",   // 11
+            "mwait",    // 12
+            "mwaitx",   // 13
+            "monitor",  // 14
+            "monitorx", // 15
+            "swi",      // 16 (INT)
+            "LOCK",     // 17
+            "UNLOCK",   // 18
+            "XACQUIRE", // 19
+            "XRELEASE", // 20
+            "clgi",     // 21
+            "stgi",     // 22
+            "vmload",   // 23
+            "vmmcall",  // 24
         ];
         if let Some(&name) = X86_PCODEOPS.get(id as usize) {
             return name.to_string();
@@ -13442,69 +16816,69 @@ fn pcodeop_name(arch: Architecture, id: u64) -> String {
     // intact for the analyst.
     if matches!(arch, Architecture::ARM32) {
         const ARM32_PCODEOPS: &[&str] = &[
-            "coprocessor_function",        // 0
-            "coprocessor_function2",       // 1
-            "coprocessor_load",            // 2
-            "coprocessor_load2",           // 3
-            "coprocessor_loadlong",        // 4
-            "coprocessor_loadlong2",       // 5
-            "coprocessor_moveto",          // 6
-            "coprocessor_moveto2",         // 7
-            "coprocessor_movefromRt",      // 8
-            "coprocessor_movefromRt2",     // 9
-            "coprocessor_movefrom2",       // 10
-            "coprocessor_store",           // 11
-            "coprocessor_store2",          // 12
-            "coprocessor_storelong",       // 13
-            "coprocessor_storelong2",      // 14
-            "software_interrupt",          // 15
-            "software_bkpt",               // 16
-            "software_udf",                // 17
-            "software_hlt",                // 18
-            "software_hvc",                // 19
-            "software_smc",                // 20
-            "setUserMode",                 // 21
-            "setFIQMode",                  // 22
-            "setIRQMode",                  // 23
-            "setSupervisorMode",           // 24
-            "setMonitorMode",              // 25
-            "setAbortMode",                // 26
-            "setUndefinedMode",            // 27
-            "setSystemMode",               // 28
-            "enableIRQinterrupts",         // 29
-            "enableFIQinterrupts",         // 30
-            "enableDataAbortInterrupts",   // 31
-            "disableIRQinterrupts",        // 32
-            "disableFIQinterrupts",        // 33
-            "isFIQinterruptsEnabled",      // 34
-            "isIRQinterruptsEnabled",      // 35
-            "disableDataAbortInterrupts",  // 36
-            "hasExclusiveAccess",          // 37
-            "isCurrentModePrivileged",     // 38
-            "setThreadModePrivileged",     // 39
-            "isThreadMode",                // 40
-            "jazelle_branch",              // 41
-            "ClearExclusiveLocal",         // 42
-            "HintDebug",                   // 43
-            "DataMemoryBarrier",           // 44
-            "DataSynchronizationBarrier",  // 45
-            "secureMonitorCall",           // 46
-            "WaitForEvent",                // 47
-            "WaitForInterrupt",            // 48
-            "HintYield",                   // 49
+            "coprocessor_function",              // 0
+            "coprocessor_function2",             // 1
+            "coprocessor_load",                  // 2
+            "coprocessor_load2",                 // 3
+            "coprocessor_loadlong",              // 4
+            "coprocessor_loadlong2",             // 5
+            "coprocessor_moveto",                // 6
+            "coprocessor_moveto2",               // 7
+            "coprocessor_movefromRt",            // 8
+            "coprocessor_movefromRt2",           // 9
+            "coprocessor_movefrom2",             // 10
+            "coprocessor_store",                 // 11
+            "coprocessor_store2",                // 12
+            "coprocessor_storelong",             // 13
+            "coprocessor_storelong2",            // 14
+            "software_interrupt",                // 15
+            "software_bkpt",                     // 16
+            "software_udf",                      // 17
+            "software_hlt",                      // 18
+            "software_hvc",                      // 19
+            "software_smc",                      // 20
+            "setUserMode",                       // 21
+            "setFIQMode",                        // 22
+            "setIRQMode",                        // 23
+            "setSupervisorMode",                 // 24
+            "setMonitorMode",                    // 25
+            "setAbortMode",                      // 26
+            "setUndefinedMode",                  // 27
+            "setSystemMode",                     // 28
+            "enableIRQinterrupts",               // 29
+            "enableFIQinterrupts",               // 30
+            "enableDataAbortInterrupts",         // 31
+            "disableIRQinterrupts",              // 32
+            "disableFIQinterrupts",              // 33
+            "isFIQinterruptsEnabled",            // 34
+            "isIRQinterruptsEnabled",            // 35
+            "disableDataAbortInterrupts",        // 36
+            "hasExclusiveAccess",                // 37
+            "isCurrentModePrivileged",           // 38
+            "setThreadModePrivileged",           // 39
+            "isThreadMode",                      // 40
+            "jazelle_branch",                    // 41
+            "ClearExclusiveLocal",               // 42
+            "HintDebug",                         // 43
+            "DataMemoryBarrier",                 // 44
+            "DataSynchronizationBarrier",        // 45
+            "secureMonitorCall",                 // 46
+            "WaitForEvent",                      // 47
+            "WaitForInterrupt",                  // 48
+            "HintYield",                         // 49
             "InstructionSynchronizationBarrier", // 50
-            "HintPreloadData",             // 51
-            "HintPreloadDataForWrite",     // 52
-            "HintPreloadInstruction",      // 53
-            "SignedSaturate",              // 54
-            "SignedDoesSaturate",          // 55
-            "UnsignedSaturate",            // 56
-            "UnsignedDoesSaturate",        // 57
-            "Absolute",                    // 58
-            "ReverseBitOrder",             // 59
-            "SendEvent",                   // 60
-            "setEndianState",              // 61
-            "setISAMode",                  // 62
+            "HintPreloadData",                   // 51
+            "HintPreloadDataForWrite",           // 52
+            "HintPreloadInstruction",            // 53
+            "SignedSaturate",                    // 54
+            "SignedDoesSaturate",                // 55
+            "UnsignedSaturate",                  // 56
+            "UnsignedDoesSaturate",              // 57
+            "Absolute",                          // 58
+            "ReverseBitOrder",                   // 59
+            "SendEvent",                         // 60
+            "setEndianState",                    // 61
+            "setISAMode",                        // 62
         ];
         if let Some(&name) = ARM32_PCODEOPS.get(id as usize) {
             return name.to_string();
@@ -13514,8 +16888,12 @@ fn pcodeop_name(arch: Architecture, id: u64) -> String {
 }
 
 fn format_const_ctx(val: u64, size: u32, ctx: &PrintCtx) -> String {
-    if val == 0 { return "0".to_string(); }
-    if val < 10 { return format!("{}", val); }
+    if val == 0 {
+        return "0".to_string();
+    }
+    if val < 10 {
+        return format!("{}", val);
+    }
     // Try string literal
     if size >= 4 && val > 0x200 {
         if let Some(s) = try_read_string(val, ctx) {
@@ -13529,10 +16907,18 @@ fn format_const_ctx(val: u64, size: u32, ctx: &PrintCtx) -> String {
             // or letter — reduces false positives from random padding bytes
             // that coincidentally form a 1-char ASCII + null pattern.
             let accept_short_one = s.len() == 1
-                && s.chars().next().map_or(false,
-                    |c| c.is_ascii_alphanumeric());
-            if s.is_empty() || (s.len() < 2 && !accept_short_one) { /* fall through */ }
-            else { return format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")); }
+                && s.chars()
+                    .next()
+                    .map_or(false, |c| c.is_ascii_alphanumeric());
+            if s.is_empty() || (s.len() < 2 && !accept_short_one) { /* fall through */
+            } else {
+                return format!(
+                    "\"{}\"",
+                    s.replace('\\', "\\\\")
+                        .replace('"', "\\\"")
+                        .replace('\n', "\\n")
+                );
+            }
         }
         // Try import/global name (e.g., GOT entry for stdin/stdout).
         // Skip when val is page-aligned (low 12 bits zero): those are ADRP
@@ -13563,8 +16949,12 @@ fn format_const_ctx_load(val: u64, size: u32, ctx: &PrintCtx) -> String {
     // 2. Requires ≥4 bytes of string content to avoid PE pointer-table false positives
     // 3. Never falls through to format_const's ASCII-decode path (would produce string
     //    literals from pointer constants, e.g. 0xC8A1 → "È¡").
-    if val == 0 { return "0".to_string(); }
-    if val < 10 { return format!("{}", val); }
+    if val == 0 {
+        return "0".to_string();
+    }
+    if val < 10 {
+        return format!("{}", val);
+    }
     if size >= 4 && val > 0x200 {
         if val & 0xFFF != 0 {
             if let Some(name) = ctx.imports.get(&val) {
@@ -13578,7 +16968,12 @@ fn format_const_ctx_load(val: u64, size: u32, ctx: &PrintCtx) -> String {
         }
         if let Some(s) = try_read_string(val, ctx) {
             if s.len() >= 4 {
-                return format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"));
+                return format!(
+                    "\"{}\"",
+                    s.replace('\\', "\\\\")
+                        .replace('"', "\\\"")
+                        .replace('\n', "\\n")
+                );
             }
         }
         if let Some(ws) = try_read_wide_string(val, ctx) {
@@ -13615,9 +17010,13 @@ fn format_const(val: u64, size: u32) -> String {
 }
 
 fn format_const_inner(val: u64, size: u32) -> String {
-    if val == 0 { return "0".to_string(); }
+    if val == 0 {
+        return "0".to_string();
+    }
     // Small positive values in decimal for readability
-    if val < 1000 { return format!("{}", val); }
+    if val < 1000 {
+        return format!("{}", val);
+    }
     // Power-of-2 constants in decimal (common thresholds: 1024, 4096, 65536, etc.)
     if val.is_power_of_two() && val <= 0x100000000 {
         return format!("{}", val);
@@ -13635,13 +17034,26 @@ fn format_const_inner(val: u64, size: u32) -> String {
     }
     // Check for negative values (sign bit set)
     let sign_bit = match size {
-        1 => 0x80, 2 => 0x8000, 4 => 0x80000000, 8 => 0x8000000000000000, _ => 0,
+        1 => 0x80,
+        2 => 0x8000,
+        4 => 0x80000000,
+        8 => 0x8000000000000000,
+        _ => 0,
     };
     if sign_bit != 0 && val >= sign_bit && val != u64::MAX {
-        let mask = match size { 1 => 0xFF, 2 => 0xFFFF, 4 => 0xFFFFFFFF, _ => u64::MAX };
+        let mask = match size {
+            1 => 0xFF,
+            2 => 0xFFFF,
+            4 => 0xFFFFFFFF,
+            _ => u64::MAX,
+        };
         let neg = ((!val) & mask).wrapping_add(1);
-        if neg < 1000 { return format!("-{}", neg); }
-        if neg <= 0x10000 { return format!("-0x{:x}", neg); }
+        if neg < 1000 {
+            return format!("-{}", neg);
+        }
+        if neg <= 0x10000 {
+            return format!("-0x{:x}", neg);
+        }
     }
     format!("0x{:x}", val)
 }
@@ -13671,27 +17083,37 @@ fn looks_like_address(val: u64) -> bool {
         let bytes = val.to_le_bytes();
         let unique_bytes: std::collections::HashSet<u8> = bytes[..nbytes].iter().copied().collect();
         // If fewer than 3 unique byte values, it's likely a magic constant
-        if unique_bytes.len() <= 2 { return true; }
+        if unique_bytes.len() <= 2 {
+            return true;
+        }
         // Also catch near-repeating patterns where most bytes are the same
         // (e.g., 0x92492493 has bytes [0x93, 0x24, 0x49, 0x92] — 4 unique, but
         //  the nibble pattern is diagnostic of a magic constant)
         if nbytes == 4 && unique_bytes.len() <= 4 {
             // Check if the value is in the typical magic multiply range (> 0x10000000)
-            if val > 0x10000000 { return true; }
+            if val > 0x10000000 {
+                return true;
+            }
         }
     }
     false
 }
 
 fn try_decode_ascii_const(val: u64, size: u32) -> Option<String> {
-    let nbytes = match size { 4 => 4, 8 => 8, _ => return None };
+    let nbytes = match size {
+        4 => 4,
+        8 => 8,
+        _ => return None,
+    };
     let bytes = val.to_le_bytes();
     let mut s = String::new();
     let mut all_ascii = true;
     let mut printable_count = 0;
     for i in 0..nbytes {
         let b = bytes[i as usize];
-        if b == 0 { break; } // null terminator — end of string
+        if b == 0 {
+            break;
+        } // null terminator — end of string
         if b >= 0x20 && b <= 0x7e {
             s.push(b as char);
             printable_count += 1;
@@ -13713,20 +17135,20 @@ fn try_decode_ascii_const(val: u64, size: u32) -> Option<String> {
 fn va_to_file_offset(va: u64, binary: &[u8]) -> Option<usize> {
     let obj = goblin::Object::parse(binary).ok()?;
     match &obj {
-        goblin::Object::Mach(goblin::mach::Mach::Binary(m)) => {
-            m.segments.iter().find_map(|seg| {
-                if va >= seg.vmaddr && va < seg.vmaddr + seg.vmsize {
-                    Some((seg.fileoff + (va - seg.vmaddr)) as usize)
-                } else { None }
-            })
-        }
-        goblin::Object::Elf(elf) => {
-            elf.section_headers.iter().find_map(|sh| {
-                if sh.sh_addr != 0 && va >= sh.sh_addr && va < sh.sh_addr + sh.sh_size {
-                    Some((sh.sh_offset + (va - sh.sh_addr)) as usize)
-                } else { None }
-            })
-        }
+        goblin::Object::Mach(goblin::mach::Mach::Binary(m)) => m.segments.iter().find_map(|seg| {
+            if va >= seg.vmaddr && va < seg.vmaddr + seg.vmsize {
+                Some((seg.fileoff + (va - seg.vmaddr)) as usize)
+            } else {
+                None
+            }
+        }),
+        goblin::Object::Elf(elf) => elf.section_headers.iter().find_map(|sh| {
+            if sh.sh_addr != 0 && va >= sh.sh_addr && va < sh.sh_addr + sh.sh_size {
+                Some((sh.sh_offset + (va - sh.sh_addr)) as usize)
+            } else {
+                None
+            }
+        }),
         goblin::Object::PE(pe) => {
             let base = pe.image_base as u64;
             let rva = va.checked_sub(base)?;
@@ -13734,7 +17156,9 @@ fn va_to_file_offset(va: u64, binary: &[u8]) -> Option<usize> {
                 let sr = s.virtual_address as u64;
                 if rva >= sr && rva < sr + s.virtual_size as u64 {
                     Some((s.pointer_to_raw_data as u64 + (rva - sr)) as usize)
-                } else { None }
+                } else {
+                    None
+                }
             })
         }
         _ => None,
@@ -13750,11 +17174,14 @@ fn try_read_string(va: u64, ctx: &PrintCtx) -> Option<String> {
             // Use section-level granularity to avoid reading code as strings
             macho.segments.iter().find_map(|seg| {
                 let segname = seg.name().ok().unwrap_or("").trim_end_matches('\0');
-                if segname != "__TEXT" { return None; }
+                if segname != "__TEXT" {
+                    return None;
+                }
                 // Check individual sections within __TEXT
                 if let Ok(sections) = seg.sections() {
                     for (sec, _) in &sections {
-                        let _sname = std::str::from_utf8(&sec.sectname).unwrap_or("")
+                        let _sname = std::str::from_utf8(&sec.sectname)
+                            .unwrap_or("")
                             .trim_end_matches('\0');
                         if va >= sec.addr && va < sec.addr + sec.size {
                             let fo = (sec.offset as u64 + (va - sec.addr)) as usize;
@@ -13765,7 +17192,9 @@ fn try_read_string(va: u64, ctx: &PrintCtx) -> Option<String> {
                 // Fallback: use segment-level mapping
                 if va >= seg.vmaddr && va < seg.vmaddr + seg.vmsize {
                     Some((seg.fileoff + (va - seg.vmaddr)) as usize)
-                } else { None }
+                } else {
+                    None
+                }
             })?
         }
         goblin::Object::Elf(elf) => {
@@ -13776,7 +17205,9 @@ fn try_read_string(va: u64, ctx: &PrintCtx) -> Option<String> {
                     return None;
                 }
                 // SHT_NOBITS (8) = .bss — no actual data in file
-                if sh.sh_type == 8 { return None; }
+                if sh.sh_type == 8 {
+                    return None;
+                }
                 // SHT_PROGBITS (1) with SHF_ALLOC (2) — loaded into memory
                 let is_alloc = sh.sh_flags & 0x2 != 0;
                 // Reject executable sections (code, not data)
@@ -13785,31 +17216,43 @@ fn try_read_string(va: u64, ctx: &PrintCtx) -> Option<String> {
                 let is_write = sh.sh_flags & 0x1 != 0;
                 if is_alloc && !is_exec && !is_write {
                     Some((sh.sh_offset + (va - sh.sh_addr)) as usize)
-                } else { None }
+                } else {
+                    None
+                }
             })?
         }
         goblin::Object::PE(pe) => {
             let rva = va.checked_sub(pe.image_base as u64)? as u64;
             pe.sections.iter().find_map(|s| {
                 let sr = s.virtual_address as u64;
-                if rva < sr || rva >= sr + s.virtual_size as u64 { return None; }
+                if rva < sr || rva >= sr + s.virtual_size as u64 {
+                    return None;
+                }
                 // Only read strings from read-only data sections (.rdata)
                 // Skip .data (writable globals), .text (code), .rsrc (resources)
                 let is_writable = s.characteristics & 0x80000000 != 0; // IMAGE_SCN_MEM_WRITE
-                let is_exec = s.characteristics & 0x20000000 != 0;     // IMAGE_SCN_MEM_EXECUTE
-                if is_writable || is_exec { return None; }
+                let is_exec = s.characteristics & 0x20000000 != 0; // IMAGE_SCN_MEM_EXECUTE
+                if is_writable || is_exec {
+                    return None;
+                }
                 Some((s.pointer_to_raw_data as u64 + (rva - sr)) as usize)
             })?
         }
         _ => return None,
     };
-    if file_offset >= binary.len() { return None; }
+    if file_offset >= binary.len() {
+        return None;
+    }
     let max = 512.min(binary.len() - file_offset);
     let slice = &binary[file_offset..file_offset + max];
     let null_pos = slice.iter().position(|&b| b == 0)?;
-    if null_pos > 256 { return None; } // reject very long "strings"
-    // Allow empty strings (null_pos == 0) and single-char strings (null_pos == 1)
-    if null_pos == 0 { return Some(String::new()); }
+    if null_pos > 256 {
+        return None;
+    } // reject very long "strings"
+      // Allow empty strings (null_pos == 0) and single-char strings (null_pos == 1)
+    if null_pos == 0 {
+        return Some(String::new());
+    }
     let s = std::str::from_utf8(&slice[..null_pos]).ok()?;
     // Reject strings that look like compiler metadata or partial data
     // Reject strings that look like compiler metadata, partial data, or non-strings
@@ -13839,12 +17282,21 @@ fn try_read_string(va: u64, ctx: &PrintCtx) -> Option<String> {
         // Reject strings from inside .bss/.data global arrays that happen to contain
         // readable text from adjacent sections (e.g., GCC version string fragments)
         || (null_pos <= 8 && s.bytes().any(|b| b < 0x20 && b != b'\n' && b != b'\t'))
-    { return None; }
+    {
+        return None;
+    }
     // Accept printable ASCII plus UTF-8 characters (accented letters, symbols like ™©®)
-    if s.chars().all(|c| c.is_ascii_graphic() || c == ' ' || c == '\n' || c == '\t'
-        || (c as u32 >= 0x80 && !c.is_control())) {
+    if s.chars().all(|c| {
+        c.is_ascii_graphic()
+            || c == ' '
+            || c == '\n'
+            || c == '\t'
+            || (c as u32 >= 0x80 && !c.is_control())
+    }) {
         Some(s.to_string())
-    } else { None }
+    } else {
+        None
+    }
 }
 
 /// Read raw bytes at a virtual address from the binary (any section).
@@ -13858,27 +17310,37 @@ fn try_read_bytes_at_va(va: u64, ctx: &PrintCtx, max_len: usize) -> Option<Vec<u
                 let sr = s.virtual_address as u64;
                 if rva >= sr && rva < sr + s.virtual_size as u64 {
                     Some((s.pointer_to_raw_data as u64 + (rva - sr)) as usize)
-                } else { None }
+                } else {
+                    None
+                }
             })?
         }
         goblin::Object::Elf(elf) => {
             elf.section_headers.iter().find_map(|sh| {
-                if sh.sh_type == 8 { return None; } // SHT_NOBITS
+                if sh.sh_type == 8 {
+                    return None;
+                } // SHT_NOBITS
                 if va >= sh.sh_addr && va < sh.sh_addr + sh.sh_size {
                     Some((sh.sh_offset + (va - sh.sh_addr)) as usize)
-                } else { None }
+                } else {
+                    None
+                }
             })?
         }
         goblin::Object::Mach(goblin::mach::Mach::Binary(macho)) => {
             macho.segments.iter().find_map(|seg| {
                 if va >= seg.vmaddr && va < seg.vmaddr + seg.vmsize {
                     Some((seg.fileoff + (va - seg.vmaddr)) as usize)
-                } else { None }
+                } else {
+                    None
+                }
             })?
         }
         _ => return None,
     };
-    if file_offset >= binary.len() { return None; }
+    if file_offset >= binary.len() {
+        return None;
+    }
     let len = max_len.min(binary.len() - file_offset);
     Some(binary[file_offset..file_offset + len].to_vec())
 }
@@ -13887,28 +17349,42 @@ fn try_read_bytes_at_va(va: u64, ctx: &PrintCtx, max_len: usize) -> Option<Vec<u
 /// Returns the decrypted string and key if the result is printable ASCII.
 fn try_xor_decrypt_single(va: u64, ctx: &PrintCtx) -> Option<(String, u8)> {
     let data = try_read_bytes_at_va(va, ctx, 256)?;
-    if data.len() < 4 { return None; }
+    if data.len() < 4 {
+        return None;
+    }
     // Skip if the data is already a plaintext string (no encryption needed)
     let null_pos_raw = data.iter().position(|&b| b == 0).unwrap_or(data.len());
     if null_pos_raw >= 4 && null_pos_raw <= 200 {
-        if data[..null_pos_raw].iter().all(|&b| (b >= 0x20 && b < 0x7f) || b == b'\n') {
+        if data[..null_pos_raw]
+            .iter()
+            .all(|&b| (b >= 0x20 && b < 0x7f) || b == b'\n')
+        {
             return None; // Already plaintext
         }
     }
 
     for key in 1u8..=0xFE {
         let decrypted: Vec<u8> = data.iter().map(|b| b ^ key).collect();
-        let null_pos = decrypted.iter().position(|&b| b == 0).unwrap_or(decrypted.len());
-        if null_pos < 6 || null_pos > 200 { continue; }
+        let null_pos = decrypted
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(decrypted.len());
+        if null_pos < 6 || null_pos > 200 {
+            continue;
+        }
         let candidate = &decrypted[..null_pos];
-        if candidate.iter().all(|&b| (b >= 0x20 && b < 0x7f) || b == b'\n' || b == b'\t') {
+        if candidate
+            .iter()
+            .all(|&b| (b >= 0x20 && b < 0x7f) || b == b'\n' || b == b'\t')
+        {
             if let Ok(s) = std::str::from_utf8(candidate) {
                 let unique: std::collections::HashSet<u8> = candidate.iter().copied().collect();
                 // Reject: key byte appears as most common char (null bytes → repeated key)
                 let key_char_count = candidate.iter().filter(|&&b| b == key).count();
                 let has_letter = candidate.iter().any(|&b| b.is_ascii_alphabetic());
                 // Require: 5+ unique chars, has letters, key byte isn't dominant
-                if unique.len() >= 5 && has_letter
+                if unique.len() >= 5
+                    && has_letter
                     && key_char_count * 3 < candidate.len()
                     && s.trim().len() >= 6
                 {
@@ -13924,7 +17400,9 @@ fn try_xor_decrypt_single(va: u64, ctx: &PrintCtx) -> Option<(String, u8)> {
 /// Uses known-plaintext attack: assumes common string prefixes and endings.
 fn try_xor_decrypt_multi(va: u64, ctx: &PrintCtx) -> Option<(String, Vec<u8>)> {
     let data = try_read_bytes_at_va(va, ctx, 256)?;
-    if data.len() < 12 { return None; }
+    if data.len() < 12 {
+        return None;
+    }
     // Skip if already plaintext
     let null_raw = data.iter().position(|&b| b == 0).unwrap_or(data.len());
     if null_raw >= 6 && data[..null_raw].iter().all(|&b| b >= 0x20 && b < 0x7f) {
@@ -13933,26 +17411,52 @@ fn try_xor_decrypt_multi(va: u64, ctx: &PrintCtx) -> Option<(String, Vec<u8>)> {
 
     // Try common plaintext prefixes to derive the key
     let prefixes: &[&[u8]] = &[
-        b"http", b"HTTP", b"https", b"cmd ", b"cmd.",
-        b"C:\\", b"C:/", b"/bin", b"/tmp", b"/etc",
-        b"HKEY", b"Soft", b"\\\\.",
-        b"powershell", b"rundll32", b"regsvr32",
+        b"http",
+        b"HTTP",
+        b"https",
+        b"cmd ",
+        b"cmd.",
+        b"C:\\",
+        b"C:/",
+        b"/bin",
+        b"/tmp",
+        b"/etc",
+        b"HKEY",
+        b"Soft",
+        b"\\\\.",
+        b"powershell",
+        b"rundll32",
+        b"regsvr32",
     ];
 
     for key_len in 2..=4usize {
         for prefix in prefixes {
-            if prefix.len() < key_len { continue; }
+            if prefix.len() < key_len {
+                continue;
+            }
             // Derive key from known plaintext
             let key: Vec<u8> = (0..key_len).map(|i| data[i] ^ prefix[i]).collect();
-            if key.iter().all(|&k| k == 0) { continue; }
+            if key.iter().all(|&k| k == 0) {
+                continue;
+            }
 
-            let decrypted: Vec<u8> = data.iter().enumerate()
+            let decrypted: Vec<u8> = data
+                .iter()
+                .enumerate()
                 .map(|(i, b)| b ^ key[i % key_len])
                 .collect();
-            let null_pos = decrypted.iter().position(|&b| b == 0).unwrap_or(decrypted.len());
-            if null_pos < 8 || null_pos > 200 { continue; }
+            let null_pos = decrypted
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(decrypted.len());
+            if null_pos < 8 || null_pos > 200 {
+                continue;
+            }
             let candidate = &decrypted[..null_pos];
-            if candidate.iter().all(|&b| (b >= 0x20 && b < 0x7f) || b == b'\n' || b == b'\t') {
+            if candidate
+                .iter()
+                .all(|&b| (b >= 0x20 && b < 0x7f) || b == b'\n' || b == b'\t')
+            {
                 if let Ok(s) = std::str::from_utf8(candidate) {
                     let unique: std::collections::HashSet<u8> = candidate.iter().copied().collect();
                     let has_letter = candidate.iter().any(|&b| b.is_ascii_alphabetic());
@@ -13968,28 +17472,42 @@ fn try_xor_decrypt_multi(va: u64, ctx: &PrintCtx) -> Option<(String, Vec<u8>)> {
 
 /// Try ROT13 decryption on a string.
 fn try_rot13(s: &str) -> Option<String> {
-    if s.len() < 8 { return None; }
+    if s.len() < 8 {
+        return None;
+    }
     // Must be mostly alphabetic to be a ROT13 candidate
     let alpha_ratio = s.chars().filter(|c| c.is_ascii_alphabetic()).count() as f64 / s.len() as f64;
-    if alpha_ratio < 0.6 { return None; }
+    if alpha_ratio < 0.6 {
+        return None;
+    }
 
-    let decoded: String = s.chars().map(|c| match c {
-        'a'..='m' | 'A'..='M' => (c as u8 + 13) as char,
-        'n'..='z' | 'N'..='Z' => (c as u8 - 13) as char,
-        _ => c,
-    }).collect();
+    let decoded: String = s
+        .chars()
+        .map(|c| match c {
+            'a'..='m' | 'A'..='M' => (c as u8 + 13) as char,
+            'n'..='z' | 'N'..='Z' => (c as u8 - 13) as char,
+            _ => c,
+        })
+        .collect();
 
     // Check if decoded contains common English words
-    let common_words = ["the", "and", "for", "are", "but", "not", "you", "all",
-        "can", "her", "was", "one", "our", "out", "has", "his", "how", "its",
-        "let", "may", "new", "now", "old", "see", "way", "who", "did", "get",
-        "com", "org", "net", "http", "file", "open", "read", "write", "exec",
-        "system", "shell", "command", "password", "error", "failed", "success",
-        "connect", "send", "recv", "socket", "server", "client", "path", "name"];
+    let common_words = [
+        "the", "and", "for", "are", "but", "not", "you", "all", "can", "her", "was", "one", "our",
+        "out", "has", "his", "how", "its", "let", "may", "new", "now", "old", "see", "way", "who",
+        "did", "get", "com", "org", "net", "http", "file", "open", "read", "write", "exec",
+        "system", "shell", "command", "password", "error", "failed", "success", "connect", "send",
+        "recv", "socket", "server", "client", "path", "name",
+    ];
     let decoded_lower = decoded.to_lowercase();
-    let word_hits = common_words.iter().filter(|w| decoded_lower.contains(**w)).count();
+    let word_hits = common_words
+        .iter()
+        .filter(|w| decoded_lower.contains(**w))
+        .count();
     let original_lower = s.to_lowercase();
-    let orig_hits = common_words.iter().filter(|w| original_lower.contains(**w)).count();
+    let orig_hits = common_words
+        .iter()
+        .filter(|w| original_lower.contains(**w))
+        .count();
 
     if word_hits > orig_hits && word_hits >= 2 {
         Some(decoded)
@@ -14000,15 +17518,22 @@ fn try_rot13(s: &str) -> Option<String> {
 
 /// Try base64 decoding on a string.
 fn try_base64_decode(s: &str) -> Option<String> {
-    if s.len() < 8 { return None; }
+    if s.len() < 8 {
+        return None;
+    }
     // Must look like base64: alphanumeric + / + = padding
-    if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=') {
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+    {
         return None;
     }
     // Must have both upper and lowercase
     let has_upper = s.chars().any(|c| c.is_ascii_uppercase());
     let has_lower = s.chars().any(|c| c.is_ascii_lowercase());
-    if !has_upper || !has_lower { return None; }
+    if !has_upper || !has_lower {
+        return None;
+    }
 
     // Simple base64 decoder (no external dep needed)
     let table = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -14026,9 +17551,14 @@ fn try_base64_decode(s: &str) -> Option<String> {
             buf &= (1 << bits) - 1;
         }
     }
-    if bytes.len() < 4 { return None; }
+    if bytes.len() < 4 {
+        return None;
+    }
     // Check if result is printable ASCII
-    if bytes.iter().all(|&b| (b >= 0x20 && b < 0x7f) || b == b'\n' || b == b'\t' || b == 0) {
+    if bytes
+        .iter()
+        .all(|&b| (b >= 0x20 && b < 0x7f) || b == b'\n' || b == b'\t' || b == 0)
+    {
         let null_pos = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
         let decoded = std::str::from_utf8(&bytes[..null_pos]).ok()?;
         if decoded.len() >= 4 {
@@ -14048,16 +17578,22 @@ fn try_read_wide_string(va: u64, ctx: &PrintCtx) -> Option<String> {
             let rva = va.checked_sub(pe.image_base as u64)? as u64;
             pe.sections.iter().find_map(|s| {
                 let sr = s.virtual_address as u64;
-                if rva < sr || rva >= sr + s.virtual_size as u64 { return None; }
+                if rva < sr || rva >= sr + s.virtual_size as u64 {
+                    return None;
+                }
                 let is_writable = s.characteristics & 0x80000000 != 0;
                 let is_exec = s.characteristics & 0x20000000 != 0;
-                if is_writable || is_exec { return None; }
+                if is_writable || is_exec {
+                    return None;
+                }
                 Some((s.pointer_to_raw_data as u64 + (rva - sr)) as usize)
             })?
         }
         _ => return None,
     };
-    if file_offset >= binary.len() { return None; }
+    if file_offset >= binary.len() {
+        return None;
+    }
     let max = 512.min(binary.len() - file_offset);
     let slice = &binary[file_offset..file_offset + max];
     // Read UTF-16LE: pairs of bytes until double-null
@@ -14065,17 +17601,30 @@ fn try_read_wide_string(va: u64, ctx: &PrintCtx) -> Option<String> {
     let mut i = 0;
     while i + 1 < slice.len() {
         let ch = u16::from_le_bytes([slice[i], slice[i + 1]]);
-        if ch == 0 { break; }
+        if ch == 0 {
+            break;
+        }
         chars.push(ch);
         i += 2;
-        if chars.len() > 256 { return None; } // too long
+        if chars.len() > 256 {
+            return None;
+        } // too long
     }
-    if chars.len() < 2 { return None; } // too short
+    if chars.len() < 2 {
+        return None;
+    } // too short
     let s = String::from_utf16(&chars).ok()?;
     // Verify it's actually readable text
-    if s.chars().all(|c| c.is_ascii_graphic() || c == ' ' || c == '\\' || c == '%') {
-        Some(format!("L\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")))
-    } else { None }
+    if s.chars()
+        .all(|c| c.is_ascii_graphic() || c == ' ' || c == '\\' || c == '%')
+    {
+        Some(format!(
+            "L\"{}\"",
+            s.replace('\\', "\\\\").replace('"', "\\\"")
+        ))
+    } else {
+        None
+    }
 }
 
 fn var_name(vn: &Varnode, ctx: &PrintCtx) -> String {
@@ -14115,14 +17664,24 @@ fn needs_paren_for_arrow(s: &str) -> bool {
     let mut i = 0;
     while i + 2 < bytes.len() {
         let b = bytes[i];
-        if b == b'(' || b == b'[' { depth += 1; i += 1; continue; }
-        if b == b')' || b == b']' { depth -= 1; i += 1; continue; }
+        if b == b'(' || b == b'[' {
+            depth += 1;
+            i += 1;
+            continue;
+        }
+        if b == b')' || b == b']' {
+            depth -= 1;
+            i += 1;
+            continue;
+        }
         if depth == 0 && b == b' ' {
             let op = bytes[i + 1];
             let after_op = bytes[i + 2];
             // Match ` OP ` where OP is one of the C binary operators.
-            let is_op_char = matches!(op,
-                b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|' | b'^' | b'?' | b':');
+            let is_op_char = matches!(
+                op,
+                b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|' | b'^' | b'?' | b':'
+            );
             let is_shift = (op == b'<' || op == b'>') && after_op == op;
             if (is_op_char && after_op == b' ') || is_shift {
                 return true;
@@ -14139,8 +17698,9 @@ fn resolve_to_const(mut id: VarId, ssa: &SsaCfg) -> Option<(u64, u32)> {
         match expr {
             Expr::Const(val, sz) => return Some((*val, *sz)),
             Expr::Var(next) => id = *next,
-            Expr::UnaryOp(UnaryOpKind::Zext, inner)
-            | Expr::UnaryOp(UnaryOpKind::Sext, inner) => id = *inner,
+            Expr::UnaryOp(UnaryOpKind::Zext, inner) | Expr::UnaryOp(UnaryOpKind::Sext, inner) => {
+                id = *inner
+            }
             _ => return None,
         }
     }
@@ -14158,11 +17718,13 @@ fn resolve_through_vars(id: VarId, ssa: &SsaCfg) -> Expr {
 // ---- Helpers ----
 
 fn is_flag(offset: u64) -> bool {
-    matches!(offset, 512..=523 | 256..=264 | 96..=104)  // x86 + ARM64 + ARM32 flags
+    matches!(offset, 512..=523 | 256..=264 | 96..=104) // x86 + ARM64 + ARM32 flags
 }
 
 fn is_zext_artifact(vdef: &VarDef, ssa: &SsaCfg) -> bool {
-    if vdef.varnode.space != AddressSpaceId::Register { return false; }
+    if vdef.varnode.space != AddressSpaceId::Register {
+        return false;
+    }
     if let Expr::UnaryOp(UnaryOpKind::Zext, inner_id) = &vdef.expr {
         let inner = ssa.var(*inner_id);
         inner.varnode.space == AddressSpaceId::Register
@@ -14178,12 +17740,16 @@ fn is_arg_consumed_by_call(var_id: VarId, ssa: &SsaCfg) -> bool {
     for block in &ssa.blocks {
         // Check Call terminators
         if let SsaTerminator::Call { args, .. } = &block.terminator {
-            if args.contains(&var_id) { return true; }
+            if args.contains(&var_id) {
+                return true;
+            }
         }
         // Check Call statements
         for stmt in &block.stmts {
             if let Stmt::Call { args, .. } = stmt {
-                if args.contains(&var_id) { return true; }
+                if args.contains(&var_id) {
+                    return true;
+                }
             }
         }
     }
@@ -14200,7 +17766,14 @@ fn is_self_assign(vdef: &VarDef, ssa: &SsaCfg) -> bool {
 }
 
 fn size_to_type(size: u32) -> &'static str {
-    match size { 1 => "uint8_t", 2 => "uint16_t", 4 => "uint32_t", 8 => "uint64_t", 16 => "__uint128_t", _ => "void" }
+    match size {
+        1 => "uint8_t",
+        2 => "uint16_t",
+        4 => "uint32_t",
+        8 => "uint64_t",
+        16 => "__uint128_t",
+        _ => "void",
+    }
 }
 
 /// Type-aware version: uses InferredType to pick signed/float/pointer types.
@@ -14258,14 +17831,23 @@ fn binop_str(kind: BinOpKind) -> &'static str {
 
 fn unaryop_str(kind: UnaryOpKind) -> &'static str {
     match kind {
-        UnaryOpKind::Neg => "-", UnaryOpKind::Not => "~", UnaryOpKind::BoolNot => "!",
-        UnaryOpKind::Zext => "ZEXT", UnaryOpKind::Sext => "SEXT",
-        UnaryOpKind::FloatNeg => "FNEG", UnaryOpKind::FloatAbs => "FABS",
-        UnaryOpKind::FloatSqrt => "FSQRT", UnaryOpKind::FloatNan => "ISNAN",
-        UnaryOpKind::Int2Float => "INT2FLOAT", UnaryOpKind::Float2Float => "FLOAT2FLOAT",
-        UnaryOpKind::Trunc => "TRUNC", UnaryOpKind::FloatCeil => "CEIL",
-        UnaryOpKind::FloatFloor => "FLOOR", UnaryOpKind::FloatRound => "ROUND",
-        UnaryOpKind::Popcount => "POPCOUNT", UnaryOpKind::Lzcount => "LZCOUNT",
+        UnaryOpKind::Neg => "-",
+        UnaryOpKind::Not => "~",
+        UnaryOpKind::BoolNot => "!",
+        UnaryOpKind::Zext => "ZEXT",
+        UnaryOpKind::Sext => "SEXT",
+        UnaryOpKind::FloatNeg => "FNEG",
+        UnaryOpKind::FloatAbs => "FABS",
+        UnaryOpKind::FloatSqrt => "FSQRT",
+        UnaryOpKind::FloatNan => "ISNAN",
+        UnaryOpKind::Int2Float => "INT2FLOAT",
+        UnaryOpKind::Float2Float => "FLOAT2FLOAT",
+        UnaryOpKind::Trunc => "TRUNC",
+        UnaryOpKind::FloatCeil => "CEIL",
+        UnaryOpKind::FloatFloor => "FLOOR",
+        UnaryOpKind::FloatRound => "ROUND",
+        UnaryOpKind::Popcount => "POPCOUNT",
+        UnaryOpKind::Lzcount => "LZCOUNT",
     }
 }
 
@@ -14279,12 +17861,18 @@ fn extract_if_eq_const(line: &str) -> Option<(String, String)> {
 fn parse_eq_const(cond: &str) -> Option<(String, String)> {
     // Split on " == "
     let parts: Vec<&str> = cond.splitn(2, " == ").collect();
-    if parts.len() != 2 { return None; }
+    if parts.len() != 2 {
+        return None;
+    }
     let var = parts[0].trim();
     let val = parts[1].trim();
     // Validate: var should be a variable-like expression, val should be a constant
-    if var.is_empty() || val.is_empty() { return None; }
-    let val_is_const = val.starts_with("0x") || val.starts_with('\'') || val.starts_with('-')
+    if var.is_empty() || val.is_empty() {
+        return None;
+    }
+    let val_is_const = val.starts_with("0x")
+        || val.starts_with('\'')
+        || val.starts_with('-')
         || val.chars().next().map_or(false, |c| c.is_ascii_digit())
         || val == "NULL";
     if val_is_const {
@@ -14315,12 +17903,10 @@ fn try_extract_low_from_or(high: VarId, low: VarId, ssa: &SsaCfg) -> Option<VarI
     // high must be Lsl(something, 32)
     let high_def = ssa.var(high);
     match &high_def.expr {
-        Expr::BinOp(BinOpKind::Lsl, _, shift_amt) => {
-            match &ssa.var(*shift_amt).expr {
-                Expr::Const(32, _) => {}
-                _ => return None,
-            }
-        }
+        Expr::BinOp(BinOpKind::Lsl, _, shift_amt) => match &ssa.var(*shift_amt).expr {
+            Expr::Const(32, _) => {}
+            _ => return None,
+        },
         _ => return None,
     }
 

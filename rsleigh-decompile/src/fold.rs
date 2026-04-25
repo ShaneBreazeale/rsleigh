@@ -1993,6 +1993,35 @@ fn simplify_expr(expr: Expr, vars: &[VarDef]) -> Expr {
             }
         }
 
+        // === Unary involutions: f(f(x)) = x ===
+        //
+        // Audit P2 #1: ~~x and -(-x) are involutive over their domains.
+        // Folding them at the SSA layer lets `--ssa-json` show the
+        // canonical form and avoids the printer accumulating
+        // double-negation residue.
+        Expr::UnaryOp(UnaryOpKind::Not, inner) => {
+            if let Expr::UnaryOp(UnaryOpKind::Not, x) = &vars[inner.0 as usize].expr {
+                Expr::Var(*x)
+            } else {
+                expr
+            }
+        }
+        Expr::UnaryOp(UnaryOpKind::Neg, inner) => {
+            if let Expr::UnaryOp(UnaryOpKind::Neg, x) = &vars[inner.0 as usize].expr {
+                Expr::Var(*x)
+            } else {
+                expr
+            }
+        }
+        // !(!x) = x for boolean negation.
+        Expr::UnaryOp(UnaryOpKind::BoolNot, inner) => {
+            if let Expr::UnaryOp(UnaryOpKind::BoolNot, x) = &vars[inner.0 as usize].expr {
+                Expr::Var(*x)
+            } else {
+                expr
+            }
+        }
+
         _ => expr,
     }
 }

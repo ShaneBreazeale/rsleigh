@@ -116,6 +116,57 @@ fn x_times_zero_folds_to_zero() {
 }
 
 #[test]
+fn neg_neg_x_folds_to_x() {
+    // var0 = unknown (x)
+    // var1 = -var0
+    // var2 = -var1   →  must fold to Var(0)
+    let vars = vec![
+        vd(0, Expr::Unknown, 4),
+        vd(1, Expr::UnaryOp(UnaryOpKind::Neg, VarId(0)), 4),
+        vd(2, Expr::UnaryOp(UnaryOpKind::Neg, VarId(1)), 4),
+    ];
+    let ssa = run_fold(vars, 2);
+    // After fold, var2 must NOT still be UnaryOp(Neg, _). The fold pass
+    // either resolves to Var(0) or further inlines var0's expression
+    // (Unknown), but the involutive double-Neg shape must be gone.
+    assert!(
+        !matches!(&ssa.vars[2].expr, Expr::UnaryOp(UnaryOpKind::Neg, _)),
+        "Neg(Neg(x)) survived fold: {:?}",
+        ssa.vars[2].expr
+    );
+}
+
+#[test]
+fn not_not_x_folds_away_double_negation() {
+    let vars = vec![
+        vd(0, Expr::Unknown, 4),
+        vd(1, Expr::UnaryOp(UnaryOpKind::Not, VarId(0)), 4),
+        vd(2, Expr::UnaryOp(UnaryOpKind::Not, VarId(1)), 4),
+    ];
+    let ssa = run_fold(vars, 2);
+    assert!(
+        !matches!(&ssa.vars[2].expr, Expr::UnaryOp(UnaryOpKind::Not, _)),
+        "Not(Not(x)) survived fold: {:?}",
+        ssa.vars[2].expr
+    );
+}
+
+#[test]
+fn boolnot_boolnot_x_folds_away_double_negation() {
+    let vars = vec![
+        vd(0, Expr::Unknown, 1),
+        vd(1, Expr::UnaryOp(UnaryOpKind::BoolNot, VarId(0)), 1),
+        vd(2, Expr::UnaryOp(UnaryOpKind::BoolNot, VarId(1)), 1),
+    ];
+    let ssa = run_fold(vars, 2);
+    assert!(
+        !matches!(&ssa.vars[2].expr, Expr::UnaryOp(UnaryOpKind::BoolNot, _)),
+        "BoolNot(BoolNot(x)) survived fold: {:?}",
+        ssa.vars[2].expr
+    );
+}
+
+#[test]
 fn x_minus_x_folds_to_zero() {
     // Idempotence check — the existing `x - x → 0` rule survives the new
     // `0 - x → -x` rule and isn't accidentally shadowed.
