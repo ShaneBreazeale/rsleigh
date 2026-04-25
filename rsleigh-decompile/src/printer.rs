@@ -17001,8 +17001,8 @@ fn format_const(val: u64, size: u32) -> String {
     if val <= u32::MAX as u64 && (size == 4 || size == 8) {
         let v32 = val as u32;
         if crate::peb_walk::looks_like_hash(v32) {
-            if let Some(api) = crate::peb_walk::resolve_ror13_hash(v32) {
-                return format!("{} /* ROR13(\"{}\") */", s, api);
+            if let Some((api, variant)) = crate::peb_walk::resolve_api_hash(v32) {
+                return format!("{} /* {}(\"{}\") */", s, variant, api);
             }
         }
     }

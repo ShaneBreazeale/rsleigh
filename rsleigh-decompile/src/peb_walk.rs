@@ -375,10 +375,36 @@ static HASH_INDEX: LazyLock<HashMap<u32, &'static str>> = LazyLock::new(|| {
     m
 });
 
-/// Look up an API name from a 32-bit hash (any of ROR13, DJB2, add+rotl1).
-/// Returns None for misses.
+/// Look up an API name from a 32-bit hash (any of ROR13, DJB2, DJB2a,
+/// add+rotl1). Returns None for misses.
 pub fn resolve_ror13_hash(h: u32) -> Option<&'static str> {
     HASH_INDEX.get(&h).copied()
+}
+
+/// Resolve a 32-bit hash and return both the API name and which hash
+/// variant matched. Useful for printer annotations that want to call
+/// out the specific algorithm (e.g. `DJB2a("VirtualAlloc")`).
+///
+/// Variants checked in order: ROR13, DJB2, DJB2a, add+rotl1. A given
+/// (hash, name) pair only matches one variant in practice; ties prefer
+/// the earlier-checked variant.
+pub fn resolve_api_hash(h: u32) -> Option<(&'static str, &'static str)> {
+    let name = HASH_INDEX.get(&h).copied()?;
+    if ror13_api(name) == h || ror13_module_api("kernel32.dll", name) == h
+        || ror13_module_api("ntdll.dll", name) == h
+    {
+        return Some((name, "ROR13"));
+    }
+    if djb2_api(name) == h {
+        return Some((name, "DJB2"));
+    }
+    if djb2a_api(name) == h {
+        return Some((name, "DJB2a"));
+    }
+    if add_rotl1_api(name) == h {
+        return Some((name, "add+rotl1"));
+    }
+    Some((name, "hash"))
 }
 
 /// Heuristic gate: only annotate constants that *look* like a hash —
@@ -454,6 +480,23 @@ mod tests {
                 h
             );
         }
+    }
+
+    #[test]
+    fn resolve_api_hash_labels_djb2a_correctly() {
+        // 0x19fbbf49 is djb2a("VirtualAlloc") — observed in v5.
+        let h = djb2a_api("VirtualAlloc");
+        let (name, variant) = resolve_api_hash(h).expect("should resolve");
+        assert_eq!(name, "VirtualAlloc");
+        assert_eq!(variant, "DJB2a");
+    }
+
+    #[test]
+    fn resolve_api_hash_labels_ror13_correctly() {
+        let h = ror13_api("LoadLibraryA");
+        let (name, variant) = resolve_api_hash(h).expect("should resolve");
+        assert_eq!(name, "LoadLibraryA");
+        assert_eq!(variant, "ROR13");
     }
 
     #[test]
