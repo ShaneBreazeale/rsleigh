@@ -296,6 +296,43 @@ fn oracle_op_to_norm(op: &OracleOp) -> Option<NormOp> {
     })
 }
 
+/// Drop dead `Copy{Unique, Const}` ops whose Unique output is never read by
+/// any subsequent op in the same instruction. SLEIGH macro expansion routinely
+/// emits zero-initialization Copies into unique slots that downstream ops
+/// don't consume; rsleigh's optimizer prunes them, Ghidra leaves them in.
+/// Both forms are semantically equivalent — strip them on both sides so the
+/// strict comparison can match the meaningful ops.
+fn drop_dead_const_unique_inits(ops: &mut Vec<NormOp>) {
+    let mut to_drop: Vec<usize> = Vec::new();
+    for i in 0..ops.len() {
+        let op = &ops[i];
+        if op.mnemonic != "Copy" {
+            continue;
+        }
+        let out = match &op.out {
+            Some(v) if v.space == AddressSpaceId::Unique => v.clone(),
+            _ => continue,
+        };
+        if op.inputs.len() != 1 || op.inputs[0].space != AddressSpaceId::Const {
+            continue;
+        }
+        // Read by any subsequent op in this instruction?
+        let read = ops[i + 1..].iter().any(|later| {
+            later.inputs.iter().any(|v| {
+                v.space == AddressSpaceId::Unique
+                    && v.offset == out.offset
+                    && v.size == out.size
+            })
+        });
+        if !read {
+            to_drop.push(i);
+        }
+    }
+    for &i in to_drop.iter().rev() {
+        ops.remove(i);
+    }
+}
+
 /// Remap `unique` offsets to first-def order (per instruction). Ghidra and
 /// rsleigh assign arbitrary unique offsets; only definition order is comparable.
 fn normalize_uniques(ops: &mut [NormOp]) {
@@ -370,9 +407,12 @@ const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
     ),
     (
         "aarch64/csel.ghidra.json",
-        "AArch64 csel-family lift (csetm w8, lt) produces fewer pcode \
-         ops than Ghidra (5 vs 7). Likely missing flag-recombine \
-         intermediates around the conditional select.",
+        "AArch64 csetm INT_2COMP / IntNeg in rsleigh emits an 8-byte \
+         Unique output for a 4-byte input; Ghidra emits size 4. Real \
+         codegen size-precision bug — same family as the ARM32 \
+         mov-imm Subpiece-of-wider-Const issue but on the output \
+         side. Op count and shape now match after dead-Copy stripping \
+         in the comparator; only the output size diverges.",
     ),
 ];
 
@@ -427,6 +467,10 @@ fn check_oracle(path: &Path) {
 
             let mut rs_norm: Vec<NormOp> = decoded.ops.iter().map(rsleigh_op_to_norm).collect();
             let mut gh_norm: Vec<NormOp> = ins.pcode.iter().filter_map(oracle_op_to_norm).collect();
+            // Strip macro-emitted dead Copies before unique renumbering so
+            // both sides agree on definition order.
+            drop_dead_const_unique_inits(&mut rs_norm);
+            drop_dead_const_unique_inits(&mut gh_norm);
             normalize_uniques(&mut rs_norm);
             normalize_uniques(&mut gh_norm);
 
