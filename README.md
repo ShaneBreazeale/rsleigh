@@ -1,293 +1,322 @@
 # rsleigh
 
-pure-Rust SLEIGH-driven multi-arch decoder/lifter with an experimental decompiler and malware-analysis heuristics.
-## Why
+rsleigh is a Rust workspace for decoding machine code with Ghidra SLEIGH
+specifications, lifting instructions to P-code, and experimenting with C-like
+decompilation and binary triage workflows.
 
-Started as the disassembly + decompilation backend for [Spectra](https://github.com/ShaneBreazeale/spectra), my reverse engineering tool. I wanted to drop the Ghidra JVM daemon, so I wrote a SLEIGH compiler and decompiler in Rust and am open-sourcing the backend.
+The short version:
 
-It is **not** a drop-in replacement for Ghidra or IDA. Single-author project at v0.x with limited testing relative to the surface area, and rough edges in decompiler output. Treat as exploratory infrastructure, not production tooling. If correctness on a specific binary matters, cross-check against Ghidra or BN.
+- It parses `.slaspec` files and generates Rust decoder crates.
+- `rsleigh-api` exposes a reusable decoder/lifter API.
+- `rsleigh-cli` can list, disassemble, and decompile functions from common
+  binary formats.
+- `rsleigh-decompile` is an active, useful, but still experimental decompiler.
 
-## Prior art
+This is not a drop-in replacement for Ghidra, IDA, or Binary Ninja. The decoder
+and lifter are the most stable part of the project. The decompiler, malware
+heuristics, and text output are moving quickly and should be treated as analysis
+assistance, not ground truth.
 
-- **[rbran/sleigh-rs](https://github.com/rbran/sleigh-rs)** — pure-Rust SLEIGH parser, self-described as unfinished. Parser layer here is independent; semantic layer was forked from sleigh-rs and has diverged substantially.
-- **[mnemonikr/libsla](https://github.com/mnemonikr/libsla)** — FFI bindings to Ghidra's libsla. Solid if you accept C++ deps.
-- **jingle_sleigh** — another libsla FFI layer.
+## Why this exists
 
-If you need a SLEIGH frontend in Rust today and don't need the decompiler, sleigh-rs or libsla bindings will likely serve you better. Greenfield reimplementation here is justified by full codegen control (constructor cache layout, dynamic register lookup, generated-crate splitting) and a decompiler tightly coupled to the decoder.
+rsleigh started as the native analysis backend for
+[Spectra](https://github.com/ShaneBreazeale/spectra). The goal was to get a
+SLEIGH-driven decoder and P-code pipeline without depending on a long-running
+Ghidra JVM process or C++ libsla bindings.
 
-## What works
+The project is now useful as:
 
-7 architectures end-to-end. SLEIGH-driven decoder emits P-code; 5-pass decompiler turns P-code into C-like output.
+- a pure-Rust SLEIGH decoder/lifter for supported architectures;
+- a scriptable CLI for batch disassembly, pseudocode, xrefs, and triage;
+- a testbed for P-code based decompilation passes;
+- a place to experiment with malware-oriented static-analysis heuristics.
+
+It is still a v0.x, single-maintainer project. If correctness on a specific
+target matters, compare against another tool and inspect the P-code or assembly.
+
+## Status
+
+The stable surface is intentionally narrow:
+
+- `rsleigh-api::Decoder`
+- `Architecture`
+- `Decoder::decode`
+- register-name lookup
+- re-exported `pcode-ir` types such as `Instruction`, `PcodeOp`, `Varnode`,
+  `AddressSpaceId`, and `DecodeError`
+
+Everything else should be considered experimental unless documented otherwise:
+the CLI output format, decompiler internals, pseudocode text, signature
+heuristics, function-ID behavior, malware annotations, and analysis passes may
+change without a deprecation cycle.
+
+## Supported targets
+
+Instruction decoding and P-code lifting are generated from SLEIGH for:
 
 | Architecture | Notes |
 |---|---|
-| x86-64 | SysV + Windows x64 calling conventions |
-| x86-32 | SSE/AVX, PE32 IAT, cdecl/thiscall, ELF32 PIE |
-| AArch64 | NEON + SVE, AAPCS64 (x0-x7 + v0-v7 typed) |
-| ARM32 | ARMv7 + Thumb, VFP/NEON (decode only; FP folding incomplete) |
-| MIPS32 | FPU, DSP, MIPS16, microMIPS, PIC GP-relative resolution |
-| RISC-V 64 | RV64GC + F/D/B/K/P/Q/V/C |
-| WebAssembly | native parser (WASM is a stack VM, SLEIGH model fits poorly, this path bypasses it) |
+| x86-64 | 64-bit mode, SysV and Windows x64 decompiler conventions |
+| x86-32 | 32-bit protected mode, cdecl/thiscall heuristics |
+| AArch64 | AAPCS64-oriented decompiler support |
+| ARM32 | ARMv7 and Thumb; floating-point folding is incomplete |
+| MIPS32 | Big-endian MIPS, including PIC-oriented call resolution work |
+| RISC-V 64 | RV64-oriented decoder support |
 
-**Binary formats:** ELF (32/64), Mach-O (x86-64, AArch64), PE (32/64 incl. ARM64), WASM, raw firmware.
+The CLI handles ELF, PE, Mach-O, raw blobs, and WebAssembly. WASM uses a native
+parser path rather than SLEIGH because it is a stack VM and does not fit the
+same register-machine model cleanly.
 
-Generated decoder crates are large. x86-64 ships split across 8 compile batches, AArch64 across 4. Downstream compile time and binary size are real costs to expect.
+Generated decoder crates are large. Compile time and final binary size are real
+costs, especially for x86 and AArch64.
 
-## PE64 malware analysis
+## Quick Start
 
-Static-analysis features aimed at modern malware and packers. All gated to known patterns to keep false-positive rate low.
-
-- **SEH SMC pipeline** — walks `.pdata` + UNWIND_INFO, parses MSVC scope tables (BFS depth 8), abstract-interp over `mov [tracked+disp], imm` + `rep movs` + indirect jumps + jump tables (stride 8 / MSVC i32-rel stride 4). Fixpoint loop (`extract → apply → re-discover`, hard cap 16) recovers code-on-demand patches. Solves the PyVMProtect v4 class. Walkthrough in `docs/pe64-seh-pipeline.md`.
-- **TLS-callback SMC** — extends SMC fixpoint past SEH-only via `IMAGE_TLS_DIRECTORY64.AddressOfCallBacks`. Catches packers that hide unpack stubs in TLS callbacks instead of SEH handlers.
-- **x64 syscall annotation** — block-local pattern detector for `mov eax, IMM; syscall` gadget; matches against Win11 24H2 ntdll table (~120 entries) and emits `// syscall 0xNN -> likely NtXxx` annotation. Resolves shellcode, Donut, Cobalt Strike, SysWhispers output.
-- **PEB-walk ROR13 hash resolver** — when a 32-bit constant matches a known API hash (ROR13 over ~130 curated kernel32/ntdll/ws2_32/advapi32/wininet/user32 names), inline `/* ROR13("LoadLibraryA") */` annotation in decompiled output. Covers Metasploit `block_api`, Donut, public shellcode.
-- **Function ID database** — Ghidra-FID-style body fingerprinting in pure Rust. xxh3 full + callee-aware specific hash over operand-masked instruction bytes. Bundled glibc 2.36, libstdc++ 12.2, musl 1.2.5 (x86_64 + aarch64), 13,612 entries auto-loaded by target arch. `rsleigh-fid-gen` builds custom .fidb from ELF/Mach-O/PE/`.a`.
-- **38K+ function signatures** — auto-loaded; param-name annotations at call sites, Win32 typedef display (HANDLE, HKEY, REGSAM, ...), interprocedural propagation, cross-function struct propagation.
-
-## CLI
+From a checkout:
 
 ```bash
+make test
+```
+
+Or step by step:
+
+```bash
+cargo run -p rsleigh-generate
+cargo test -p test-harness
 cargo install --path rsleigh-cli
 ```
 
-**Core:**
+Basic CLI usage:
 
 ```bash
-rsleigh ./binary                       # list functions
-rsleigh ./binary main                  # decompile a function
-rsleigh ./binary --all                 # decompile everything
-rsleigh ./binary --disasm main         # disassembly + P-code
-rsleigh ./binary --json                # JSON output
-rsleigh ./binary --xrefs main          # callers + callees
-rsleigh ./binary --raw x86-64          # raw firmware blob
-rsleigh ./binary --pcode-json main     # raw P-code (debug)
-rsleigh ./binary --ssa-json main       # post-fold SSA (debug)
-rsleigh ./binary --sigs extra.json     # additional signatures
-rsleigh ./binary --fid file.fidb       # additional FID database
-rsleigh ./binary --no-fid-auto         # disable bundled FID DBs
+rsleigh ./binary                         # list discovered functions
+rsleigh ./binary main                    # decompile one function
+rsleigh ./binary 0x140001000             # decompile by address
+rsleigh ./binary --all                   # decompile all discovered functions
+rsleigh ./binary --disasm main           # disassembly plus P-code
+rsleigh ./binary --json                  # machine-readable output where supported
+rsleigh ./binary --xrefs main            # callers and callees
+rsleigh ./binary --raw x86-64            # treat input as a raw blob
 ```
 
-**Token-reduced output (LLM workflows):**
+Debug and integration-oriented output:
 
 ```bash
-rsleigh ./binary --compact             # -24% (strip locals)
-rsleigh ./binary --brief               # -35% (calls + cflow only)
-rsleigh ./binary --min-complexity N    # skip trivial functions
-rsleigh ./binary --brief --min-complexity 5  # -40% combined
+rsleigh ./binary --pcode-json main       # raw lifted P-code
+rsleigh ./binary --ssa-json main         # post-fold SSA
+rsleigh ./binary --sigs extra.json       # load extra function signatures
+rsleigh ./binary --fid custom.fidb       # load an extra function-ID database
+rsleigh ./binary --no-fid-auto           # disable bundled FID databases
 ```
 
-**Experimental:**
+Output-reduction modes for large binaries and LLM workflows:
 
 ```bash
-rsleigh ./binary --vulnscan            # 27 vuln patterns (heuristic)
-rsleigh ./binary --search "recv"       # string/API/constant search
+rsleigh ./binary --all --compact         # remove some declarations and blank space
+rsleigh ./binary --all --brief           # calls and control-flow oriented output
+rsleigh ./binary --all --min-complexity 10
+```
+
+Experimental analysis modes:
+
+```bash
+rsleigh ./binary --search "recv"
 rsleigh ./binary --search --api LoadLibrary --const 0xCAFEBABE
-rsleigh ./binary --summary             # one-line per function
-rsleigh ./binary --callgraph           # JSON + behavioral tags
-rsleigh ./binary --classes [--json]    # MSVC/GCC RTTI class recovery
-rsleigh ./binary --diff ./binary_v2    # decompilation diff
-rsleigh ./binary --taint main          # taint (intra-procedural, partial)
-rsleigh ./binary --yara                # generate YARA from binary
+rsleigh ./binary --summary
+rsleigh ./binary --callgraph
+rsleigh ./binary --classes [--json]
+rsleigh ./binary --diff ./binary_v2
+rsleigh ./binary --taint main
+rsleigh ./binary --vulnscan
+rsleigh ./binary --yara
 ```
 
-Experimental flags are pattern-matching heuristics over decompiled output, not sound analyses. Will both miss real bugs and flag false positives. Treat as triage hints.
+Those modes are heuristics over the current analysis pipeline. They are useful
+for triage, but they are not sound vulnerability detection, taint analysis, or
+semantic differencing.
 
-## Decompiler output
+## Rust API
 
-CTF challenge with imports + strings inlined:
+```rust
+use rsleigh_api::{Architecture, Decoder};
 
-```c
-init();
-puts("Welcome to my intricate trap, where all who are not me shall fail.");
-if (stage1() == 0) {
-    fail();
-    if (stage2() == 0) {
-        fail();
-        if (stage3() == 0) {
-            fail();
-            puts("Amazing");
-            give_flag();
-        }
-    }
-}
+let mut decoder = Decoder::new(Architecture::X86_64);
+let inst = decoder.decode(&[0x48, 0x89, 0xd8], 0x1000).unwrap();
+
+assert_eq!(inst.disassembly, "MOV RAX,RBX");
+assert_eq!(inst.len, 3);
 ```
 
-DWARF-compiled C:
+The decompiler can also be embedded, but its API is not stable yet. Pin an exact
+version or commit if you build on `rsleigh-decompile`.
+
+## Decompiler
+
+The decompiler turns lifted P-code into C-like pseudocode through:
+
+1. CFG construction
+2. SSA conversion
+3. expression folding and type hints
+4. control-flow structuring
+5. printing and annotations
+
+It can produce readable output for many simple and moderately complex
+functions, especially when imports, signatures, strings, and straightforward
+control flow are available.
+
+Example shape:
 
 ```c
 int factorial(int n) {
     if (n > 1) {
         return n * factorial(n - 1);
-    } else {
-        return 1;
     }
+    return 1;
 }
 ```
 
-Output quality degrades on optimized code, complex stack frame layouts, indirect calls, and floating point. Expect to fall back to `--disasm` regularly.
+Expect output quality to degrade on optimized code, unusual ABI patterns,
+floating-point-heavy code, complex stack layouts, exception-heavy code,
+indirect calls, hand-written assembly, and aggressive obfuscation. In normal
+use, falling back to `--disasm`, `--pcode-json`, or another reverse-engineering
+tool is part of the workflow.
 
-## How it works
+More detail:
 
-```
-.slaspec → parser → codegen → generated Rust crates → compile
-                                                         ↓
-bytes + addr → Decoder::decode() → Instruction { disasm, ops: Vec<PcodeOp> }
-                                                         ↓
-             decompile_with_binary() → CFG → SSA → fold → structure → C pseudocode
-```
+- `docs/decompiler-passes.md`
+- `docs/architectures.md`
+- `docs/features.md`
 
-5-pass decompiler:
+## Malware and Triage Features
 
-1. **CFG** — P-code to basic blocks, IAT call resolution, x86-32 CALL/RET boilerplate stripping.
-2. **SSA** — iterative dataflow with phi insertion + memory SSA for stack slots; deterministic Phi creation (varnodes sorted) so repeated runs produce identical output.
-3. **Fold** — expression folding, DCE, condition recovery (compound flag patterns → comparisons), type inference (3-phase), CC detection, signature-based propagation, MBA deobfuscation (SiMBA + equality saturation via `egg`), Phi → Ternary at 2-way merges.
-4. **Structure** — if/else, while/for/do-while, switch/case from jump tables (depth-limited recursion, max 256).
-5. **Printer** — function signatures, local declarations, register auto-naming, import resolution, prologue/epilogue elision, syscall + ROR13 hash annotations.
+The PE-focused analysis code is intentionally practical and pattern-based. It
+tries to surface useful hints without pretending to be a full program-analysis
+system.
 
-Detail per pass: `docs/decompiler-passes.md`. Architectures: `docs/architectures.md`. Feature catalog: `docs/features.md`.
+Current examples include:
 
-## Crates.io
+- PE64 SEH/TLS static patch discovery for some self-modifying-code patterns
+- direct x64 syscall annotation for a Win11 24H2-oriented table
+- ROR13 API-hash comments for a curated set of common Windows APIs
+- bundled function-ID databases for selected libc/libstdc++/musl builds
+- Win32 and C/POSIX signature hints used by the decompiler printer
+- C++ RTTI-oriented class recovery experiments
 
-Workspace published as namespaced crates:
+These features can miss real behavior and can produce false positives. Treat
+them as leads to inspect, not conclusions.
 
-- `rsleigh-cli` — CLI binary (`cargo install rsleigh-cli`)
-- `rsleigh-api` — Decoder + P-code emitter
-- `rsleigh-decompile` — Decompiler library
-- `rsleigh-fid` — Function ID database
-- `pcode-ir` — P-code IR types (no_std, zero deps)
-- `rsleigh` — SLEIGH parser library
-- `rsleigh-generate` — codegen CLI
-- `rsleigh-gen-{x86,x86-32,aarch64,arm32,mips,riscv}-{shared,subtables,instr-NN,root}` — generated decoder crates (~40 internal crates, transitive deps; do not depend on directly)
+## Testing and Benchmarks
 
-## Rust API
+The test suite is a regression net for the project, not proof of full SLEIGH or
+decompiler correctness.
 
-```rust
-use rsleigh_api::{Decoder, Architecture};
+Coverage includes:
 
-let mut dec = Decoder::new(Architecture::X86_64);
-let inst = dec.decode(&[0x48, 0x89, 0xd8], 0x1000).unwrap();
+- golden P-code tests across supported architectures;
+- focused regression tests for previously fixed decoder/decompiler bugs;
+- CLI integration tests against curated fixtures;
+- Ghidra-oracle comparisons for selected instructions and binaries;
+- fuzz-style panic checks for random byte streams;
+- SEH/static-analysis fixture tests.
 
-let binary = std::fs::read("my_binary").unwrap();
-let pseudocode = rsleigh_decompile::decompile_with_binary(
-    Architecture::X86_64, &instructions, Some(&binary), Some(path));
-```
-
-`FunctionMeta`, `VulnFinding`, `CallGraphEntry` derive `serde::Serialize` for tool integration.
-
-## Bench vs Ghidra
+There is also a benchmark harness that compares rsleigh output against cached or
+fresh Ghidra output:
 
 ```bash
-scripts/bench-compare.sh <binary> [--sample N]   # full Ghidra + score
-scripts/bench-score.py --binary X --rsleigh Y --ghidra cached.json --out DIR
+scripts/bench-compare.sh <binary> [--sample N]
+scripts/bench-score.py --binary X --rsleigh target/release/rsleigh --ghidra cached.json --out DIR
 ```
 
-Composite score weights: discovery 25, cflow_similarity 25, leak_parity 20, line_parity 15 (elision-aware), empty_rate 15.
+The score is a coarse regression signal, not a scientific ranking. It combines
+function discovery, control-flow similarity, leakage of unresolved temporary
+names, rough line-count parity, and empty-output rate. Small movements are
+expected; repeated and larger drops matter more than single-run noise.
 
-Current scores on 4 fixtures: bed (Go x86-64) 89.7, plm (AArch64 C++) 84.3, git-repack (AArch64 C) 93.5, nano (ARM32 static stripped) 81.7, clang-apply-replacements (PE x86-64 MSVC C++) 91.2. Noise band: ~1% per repeat run.
+See `docs/TESTING.md` for the current test philosophy and gaps.
 
-Function discovery comparison (21 binaries): rsleigh wins 15, Ghidra 6.
+## Known Limitations
 
-## Testing — what's there and what isn't
+The most important limitations today:
 
-~7200 assertions, ~240 tests. Best understood as a **regression net for changes I make**, not as evidence of correctness across the SLEIGH spec or the decompiler.
+- The decompiler still loses some use-def links, which can leave variables like
+  `iVar1` where the original source-level value should be recoverable.
+- Type recovery is shallow. There are useful pointer, bool, signedness, Win32,
+  and signature hints, but no full constraint-based type system.
+- Stack-frame recovery is heuristic and can misrepresent aliased stack slots or
+  structs.
+- Control-flow structuring is improving but still prints some awkward or wrong
+  shapes for loops, nested branches, and dead regions.
+- Floating-point value propagation is incomplete, especially in ARM32 VFP/NEON
+  paths.
+- Register-indirect calls are only partly resolved.
+- MBA/deobfuscation support handles a useful subset, not arbitrary obfuscation.
+- Syscall annotations are Windows-build-specific hints.
+- Full virtualization protectors remain out of scope for static recovery of the
+  original program.
 
-| Category | What it actually proves |
-|---|---|
-| Golden P-code (~145 across 7 archs) | ~20/arch — smoke tests, not coverage |
-| Functional sequences | a handful of common patterns |
-| Bug probes | regression pins for fixed bugs |
-| Ghidra differential (~300 instructions) | the happy path I thought to write down |
-| Pseudocode quality regressions (14) | per-fixture audit fixes locked in |
-| CLI integration | per-fixture flag-subexpr / Go preamble / STACKSTR / etc. |
-| Decoder fuzz (5000 random byte sequences) | no panics — not correctness |
-| Spectra API contract | decoder/decompile/analysis/multi-arch |
-| Native backend integration (10) | end-to-end pipeline |
-| SEH static analysis (16) | crackmev3 + handler classification + TLS + dedup |
+If you need trustworthy answers, use rsleigh as one signal among several.
 
-Doc: `docs/TESTING.md`.
+## Security Posture
 
-What's missing and would make this credible:
+The project is intended to run on untrusted binaries, but it has not gone
+through a dedicated security audit.
 
-- Differential testing against Ghidra on millions of instructions, with public divergence report
-- Structural fuzzing of encoded instructions (not random bytes), which catches real decoder bugs
-- Decompiler benchmark suite vs. Ghidra / Binary Ninja free / IDA free
-- Round-trip emulator tests (decode → execute → compare against reference CPU model)
-- Golden-file CI for curated CTF corpus
+Current posture:
 
-## Security posture
+- safe Rust in the API and decompiler crates;
+- bounds checks and recursion limits in analysis code;
+- fuzz tests aimed at panic-freedom, not semantic correctness;
+- no claim of sandboxing, exploit resistance, or service-hardening.
 
-Decoder and decompiler intended to be safe to run on untrusted binaries:
+If you expose rsleigh in a network service or automated malware pipeline, isolate
+the process and audit the code for your threat model.
 
-- Zero `unsafe` in decompiler and API crates
-- Bounds-checked VarId access — currently returns sentinel on OOB. **This is a problem, not a feature**: silent fallback on unexpected SSA state means decoder/decompiler bugs get swallowed and produce plausible-but-wrong output. Planned: tracing diagnostic channel + debug assertion so OOB hits are visible.
-- Recursion depth limit (256) in structure recovery
-- Checked arithmetic in PLT/GOT/IAT offset math
-- Fuzz tests cover panic-freedom, not correctness
+## Workspace Layout
 
-Not making a hardening claim beyond that. If you intend to run this on adversarial input as part of a service, audit it yourself.
-
-## Known limitations
-
-**Top priority — use-def linking failure.** Some register values are not traced back to their defining expression. `factorial` decompiles as `iVar1 * factorial(n - 1)` instead of `n * factorial(n - 1)`. SSA/fold layer doesn't always reach the original definition. Single most important correctness problem in the decompiler; gates further analysis features built on top of the pipeline (taint, vulnscan, diff all inherit it).
-
-Other limitations:
-
-- Type inference shallow: signed/float/pointer/bool + Win32 typedefs + heuristic struct field naming, no constraint-based recovery
-- Stack frame reconstruction heuristic; struct fields show offsets, not typed members
-- Loop conditions not always recovered to source-level comparison; `while` sometimes appears where `for` would read better
-- Loop-invariant expressions not hoisted
-- x86-32 sequential TEST/JNZ patterns occasionally nest incorrectly
-- Register-indirect calls (`CALL EDI` after IAT load) not resolved to import names
-- ARM32 VFP/NEON decodes correctly but FP register values not fully traced through fold
-- MBA deobfuscation handles 1-4 variable linear MBA; non-linear forms need synthesis
-- Syscall annotations are Win11 24H2-specific; numbers shift across Windows builds
-- Win32k syscalls (0x1000+) not in syscall table — process-attach gated, rare in malware triage
-- Full virtualization protectors (VMProtect 3.x, Themida) — VM dispatcher visible, original code not
-
-## Quick start
-
-```bash
-make test                              # generate all archs + build + run tests
-```
-
-Step by step:
-
-```bash
-cargo run -p rsleigh-generate          # parse slaspecs, emit generated Rust (~30s)
-cargo test -p test-harness             # compile generated crates + run tests
-```
-
-## Repository structure
-
-```
+```text
 rsleigh/
-  src/                    SLEIGH parser + Rust codegen library
-  pcode-ir/               PcodeOp/Varnode types + peephole optimizer (no_std)
-  rsleigh-api/            Decoder API — bytes to instructions + P-code
-  rsleigh-decompile/      Decompiler — P-code to C pseudocode + signature DB
-  rsleigh-fid/            Function ID database (xxh3 fingerprinting)
-  rsleigh-cli/            CLI binary
-  rsleigh-generate/       Slaspec parser, generates Rust crate source
-  generated/              Output crates (40 internal crates)
-  test-harness/           Golden tests, corpus, fuzz, decompiler validation
-  slaspec/                Ghidra .slaspec files (Apache 2.0)
-  scripts/                Ghidra/Qt sig extraction, FID DB build, publish
-  docs/                   Detail docs (architectures, features, passes, SEH, testing)
+  src/                  SLEIGH parser and code-generation library
+  pcode-ir/             P-code IR types and peephole optimizer
+  rsleigh-api/          stable decoder/lifter API
+  rsleigh-decompile/    experimental P-code to C-like decompiler
+  rsleigh-fid/          function-ID database support
+  rsleigh-cli/          command-line interface
+  rsleigh-generate/     slaspec to generated Rust crates
+  generated/            generated decoder crates
+  test-harness/         fixtures, oracle tests, fuzz and integration tests
+  slaspec/              bundled Ghidra SLEIGH specs
+  scripts/              benchmark, oracle, signature, and FID tooling
+  docs/                 detailed design and testing notes
 ```
+
+## Prior Art
+
+- [rbran/sleigh-rs](https://github.com/rbran/sleigh-rs): pure-Rust SLEIGH
+  parser work. rsleigh's parser layer is independent; early semantic work was
+  forked from sleigh-rs and has since diverged substantially.
+- [mnemonikr/libsla](https://github.com/mnemonikr/libsla): Rust bindings to
+  Ghidra's C++ libsla.
+- jingle_sleigh and related projects: libsla-oriented bindings and tools.
+
+If you only need a SLEIGH frontend and do not need rsleigh's generated Rust
+decoder crates or decompiler experiments, one of those projects may be a better
+fit.
 
 ## Roadmap
 
-- Stable / experimental split enforced in API crate (currently only documented at CLI layer)
-- `CHANGELOG.md` — none yet; treat `git log` as source of truth
-- Fix use-def linking failure (top of Known Limitations) before adding more analysis features
-- Diagnostic channel for VarId OOB instead of silent sentinel
-- Golden-file CI for CTF corpus
-- Mutation-based end-to-end binary fuzzing
-- Multi-binary token-reduction benchmark
-- PEB-walk hash table extension to FNV-1a / DJB2 / custom hashers (currently ROR13 only)
-- Syscall tables for Win10 22H2 + Win11 23H2 (currently 24H2 only)
-- ARM64 PAC pointer modeling
+Near-term work is focused on making the existing pipeline more trustworthy
+rather than adding more analysis modes:
+
+- improve use-def linking and diagnostic reporting;
+- broaden differential testing against Ghidra;
+- add encoded-instruction fuzzing rather than only random-byte fuzzing;
+- make benchmark fixtures easier to reproduce;
+- tighten type recovery and indirect-call resolution;
+- separate stable CLI/API behavior from experimental output more clearly;
+- document changes in a changelog once releases settle down.
+
+The longer roadmap lives in `ROADMAP.md`.
 
 ## License
 
-Apache 2.0. Bundled `.slaspec` files are from Ghidra (also Apache 2.0).
+Apache-2.0. Bundled `.slaspec` files are from Ghidra and are also Apache-2.0.
