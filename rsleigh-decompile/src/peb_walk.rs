@@ -54,7 +54,9 @@ pub fn ror13_module_api(module: &str, name: &str) -> u32 {
     }
     buf.push(0); // UTF-16 NUL
     buf.push(0);
-    for &b in name.as_bytes() { buf.push(b); }
+    for &b in name.as_bytes() {
+        buf.push(b);
+    }
     buf.push(0);
     ror13(&buf)
 }
@@ -201,6 +203,70 @@ const API_SEEDS: &[(&str, &str)] = &[
     ("wininet.dll", "InternetReadFile"),
     ("wininet.dll", "InternetCloseHandle"),
     ("wininet.dll", "InternetWriteFile"),
+    ("wininet.dll", "InternetCrackUrlA"),
+    ("wininet.dll", "InternetSetOptionA"),
+    ("wininet.dll", "HttpQueryInfoA"),
+    // winhttp.dll — modern HTTP client used by Cobalt Strike, IcedID, etc.
+    ("winhttp.dll", "WinHttpOpen"),
+    ("winhttp.dll", "WinHttpConnect"),
+    ("winhttp.dll", "WinHttpOpenRequest"),
+    ("winhttp.dll", "WinHttpSendRequest"),
+    ("winhttp.dll", "WinHttpReceiveResponse"),
+    ("winhttp.dll", "WinHttpReadData"),
+    ("winhttp.dll", "WinHttpWriteData"),
+    ("winhttp.dll", "WinHttpQueryHeaders"),
+    ("winhttp.dll", "WinHttpCloseHandle"),
+    ("winhttp.dll", "WinHttpSetOption"),
+    // crypt32.dll — certificate / blob crypto seen in C2 unpackers
+    ("crypt32.dll", "CryptStringToBinaryA"),
+    ("crypt32.dll", "CryptStringToBinaryW"),
+    ("crypt32.dll", "CryptBinaryToStringA"),
+    ("crypt32.dll", "CryptBinaryToStringW"),
+    ("crypt32.dll", "CryptUnprotectData"),
+    ("crypt32.dll", "CryptProtectData"),
+    ("crypt32.dll", "CertOpenSystemStoreA"),
+    ("crypt32.dll", "CertCloseStore"),
+    ("crypt32.dll", "CertEnumCertificatesInStore"),
+    // bcrypt.dll — Win10+ crypto primitives, AES/SHA in modern droppers
+    ("bcrypt.dll", "BCryptOpenAlgorithmProvider"),
+    ("bcrypt.dll", "BCryptCloseAlgorithmProvider"),
+    ("bcrypt.dll", "BCryptGenerateSymmetricKey"),
+    ("bcrypt.dll", "BCryptDestroyKey"),
+    ("bcrypt.dll", "BCryptEncrypt"),
+    ("bcrypt.dll", "BCryptDecrypt"),
+    ("bcrypt.dll", "BCryptHash"),
+    ("bcrypt.dll", "BCryptHashData"),
+    ("bcrypt.dll", "BCryptCreateHash"),
+    ("bcrypt.dll", "BCryptFinishHash"),
+    ("bcrypt.dll", "BCryptDestroyHash"),
+    ("bcrypt.dll", "BCryptGenRandom"),
+    // secur32.dll — auth + SSPI
+    ("secur32.dll", "AcquireCredentialsHandleA"),
+    ("secur32.dll", "InitializeSecurityContextA"),
+    ("secur32.dll", "DecryptMessage"),
+    ("secur32.dll", "EncryptMessage"),
+    ("secur32.dll", "FreeCredentialsHandle"),
+    // psapi.dll — process enumeration / module discovery
+    ("psapi.dll", "EnumProcesses"),
+    ("psapi.dll", "EnumProcessModules"),
+    ("psapi.dll", "EnumProcessModulesEx"),
+    ("psapi.dll", "GetModuleFileNameExA"),
+    ("psapi.dll", "GetModuleFileNameExW"),
+    ("psapi.dll", "GetModuleBaseNameA"),
+    ("psapi.dll", "GetModuleBaseNameW"),
+    ("psapi.dll", "GetMappedFileNameA"),
+    ("psapi.dll", "GetMappedFileNameW"),
+    // dbghelp.dll — minidump / symbol enumeration (LSASS dumpers)
+    ("dbghelp.dll", "MiniDumpWriteDump"),
+    ("dbghelp.dll", "SymInitialize"),
+    ("dbghelp.dll", "SymFromAddr"),
+    ("dbghelp.dll", "SymGetModuleInfo"),
+    // shell32.dll — file/system operations seen in installers + droppers
+    ("shell32.dll", "ShellExecuteA"),
+    ("shell32.dll", "ShellExecuteW"),
+    ("shell32.dll", "ShellExecuteExA"),
+    ("shell32.dll", "SHGetFolderPathA"),
+    ("shell32.dll", "SHGetFolderPathW"),
     // user32.dll
     ("user32.dll", "MessageBoxA"),
     ("user32.dll", "MessageBoxW"),
@@ -210,27 +276,84 @@ const API_SEEDS: &[(&str, &str)] = &[
     ("user32.dll", "GetKeyState"),
     ("user32.dll", "SetWindowsHookExA"),
     ("user32.dll", "CallNextHookEx"),
+    ("user32.dll", "GetWindowTextA"),
+    ("user32.dll", "GetWindowTextW"),
+    ("user32.dll", "EnumWindows"),
+    ("user32.dll", "GetClipboardData"),
+    ("user32.dll", "OpenClipboard"),
+    ("user32.dll", "CloseClipboard"),
+    // ntdll.dll — additional NT APIs commonly resolved
+    ("ntdll.dll", "RtlCreateUserThread"),
+    ("ntdll.dll", "NtQuerySystemInformation"),
+    ("ntdll.dll", "NtSetContextThread"),
+    ("ntdll.dll", "NtGetContextThread"),
+    ("ntdll.dll", "NtDelayExecution"),
+    ("ntdll.dll", "NtWaitForSingleObject"),
+    ("ntdll.dll", "NtCreateThread"),
+    ("ntdll.dll", "LdrLoadDll"),
+    ("ntdll.dll", "LdrGetProcedureAddress"),
+    ("ntdll.dll", "LdrFindResourceEx_U"),
 ];
 
-/// Reverse map: ROR13 hash → "module!api". Built lazily on first lookup.
-/// Both unqualified and module-qualified hashes are precomputed; the
-/// printer can look up either form.
+/// DJB2 hash (Dan Bernstein), the second-most-common API-resolution hash
+/// after ROR13. Cobalt Strike's UDRL and several Donut variants use DJB2
+/// (or DJB2a, the XOR variant) over the API name. Seed value 5381 is the
+/// canonical Bernstein constant.
+pub fn djb2(input: &[u8]) -> u32 {
+    let mut h: u32 = 5381;
+    for &b in input {
+        h = h.wrapping_mul(33).wrapping_add(b as u32);
+    }
+    h
+}
+
+/// DJB2 over an API name with NUL terminator (matches public-shellcode
+/// implementations that loop until the export-name byte is zero).
+pub fn djb2_api(name: &str) -> u32 {
+    let mut buf = name.as_bytes().to_vec();
+    buf.push(0);
+    djb2(&buf)
+}
+
+/// Simple additive hash: `h = sum(byte)` rotated left 1 each step.
+/// Seen in primitive shellcode (early Metasploit demos, some packers).
+/// Lower entropy than ROR13/DJB2 but widely deployed.
+pub fn add_rotl1(input: &[u8]) -> u32 {
+    let mut h: u32 = 0;
+    for &b in input {
+        h = h.rotate_left(1).wrapping_add(b as u32);
+    }
+    h
+}
+
+/// add_rotl1 over an API name with NUL terminator.
+pub fn add_rotl1_api(name: &str) -> u32 {
+    let mut buf = name.as_bytes().to_vec();
+    buf.push(0);
+    add_rotl1(&buf)
+}
+
+/// Reverse map: hash → API name. Built lazily on first lookup. Covers
+/// ROR13 (unqualified + module-qualified) plus the DJB2 and add+rotl
+/// variants so a single resolver handles all common shellcode hash
+/// schemes.
 static HASH_INDEX: LazyLock<HashMap<u32, &'static str>> = LazyLock::new(|| {
-    let mut m: HashMap<u32, &'static str> = HashMap::with_capacity(API_SEEDS.len() * 2);
+    let mut m: HashMap<u32, &'static str> = HashMap::with_capacity(API_SEEDS.len() * 4);
     for &(module, name) in API_SEEDS {
-        // Unqualified form: ROR13("ApiName\0").
-        let h_api = ror13_api(name);
-        m.entry(h_api).or_insert(name);
-        // Module-qualified form (kernel32-style).
-        let _h_qual = ror13_module_api(module, name);
-        // Annotated value owns module + name; keep it compile-time-static
-        // by using only the API name (cheap, sufficient for analyst).
-        m.entry(_h_qual).or_insert(name);
+        // ROR13 unqualified — Metasploit, Cobalt Strike beacon stub.
+        m.entry(ror13_api(name)).or_insert(name);
+        // ROR13 module-qualified (`MODULE\0API\0`).
+        m.entry(ror13_module_api(module, name)).or_insert(name);
+        // DJB2 — Cobalt Strike UDRL, several Donut variants.
+        m.entry(djb2_api(name)).or_insert(name);
+        // add+rotl1 — primitive shellcode.
+        m.entry(add_rotl1_api(name)).or_insert(name);
     }
     m
 });
 
-/// Look up an API name from a 32-bit ROR13 hash. Returns None for misses.
+/// Look up an API name from a 32-bit hash (any of ROR13, DJB2, add+rotl1).
+/// Returns None for misses.
 pub fn resolve_ror13_hash(h: u32) -> Option<&'static str> {
     HASH_INDEX.get(&h).copied()
 }
@@ -241,10 +364,14 @@ pub fn resolve_ror13_hash(h: u32) -> Option<&'static str> {
 /// filter cuts ~99% of legit constants while keeping all known hashes
 /// (verified against API_SEEDS at test time).
 pub fn looks_like_hash(value: u32) -> bool {
-    if value < 0x01000000 { return false; }
-    if value == u32::MAX { return false; }
+    if value < 0x01000000 {
+        return false;
+    }
+    if value == u32::MAX {
+        return false;
+    }
     let high = value >> 16;
-    let low  = value & 0xFFFF;
+    let low = value & 0xFFFF;
     high != 0 && low != 0
 }
 
@@ -271,8 +398,71 @@ mod tests {
         // Every seeded API must round-trip through the index.
         for &(_, name) in API_SEEDS {
             let h = ror13_api(name);
-            assert!(resolve_ror13_hash(h).is_some(),
-                "API {} hash {:#x} not in index", name, h);
+            assert!(
+                resolve_ror13_hash(h).is_some(),
+                "API {} hash {:#x} not in index",
+                name,
+                h
+            );
+        }
+    }
+
+    #[test]
+    fn djb2_known_apis_resolve() {
+        for &(_, name) in API_SEEDS {
+            let h = djb2_api(name);
+            assert!(
+                resolve_ror13_hash(h).is_some(),
+                "DJB2 hash for {} ({:#x}) not in index",
+                name,
+                h
+            );
+        }
+    }
+
+    #[test]
+    fn add_rotl1_known_apis_resolve() {
+        for &(_, name) in API_SEEDS {
+            let h = add_rotl1_api(name);
+            assert!(
+                resolve_ror13_hash(h).is_some(),
+                "add_rotl1 hash for {} ({:#x}) not in index",
+                name,
+                h
+            );
+        }
+    }
+
+    #[test]
+    fn djb2_seed_is_5381() {
+        // Empty buffer must yield exactly the canonical Bernstein seed.
+        assert_eq!(djb2(b""), 5381);
+        // Standard Bernstein test vector for "" + 'a': 5381 * 33 + 97 = 177670.
+        assert_eq!(djb2(b"a"), 177670);
+    }
+
+    #[test]
+    fn distinct_hashes_for_distinct_apis() {
+        // No two seeded APIs may collide under any single hash function
+        // — collisions across different hash functions are fine since the
+        // index dedupes by first-insert.
+        for variant in [
+            ror13_api as fn(&str) -> u32,
+            djb2_api as fn(&str) -> u32,
+            add_rotl1_api as fn(&str) -> u32,
+        ] {
+            let mut seen: std::collections::HashMap<u32, &str> = std::collections::HashMap::new();
+            for &(_, name) in API_SEEDS {
+                let h = variant(name);
+                if let Some(prev) = seen.insert(h, name) {
+                    if prev != name {
+                        panic!(
+                            "hash collision between {} and {} ({:#x})",
+                            prev, name, h
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -280,11 +470,11 @@ mod tests {
     fn looks_like_hash_filters_common_values() {
         assert!(!looks_like_hash(0));
         assert!(!looks_like_hash(1));
-        assert!(!looks_like_hash(0xFFFF));         // common mask
-        assert!(!looks_like_hash(0x1000));         // page size
-        assert!(!looks_like_hash(0x4000));         // common alignment
-        assert!(!looks_like_hash(0xFFFFFFFF));     // all-ones mask
-        assert!(looks_like_hash(0x0726774C));      // LoadLibraryA hash
-        assert!(looks_like_hash(0xDEADBEEF));      // fake high-entropy
+        assert!(!looks_like_hash(0xFFFF)); // common mask
+        assert!(!looks_like_hash(0x1000)); // page size
+        assert!(!looks_like_hash(0x4000)); // common alignment
+        assert!(!looks_like_hash(0xFFFFFFFF)); // all-ones mask
+        assert!(looks_like_hash(0x0726774C)); // LoadLibraryA hash
+        assert!(looks_like_hash(0xDEADBEEF)); // fake high-entropy
     }
 }
