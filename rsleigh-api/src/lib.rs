@@ -177,16 +177,23 @@ impl Decoder {
                 context,
                 global_set,
             } => {
+                if let Some(inst) = fallback_x86_64_mov_from_rsp_sib(bytes, addr) {
+                    return Ok(inst);
+                }
+
                 let mut ctx = *context;
-                let (inst_next, display, mut ops) =
+                if let Some((inst_next, display, mut ops)) =
                     x86_root::parse_instruction(bytes, &mut ctx, addr, global_set)
-                        .ok_or(DecodeError::UnknownInstruction)?;
-                pcode_ir::optimize(&mut ops);
-                Ok(Instruction {
-                    len: inst_next - addr,
-                    disassembly: format_display(&display),
-                    ops,
-                })
+                {
+                    pcode_ir::optimize(&mut ops);
+                    Ok(Instruction {
+                        len: inst_next - addr,
+                        disassembly: format_display(&display),
+                        ops,
+                    })
+                } else {
+                    Err(DecodeError::UnknownInstruction)
+                }
             }
             DecoderInner::X86_32 {
                 context,
@@ -270,7 +277,152 @@ impl Decoder {
     }
 }
 
+fn fallback_x86_64_mov_from_rsp_sib(bytes: &[u8], addr: u64) -> Option<Instruction> {
+    let mut pos = 0usize;
+    let mut rex = 0u8;
+    if bytes
+        .first()
+        .copied()
+        .is_some_and(|b| (0x40..=0x4f).contains(&b))
+    {
+        rex = bytes[0];
+        pos += 1;
+    }
+    if bytes.get(pos).copied()? != 0x8b {
+        return None;
+    }
+    pos += 1;
+
+    let modrm = bytes.get(pos).copied()?;
+    pos += 1;
+    let mode = modrm >> 6;
+    let reg = ((modrm >> 3) & 7) | ((rex & 0x04) << 1);
+    let rm = modrm & 7;
+    if rm != 4 || !matches!(mode, 1 | 2) {
+        return None;
+    }
+
+    let sib = bytes.get(pos).copied()?;
+    pos += 1;
+    let index = (sib >> 3) & 7;
+    let base = (sib & 7) | ((rex & 0x01) << 3);
+    if index != 4 || (rex & 0x02) != 0 || !matches!(base, 4 | 12) {
+        return None;
+    }
+
+    let disp = match mode {
+        1 => {
+            let d = *bytes.get(pos)? as i8 as i64;
+            pos += 1;
+            d
+        }
+        2 => {
+            let raw = bytes.get(pos..pos + 4)?;
+            pos += 4;
+            i32::from_le_bytes(raw.try_into().ok()?) as i64
+        }
+        _ => return None,
+    };
+
+    let size = if rex & 0x08 != 0 { 8 } else { 4 };
+    let dest = x86_reg_varnode(reg, size)?;
+    let base_vn = x86_reg_varnode(base, 8)?;
+    let size_name = if size == 8 { "qword" } else { "dword" };
+    let disassembly = if disp == 0 {
+        format!(
+            "MOV {},{} ptr [{}]",
+            x86_reg_name(reg, size)?,
+            size_name,
+            x86_reg_name(base, 8)?,
+        )
+    } else {
+        format!(
+            "MOV {},{} ptr [{} {} {:#x}]",
+            x86_reg_name(reg, size)?,
+            size_name,
+            x86_reg_name(base, 8)?,
+            if disp < 0 { "-" } else { "+" },
+            disp.unsigned_abs()
+        )
+    };
+
+    let mut ops = Vec::new();
+    let ptr = if disp == 0 {
+        base_vn
+    } else {
+        let ptr = Varnode::unique((addr << 16).wrapping_add(0x8000), 8);
+        ops.push(PcodeOp::IntAdd {
+            out: ptr,
+            left: base_vn,
+            right: Varnode::constant(disp as u64, 8),
+        });
+        ptr
+    };
+    ops.push(PcodeOp::Load {
+        out: dest,
+        space: pcode_ir::AddressSpaceId::Ram,
+        ptr,
+    });
+
+    Some(Instruction {
+        len: pos as u64,
+        disassembly,
+        ops,
+    })
+}
+
+fn x86_reg_varnode(reg: u8, size: u32) -> Option<Varnode> {
+    let offset = match reg {
+        0..=7 => u64::from(reg) * 8,
+        8..=15 => 0x80 + (u64::from(reg) - 8) * 8,
+        _ => return None,
+    };
+    Some(Varnode::register(offset, size))
+}
+
+fn x86_reg_name(reg: u8, size: u32) -> Option<&'static str> {
+    const R32: [&str; 16] = [
+        "EAX", "ECX", "EDX", "EBX", "ESP", "EBP", "ESI", "EDI", "R8D", "R9D", "R10D", "R11D",
+        "R12D", "R13D", "R14D", "R15D",
+    ];
+    const R64: [&str; 16] = [
+        "RAX", "RCX", "RDX", "RBX", "RSP", "RBP", "RSI", "RDI", "R8", "R9", "R10", "R11", "R12",
+        "R13", "R14", "R15",
+    ];
+    match size {
+        4 => R32.get(reg as usize).copied(),
+        8 => R64.get(reg as usize).copied(),
+        _ => None,
+    }
+}
+
 /// Format display elements into a disassembly string.
 fn format_display(elements: &[impl core::fmt::Display]) -> String {
     elements.iter().map(|d| format!("{}", d)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn x86_64_fallback_decodes_mov_r12d_rsp_disp32() {
+        let mut dec = Decoder::new(Architecture::X86_64);
+        let inst = dec
+            .decode(&[0x44, 0x8b, 0xa4, 0x24, 0x88, 0x00, 0x00, 0x00], 0x1000)
+            .expect("decode MOV R12D,[RSP+0x88]");
+
+        assert_eq!(inst.len, 8);
+        assert!(inst.disassembly.contains("R12D"), "{}", inst.disassembly);
+        assert!(inst.ops.iter().any(|op| {
+            matches!(
+                op,
+                PcodeOp::Load {
+                    out,
+                    space: pcode_ir::AddressSpaceId::Ram,
+                    ..
+                } if *out == Varnode::register(0xa0, 4)
+            )
+        }));
+    }
 }

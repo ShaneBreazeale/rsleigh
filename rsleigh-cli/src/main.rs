@@ -1019,7 +1019,7 @@ fn decode_func(
     let Some(off) = off else { return vec![]; };
     let max = 4096.min(data.len() - off as usize);
     let bytes = &data[off as usize..off as usize + max];
-    let next_func = symbols.iter().filter(|(a, _)| *a > fa).map(|(a, _)| *a).min()
+    let next_func = symbols.iter().filter(|(a, name)| *a > fa && !name.starts_with("seh_scope_")).map(|(a, _)| *a).min()
         .unwrap_or(fa + max as u64);
     let decode_max = ((next_func - fa) as usize).min(max);
 
