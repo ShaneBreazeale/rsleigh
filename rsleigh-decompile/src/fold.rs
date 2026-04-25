@@ -1,17 +1,19 @@
-use pcode_ir::AddressSpaceId;
 use crate::ir::*;
+use pcode_ir::AddressSpaceId;
 
 /// Flag register offsets (Ghidra register space).
 /// x86: CF=512, F1=513, PF=514, ZF=518, SF=519, DF=521, OF=523
 /// ARM64: NG=256, ZR=257, CY=258, OV=259, tmpNG=263, tmpZR=264, tmpCY=261, tmpOV=262
 const FLAG_OFFSETS: &[u64] = &[
-    512, 513, 514, 518, 519, 521, 523,       // x86: CF PF AF ZF SF DF OF
-    256, 257, 258, 259, 261, 262, 263, 264,   // ARM64: NG ZR CY OV shift_carry tmpCY tmpOV tmpNG
-    96, 97, 98, 99, 100, 101, 102, 103, 104,  // ARM32: NG ZR CY OV tmpNG tmpZR tmpCY tmpOV shift_carry
+    512, 513, 514, 518, 519, 521, 523, // x86: CF PF AF ZF SF DF OF
+    256, 257, 258, 259, 261, 262, 263,
+    264, // ARM64: NG ZR CY OV shift_carry tmpCY tmpOV tmpNG
+    96, 97, 98, 99, 100, 101, 102, 103,
+    104, // ARM32: NG ZR CY OV tmpNG tmpZR tmpCY tmpOV shift_carry
 ];
 
-const RSP_OFFSET: u64 = 32;   // x86-64 RSP
-const ESP_OFFSET: u64 = 16;   // x86-32 ESP
+const RSP_OFFSET: u64 = 32; // x86-64 RSP
+const ESP_OFFSET: u64 = 16; // x86-32 ESP
 const RIP_OFFSET: u64 = 648;
 pub const RAX_OFFSET: u64 = 0;
 
@@ -44,8 +46,7 @@ const GO_AMD64_ARG_REGS: &[u64] = &[0, 24, 8, 56, 48, 128, 136, 144, 152];
 /// Go amd64 float arg regs: X0-X14 (XMM0-XMM14) — 15 regs.
 /// SLEIGH XMM0 = 4608, stride 64.
 const GO_AMD64_FLOAT_ARG_REGS: &[u64] = &[
-    4608, 4672, 4736, 4800, 4864, 4928, 4992, 5056,
-    5120, 5184, 5248, 5312, 5376, 5440, 5504,
+    4608, 4672, 4736, 4800, 4864, 4928, 4992, 5056, 5120, 5184, 5248, 5312, 5376, 5440, 5504,
 ];
 
 // Active argument register offsets — set by fold_with_cc() based on binary format.
@@ -67,14 +68,101 @@ fn float_arg_reg_offsets() -> &'static [u64] {
 }
 
 /// Calling convention detected from binary format.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum CallingConv {
-    SysV,     // Linux, macOS, BSD — RDI, RSI, RDX, RCX, R8, R9
-    Win64,    // Windows x64 — RCX, RDX, R8, R9
-    Cdecl32,  // x86-32 cdecl — stack-based
-    AArch64,  // AAPCS64 — x0-x7
-    Arm32,    // AAPCS — r0-r3
-    GoAmd64,  // Go internal ABI v1.17+ — RAX, RBX, RCX, RDI, RSI, R8-R11
+    SysV,      // Linux, macOS, BSD — RDI, RSI, RDX, RCX, R8, R9
+    Win64,     // Windows x64 — RCX, RDX, R8, R9
+    Cdecl32,   // x86-32 cdecl — stack-based, caller cleans
+    Stdcall32, // x86-32 stdcall — stack-based, callee cleans (RET imm16)
+    AArch64,   // AAPCS64 — x0-x7
+    Arm32,     // AAPCS — r0-r3
+    GoAmd64,   // Go internal ABI v1.17+ — RAX, RBX, RCX, RDI, RSI, R8-R11
+}
+
+/// Full ABI descriptor: arg locations, return locations, cleanup, shadow space.
+///
+/// Audit P1 #2: replaces ad-hoc per-architecture rules in return-value
+/// detection and call-site arg recovery with a single source of truth so
+/// new architectures and conventions can be added without sprinkling magic
+/// numbers across passes.
+#[derive(Clone, Copy, Debug)]
+pub struct Abi {
+    /// Integer/pointer argument register offsets in call order.
+    pub int_args: &'static [u64],
+    /// Floating-point argument register offsets in call order.
+    pub float_args: &'static [u64],
+    /// Integer return register offset (RAX, EAX, x0, r0, ...).
+    /// `None` when the convention does not designate one (e.g. void-only).
+    pub return_reg_int: Option<u64>,
+    /// Float return register offset (XMM0, V0, ...).
+    pub return_reg_float: Option<u64>,
+    /// True when the callee cleans the argument stack (stdcall/fastcall).
+    /// False for cdecl/SysV/Win64 where the caller adjusts SP after the call.
+    pub callee_cleanup_stack: bool,
+    /// Shadow space the caller must allocate (Win64 = 32, others = 0).
+    pub shadow_space_bytes: u32,
+}
+
+/// Look up the ABI descriptor for a calling convention.
+pub fn abi(cc: CallingConv) -> Abi {
+    match cc {
+        CallingConv::SysV => Abi {
+            int_args: SYSV_ARG_REGS,
+            float_args: SYSV_FLOAT_ARG_REGS,
+            return_reg_int: Some(RAX_OFFSET),
+            return_reg_float: Some(4608), // XMM0
+            callee_cleanup_stack: false,
+            shadow_space_bytes: 0,
+        },
+        CallingConv::Win64 => Abi {
+            int_args: WIN64_ARG_REGS,
+            float_args: WIN64_FLOAT_ARG_REGS,
+            return_reg_int: Some(RAX_OFFSET),
+            return_reg_float: Some(4608),
+            callee_cleanup_stack: false,
+            shadow_space_bytes: 32,
+        },
+        CallingConv::Cdecl32 => Abi {
+            int_args: &[],
+            float_args: &[],
+            return_reg_int: Some(RAX_OFFSET), // EAX (offset 0, size 4)
+            return_reg_float: None,           // ST0 — not modeled here
+            callee_cleanup_stack: false,
+            shadow_space_bytes: 0,
+        },
+        CallingConv::Stdcall32 => Abi {
+            int_args: &[],
+            float_args: &[],
+            return_reg_int: Some(RAX_OFFSET),
+            return_reg_float: None,
+            callee_cleanup_stack: true,
+            shadow_space_bytes: 0,
+        },
+        CallingConv::AArch64 => Abi {
+            int_args: AARCH64_ARG_REGS,
+            float_args: AARCH64_FLOAT_ARG_REGS,
+            return_reg_int: Some(16384),  // x0
+            return_reg_float: Some(20480), // v0
+            callee_cleanup_stack: false,
+            shadow_space_bytes: 0,
+        },
+        CallingConv::Arm32 => Abi {
+            int_args: ARM32_ARG_REGS,
+            float_args: &[],
+            return_reg_int: Some(32), // r0
+            return_reg_float: None,
+            callee_cleanup_stack: false,
+            shadow_space_bytes: 0,
+        },
+        CallingConv::GoAmd64 => Abi {
+            int_args: GO_AMD64_ARG_REGS,
+            float_args: GO_AMD64_FLOAT_ARG_REGS,
+            return_reg_int: Some(RAX_OFFSET),
+            return_reg_float: Some(4608),
+            callee_cleanup_stack: false,
+            shadow_space_bytes: 0,
+        },
+    }
 }
 
 /// Fold expressions: inline temps, eliminate dead code, recover conditions.
@@ -84,26 +172,13 @@ pub fn fold(ssa: &mut SsaCfg) {
 
 /// Fold with explicit calling convention.
 pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
-    // Set the thread-local arg register offsets based on calling convention
+    // Pull arg-register offsets from the ABI descriptor.
+    let abi_for_cc = abi(cc);
     ARG_REG_OFFSETS_TLS.with(|r| {
-        *r.borrow_mut() = match cc {
-            CallingConv::SysV => SYSV_ARG_REGS,
-            CallingConv::Win64 => WIN64_ARG_REGS,
-            CallingConv::Cdecl32 => &[],
-            CallingConv::AArch64 => AARCH64_ARG_REGS,
-            CallingConv::Arm32 => ARM32_ARG_REGS,
-            CallingConv::GoAmd64 => GO_AMD64_ARG_REGS,
-        };
+        *r.borrow_mut() = abi_for_cc.int_args;
     });
     FLOAT_ARG_REG_OFFSETS_TLS.with(|r| {
-        *r.borrow_mut() = match cc {
-            CallingConv::SysV => SYSV_FLOAT_ARG_REGS,
-            CallingConv::Win64 => WIN64_FLOAT_ARG_REGS,
-            CallingConv::Cdecl32 => &[],
-            CallingConv::AArch64 => AARCH64_FLOAT_ARG_REGS,
-            CallingConv::Arm32 => &[],
-            CallingConv::GoAmd64 => GO_AMD64_FLOAT_ARG_REGS,
-        };
+        *r.borrow_mut() = abi_for_cc.float_args;
     });
     // Collect call arguments FIRST, before any optimization.
     // Arg register writes (RCX/RDX for Win64, RDI/RSI for SysV) have use_count=0
@@ -117,7 +192,10 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
     // entry by SysV and Win64. Without this, REP STOSB/MOVSB/SCASB expand
     // to `1 - 2*DF` in the per-iteration advance, leaking `(uint8_t)DF`
     // into output and breaking memset-style recognition.
-    if matches!(cc, CallingConv::SysV | CallingConv::Win64 | CallingConv::Cdecl32 | CallingConv::GoAmd64) {
+    if matches!(
+        cc,
+        CallingConv::SysV | CallingConv::Win64 | CallingConv::Cdecl32 | CallingConv::GoAmd64
+    ) {
         for v in ssa.vars.iter_mut() {
             if matches!(v.expr, Expr::Unknown)
                 && v.varnode.space == AddressSpaceId::Register
@@ -151,7 +229,9 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
         name_loop_phis(ssa);
         name_parameters_with_cc(ssa, cc); // Re-run to catch params exposed by folding
         let after = count_live_stmts(ssa);
-        if before == after { break; }
+        if before == after {
+            break;
+        }
     }
     // Type inference runs once after folding is stable
     infer_types(ssa);
@@ -188,11 +268,18 @@ fn infer_go_header_params(ssa: &mut SsaCfg) {
         }
     }
     // Sort numerically by param index.
-    let mut indexed: Vec<(u32, String)> = param_vars.keys()
-        .filter_map(|n| n.strip_prefix("param_").and_then(|s| s.parse::<u32>().ok()).map(|i| (i, n.clone())))
+    let mut indexed: Vec<(u32, String)> = param_vars
+        .keys()
+        .filter_map(|n| {
+            n.strip_prefix("param_")
+                .and_then(|s| s.parse::<u32>().ok())
+                .map(|i| (i, n.clone()))
+        })
         .collect();
     indexed.sort();
-    if indexed.is_empty() { return; }
+    if indexed.is_empty() {
+        return;
+    }
 
     // Classify each param.
     // Build transitive "derived from param" closure. A VarId Y is
@@ -206,24 +293,38 @@ fn infer_go_header_params(ssa: &mut SsaCfg) {
             changed = false;
             guard += 1;
             for (idx, v) in ssa.vars.iter().enumerate() {
-                if set.contains(&idx) { continue; }
+                if set.contains(&idx) {
+                    continue;
+                }
                 let parents: &[VarId] = match &v.expr {
                     Expr::Var(a) => std::slice::from_ref(a),
                     Expr::UnaryOp(_, a) => std::slice::from_ref(a),
-                    Expr::BinOp(_, a, b) => { if set.contains(&(a.0 as usize)) || set.contains(&(b.0 as usize)) {
-                        set.insert(idx); changed = true; } continue; }
+                    Expr::BinOp(_, a, b) => {
+                        if set.contains(&(a.0 as usize)) || set.contains(&(b.0 as usize)) {
+                            set.insert(idx);
+                            changed = true;
+                        }
+                        continue;
+                    }
                     _ => continue,
                 };
                 if parents.iter().any(|p| set.contains(&(p.0 as usize))) {
-                    set.insert(idx); changed = true;
+                    set.insert(idx);
+                    changed = true;
                 }
             }
         }
         set
     };
 
-    let is_pointer_like = |p: &str, param_vars: &std::collections::BTreeMap<String, Vec<usize>>, ssa: &SsaCfg| -> bool {
-        let vars = match param_vars.get(p) { Some(v) => v, None => return false };
+    let is_pointer_like = |p: &str,
+                           param_vars: &std::collections::BTreeMap<String, Vec<usize>>,
+                           ssa: &SsaCfg|
+     -> bool {
+        let vars = match param_vars.get(p) {
+            Some(v) => v,
+            None => return false,
+        };
         for &vi in vars {
             if ssa.vars[vi].inferred_type == InferredType::Pointer {
                 return true;
@@ -234,30 +335,42 @@ fn infer_go_header_params(ssa: &mut SsaCfg) {
             for stmt in &blk.stmts {
                 match stmt {
                     Stmt::Store { addr, .. } => {
-                        if derived.contains(&(addr.0 as usize)) { return true; }
-                    }
-                    Stmt::Assign(vid) => {
-                        match &ssa.vars[vid.0 as usize].expr {
-                            Expr::Load(ptr) if derived.contains(&(ptr.0 as usize)) => return true,
-                            Expr::FieldAccess(base, _) if derived.contains(&(base.0 as usize)) => return true,
-                            _ => {}
+                        if derived.contains(&(addr.0 as usize)) {
+                            return true;
                         }
                     }
+                    Stmt::Assign(vid) => match &ssa.vars[vid.0 as usize].expr {
+                        Expr::Load(ptr) if derived.contains(&(ptr.0 as usize)) => return true,
+                        Expr::FieldAccess(base, _) if derived.contains(&(base.0 as usize)) => {
+                            return true
+                        }
+                        _ => {}
+                    },
                     _ => {}
                 }
             }
         }
         false
     };
-    let is_length_like = |p: &str, param_vars: &std::collections::BTreeMap<String, Vec<usize>>, ssa: &SsaCfg| -> bool {
-        let vars = match param_vars.get(p) { Some(v) => v, None => return false };
+    let is_length_like = |p: &str,
+                          param_vars: &std::collections::BTreeMap<String, Vec<usize>>,
+                          ssa: &SsaCfg|
+     -> bool {
+        let vars = match param_vars.get(p) {
+            Some(v) => v,
+            None => return false,
+        };
         for v in ssa.vars.iter() {
             if let Expr::BinOp(kind, l, r) = &v.expr {
-                if matches!(kind,
-                    BinOpKind::Less | BinOpKind::LessEq
-                    | BinOpKind::SLess | BinOpKind::SLessEq
-                    | BinOpKind::Eq | BinOpKind::NotEq)
-                {
+                if matches!(
+                    kind,
+                    BinOpKind::Less
+                        | BinOpKind::LessEq
+                        | BinOpKind::SLess
+                        | BinOpKind::SLessEq
+                        | BinOpKind::Eq
+                        | BinOpKind::NotEq
+                ) {
                     if vars.contains(&(l.0 as usize)) || vars.contains(&(r.0 as usize)) {
                         return true;
                     }
@@ -268,7 +381,9 @@ fn infer_go_header_params(ssa: &mut SsaCfg) {
             for stmt in &blk.stmts {
                 if let Stmt::Call { args, .. } = stmt {
                     for a in args {
-                        if vars.contains(&(a.0 as usize)) { return true; }
+                        if vars.contains(&(a.0 as usize)) {
+                            return true;
+                        }
                     }
                 }
             }
@@ -281,11 +396,19 @@ fn infer_go_header_params(ssa: &mut SsaCfg) {
     // "len" candidate is being compared to `*(data + 0x10)` style load
     // of the data param, we are looking at array indexing, not a slice
     // header.
-    let len_is_bound_by_data = |a_name: &str, b_name: &str,
+    let len_is_bound_by_data = |a_name: &str,
+                                b_name: &str,
                                 param_vars: &std::collections::BTreeMap<String, Vec<usize>>,
-                                ssa: &SsaCfg| -> bool {
-        let a_vars = match param_vars.get(a_name) { Some(v) => v, None => return false };
-        let b_vars = match param_vars.get(b_name) { Some(v) => v, None => return false };
+                                ssa: &SsaCfg|
+     -> bool {
+        let a_vars = match param_vars.get(a_name) {
+            Some(v) => v,
+            None => return false,
+        };
+        let b_vars = match param_vars.get(b_name) {
+            Some(v) => v,
+            None => return false,
+        };
         let a_derived = closure_from(a_vars, ssa);
         // Scan comparisons; if both sides derive from a (data) and b
         // (length), reject. Loads from a's offsets count as a-derived.
@@ -293,8 +416,12 @@ fn infer_go_header_params(ssa: &mut SsaCfg) {
         load_chain.extend(a_derived.iter().copied());
         for (idx, v) in ssa.vars.iter().enumerate() {
             match &v.expr {
-                Expr::Load(p) if a_derived.contains(&(p.0 as usize)) => { load_chain.insert(idx); }
-                Expr::FieldAccess(p, _) if a_derived.contains(&(p.0 as usize)) => { load_chain.insert(idx); }
+                Expr::Load(p) if a_derived.contains(&(p.0 as usize)) => {
+                    load_chain.insert(idx);
+                }
+                Expr::FieldAccess(p, _) if a_derived.contains(&(p.0 as usize)) => {
+                    load_chain.insert(idx);
+                }
                 _ => {}
             }
         }
@@ -303,11 +430,15 @@ fn infer_go_header_params(ssa: &mut SsaCfg) {
 
         for v in ssa.vars.iter() {
             if let Expr::BinOp(kind, l, r) = &v.expr {
-                if matches!(kind,
-                    BinOpKind::Less | BinOpKind::LessEq
-                    | BinOpKind::SLess | BinOpKind::SLessEq
-                    | BinOpKind::Eq | BinOpKind::NotEq)
-                {
+                if matches!(
+                    kind,
+                    BinOpKind::Less
+                        | BinOpKind::LessEq
+                        | BinOpKind::SLess
+                        | BinOpKind::SLessEq
+                        | BinOpKind::Eq
+                        | BinOpKind::NotEq
+                ) {
                     let l_b = b_vars.contains(&(l.0 as usize));
                     let r_b = b_vars.contains(&(r.0 as usize));
                     let l_a = load_chain.contains(&(l.0 as usize));
@@ -328,17 +459,24 @@ fn infer_go_header_params(ssa: &mut SsaCfg) {
     while i + 1 < indexed.len() {
         let (ai, a_name) = &indexed[i];
         let (bi, b_name) = &indexed[i + 1];
-        if *bi != *ai + 1 { i += 1; continue; }
+        if *bi != *ai + 1 {
+            i += 1;
+            continue;
+        }
 
         let a_ptr = is_pointer_like(a_name, &param_vars, ssa);
         let b_len = is_length_like(b_name, &param_vars, ssa);
-        if !(a_ptr && b_len) { i += 1; continue; }
+        if !(a_ptr && b_len) {
+            i += 1;
+            continue;
+        }
 
         // Reject if the apparent length is bound by a value derived
         // from the apparent data pointer — that's array indexing into
         // a struct, not a real slice/string header.
         if len_is_bound_by_data(a_name, b_name, &param_vars, ssa) {
-            i += 1; continue;
+            i += 1;
+            continue;
         }
 
         let mut stride = 2;
@@ -354,11 +492,15 @@ fn infer_go_header_params(ssa: &mut SsaCfg) {
         let suffix_data = *ai;
         let suffix_len = *bi;
         let (data_name, len_name) = if is_slice {
-            (format!("slice_data_{}", suffix_data),
-             format!("slice_len_{}", suffix_len))
+            (
+                format!("slice_data_{}", suffix_data),
+                format!("slice_len_{}", suffix_len),
+            )
         } else {
-            (format!("s_data_{}", suffix_data),
-             format!("s_len_{}", suffix_len))
+            (
+                format!("s_data_{}", suffix_data),
+                format!("s_len_{}", suffix_len),
+            )
         };
 
         rename_param(ssa, a_name, &data_name);
@@ -391,8 +533,16 @@ fn count_live_stmts(ssa: &SsaCfg) -> usize {
 fn combine_frame_offset(op1: BinOpKind, c1: u64, op2: BinOpKind, c2: u64) -> (BinOpKind, u64) {
     let s1 = c1 as i64;
     let s2 = c2 as i64;
-    let delta1: i64 = if matches!(op1, BinOpKind::Sub) { -s1 } else { s1 };
-    let delta2: i64 = if matches!(op2, BinOpKind::Sub) { -s2 } else { s2 };
+    let delta1: i64 = if matches!(op1, BinOpKind::Sub) {
+        -s1
+    } else {
+        s1
+    };
+    let delta2: i64 = if matches!(op2, BinOpKind::Sub) {
+        -s2
+    } else {
+        s2
+    };
     let combined = delta1.wrapping_add(delta2);
     if combined < 0 {
         (BinOpKind::Sub, (-combined) as u64)
@@ -405,7 +555,7 @@ fn combine_frame_offset(op1: BinOpKind, c1: u64, op2: BinOpKind, c2: u64) -> (Bi
 /// Only handles Eq↔NotEq. Returns None for Less/SLess/etc. (those need operand swapping).
 fn negate_eq_op(op: BinOpKind) -> Option<BinOpKind> {
     match op {
-        BinOpKind::Eq    => Some(BinOpKind::NotEq),
+        BinOpKind::Eq => Some(BinOpKind::NotEq),
         BinOpKind::NotEq => Some(BinOpKind::Eq),
         _ => None,
     }
@@ -415,7 +565,9 @@ fn fold_once(ssa: &mut SsaCfg) {
     // Pass 1: Collapse trivial Phis
     for v in 0..ssa.vars.len() {
         if let Expr::Phi(inputs) = &ssa.vars[v].expr {
-            if inputs.is_empty() { continue; }
+            if inputs.is_empty() {
+                continue;
+            }
             let first = inputs[0];
             if inputs.iter().all(|i| *i == first) {
                 ssa.vars[v].expr = Expr::Var(first);
@@ -426,7 +578,9 @@ fn fold_once(ssa: &mut SsaCfg) {
     // Pass 1b: Simplify trivial ternaries
     for v in 0..ssa.vars.len() {
         if let Expr::Ternary(cond, then_val, else_val) = &ssa.vars[v].expr {
-            let c = *cond; let t = *then_val; let e = *else_val;
+            let c = *cond;
+            let t = *then_val;
+            let e = *else_val;
             // Ternary(Const(1), a, b) → Var(a)
             if matches!(&ssa.vars[c.0 as usize].expr, Expr::Const(v, _) if *v != 0) {
                 ssa.vars[v].expr = Expr::Var(t);
@@ -449,7 +603,10 @@ fn fold_once(ssa: &mut SsaCfg) {
     }
     // Constant folding: evaluate BinOp(Const, Const) chains to single constants.
     for v in 0..ssa.vars.len() {
-        if matches!(&ssa.vars[v].expr, Expr::BinOp(_, _, _) | Expr::UnaryOp(_, _)) {
+        if matches!(
+            &ssa.vars[v].expr,
+            Expr::BinOp(_, _, _) | Expr::UnaryOp(_, _)
+        ) {
             if let Some((val, sz)) = const_fold_expr(&ssa.vars[v].expr, &ssa.vars) {
                 ssa.vars[v].expr = Expr::Const(val, sz);
             }
@@ -557,7 +714,9 @@ fn mba_simplify(ssa: &mut SsaCfg) {
                 changed = true;
             }
         }
-        if !changed { break; }
+        if !changed {
+            break;
+        }
     }
 
     // Phase 2: Oracle-based truth table simplification
@@ -579,21 +738,29 @@ fn mba_oracle_simplify(ssa: &mut SsaCfg) {
 
         // Forward pass (leaves → root)
         for v in 0..ssa.vars.len() {
-            if try_simba_at(v, &mut ssa.vars) { changed = true; }
+            if try_simba_at(v, &mut ssa.vars) {
+                changed = true;
+            }
         }
         // Reverse pass (root → leaves) — catch top-down opportunities
         for v in (0..ssa.vars.len()).rev() {
-            if try_simba_at(v, &mut ssa.vars) { changed = true; }
+            if try_simba_at(v, &mut ssa.vars) {
+                changed = true;
+            }
         }
 
-        if !changed { break; }
+        if !changed {
+            break;
+        }
     }
 }
 
 /// Try SiMBA simplification on a single variable. Returns true if simplified.
 fn try_simba_at(v: usize, vars: &mut Vec<VarDef>) -> bool {
     let depth = expr_depth(&vars[v].expr, vars, 0);
-    if depth < 2 { return false; }
+    if depth < 2 {
+        return false;
+    }
 
     // Constant folding first
     if let Some((val, sz)) = const_fold_expr(&vars[v].expr, vars) {
@@ -606,10 +773,16 @@ fn try_simba_at(v: usize, vars: &mut Vec<VarDef>) -> bool {
     bases.sort_by_key(|id| id.0);
     bases.dedup_by_key(|id| id.0);
 
-    if bases.is_empty() || bases.len() > 4 { return false; }
+    if bases.is_empty() || bases.len() > 4 {
+        return false;
+    }
 
     let sz = vars[v].size;
-    let mask = if sz >= 8 { u64::MAX } else { (1u64 << (sz * 8)).wrapping_sub(1) };
+    let mask = if sz >= 8 {
+        u64::MAX
+    } else {
+        (1u64 << (sz * 8)).wrapping_sub(1)
+    };
 
     let simplified = match bases.len() {
         1 => simba_simplify_1var(v, vars, bases[0], mask, sz),
@@ -629,11 +802,15 @@ fn try_simba_at(v: usize, vars: &mut Vec<VarDef>) -> bool {
 
 /// Compute expression depth (for filtering).
 fn expr_depth(expr: &Expr, vars: &[VarDef], depth: usize) -> usize {
-    if depth > 10 { return depth; } // prevent infinite recursion
+    if depth > 10 {
+        return depth;
+    } // prevent infinite recursion
     match expr {
         Expr::Const(_, _) | Expr::Unknown => 0,
         Expr::Var(id) => {
-            if id.0 as usize >= vars.len() { return 0; }
+            if id.0 as usize >= vars.len() {
+                return 0;
+            }
             expr_depth(&vars[id.0 as usize].expr, vars, depth + 1)
         }
         Expr::BinOp(_, left, right) => {
@@ -641,24 +818,28 @@ fn expr_depth(expr: &Expr, vars: &[VarDef], depth: usize) -> usize {
             let rd = expr_depth(&vars[right.0 as usize].expr, vars, depth + 1);
             1 + ld.max(rd)
         }
-        Expr::UnaryOp(_, inner) => {
-            1 + expr_depth(&vars[inner.0 as usize].expr, vars, depth + 1)
-        }
+        Expr::UnaryOp(_, inner) => 1 + expr_depth(&vars[inner.0 as usize].expr, vars, depth + 1),
         _ => 0,
     }
 }
 
 /// Collect base variables (leaves of the expression tree that aren't constants).
 fn collect_base_vars(expr: &Expr, vars: &[VarDef], bases: &mut Vec<VarId>, depth: usize) {
-    if depth > 10 { return; }
+    if depth > 10 {
+        return;
+    }
     match expr {
         Expr::Const(_, _) => {}
         Expr::Unknown => {}
         Expr::Var(id) => {
-            if id.0 as usize >= vars.len() { return; }
+            if id.0 as usize >= vars.len() {
+                return;
+            }
             let inner = &vars[id.0 as usize].expr;
-            if matches!(inner, Expr::Unknown) || matches!(inner, Expr::Load(_))
-                || matches!(inner, Expr::Phi(_)) || matches!(inner, Expr::FieldAccess(_, _))
+            if matches!(inner, Expr::Unknown)
+                || matches!(inner, Expr::Load(_))
+                || matches!(inner, Expr::Phi(_))
+                || matches!(inner, Expr::FieldAccess(_, _))
                 || matches!(inner, Expr::Ternary(_, _, _))
             {
                 bases.push(*id); // This is a base variable (input)
@@ -677,13 +858,25 @@ fn collect_base_vars(expr: &Expr, vars: &[VarDef], bases: &mut Vec<VarId>, depth
     }
 }
 
-
 /// Symbolically evaluate an expression with given variable bindings.
-fn eval_expr(expr: &Expr, vars: &[VarDef], env: &std::collections::HashMap<u32, u64>, mask: u64, depth: usize) -> Option<u64> {
-    if depth > 20 { return None; }
+fn eval_expr(
+    expr: &Expr,
+    vars: &[VarDef],
+    env: &std::collections::HashMap<u32, u64>,
+    mask: u64,
+    depth: usize,
+) -> Option<u64> {
+    if depth > 20 {
+        return None;
+    }
     match expr {
         Expr::Const(val, _) => Some(*val & mask),
-        Expr::Unknown | Expr::Load(_) | Expr::Phi(_) | Expr::FieldAccess(_, _) | Expr::Ternary(_, _, _) | Expr::UserOp { .. } => None,
+        Expr::Unknown
+        | Expr::Load(_)
+        | Expr::Phi(_)
+        | Expr::FieldAccess(_, _)
+        | Expr::Ternary(_, _, _)
+        | Expr::UserOp { .. } => None,
         Expr::Var(id) => {
             if let Some(&val) = env.get(&id.0) {
                 Some(val & mask)
@@ -742,24 +935,38 @@ fn eval_expr(expr: &Expr, vars: &[VarDef], env: &std::collections::HashMap<u32, 
 /// SiMBA coefficient recovery for 2-variable MBA expressions.
 /// Called from mba_oracle_simplify when exactly 2 base variables are found.
 fn simba_simplify_2var(
-    var_idx: usize, vars: &[VarDef], bases: &[VarId], mask: u64, sz: u32,
+    var_idx: usize,
+    vars: &[VarDef],
+    bases: &[VarId],
+    mask: u64,
+    sz: u32,
 ) -> Option<Expr> {
-    if bases.len() != 2 { return None; }
+    if bases.len() != 2 {
+        return None;
+    }
     let (a_id, b_id) = (bases[0], bases[1]);
 
     // Evaluate f(0,0), f(1,0), f(0,1), f(1,1)
     let mut env = std::collections::HashMap::new();
 
-    env.clear(); env.insert(a_id.0, 0u64); env.insert(b_id.0, 0u64);
+    env.clear();
+    env.insert(a_id.0, 0u64);
+    env.insert(b_id.0, 0u64);
     let f00 = eval_expr(&vars[var_idx].expr, vars, &env, mask, 0)?;
 
-    env.clear(); env.insert(a_id.0, 1u64); env.insert(b_id.0, 0u64);
+    env.clear();
+    env.insert(a_id.0, 1u64);
+    env.insert(b_id.0, 0u64);
     let f10 = eval_expr(&vars[var_idx].expr, vars, &env, mask, 0)?;
 
-    env.clear(); env.insert(a_id.0, 0u64); env.insert(b_id.0, 1u64);
+    env.clear();
+    env.insert(a_id.0, 0u64);
+    env.insert(b_id.0, 1u64);
     let f01 = eval_expr(&vars[var_idx].expr, vars, &env, mask, 0)?;
 
-    env.clear(); env.insert(a_id.0, 1u64); env.insert(b_id.0, 1u64);
+    env.clear();
+    env.insert(a_id.0, 1u64);
+    env.insert(b_id.0, 1u64);
     let f11 = eval_expr(&vars[var_idx].expr, vars, &env, mask, 0)?;
 
     // Recover coefficients (mod 2^N)
@@ -769,20 +976,32 @@ fn simba_simplify_2var(
     let c3 = f11.wrapping_sub(f10).wrapping_sub(f01).wrapping_add(f00) & mask;
 
     // Verify with additional test points to avoid false positives
-    env.clear(); env.insert(a_id.0, 0xAA); env.insert(b_id.0, 0x55);
+    env.clear();
+    env.insert(a_id.0, 0xAA);
+    env.insert(b_id.0, 0x55);
     let f_test = eval_expr(&vars[var_idx].expr, vars, &env, mask, 0)?;
-    let expected = (c0.wrapping_add(c1.wrapping_mul(0xAA))
+    let expected = (c0
+        .wrapping_add(c1.wrapping_mul(0xAA))
         .wrapping_add(c2.wrapping_mul(0x55))
-        .wrapping_add(c3.wrapping_mul(0xAA & 0x55))) & mask;
-    if f_test != expected { return None; } // Not a linear MBA
+        .wrapping_add(c3.wrapping_mul(0xAA & 0x55)))
+        & mask;
+    if f_test != expected {
+        return None;
+    } // Not a linear MBA
 
     // Second verification
-    env.clear(); env.insert(a_id.0, 0xFF); env.insert(b_id.0, 0x42);
+    env.clear();
+    env.insert(a_id.0, 0xFF);
+    env.insert(b_id.0, 0x42);
     let f_test2 = eval_expr(&vars[var_idx].expr, vars, &env, mask, 0)?;
-    let expected2 = (c0.wrapping_add(c1.wrapping_mul(0xFF))
+    let expected2 = (c0
+        .wrapping_add(c1.wrapping_mul(0xFF))
         .wrapping_add(c2.wrapping_mul(0x42))
-        .wrapping_add(c3.wrapping_mul(0xFF & 0x42))) & mask;
-    if f_test2 != expected2 { return None; }
+        .wrapping_add(c3.wrapping_mul(0xFF & 0x42)))
+        & mask;
+    if f_test2 != expected2 {
+        return None;
+    }
 
     // Map coefficient vector to simplest expression
     let neg1 = mask; // -1 mod 2^N
@@ -795,11 +1014,19 @@ fn simba_simplify_2var(
             (1, 0, 0) => return Some(Expr::Var(a_id)),
             (0, 1, 0) => return Some(Expr::Var(b_id)),
             (1, 1, 0) => return Some(Expr::BinOp(BinOpKind::Add, a_id, b_id)),
-            _ if c1 == 1 && c2 == neg1 && c3 == 0 => return Some(Expr::BinOp(BinOpKind::Sub, a_id, b_id)),
-            _ if c1 == neg1 && c2 == 1 && c3 == 0 => return Some(Expr::BinOp(BinOpKind::Sub, b_id, a_id)),
+            _ if c1 == 1 && c2 == neg1 && c3 == 0 => {
+                return Some(Expr::BinOp(BinOpKind::Sub, a_id, b_id))
+            }
+            _ if c1 == neg1 && c2 == 1 && c3 == 0 => {
+                return Some(Expr::BinOp(BinOpKind::Sub, b_id, a_id))
+            }
             (0, 0, 1) => return Some(Expr::BinOp(BinOpKind::And, a_id, b_id)),
-            _ if c1 == 1 && c2 == 1 && c3 == neg1 => return Some(Expr::BinOp(BinOpKind::Or, a_id, b_id)),
-            _ if c1 == 1 && c2 == 1 && c3 == neg2 => return Some(Expr::BinOp(BinOpKind::Xor, a_id, b_id)),
+            _ if c1 == 1 && c2 == 1 && c3 == neg1 => {
+                return Some(Expr::BinOp(BinOpKind::Or, a_id, b_id))
+            }
+            _ if c1 == 1 && c2 == 1 && c3 == neg2 => {
+                return Some(Expr::BinOp(BinOpKind::Xor, a_id, b_id))
+            }
             _ if c1 == 1 && c2 == 0 && c3 == neg1 => {
                 // a - (a&b) = a & ~b — but we don't have AndNot, express as Sub
                 return Some(Expr::BinOp(BinOpKind::Sub, a_id, b_id)); // approximation
@@ -848,20 +1075,35 @@ fn simba_simplify_2var(
 /// SiMBA coefficient recovery for 3-variable MBA expressions.
 /// Boolean basis: {1, a, b, c, a&b, a&c, b&c, a&b&c} — 8 coefficients from 8 evaluations.
 fn simba_simplify_3var(
-    var_idx: usize, vars: &[VarDef], bases: &[VarId], mask: u64, _sz: u32,
+    var_idx: usize,
+    vars: &[VarDef],
+    bases: &[VarId],
+    mask: u64,
+    _sz: u32,
 ) -> Option<Expr> {
-    if bases.len() != 3 { return None; }
+    if bases.len() != 3 {
+        return None;
+    }
     let (a_id, b_id, c_id) = (bases[0], bases[1], bases[2]);
 
     // Evaluate f on all 8 combinations of (0,1) for (a,b,c)
     let mut env = std::collections::HashMap::new();
     let mut f = [0u64; 8];
-    let combos: [(u64,u64,u64); 8] = [
-        (0,0,0), (1,0,0), (0,1,0), (0,0,1), (1,1,0), (1,0,1), (0,1,1), (1,1,1)
+    let combos: [(u64, u64, u64); 8] = [
+        (0, 0, 0),
+        (1, 0, 0),
+        (0, 1, 0),
+        (0, 0, 1),
+        (1, 1, 0),
+        (1, 0, 1),
+        (0, 1, 1),
+        (1, 1, 1),
     ];
-    for (i, (a,b,c)) in combos.iter().enumerate() {
+    for (i, (a, b, c)) in combos.iter().enumerate() {
         env.clear();
-        env.insert(a_id.0, *a); env.insert(b_id.0, *b); env.insert(c_id.0, *c);
+        env.insert(a_id.0, *a);
+        env.insert(b_id.0, *b);
+        env.insert(c_id.0, *c);
         f[i] = eval_expr(&vars[var_idx].expr, vars, &env, mask, 0)?;
     }
 
@@ -870,32 +1112,59 @@ fn simba_simplify_3var(
     let c1 = f[1].wrapping_sub(f[0]) & mask;
     let c2 = f[2].wrapping_sub(f[0]) & mask;
     let c3 = f[3].wrapping_sub(f[0]) & mask;
-    let c4 = f[4].wrapping_sub(f[1]).wrapping_sub(f[2]).wrapping_add(f[0]) & mask;
-    let c5 = f[5].wrapping_sub(f[1]).wrapping_sub(f[3]).wrapping_add(f[0]) & mask;
-    let c6 = f[6].wrapping_sub(f[2]).wrapping_sub(f[3]).wrapping_add(f[0]) & mask;
-    let c7 = f[7].wrapping_sub(f[4]).wrapping_sub(f[5]).wrapping_sub(f[6])
-        .wrapping_add(f[1]).wrapping_add(f[2]).wrapping_add(f[3]).wrapping_sub(f[0]) & mask;
+    let c4 = f[4]
+        .wrapping_sub(f[1])
+        .wrapping_sub(f[2])
+        .wrapping_add(f[0])
+        & mask;
+    let c5 = f[5]
+        .wrapping_sub(f[1])
+        .wrapping_sub(f[3])
+        .wrapping_add(f[0])
+        & mask;
+    let c6 = f[6]
+        .wrapping_sub(f[2])
+        .wrapping_sub(f[3])
+        .wrapping_add(f[0])
+        & mask;
+    let c7 = f[7]
+        .wrapping_sub(f[4])
+        .wrapping_sub(f[5])
+        .wrapping_sub(f[6])
+        .wrapping_add(f[1])
+        .wrapping_add(f[2])
+        .wrapping_add(f[3])
+        .wrapping_sub(f[0])
+        & mask;
 
     // Verify with a non-trivial test point
     env.clear();
-    env.insert(a_id.0, 0xAA); env.insert(b_id.0, 0x55); env.insert(c_id.0, 0x42);
+    env.insert(a_id.0, 0xAA);
+    env.insert(b_id.0, 0x55);
+    env.insert(c_id.0, 0x42);
     let f_test = eval_expr(&vars[var_idx].expr, vars, &env, mask, 0)?;
     let (ta, tb, tc) = (0xAAu64, 0x55u64, 0x42u64);
-    let expected = c0.wrapping_add(c1.wrapping_mul(ta))
+    let expected = c0
+        .wrapping_add(c1.wrapping_mul(ta))
         .wrapping_add(c2.wrapping_mul(tb))
         .wrapping_add(c3.wrapping_mul(tc))
         .wrapping_add(c4.wrapping_mul(ta & tb))
         .wrapping_add(c5.wrapping_mul(ta & tc))
         .wrapping_add(c6.wrapping_mul(tb & tc))
-        .wrapping_add(c7.wrapping_mul(ta & tb & tc)) & mask;
-    if f_test != expected { return None; }
+        .wrapping_add(c7.wrapping_mul(ta & tb & tc))
+        & mask;
+    if f_test != expected {
+        return None;
+    }
 
     let neg1 = mask;
     let neg2 = mask.wrapping_sub(1);
 
     // Map coefficient vector to simplest expression
     // Only handle patterns where c0 == 0 (no constant offset)
-    if c0 != 0 { return None; } // with constant → too complex to simplify cleanly
+    if c0 != 0 {
+        return None;
+    } // with constant → too complex to simplify cleanly
 
     // Count non-zero coefficients
     let coeffs = [c1, c2, c3, c4, c5, c6, c7];
@@ -903,16 +1172,34 @@ fn simba_simplify_3var(
 
     // Single non-zero → single variable or single op
     if nonzero == 1 {
-        if c1 == 1 { return Some(Expr::Var(a_id)); }
-        if c2 == 1 { return Some(Expr::Var(b_id)); }
-        if c3 == 1 { return Some(Expr::Var(c_id)); }
-        if c4 == 1 { return Some(Expr::BinOp(BinOpKind::And, a_id, b_id)); }
-        if c5 == 1 { return Some(Expr::BinOp(BinOpKind::And, a_id, c_id)); }
-        if c6 == 1 { return Some(Expr::BinOp(BinOpKind::And, b_id, c_id)); }
+        if c1 == 1 {
+            return Some(Expr::Var(a_id));
+        }
+        if c2 == 1 {
+            return Some(Expr::Var(b_id));
+        }
+        if c3 == 1 {
+            return Some(Expr::Var(c_id));
+        }
+        if c4 == 1 {
+            return Some(Expr::BinOp(BinOpKind::And, a_id, b_id));
+        }
+        if c5 == 1 {
+            return Some(Expr::BinOp(BinOpKind::And, a_id, c_id));
+        }
+        if c6 == 1 {
+            return Some(Expr::BinOp(BinOpKind::And, b_id, c_id));
+        }
         // c7 == 1 → a&b&c — can't express as single BinOp
-        if c1 == neg1 { return Some(Expr::UnaryOp(UnaryOpKind::Neg, a_id)); }
-        if c2 == neg1 { return Some(Expr::UnaryOp(UnaryOpKind::Neg, b_id)); }
-        if c3 == neg1 { return Some(Expr::UnaryOp(UnaryOpKind::Neg, c_id)); }
+        if c1 == neg1 {
+            return Some(Expr::UnaryOp(UnaryOpKind::Neg, a_id));
+        }
+        if c2 == neg1 {
+            return Some(Expr::UnaryOp(UnaryOpKind::Neg, b_id));
+        }
+        if c3 == neg1 {
+            return Some(Expr::UnaryOp(UnaryOpKind::Neg, c_id));
+        }
     }
 
     // Two-variable patterns (third variable cancels out)
@@ -965,9 +1252,7 @@ fn simba_simplify_3var(
     }
 
     // a ^ b ^ c: c1=c2=c3=1, c4=c5=c6=-2, c7=4
-    if c1 == 1 && c2 == 1 && c3 == 1 && c4 == neg2 && c5 == neg2 && c6 == neg2
-        && c7 == 4
-    {
+    if c1 == 1 && c2 == 1 && c3 == 1 && c4 == neg2 && c5 == neg2 && c6 == neg2 && c7 == 4 {
         return None; // Can't express as single op
     }
 
@@ -979,9 +1264,15 @@ fn simba_simplify_3var(
 ///                 a&b&c, a&b&d, a&c&d, b&c&d, a&b&c&d}
 /// 16 coefficients from 16 evaluations via Möbius inversion.
 fn simba_simplify_4var(
-    var_idx: usize, vars: &[VarDef], bases: &[VarId], mask: u64, _sz: u32,
+    var_idx: usize,
+    vars: &[VarDef],
+    bases: &[VarId],
+    mask: u64,
+    _sz: u32,
 ) -> Option<Expr> {
-    if bases.len() != 4 { return None; }
+    if bases.len() != 4 {
+        return None;
+    }
     let ids = [bases[0], bases[1], bases[2], bases[3]];
 
     // Evaluate f on all 16 combinations of (0,1) for (a,b,c,d)
@@ -993,69 +1284,162 @@ fn simba_simplify_4var(
             for c in 0u64..=1 {
                 for d in 0u64..=1 {
                     env.clear();
-                    env.insert(ids[0].0, a); env.insert(ids[1].0, b);
-                    env.insert(ids[2].0, c); env.insert(ids[3].0, d);
+                    env.insert(ids[0].0, a);
+                    env.insert(ids[1].0, b);
+                    env.insert(ids[2].0, c);
+                    env.insert(ids[3].0, d);
                     let v = eval_expr(&vars[var_idx].expr, vars, &env, mask, 0)?;
-                    vals.insert((a,b,c,d), v);
+                    vals.insert((a, b, c, d), v);
                 }
             }
         }
     }
 
-    let v = |a:u64,b:u64,c:u64,d:u64| -> u64 { *vals.get(&(a,b,c,d)).unwrap() };
+    let v = |a: u64, b: u64, c: u64, d: u64| -> u64 { *vals.get(&(a, b, c, d)).unwrap() };
 
     // Möbius inversion: recover 16 coefficients
-    let c_1    = v(0,0,0,0);
-    let c_a    = v(1,0,0,0).wrapping_sub(v(0,0,0,0)) & mask;
-    let c_b    = v(0,1,0,0).wrapping_sub(v(0,0,0,0)) & mask;
-    let c_c    = v(0,0,1,0).wrapping_sub(v(0,0,0,0)) & mask;
-    let c_d    = v(0,0,0,1).wrapping_sub(v(0,0,0,0)) & mask;
-    let c_ab   = v(1,1,0,0).wrapping_sub(v(1,0,0,0)).wrapping_sub(v(0,1,0,0)).wrapping_add(v(0,0,0,0)) & mask;
-    let c_ac   = v(1,0,1,0).wrapping_sub(v(1,0,0,0)).wrapping_sub(v(0,0,1,0)).wrapping_add(v(0,0,0,0)) & mask;
-    let c_ad   = v(1,0,0,1).wrapping_sub(v(1,0,0,0)).wrapping_sub(v(0,0,0,1)).wrapping_add(v(0,0,0,0)) & mask;
-    let c_bc   = v(0,1,1,0).wrapping_sub(v(0,1,0,0)).wrapping_sub(v(0,0,1,0)).wrapping_add(v(0,0,0,0)) & mask;
-    let c_bd   = v(0,1,0,1).wrapping_sub(v(0,1,0,0)).wrapping_sub(v(0,0,0,1)).wrapping_add(v(0,0,0,0)) & mask;
-    let c_cd   = v(0,0,1,1).wrapping_sub(v(0,0,1,0)).wrapping_sub(v(0,0,0,1)).wrapping_add(v(0,0,0,0)) & mask;
+    let c_1 = v(0, 0, 0, 0);
+    let c_a = v(1, 0, 0, 0).wrapping_sub(v(0, 0, 0, 0)) & mask;
+    let c_b = v(0, 1, 0, 0).wrapping_sub(v(0, 0, 0, 0)) & mask;
+    let c_c = v(0, 0, 1, 0).wrapping_sub(v(0, 0, 0, 0)) & mask;
+    let c_d = v(0, 0, 0, 1).wrapping_sub(v(0, 0, 0, 0)) & mask;
+    let c_ab = v(1, 1, 0, 0)
+        .wrapping_sub(v(1, 0, 0, 0))
+        .wrapping_sub(v(0, 1, 0, 0))
+        .wrapping_add(v(0, 0, 0, 0))
+        & mask;
+    let c_ac = v(1, 0, 1, 0)
+        .wrapping_sub(v(1, 0, 0, 0))
+        .wrapping_sub(v(0, 0, 1, 0))
+        .wrapping_add(v(0, 0, 0, 0))
+        & mask;
+    let c_ad = v(1, 0, 0, 1)
+        .wrapping_sub(v(1, 0, 0, 0))
+        .wrapping_sub(v(0, 0, 0, 1))
+        .wrapping_add(v(0, 0, 0, 0))
+        & mask;
+    let c_bc = v(0, 1, 1, 0)
+        .wrapping_sub(v(0, 1, 0, 0))
+        .wrapping_sub(v(0, 0, 1, 0))
+        .wrapping_add(v(0, 0, 0, 0))
+        & mask;
+    let c_bd = v(0, 1, 0, 1)
+        .wrapping_sub(v(0, 1, 0, 0))
+        .wrapping_sub(v(0, 0, 0, 1))
+        .wrapping_add(v(0, 0, 0, 0))
+        & mask;
+    let c_cd = v(0, 0, 1, 1)
+        .wrapping_sub(v(0, 0, 1, 0))
+        .wrapping_sub(v(0, 0, 0, 1))
+        .wrapping_add(v(0, 0, 0, 0))
+        & mask;
     // Skip triple and quad coefficients for matching (we only output 2-op expressions)
-    let c_abc  = v(1,1,1,0).wrapping_sub(v(1,1,0,0)).wrapping_sub(v(1,0,1,0)).wrapping_sub(v(0,1,1,0))
-        .wrapping_add(v(1,0,0,0)).wrapping_add(v(0,1,0,0)).wrapping_add(v(0,0,1,0)).wrapping_sub(v(0,0,0,0)) & mask;
-    let c_abd  = v(1,1,0,1).wrapping_sub(v(1,1,0,0)).wrapping_sub(v(1,0,0,1)).wrapping_sub(v(0,1,0,1))
-        .wrapping_add(v(1,0,0,0)).wrapping_add(v(0,1,0,0)).wrapping_add(v(0,0,0,1)).wrapping_sub(v(0,0,0,0)) & mask;
-    let c_acd  = v(1,0,1,1).wrapping_sub(v(1,0,1,0)).wrapping_sub(v(1,0,0,1)).wrapping_sub(v(0,0,1,1))
-        .wrapping_add(v(1,0,0,0)).wrapping_add(v(0,0,1,0)).wrapping_add(v(0,0,0,1)).wrapping_sub(v(0,0,0,0)) & mask;
-    let c_bcd  = v(0,1,1,1).wrapping_sub(v(0,1,1,0)).wrapping_sub(v(0,1,0,1)).wrapping_sub(v(0,0,1,1))
-        .wrapping_add(v(0,1,0,0)).wrapping_add(v(0,0,1,0)).wrapping_add(v(0,0,0,1)).wrapping_sub(v(0,0,0,0)) & mask;
-    let c_abcd = v(1,1,1,1).wrapping_sub(v(1,1,1,0)).wrapping_sub(v(1,1,0,1)).wrapping_sub(v(1,0,1,1)).wrapping_sub(v(0,1,1,1))
-        .wrapping_add(v(1,1,0,0)).wrapping_add(v(1,0,1,0)).wrapping_add(v(1,0,0,1)).wrapping_add(v(0,1,1,0)).wrapping_add(v(0,1,0,1)).wrapping_add(v(0,0,1,1))
-        .wrapping_sub(v(1,0,0,0)).wrapping_sub(v(0,1,0,0)).wrapping_sub(v(0,0,1,0)).wrapping_sub(v(0,0,0,1))
-        .wrapping_add(v(0,0,0,0)) & mask;
+    let c_abc = v(1, 1, 1, 0)
+        .wrapping_sub(v(1, 1, 0, 0))
+        .wrapping_sub(v(1, 0, 1, 0))
+        .wrapping_sub(v(0, 1, 1, 0))
+        .wrapping_add(v(1, 0, 0, 0))
+        .wrapping_add(v(0, 1, 0, 0))
+        .wrapping_add(v(0, 0, 1, 0))
+        .wrapping_sub(v(0, 0, 0, 0))
+        & mask;
+    let c_abd = v(1, 1, 0, 1)
+        .wrapping_sub(v(1, 1, 0, 0))
+        .wrapping_sub(v(1, 0, 0, 1))
+        .wrapping_sub(v(0, 1, 0, 1))
+        .wrapping_add(v(1, 0, 0, 0))
+        .wrapping_add(v(0, 1, 0, 0))
+        .wrapping_add(v(0, 0, 0, 1))
+        .wrapping_sub(v(0, 0, 0, 0))
+        & mask;
+    let c_acd = v(1, 0, 1, 1)
+        .wrapping_sub(v(1, 0, 1, 0))
+        .wrapping_sub(v(1, 0, 0, 1))
+        .wrapping_sub(v(0, 0, 1, 1))
+        .wrapping_add(v(1, 0, 0, 0))
+        .wrapping_add(v(0, 0, 1, 0))
+        .wrapping_add(v(0, 0, 0, 1))
+        .wrapping_sub(v(0, 0, 0, 0))
+        & mask;
+    let c_bcd = v(0, 1, 1, 1)
+        .wrapping_sub(v(0, 1, 1, 0))
+        .wrapping_sub(v(0, 1, 0, 1))
+        .wrapping_sub(v(0, 0, 1, 1))
+        .wrapping_add(v(0, 1, 0, 0))
+        .wrapping_add(v(0, 0, 1, 0))
+        .wrapping_add(v(0, 0, 0, 1))
+        .wrapping_sub(v(0, 0, 0, 0))
+        & mask;
+    let c_abcd = v(1, 1, 1, 1)
+        .wrapping_sub(v(1, 1, 1, 0))
+        .wrapping_sub(v(1, 1, 0, 1))
+        .wrapping_sub(v(1, 0, 1, 1))
+        .wrapping_sub(v(0, 1, 1, 1))
+        .wrapping_add(v(1, 1, 0, 0))
+        .wrapping_add(v(1, 0, 1, 0))
+        .wrapping_add(v(1, 0, 0, 1))
+        .wrapping_add(v(0, 1, 1, 0))
+        .wrapping_add(v(0, 1, 0, 1))
+        .wrapping_add(v(0, 0, 1, 1))
+        .wrapping_sub(v(1, 0, 0, 0))
+        .wrapping_sub(v(0, 1, 0, 0))
+        .wrapping_sub(v(0, 0, 1, 0))
+        .wrapping_sub(v(0, 0, 0, 1))
+        .wrapping_add(v(0, 0, 0, 0))
+        & mask;
 
     // Verify with a test point
     env.clear();
-    env.insert(ids[0].0, 0xAA); env.insert(ids[1].0, 0x55);
-    env.insert(ids[2].0, 0x42); env.insert(ids[3].0, 0xDE);
+    env.insert(ids[0].0, 0xAA);
+    env.insert(ids[1].0, 0x55);
+    env.insert(ids[2].0, 0x42);
+    env.insert(ids[3].0, 0xDE);
     let f_test = eval_expr(&vars[var_idx].expr, vars, &env, mask, 0)?;
     let (ta, tb, tc, td) = (0xAAu64, 0x55u64, 0x42u64, 0xDEu64);
     let expected = c_1
-        .wrapping_add(c_a.wrapping_mul(ta)).wrapping_add(c_b.wrapping_mul(tb))
-        .wrapping_add(c_c.wrapping_mul(tc)).wrapping_add(c_d.wrapping_mul(td))
-        .wrapping_add(c_ab.wrapping_mul(ta & tb)).wrapping_add(c_ac.wrapping_mul(ta & tc))
-        .wrapping_add(c_ad.wrapping_mul(ta & td)).wrapping_add(c_bc.wrapping_mul(tb & tc))
-        .wrapping_add(c_bd.wrapping_mul(tb & td)).wrapping_add(c_cd.wrapping_mul(tc & td))
-        .wrapping_add(c_abc.wrapping_mul(ta & tb & tc)).wrapping_add(c_abd.wrapping_mul(ta & tb & td))
-        .wrapping_add(c_acd.wrapping_mul(ta & tc & td)).wrapping_add(c_bcd.wrapping_mul(tb & tc & td))
-        .wrapping_add(c_abcd.wrapping_mul(ta & tb & tc & td)) & mask;
-    if f_test != expected { return None; } // Not a linear MBA
+        .wrapping_add(c_a.wrapping_mul(ta))
+        .wrapping_add(c_b.wrapping_mul(tb))
+        .wrapping_add(c_c.wrapping_mul(tc))
+        .wrapping_add(c_d.wrapping_mul(td))
+        .wrapping_add(c_ab.wrapping_mul(ta & tb))
+        .wrapping_add(c_ac.wrapping_mul(ta & tc))
+        .wrapping_add(c_ad.wrapping_mul(ta & td))
+        .wrapping_add(c_bc.wrapping_mul(tb & tc))
+        .wrapping_add(c_bd.wrapping_mul(tb & td))
+        .wrapping_add(c_cd.wrapping_mul(tc & td))
+        .wrapping_add(c_abc.wrapping_mul(ta & tb & tc))
+        .wrapping_add(c_abd.wrapping_mul(ta & tb & td))
+        .wrapping_add(c_acd.wrapping_mul(ta & tc & td))
+        .wrapping_add(c_bcd.wrapping_mul(tb & tc & td))
+        .wrapping_add(c_abcd.wrapping_mul(ta & tb & tc & td))
+        & mask;
+    if f_test != expected {
+        return None;
+    } // Not a linear MBA
 
     // Only match patterns where the result is a simple 1-2 op expression on a subset of variables.
     // Skip if constant term is non-zero (complex to represent).
-    if c_1 != 0 { return None; }
+    if c_1 != 0 {
+        return None;
+    }
 
     // Collect non-zero coefficients
     let all_coeffs = [
-        (c_a, "a"), (c_b, "b"), (c_c, "c"), (c_d, "d"),
-        (c_ab, "ab"), (c_ac, "ac"), (c_ad, "ad"), (c_bc, "bc"), (c_bd, "bd"), (c_cd, "cd"),
-        (c_abc, "abc"), (c_abd, "abd"), (c_acd, "acd"), (c_bcd, "bcd"), (c_abcd, "abcd"),
+        (c_a, "a"),
+        (c_b, "b"),
+        (c_c, "c"),
+        (c_d, "d"),
+        (c_ab, "ab"),
+        (c_ac, "ac"),
+        (c_ad, "ad"),
+        (c_bc, "bc"),
+        (c_bd, "bd"),
+        (c_cd, "cd"),
+        (c_abc, "abc"),
+        (c_abd, "abd"),
+        (c_acd, "acd"),
+        (c_bcd, "bcd"),
+        (c_abcd, "abcd"),
     ];
     let nonzero: Vec<_> = all_coeffs.iter().filter(|(c, _)| *c != 0).collect();
 
@@ -1098,39 +1482,64 @@ fn simba_simplify_4var(
     // Pattern: c_x=1, c_y=1, c_xy=0 → x + y
     // Pattern: c_x=1, c_y=-1, c_xy=0 → x - y
     let pairs: &[(usize, usize, &str)] = &[
-        (0,1,"ab"), (0,2,"ac"), (0,3,"ad"), (1,2,"bc"), (1,3,"bd"), (2,3,"cd"),
+        (0, 1, "ab"),
+        (0, 2, "ac"),
+        (0, 3, "ad"),
+        (1, 2, "bc"),
+        (1, 3, "bd"),
+        (2, 3, "cd"),
     ];
     for &(i, j, pair_name) in pairs {
-        let ci = all_coeffs[i].0;   // singleton i
-        let cj = all_coeffs[j].0;   // singleton j
-        let cpair = all_coeffs.iter().find(|(_, n)| *n == pair_name).map(|(c, _)| *c).unwrap_or(0);
+        let ci = all_coeffs[i].0; // singleton i
+        let cj = all_coeffs[j].0; // singleton j
+        let cpair = all_coeffs
+            .iter()
+            .find(|(_, n)| *n == pair_name)
+            .map(|(c, _)| *c)
+            .unwrap_or(0);
 
         // Check that all OTHER coefficients are zero
         let others_zero = all_coeffs.iter().all(|(c, name)| {
             *c == 0 || *name == all_coeffs[i].1 || *name == all_coeffs[j].1 || *name == pair_name
         });
-        if !others_zero { continue; }
+        if !others_zero {
+            continue;
+        }
 
-        if ci == 1 && cj == 1 && cpair == neg2 { return Some(Expr::BinOp(BinOpKind::Xor, ids[i], ids[j])); }
-        if ci == 1 && cj == 1 && cpair == neg1 { return Some(Expr::BinOp(BinOpKind::Or, ids[i], ids[j])); }
-        if ci == 1 && cj == 1 && cpair == 0    { return Some(Expr::BinOp(BinOpKind::Add, ids[i], ids[j])); }
-        if ci == 1 && cj == neg1 && cpair == 0  { return Some(Expr::BinOp(BinOpKind::Sub, ids[i], ids[j])); }
-        if ci == neg1 && cj == 1 && cpair == 0  { return Some(Expr::BinOp(BinOpKind::Sub, ids[j], ids[i])); }
+        if ci == 1 && cj == 1 && cpair == neg2 {
+            return Some(Expr::BinOp(BinOpKind::Xor, ids[i], ids[j]));
+        }
+        if ci == 1 && cj == 1 && cpair == neg1 {
+            return Some(Expr::BinOp(BinOpKind::Or, ids[i], ids[j]));
+        }
+        if ci == 1 && cj == 1 && cpair == 0 {
+            return Some(Expr::BinOp(BinOpKind::Add, ids[i], ids[j]));
+        }
+        if ci == 1 && cj == neg1 && cpair == 0 {
+            return Some(Expr::BinOp(BinOpKind::Sub, ids[i], ids[j]));
+        }
+        if ci == neg1 && cj == 1 && cpair == 0 {
+            return Some(Expr::BinOp(BinOpKind::Sub, ids[j], ids[i]));
+        }
     }
 
     None
 }
 
-
 fn simba_simplify_1var(
-    var_idx: usize, vars: &[VarDef], base: VarId, mask: u64, sz: u32,
+    var_idx: usize,
+    vars: &[VarDef],
+    base: VarId,
+    mask: u64,
+    sz: u32,
 ) -> Option<Expr> {
     let mut env = std::collections::HashMap::new();
 
     env.insert(base.0, 0u64);
     let f0 = eval_expr(&vars[var_idx].expr, vars, &env, mask, 0)?;
 
-    env.clear(); env.insert(base.0, 1u64);
+    env.clear();
+    env.insert(base.0, 1u64);
     let f1 = eval_expr(&vars[var_idx].expr, vars, &env, mask, 0)?;
 
     let c0 = f0;
@@ -1142,10 +1551,13 @@ fn simba_simplify_1var(
     // Const(0) conclusion. The all-ones point exercises every bit
     // lane and flushes out any non-linearity.
     for probe in [0x42u64, u64::MAX, 0xAAAAAAAAAAAAAAAA, 0x0123456789ABCDEF] {
-        env.clear(); env.insert(base.0, probe & mask);
+        env.clear();
+        env.insert(base.0, probe & mask);
         let f_test = eval_expr(&vars[var_idx].expr, vars, &env, mask, 0)?;
         let expected = c0.wrapping_add(c1.wrapping_mul(probe & mask)) & mask;
-        if f_test != expected { return None; }
+        if f_test != expected {
+            return None;
+        }
     }
 
     let neg1 = mask;
@@ -1165,7 +1577,9 @@ fn mba_simplify_expr(var_idx: usize, vars: &[VarDef]) -> Option<Expr> {
     match expr {
         // Sub(a, Sub(a, b)) → Var(b)  [cancellation: a - (a - b) = b]
         Expr::BinOp(BinOpKind::Sub, left, right) => {
-            if let Expr::BinOp(BinOpKind::Sub, inner_left, inner_right) = &vars[right.0 as usize].expr {
+            if let Expr::BinOp(BinOpKind::Sub, inner_left, inner_right) =
+                &vars[right.0 as usize].expr
+            {
                 if left == inner_left || same_varnode(*left, *inner_left, vars) {
                     return Some(Expr::Var(*inner_right));
                 }
@@ -1187,7 +1601,9 @@ fn mba_simplify_expr(var_idx: usize, vars: &[VarDef]) -> Option<Expr> {
         }
         // Xor(a, Xor(a, b)) → Var(b)  [cancellation: a ^ (a ^ b) = b]
         Expr::BinOp(BinOpKind::Xor, left, right) => {
-            if let Expr::BinOp(BinOpKind::Xor, inner_left, inner_right) = &vars[right.0 as usize].expr {
+            if let Expr::BinOp(BinOpKind::Xor, inner_left, inner_right) =
+                &vars[right.0 as usize].expr
+            {
                 if left == inner_left || same_varnode(*left, *inner_left, vars) {
                     return Some(Expr::Var(*inner_right));
                 }
@@ -1195,7 +1611,9 @@ fn mba_simplify_expr(var_idx: usize, vars: &[VarDef]) -> Option<Expr> {
                     return Some(Expr::Var(*inner_left));
                 }
             }
-            if let Expr::BinOp(BinOpKind::Xor, inner_left, inner_right) = &vars[left.0 as usize].expr {
+            if let Expr::BinOp(BinOpKind::Xor, inner_left, inner_right) =
+                &vars[left.0 as usize].expr
+            {
                 if right == inner_left || same_varnode(*right, *inner_left, vars) {
                     return Some(Expr::Var(*inner_right));
                 }
@@ -1204,8 +1622,12 @@ fn mba_simplify_expr(var_idx: usize, vars: &[VarDef]) -> Option<Expr> {
                 }
             }
             // a ^ 0 → a (re-check after const folding resolved operands)
-            if is_const_zero(*right, vars) { return Some(Expr::Var(*left)); }
-            if is_const_zero(*left, vars) { return Some(Expr::Var(*right)); }
+            if is_const_zero(*right, vars) {
+                return Some(Expr::Var(*left));
+            }
+            if is_const_zero(*left, vars) {
+                return Some(Expr::Var(*right));
+            }
             None
         }
         // Add(a, Neg(a)) → 0, Add(Neg(a), a) → 0 [cancellation]
@@ -1251,7 +1673,8 @@ fn mba_simplify_expr(var_idx: usize, vars: &[VarDef]) -> Option<Expr> {
         }
         Expr::BinOp(BinOpKind::Or, left, right) => {
             // a | (a & b) → a
-            if let Expr::BinOp(BinOpKind::And, and_left, _and_right) = &vars[right.0 as usize].expr {
+            if let Expr::BinOp(BinOpKind::And, and_left, _and_right) = &vars[right.0 as usize].expr
+            {
                 if left == and_left || same_varnode(*left, *and_left, vars) {
                     return Some(Expr::Var(*left));
                 }
@@ -1356,7 +1779,9 @@ fn mba_simplify_expr(var_idx: usize, vars: &[VarDef]) -> Option<Expr> {
                     .or_else(|| extract_cdq_value(*or_right, *or_left, vars));
                 if let Some(val_id) = val_from_or {
                     // Right operand: strip Zext wrapper if present
-                    let div_id = if let Expr::UnaryOp(UnaryOpKind::Zext, inner) = &vars[right.0 as usize].expr {
+                    let div_id = if let Expr::UnaryOp(UnaryOpKind::Zext, inner) =
+                        &vars[right.0 as usize].expr
+                    {
                         *inner
                     } else {
                         *right
@@ -1372,7 +1797,9 @@ fn mba_simplify_expr(var_idx: usize, vars: &[VarDef]) -> Option<Expr> {
                 let val_from_or = extract_cdq_value(*or_left, *or_right, vars)
                     .or_else(|| extract_cdq_value(*or_right, *or_left, vars));
                 if let Some(val_id) = val_from_or {
-                    let div_id = if let Expr::UnaryOp(UnaryOpKind::Zext, inner) = &vars[right.0 as usize].expr {
+                    let div_id = if let Expr::UnaryOp(UnaryOpKind::Zext, inner) =
+                        &vars[right.0 as usize].expr
+                    {
                         *inner
                     } else {
                         *right
@@ -1387,8 +1814,12 @@ fn mba_simplify_expr(var_idx: usize, vars: &[VarDef]) -> Option<Expr> {
             if is_const_zero(*left, vars) || is_const_zero(*right, vars) {
                 return Some(Expr::Const(0, vars[left.0 as usize].size));
             }
-            if is_const_one(*left, vars) { return Some(Expr::Var(*right)); }
-            if is_const_one(*right, vars) { return Some(Expr::Var(*left)); }
+            if is_const_one(*left, vars) {
+                return Some(Expr::Var(*right));
+            }
+            if is_const_one(*right, vars) {
+                return Some(Expr::Var(*left));
+            }
             None
         }
         _ => None,
@@ -1431,20 +1862,30 @@ fn simplify_expr(expr: Expr, vars: &[VarDef]) -> Expr {
         Expr::BinOp(BinOpKind::Or, left, right) => {
             if left == right || same_varnode(*left, *right, vars) {
                 Expr::Var(*left)
-            } else if is_const_zero(*right, vars) { Expr::Var(*left) }
-            else if is_const_zero(*left, vars) { Expr::Var(*right) }
-            else if is_const_all_ones(*right, vars) { Expr::Var(*right) }
-            else if is_const_all_ones(*left, vars) { Expr::Var(*left) }
-            else { expr }
+            } else if is_const_zero(*right, vars) {
+                Expr::Var(*left)
+            } else if is_const_zero(*left, vars) {
+                Expr::Var(*right)
+            } else if is_const_all_ones(*right, vars) {
+                Expr::Var(*right)
+            } else if is_const_all_ones(*left, vars) {
+                Expr::Var(*left)
+            } else {
+                expr
+            }
         }
         Expr::BinOp(BinOpKind::Add, left, right) => {
-            if is_const_zero(*right, vars) { Expr::Var(*left) }
-            else if is_const_zero(*left, vars) { Expr::Var(*right) }
+            if is_const_zero(*right, vars) {
+                Expr::Var(*left)
+            } else if is_const_zero(*left, vars) {
+                Expr::Var(*right)
+            }
             // x + x → x * 2 → x << 1 (useful for MBA reduction)
             else if left == right || same_varnode(*left, *right, vars) {
                 Expr::BinOp(BinOpKind::Lsl, *left, *right) // approximate as shift
+            } else {
+                expr
             }
-            else { expr }
         }
         // x - 0 → x, x - x → 0
         Expr::BinOp(BinOpKind::Sub, left, right) => {
@@ -1458,16 +1899,25 @@ fn simplify_expr(expr: Expr, vars: &[VarDef]) -> Expr {
         }
         // x * 1 → x, x * 0 → 0
         Expr::BinOp(BinOpKind::Mult, left, right) => {
-            if is_const_one(*right, vars) { Expr::Var(*left) }
-            else if is_const_one(*left, vars) { Expr::Var(*right) }
-            else if is_const_zero(*right, vars) { Expr::Const(0, vars[left.0 as usize].size) }
-            else if is_const_zero(*left, vars) { Expr::Const(0, vars[right.0 as usize].size) }
-            else { expr }
+            if is_const_one(*right, vars) {
+                Expr::Var(*left)
+            } else if is_const_one(*left, vars) {
+                Expr::Var(*right)
+            } else if is_const_zero(*right, vars) {
+                Expr::Const(0, vars[left.0 as usize].size)
+            } else if is_const_zero(*left, vars) {
+                Expr::Const(0, vars[right.0 as usize].size)
+            } else {
+                expr
+            }
         }
         // x >> 0 → x, x << 0 → x
         Expr::BinOp(BinOpKind::Lsr | BinOpKind::Lsl | BinOpKind::Asr, left, right) => {
-            if is_const_zero(*right, vars) { Expr::Var(*left) }
-            else { expr }
+            if is_const_zero(*right, vars) {
+                Expr::Var(*left)
+            } else {
+                expr
+            }
         }
 
         _ => expr,
@@ -1514,7 +1964,8 @@ fn extract_cdq_value(high_part: VarId, low_part: VarId, vars: &[VarDef]) -> Opti
 
     // The inner value should be derived from the same source as val_id.
     // Case 1: Asr(val, 31) — classic CDQ sign extension
-    if let Expr::BinOp(BinOpKind::Asr, asr_val, asr_amount) = &vars[inner_of_shift.0 as usize].expr {
+    if let Expr::BinOp(BinOpKind::Asr, asr_val, asr_amount) = &vars[inner_of_shift.0 as usize].expr
+    {
         if let Expr::Const(31, _) = &vars[asr_amount.0 as usize].expr {
             if same_varnode(*asr_val, val_id, vars) || asr_val == &val_id {
                 return Some(val_id);
@@ -1572,7 +2023,11 @@ fn const_fold_expr(expr: &Expr, vars: &[VarDef]) -> Option<(u64, u32)> {
         Expr::BinOp(kind, left, right) => {
             let (lv, lsz) = const_fold_expr(&vars[left.0 as usize].expr, vars)?;
             let (rv, _) = const_fold_expr(&vars[right.0 as usize].expr, vars)?;
-            let mask = if lsz >= 8 { u64::MAX } else { (1u64 << (lsz * 8)) - 1 };
+            let mask = if lsz >= 8 {
+                u64::MAX
+            } else {
+                (1u64 << (lsz * 8)) - 1
+            };
             let result = match kind {
                 BinOpKind::Add => lv.wrapping_add(rv) & mask,
                 BinOpKind::Sub => lv.wrapping_sub(rv) & mask,
@@ -1589,7 +2044,11 @@ fn const_fold_expr(expr: &Expr, vars: &[VarDef]) -> Option<(u64, u32)> {
         }
         Expr::UnaryOp(kind, inner) => {
             let (v, sz) = const_fold_expr(&vars[inner.0 as usize].expr, vars)?;
-            let mask = if sz >= 8 { u64::MAX } else { (1u64 << (sz * 8)) - 1 };
+            let mask = if sz >= 8 {
+                u64::MAX
+            } else {
+                (1u64 << (sz * 8)) - 1
+            };
             let result = match kind {
                 UnaryOpKind::Neg => (-(v as i64) as u64) & mask,
                 UnaryOpKind::Not => (!v) & mask,
@@ -1621,7 +2080,10 @@ fn is_const_one(id: VarId, vars: &[VarDef]) -> bool {
 
 /// Check if `val & mask` == `val` (AND is a no-op because val fits within mask).
 fn is_const_mask_noop(val_id: VarId, mask_id: VarId, vars: &[VarDef]) -> bool {
-    if let (Expr::Const(val, _), Expr::Const(mask, _)) = (&vars[val_id.0 as usize].expr, &vars[mask_id.0 as usize].expr) {
+    if let (Expr::Const(val, _), Expr::Const(mask, _)) = (
+        &vars[val_id.0 as usize].expr,
+        &vars[mask_id.0 as usize].expr,
+    ) {
         *val & *mask == *val && *val != 0
     } else {
         false
@@ -1630,7 +2092,11 @@ fn is_const_mask_noop(val_id: VarId, mask_id: VarId, vars: &[VarDef]) -> bool {
 
 fn is_const_all_ones(id: VarId, vars: &[VarDef]) -> bool {
     if let Expr::Const(val, sz) = &vars[id.0 as usize].expr {
-        let mask = if *sz >= 8 { u64::MAX } else { (1u64 << (*sz * 8)) - 1 };
+        let mask = if *sz >= 8 {
+            u64::MAX
+        } else {
+            (1u64 << (*sz * 8)) - 1
+        };
         *val == mask
     } else {
         false
@@ -1642,7 +2108,8 @@ fn is_const_all_ones(id: VarId, vars: &[VarDef]) -> bool {
 /// (which would indicate they're loop variables, not constants).
 fn propagate_register_constants(ssa: &mut SsaCfg) {
     // Collect all register constants: offset → (value, size)
-    let mut reg_consts: std::collections::HashMap<u64, (u64, u32)> = std::collections::HashMap::new();
+    let mut reg_consts: std::collections::HashMap<u64, (u64, u32)> =
+        std::collections::HashMap::new();
     for v in &ssa.vars {
         if v.varnode.space == AddressSpaceId::Register && v.param_name.is_none() {
             if let Expr::Const(val, sz) = &v.expr {
@@ -1661,11 +2128,15 @@ fn propagate_register_constants(ssa: &mut SsaCfg) {
             && !FLAG_OFFSETS.contains(&v.varnode.offset)
             && v.varnode.offset != RSP_OFFSET
             && v.varnode.offset != RIP_OFFSET
-            && v.varnode.offset != 40 // RBP
+            && v.varnode.offset != 40
+        // RBP
         {
             if let Some(&(val, _const_sz)) = reg_consts.get(&v.varnode.offset) {
                 let mask = match v.varnode.size {
-                    1 => 0xFF, 2 => 0xFFFF, 4 => 0xFFFFFFFF, _ => u64::MAX,
+                    1 => 0xFF,
+                    2 => 0xFFFF,
+                    4 => 0xFFFFFFFF,
+                    _ => u64::MAX,
                 };
                 v.expr = Expr::Const(val & mask, v.varnode.size);
             }
@@ -1679,14 +2150,17 @@ fn propagate_register_constants(ssa: &mut SsaCfg) {
 fn propagate_register_copies(ssa: &mut SsaCfg) {
     for bi in 0..ssa.blocks.len() {
         // Build a map: for each register, track the most recent assignment's expression
-        let mut reg_expr: std::collections::HashMap<(u64, u32), (VarId, Expr)> = std::collections::HashMap::new();
+        let mut reg_expr: std::collections::HashMap<(u64, u32), (VarId, Expr)> =
+            std::collections::HashMap::new();
         let mut replacements: Vec<(usize, Expr)> = Vec::new();
 
         let stmts = &ssa.blocks[bi].stmts;
         for i in 0..stmts.len() {
             if let Stmt::Assign(var_id) = &stmts[i] {
                 let vdef = &ssa.vars[var_id.0 as usize];
-                if vdef.varnode.space != AddressSpaceId::Register { continue; }
+                if vdef.varnode.space != AddressSpaceId::Register {
+                    continue;
+                }
                 let key = (vdef.varnode.offset, vdef.varnode.size);
 
                 if let Expr::BinOp(kind, left, right) = &vdef.expr {
@@ -1720,18 +2194,19 @@ fn propagate_register_copies(ssa: &mut SsaCfg) {
 
 fn substitute_expr(expr: &Expr, candidates: &[(VarId, Expr)]) -> Expr {
     match expr {
-        Expr::Var(id) => {
-            candidates.iter().find(|(cid, _)| cid == id)
-                .map(|(_, r)| r.clone())
-                .unwrap_or_else(|| expr.clone())
-        }
+        Expr::Var(id) => candidates
+            .iter()
+            .find(|(cid, _)| cid == id)
+            .map(|(_, r)| r.clone())
+            .unwrap_or_else(|| expr.clone()),
         _ => expr.clone(),
     }
 }
 
 fn eliminate_dead(ssa: &mut SsaCfg) {
     for block in &mut ssa.blocks {
-        let mut read_after: std::collections::HashSet<(u64, u32)> = std::collections::HashSet::new();
+        let mut read_after: std::collections::HashSet<(u64, u32)> =
+            std::collections::HashSet::new();
 
         // Collect reads from terminators
         match &block.terminator {
@@ -1742,7 +2217,9 @@ fn eliminate_dead(ssa: &mut SsaCfg) {
                 collect_var_reads(*v, &ssa.vars, &mut read_after);
             }
             SsaTerminator::Call { args, .. } => {
-                for a in args { collect_var_reads(*a, &ssa.vars, &mut read_after); }
+                for a in args {
+                    collect_var_reads(*a, &ssa.vars, &mut read_after);
+                }
             }
             _ => {}
         }
@@ -1758,7 +2235,10 @@ fn eliminate_dead(ssa: &mut SsaCfg) {
                     if vdef.varnode.space == AddressSpaceId::Register
                         && FLAG_OFFSETS.contains(&vdef.varnode.offset)
                         && vdef.use_count == 0
-                    { dead_indices.push(i); continue; }
+                    {
+                        dead_indices.push(i);
+                        continue;
+                    }
 
                     // Dead uniques — but preserve UserOp placeholders (void
                     // CallOther / SLEIGH user pcodeops). They have side
@@ -1768,21 +2248,31 @@ fn eliminate_dead(ssa: &mut SsaCfg) {
                         && vdef.use_count == 0
                         && !matches!(&vdef.expr, Expr::UserOp { .. })
                     {
-                        dead_indices.push(i); continue;
+                        dead_indices.push(i);
+                        continue;
                     }
 
                     // Dead CARRY/SCARRY/SBORROW operations (multi-precision arithmetic flags)
                     if vdef.use_count == 0 {
-                        if matches!(&vdef.expr,
-                            Expr::BinOp(BinOpKind::Carry | BinOpKind::SCarry | BinOpKind::SBorrow, _, _))
-                        {
-                            dead_indices.push(i); continue;
+                        if matches!(
+                            &vdef.expr,
+                            Expr::BinOp(
+                                BinOpKind::Carry | BinOpKind::SCarry | BinOpKind::SBorrow,
+                                _,
+                                _
+                            )
+                        ) {
+                            dead_indices.push(i);
+                            continue;
                         }
                     }
 
                     // RIP writes
-                    if vdef.varnode.space == AddressSpaceId::Register && vdef.varnode.offset == RIP_OFFSET {
-                        dead_indices.push(i); continue;
+                    if vdef.varnode.space == AddressSpaceId::Register
+                        && vdef.varnode.offset == RIP_OFFSET
+                    {
+                        dead_indices.push(i);
+                        continue;
                     }
 
                     // Dead register writes (not read before overwrite)
@@ -1791,9 +2281,10 @@ fn eliminate_dead(ssa: &mut SsaCfg) {
                     // because the SSA may not have connected loop-carried variables
                     let is_arg_reg = arg_reg_offsets().contains(&vdef.varnode.offset)
                         && vdef.varnode.space == AddressSpaceId::Register;
-                    let precedes_call = block.stmts.get(i + 1..).map_or(false, |rest|
-                        rest.iter().any(|s| matches!(s, Stmt::Call { .. })))
-                        || matches!(block.terminator, SsaTerminator::Call { .. });
+                    let precedes_call =
+                        block.stmts.get(i + 1..).map_or(false, |rest| {
+                            rest.iter().any(|s| matches!(s, Stmt::Call { .. }))
+                        }) || matches!(block.terminator, SsaTerminator::Call { .. });
                     // With proper Phi re-linking, loop-carried values (accumulators)
                     // have use_count > 0 from Phi inputs. No special loop body
                     // preservation needed — standard DCE rules apply.
@@ -1801,7 +2292,10 @@ fn eliminate_dead(ssa: &mut SsaCfg) {
                         && !read_after.contains(&key)
                         && vdef.use_count == 0
                         && !(is_arg_reg && precedes_call)
-                    { dead_indices.push(i); continue; }
+                    {
+                        dead_indices.push(i);
+                        continue;
+                    }
 
                     let mut visited = std::collections::HashSet::new();
                     collect_expr_reads_inner(&vdef.expr, &ssa.vars, &mut read_after, &mut visited);
@@ -1813,14 +2307,17 @@ fn eliminate_dead(ssa: &mut SsaCfg) {
                         || is_esp_derived(&addr_def.varnode, &addr_def.expr, &ssa.vars)
                     {
                         if let Expr::Const(_, _) = &val_def.expr {
-                            dead_indices.push(i); continue;
+                            dead_indices.push(i);
+                            continue;
                         }
                     }
                     collect_var_reads(*addr, &ssa.vars, &mut read_after);
                     collect_var_reads(*val, &ssa.vars, &mut read_after);
                 }
                 Stmt::Call { args, .. } => {
-                    for a in args { collect_var_reads(*a, &ssa.vars, &mut read_after); }
+                    for a in args {
+                        collect_var_reads(*a, &ssa.vars, &mut read_after);
+                    }
                 }
             }
         }
@@ -1833,13 +2330,24 @@ fn eliminate_dead(ssa: &mut SsaCfg) {
     }
 }
 
-fn collect_var_reads(id: VarId, vars: &[VarDef], reads: &mut std::collections::HashSet<(u64, u32)>) {
+fn collect_var_reads(
+    id: VarId,
+    vars: &[VarDef],
+    reads: &mut std::collections::HashSet<(u64, u32)>,
+) {
     let mut visited = std::collections::HashSet::new();
     collect_var_reads_inner(id, vars, reads, &mut visited);
 }
 
-fn collect_var_reads_inner(id: VarId, vars: &[VarDef], reads: &mut std::collections::HashSet<(u64, u32)>, visited: &mut std::collections::HashSet<u32>) {
-    if !visited.insert(id.0) { return; } // cycle detection
+fn collect_var_reads_inner(
+    id: VarId,
+    vars: &[VarDef],
+    reads: &mut std::collections::HashSet<(u64, u32)>,
+    visited: &mut std::collections::HashSet<u32>,
+) {
+    if !visited.insert(id.0) {
+        return;
+    } // cycle detection
     let vdef = &vars[id.0 as usize];
     if vdef.varnode.space == AddressSpaceId::Register {
         reads.insert((vdef.varnode.offset, vdef.varnode.size));
@@ -1847,7 +2355,12 @@ fn collect_var_reads_inner(id: VarId, vars: &[VarDef], reads: &mut std::collecti
     collect_expr_reads_inner(&vdef.expr, vars, reads, visited);
 }
 
-fn collect_expr_reads_inner(expr: &Expr, vars: &[VarDef], reads: &mut std::collections::HashSet<(u64, u32)>, visited: &mut std::collections::HashSet<u32>) {
+fn collect_expr_reads_inner(
+    expr: &Expr,
+    vars: &[VarDef],
+    reads: &mut std::collections::HashSet<(u64, u32)>,
+    visited: &mut std::collections::HashSet<u32>,
+) {
     match expr {
         Expr::Var(id) => {
             let v = &vars[id.0 as usize];
@@ -1859,8 +2372,14 @@ fn collect_expr_reads_inner(expr: &Expr, vars: &[VarDef], reads: &mut std::colle
             collect_var_reads_inner(*l, vars, reads, visited);
             collect_var_reads_inner(*r, vars, reads, visited);
         }
-        Expr::UnaryOp(_, i) | Expr::Load(i) | Expr::FieldAccess(i, _) => collect_var_reads_inner(*i, vars, reads, visited),
-        Expr::Phi(inputs) => { for i in inputs { collect_var_reads_inner(*i, vars, reads, visited); } }
+        Expr::UnaryOp(_, i) | Expr::Load(i) | Expr::FieldAccess(i, _) => {
+            collect_var_reads_inner(*i, vars, reads, visited)
+        }
+        Expr::Phi(inputs) => {
+            for i in inputs {
+                collect_var_reads_inner(*i, vars, reads, visited);
+            }
+        }
         Expr::Ternary(c, t, e) => {
             collect_var_reads_inner(*c, vars, reads, visited);
             collect_var_reads_inner(*t, vars, reads, visited);
@@ -1871,7 +2390,9 @@ fn collect_expr_reads_inner(expr: &Expr, vars: &[VarDef], reads: &mut std::colle
 }
 
 fn is_rsp_derived(vn: &pcode_ir::Varnode, expr: &Expr, vars: &[VarDef]) -> bool {
-    if vn.space == AddressSpaceId::Register && vn.offset == RSP_OFFSET { return true; }
+    if vn.space == AddressSpaceId::Register && vn.offset == RSP_OFFSET {
+        return true;
+    }
     match expr {
         Expr::Var(id) | Expr::BinOp(_, id, _) => {
             let v = &vars[id.0 as usize];
@@ -1882,11 +2403,15 @@ fn is_rsp_derived(vn: &pcode_ir::Varnode, expr: &Expr, vars: &[VarDef]) -> bool 
 }
 
 fn is_esp_derived(vn: &pcode_ir::Varnode, expr: &Expr, vars: &[VarDef]) -> bool {
-    if vn.space == AddressSpaceId::Register && vn.offset == ESP_OFFSET && vn.size == 4 { return true; }
+    if vn.space == AddressSpaceId::Register && vn.offset == ESP_OFFSET && vn.size == 4 {
+        return true;
+    }
     match expr {
         Expr::Var(id) | Expr::BinOp(_, id, _) => {
             let v = &vars[id.0 as usize];
-            v.varnode.space == AddressSpaceId::Register && v.varnode.offset == ESP_OFFSET && v.varnode.size == 4
+            v.varnode.space == AddressSpaceId::Register
+                && v.varnode.offset == ESP_OFFSET
+                && v.varnode.size == 4
         }
         _ => false,
     }
@@ -1907,7 +2432,9 @@ fn recover_conditions(ssa: &mut SsaCfg) {
             // A comparison is only "already recovered" if its operands are NOT flags
             let already_comparison = if let Expr::BinOp(k, l, r) = &vdef.expr {
                 is_comparison(*k) && !is_flag_derived(*l, ssa) && !is_flag_derived(*r, ssa)
-            } else { false };
+            } else {
+                false
+            };
             if dominated_by_flags && !already_comparison {
                 to_recover.push((bi, *cond));
             }
@@ -1916,9 +2443,14 @@ fn recover_conditions(ssa: &mut SsaCfg) {
 
     for (bi, cond_id) in to_recover {
         if let Some(new_cond) = try_recover_condition(cond_id, bi, ssa) {
-            if let SsaTerminator::CBranch { taken, fallthrough, .. } = ssa.blocks[bi].terminator {
+            if let SsaTerminator::CBranch {
+                taken, fallthrough, ..
+            } = ssa.blocks[bi].terminator
+            {
                 ssa.blocks[bi].terminator = SsaTerminator::CBranch {
-                    cond: new_cond, taken, fallthrough,
+                    cond: new_cond,
+                    taken,
+                    fallthrough,
                 };
             }
         }
@@ -1942,18 +2474,20 @@ fn recover_conditions(ssa: &mut SsaCfg) {
         for (idx, v) in ssa.vars.iter().enumerate() {
             let (is_pair, kind, l, r) = match &v.expr {
                 Expr::BinOp(BinOpKind::NotEq, l, r) => {
-                    let pair = (is_of(*l, ssa) && is_sf(*r, ssa))
-                        || (is_sf(*l, ssa) && is_of(*r, ssa));
+                    let pair =
+                        (is_of(*l, ssa) && is_sf(*r, ssa)) || (is_sf(*l, ssa) && is_of(*r, ssa));
                     (pair, BinOpKind::SLess, *l, *r)
                 }
                 Expr::BinOp(BinOpKind::Eq, l, r) => {
-                    let pair = (is_of(*l, ssa) && is_sf(*r, ssa))
-                        || (is_sf(*l, ssa) && is_of(*r, ssa));
+                    let pair =
+                        (is_of(*l, ssa) && is_sf(*r, ssa)) || (is_sf(*l, ssa) && is_of(*r, ssa));
                     (pair, BinOpKind::SLessEq, *l, *r)
                 }
                 _ => (false, BinOpKind::Eq, VarId(0), VarId(0)),
             };
-            if !is_pair { continue; }
+            if !is_pair {
+                continue;
+            }
             // Extract CMP operands from either flag var's definition.
             let extract_ab = |flag_var: VarId| -> Option<(VarId, VarId)> {
                 match &ssa.vars[flag_var.0 as usize].expr {
@@ -1968,11 +2502,7 @@ fn recover_conditions(ssa: &mut SsaCfg) {
                     BinOpKind::SLessEq => (b, a),
                     _ => (a, b),
                 };
-                rewrites.push((
-                    idx,
-                    Expr::BinOp(kind, final_l, final_r),
-                    InferredType::Bool,
-                ));
+                rewrites.push((idx, Expr::BinOp(kind, final_l, final_r), InferredType::Bool));
             }
         }
         for (idx, expr, ty) in rewrites {
@@ -1986,7 +2516,9 @@ fn recover_conditions(ssa: &mut SsaCfg) {
     let mut sub_cond: Vec<(usize, VarId, VarId)> = Vec::new(); // (bi, a, b)
     for (bi, block) in ssa.blocks.iter().enumerate() {
         if let SsaTerminator::CBranch { cond, .. } = &block.terminator {
-            if is_flag_derived(*cond, ssa) { continue; }
+            if is_flag_derived(*cond, ssa) {
+                continue;
+            }
             let mut resolved = *cond;
             for _ in 0..4 {
                 if let Expr::Var(next) = ssa.vars[resolved.0 as usize].expr {
@@ -2003,11 +2535,18 @@ fn recover_conditions(ssa: &mut SsaCfg) {
     for (bi, a, b) in sub_cond {
         let cond_varnode = if let SsaTerminator::CBranch { cond, .. } = ssa.blocks[bi].terminator {
             ssa.vars[cond.0 as usize].varnode
-        } else { continue; };
+        } else {
+            continue;
+        };
         let new_cond = ssa.new_var(cond_varnode, Expr::BinOp(BinOpKind::NotEq, a, b), 1);
-        if let SsaTerminator::CBranch { taken, fallthrough, .. } = ssa.blocks[bi].terminator {
+        if let SsaTerminator::CBranch {
+            taken, fallthrough, ..
+        } = ssa.blocks[bi].terminator
+        {
             ssa.blocks[bi].terminator = SsaTerminator::CBranch {
-                cond: new_cond, taken, fallthrough,
+                cond: new_cond,
+                taken,
+                fallthrough,
             };
         }
     }
@@ -2022,9 +2561,14 @@ fn recover_conditions(ssa: &mut SsaCfg) {
                 if let Expr::Ternary(cond, _, _) = &ssa.vars[vi].expr {
                     if is_flag_derived(*cond, ssa) {
                         // Check it's not already a recovered comparison
-                        let already = if let Expr::BinOp(k, l, r) = &ssa.vars[cond.0 as usize].expr {
-                            is_comparison(*k) && !is_flag_derived(*l, ssa) && !is_flag_derived(*r, ssa)
-                        } else { false };
+                        let already = if let Expr::BinOp(k, l, r) = &ssa.vars[cond.0 as usize].expr
+                        {
+                            is_comparison(*k)
+                                && !is_flag_derived(*l, ssa)
+                                && !is_flag_derived(*r, ssa)
+                        } else {
+                            false
+                        };
                         if !already {
                             ternary_to_recover.push((vi, *cond, bi));
                         }
@@ -2117,13 +2661,19 @@ fn extract_cset_pattern(var_idx: usize, ssa: &SsaCfg) -> Option<(VarId, i64, i64
                     matches!(&ssa.vars[c.0 as usize].expr, Expr::Const(1, _))
                 }
                 Expr::Const(val, sz) => {
-                    let mask = if *sz >= 8 { u64::MAX } else { (1u64 << (sz * 8)) - 1 };
+                    let mask = if *sz >= 8 {
+                        u64::MAX
+                    } else {
+                        (1u64 << (sz * 8)) - 1
+                    };
                     *val == mask
                 }
                 _ => false,
             };
 
-            if !is_neg_one { continue; }
+            if !is_neg_one {
+                continue;
+            }
 
             // Check if zext_side is Zext(flag_cond)
             if let Expr::UnaryOp(UnaryOpKind::Zext, cond_id) = &zext_def.expr {
@@ -2156,9 +2706,12 @@ fn is_flag_derived(id: VarId, ssa: &SsaCfg) -> bool {
 }
 
 fn is_flag_derived_depth(id: VarId, ssa: &SsaCfg, depth: u32) -> bool {
-    if depth == 0 { return false; }
+    if depth == 0 {
+        return false;
+    }
     let vdef = &ssa.vars[id.0 as usize];
-    if vdef.varnode.space == AddressSpaceId::Register && FLAG_OFFSETS.contains(&vdef.varnode.offset) {
+    if vdef.varnode.space == AddressSpaceId::Register && FLAG_OFFSETS.contains(&vdef.varnode.offset)
+    {
         return true;
     }
     match &vdef.expr {
@@ -2203,7 +2756,11 @@ fn try_recover_condition(cond_id: VarId, block_idx: usize, ssa: &mut SsaCfg) -> 
     let classified = classify_jcc_condition(cond_id, ssa);
 
     if let Some((kind, swap)) = classified {
-        let (left, right) = if swap { (cmp_right, cmp_left) } else { (cmp_left, cmp_right) };
+        let (left, right) = if swap {
+            (cmp_right, cmp_left)
+        } else {
+            (cmp_left, cmp_right)
+        };
         let new_var = ssa.new_var(
             ssa.vars[cond_id.0 as usize].varnode,
             Expr::BinOp(kind, left, right),
@@ -2232,24 +2789,47 @@ fn try_recover_condition(cond_id: VarId, block_idx: usize, ssa: &mut SsaCfg) -> 
     // mba_simplify rewrites BoolNot(ZF) → NotEq(cmp_a, cmp_b) before recover_conditions.
     // Handle BoolAnd(NotEq(a,b), Eq(OF/OV,SF/NG)) and its mirror — both orderings.
     // Validates that NotEq operands match cmp_left/cmp_right to prevent false positives.
-    let ba_parts = if let Expr::BinOp(BinOpKind::BoolAnd, l, r) = &ssa.vars[cond_id.0 as usize].expr {
+    let ba_parts = if let Expr::BinOp(BinOpKind::BoolAnd, l, r) = &ssa.vars[cond_id.0 as usize].expr
+    {
         Some((*l, *r))
-    } else { None };
+    } else {
+        None
+    };
 
     if let Some((ba_left, ba_right)) = ba_parts {
         let is_of_sf_eq = |id: VarId| -> bool {
             if let Expr::BinOp(BinOpKind::Eq, a, b) = &ssa.vars[id.0 as usize].expr {
-                let a_of = is_flag_ref(*a,523,ssa)||is_flag_ref(*a,259,ssa)||is_flag_ref(*a,262,ssa)||is_flag_ref(*a,99,ssa);
-                let a_sf = is_flag_ref(*a,519,ssa)||is_flag_ref(*a,256,ssa)||is_flag_ref(*a,263,ssa)||is_flag_ref(*a,96,ssa);
-                let b_of = is_flag_ref(*b,523,ssa)||is_flag_ref(*b,259,ssa)||is_flag_ref(*b,262,ssa)||is_flag_ref(*b,99,ssa);
-                let b_sf = is_flag_ref(*b,519,ssa)||is_flag_ref(*b,256,ssa)||is_flag_ref(*b,263,ssa)||is_flag_ref(*b,96,ssa);
+                let a_of = is_flag_ref(*a, 523, ssa)
+                    || is_flag_ref(*a, 259, ssa)
+                    || is_flag_ref(*a, 262, ssa)
+                    || is_flag_ref(*a, 99, ssa);
+                let a_sf = is_flag_ref(*a, 519, ssa)
+                    || is_flag_ref(*a, 256, ssa)
+                    || is_flag_ref(*a, 263, ssa)
+                    || is_flag_ref(*a, 96, ssa);
+                let b_of = is_flag_ref(*b, 523, ssa)
+                    || is_flag_ref(*b, 259, ssa)
+                    || is_flag_ref(*b, 262, ssa)
+                    || is_flag_ref(*b, 99, ssa);
+                let b_sf = is_flag_ref(*b, 519, ssa)
+                    || is_flag_ref(*b, 256, ssa)
+                    || is_flag_ref(*b, 263, ssa)
+                    || is_flag_ref(*b, 96, ssa);
                 (a_of && b_sf) || (a_sf && b_of)
-            } else { false }
+            } else {
+                false
+            }
         };
         let r_is_of_sf = is_of_sf_eq(ba_right);
         let l_is_of_sf = is_of_sf_eq(ba_left);
 
-        let neq_side = if r_is_of_sf { Some(ba_left) } else if l_is_of_sf { Some(ba_right) } else { None };
+        let neq_side = if r_is_of_sf {
+            Some(ba_left)
+        } else if l_is_of_sf {
+            Some(ba_right)
+        } else {
+            None
+        };
         let neq_pair = neq_side.and_then(|id| {
             if let Expr::BinOp(BinOpKind::NotEq, l, r) = &ssa.vars[id.0 as usize].expr {
                 if !is_flag_derived(*l, ssa) && !is_flag_derived(*r, ssa) {
@@ -2266,7 +2846,11 @@ fn try_recover_condition(cond_id: VarId, block_idx: usize, ssa: &mut SsaCfg) -> 
             let cb = resolve_cmp_operand(cmp_right, ssa);
             if (ra == ca && rb == cb) || (ra == cb && rb == ca) {
                 let varnode = ssa.vars[cond_id.0 as usize].varnode;
-                let new_var = ssa.new_var(varnode, Expr::BinOp(BinOpKind::SLess, cmp_right, cmp_left), 1);
+                let new_var = ssa.new_var(
+                    varnode,
+                    Expr::BinOp(BinOpKind::SLess, cmp_right, cmp_left),
+                    1,
+                );
                 return Some(new_var);
             }
         }
@@ -2279,7 +2863,9 @@ fn try_recover_condition(cond_id: VarId, block_idx: usize, ssa: &mut SsaCfg) -> 
 /// This handles the case where flag assignments have been inlined/eliminated by
 /// earlier fold passes but the VarIds still exist.
 fn trace_cond_to_cmp(cond_id: VarId, ssa: &SsaCfg, depth: u32) -> Option<(VarId, VarId)> {
-    if depth == 0 { return None; }
+    if depth == 0 {
+        return None;
+    }
     let vdef = &ssa.vars[cond_id.0 as usize];
     match &vdef.expr {
         // SF = IntSLess(result, 0)
@@ -2291,14 +2877,17 @@ fn trace_cond_to_cmp(cond_id: VarId, ssa: &SsaCfg, depth: u32) -> Option<(VarId,
             None
         }
         // CF = Carry/Less(left, right)
-        Expr::BinOp(BinOpKind::Carry | BinOpKind::SCarry | BinOpKind::SBorrow
-            | BinOpKind::Less, left, right) => {
-            Some((*left, *right))
-        }
+        Expr::BinOp(
+            BinOpKind::Carry | BinOpKind::SCarry | BinOpKind::SBorrow | BinOpKind::Less,
+            left,
+            right,
+        ) => Some((*left, *right)),
         // BoolNot(inner) → trace inner
         Expr::UnaryOp(UnaryOpKind::BoolNot, inner) => trace_cond_to_cmp(*inner, ssa, depth - 1),
         // Zext/Sext wrapping (common in ternary conditions from CSEL/CNEG) → trace inner
-        Expr::UnaryOp(UnaryOpKind::Zext | UnaryOpKind::Sext, inner) => trace_cond_to_cmp(*inner, ssa, depth - 1),
+        Expr::UnaryOp(UnaryOpKind::Zext | UnaryOpKind::Sext, inner) => {
+            trace_cond_to_cmp(*inner, ssa, depth - 1)
+        }
         // Var(inner) → follow
         Expr::Var(inner) => trace_cond_to_cmp(*inner, ssa, depth - 1),
         // Compound: BoolAnd/BoolOr → trace both sides for CMP operands
@@ -2335,7 +2924,9 @@ fn find_cmp_operands(block_idx: usize, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
     }
     // Fallback: search all blocks (for cases where the CMP is in a predecessor)
     for bi in (0..ssa.blocks.len()).rev() {
-        if bi == block_idx { continue; }
+        if bi == block_idx {
+            continue;
+        }
         if let Some(result) = find_cmp_in_block(bi, ssa) {
             return Some(result);
         }
@@ -2370,15 +2961,18 @@ fn find_cmp_in_block(block_idx: usize, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
             if v.varnode.space == AddressSpaceId::Register
                 && matches!(v.varnode.offset, 512 | 523 | 258 | 259 | 261 | 262)
             {
-                if let Expr::BinOp(BinOpKind::Carry | BinOpKind::SCarry | BinOpKind::SBorrow
-                    | BinOpKind::Less, left, right) = &v.expr
+                if let Expr::BinOp(
+                    BinOpKind::Carry | BinOpKind::SCarry | BinOpKind::SBorrow | BinOpKind::Less,
+                    left,
+                    right,
+                ) = &v.expr
                 {
                     return Some((*left, *right));
                 }
             }
             // ARM64: NG/ZR and tmpNG/tmpZR from flag writes
-            if v.varnode.space == AddressSpaceId::Register
-                && matches!(v.varnode.offset, 257 | 264) // ZR or tmpZR (ARM64)
+            if v.varnode.space == AddressSpaceId::Register && matches!(v.varnode.offset, 257 | 264)
+            // ZR or tmpZR (ARM64)
             {
                 if let Expr::BinOp(BinOpKind::Eq, result_id, zero_id) = &v.expr {
                     let zero = &ssa.vars[zero_id.0 as usize];
@@ -2387,8 +2981,8 @@ fn find_cmp_in_block(block_idx: usize, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
                     }
                 }
             }
-            if v.varnode.space == AddressSpaceId::Register
-                && matches!(v.varnode.offset, 256 | 263) // NG or tmpNG (ARM64)
+            if v.varnode.space == AddressSpaceId::Register && matches!(v.varnode.offset, 256 | 263)
+            // NG or tmpNG (ARM64)
             {
                 if let Expr::BinOp(BinOpKind::SLess, result_id, zero_id) = &v.expr {
                     let zero = &ssa.vars[zero_id.0 as usize];
@@ -2399,8 +2993,8 @@ fn find_cmp_in_block(block_idx: usize, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
             }
             // ARM32: tmpZR at offset 101 (ZR=97 is the stored flag, tmpZR=101 is the computed one)
             // ARM32 CMP sets tmpNG/tmpZR/tmpCY/tmpOV, then copies to NG/ZR/CY/OV
-            if v.varnode.space == AddressSpaceId::Register
-                && matches!(v.varnode.offset, 97 | 101) // ZR or tmpZR (ARM32)
+            if v.varnode.space == AddressSpaceId::Register && matches!(v.varnode.offset, 97 | 101)
+            // ZR or tmpZR (ARM32)
             {
                 if let Expr::BinOp(BinOpKind::Eq, result_id, zero_id) = &v.expr {
                     let zero = &ssa.vars[zero_id.0 as usize];
@@ -2409,8 +3003,8 @@ fn find_cmp_in_block(block_idx: usize, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
                     }
                 }
             }
-            if v.varnode.space == AddressSpaceId::Register
-                && matches!(v.varnode.offset, 96 | 100) // NG or tmpNG (ARM32)
+            if v.varnode.space == AddressSpaceId::Register && matches!(v.varnode.offset, 96 | 100)
+            // NG or tmpNG (ARM32)
             {
                 if let Expr::BinOp(BinOpKind::SLess, result_id, zero_id) = &v.expr {
                     let zero = &ssa.vars[zero_id.0 as usize];
@@ -2421,10 +3015,14 @@ fn find_cmp_in_block(block_idx: usize, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
             }
             // ARM32: tmpCY/CY carry flag from CMP
             if v.varnode.space == AddressSpaceId::Register
-                && matches!(v.varnode.offset, 98 | 99 | 102 | 103) // CY, OV, tmpCY, tmpOV (ARM32)
+                && matches!(v.varnode.offset, 98 | 99 | 102 | 103)
+            // CY, OV, tmpCY, tmpOV (ARM32)
             {
-                if let Expr::BinOp(BinOpKind::Carry | BinOpKind::SCarry | BinOpKind::SBorrow
-                    | BinOpKind::Less, left, right) = &v.expr
+                if let Expr::BinOp(
+                    BinOpKind::Carry | BinOpKind::SCarry | BinOpKind::SBorrow | BinOpKind::Less,
+                    left,
+                    right,
+                ) = &v.expr
                 {
                     return Some((*left, *right));
                 }
@@ -2436,12 +3034,17 @@ fn find_cmp_in_block(block_idx: usize, ssa: &SsaCfg) -> Option<(VarId, VarId)> {
 
 /// Trace a SUB/AND/NEG result variable back to find the CMP operands.
 /// Uses zero_id for IntNeg(x) → (0, x) and TEST same-register → (x, 0).
-fn trace_to_cmp_with_zero(result_id: VarId, ssa: &SsaCfg, zero_id: Option<VarId>) -> Option<(VarId, VarId)> {
+fn trace_to_cmp_with_zero(
+    result_id: VarId,
+    ssa: &SsaCfg,
+    zero_id: Option<VarId>,
+) -> Option<(VarId, VarId)> {
     let v = &ssa.vars[result_id.0 as usize];
     match &v.expr {
-        Expr::BinOp(BinOpKind::Sub, left, right) => {
-            Some((resolve_cmp_operand(*left, ssa), resolve_cmp_operand(*right, ssa)))
-        }
+        Expr::BinOp(BinOpKind::Sub, left, right) => Some((
+            resolve_cmp_operand(*left, ssa),
+            resolve_cmp_operand(*right, ssa),
+        )),
         Expr::BinOp(BinOpKind::And, left, right) => {
             // TEST a, b → AND(a, b). ZF = (a & b == 0).
             // When both operands are the same (TEST a, a), compare a against 0.
@@ -2480,7 +3083,9 @@ fn resolve_cmp_operand(id: VarId, ssa: &SsaCfg) -> VarId {
 }
 
 fn resolve_cmp_operand_depth(id: VarId, ssa: &SsaCfg, depth: u32) -> VarId {
-    if depth == 0 { return id; }
+    if depth == 0 {
+        return id;
+    }
     let v = &ssa.vars[id.0 as usize];
     // Follow register-to-register copies
     if v.varnode.space == AddressSpaceId::Register {
@@ -2498,11 +3103,15 @@ fn resolve_cmp_operand_depth(id: VarId, ssa: &SsaCfg, depth: u32) -> VarId {
                         return *inner;
                     }
                 }
-                if let Expr::Load(_) = &sv.expr { return *src; }
+                if let Expr::Load(_) = &sv.expr {
+                    return *src;
+                }
             }
             return *src;
         }
-        if let Expr::Load(_) = &v.expr { return id; }
+        if let Expr::Load(_) = &v.expr {
+            return id;
+        }
     }
     // Follow Unique space vars
     if v.varnode.space == AddressSpaceId::Unique {
@@ -2537,10 +3146,10 @@ fn classify_jcc_condition(cond_id: VarId, ssa: &SsaCfg) -> Option<(BinOpKind, bo
             let inverted = match kind {
                 BinOpKind::Eq => BinOpKind::NotEq,
                 BinOpKind::NotEq => BinOpKind::Eq,
-                BinOpKind::Less => BinOpKind::LessEq,   // !(a < b) = a >= b = b <= a
-                BinOpKind::LessEq => BinOpKind::Less,    // !(a <= b) = a > b = b < a
-                BinOpKind::SLess => BinOpKind::SLessEq,  // !(a < b) = a >= b = b <= a
-                BinOpKind::SLessEq => BinOpKind::SLess,  // !(a <= b) = a > b = b < a
+                BinOpKind::Less => BinOpKind::LessEq, // !(a < b) = a >= b = b <= a
+                BinOpKind::LessEq => BinOpKind::Less, // !(a <= b) = a > b = b < a
+                BinOpKind::SLess => BinOpKind::SLessEq, // !(a < b) = a >= b = b <= a
+                BinOpKind::SLessEq => BinOpKind::SLess, // !(a <= b) = a > b = b < a
                 _ => return None,
             };
             // Invert: !(a < b) = b <= a, so swap stays the same but the kind flips.
@@ -2551,13 +3160,33 @@ fn classify_jcc_condition(cond_id: VarId, ssa: &SsaCfg) -> Option<(BinOpKind, bo
     }
 
     // Helper: check ZF (x86=518), ZR (ARM64=257,tmpZR=264), ZR (ARM32=97)
-    let is_zf = |id: VarId| is_flag_ref(id, 518, ssa) || is_flag_ref(id, 257, ssa) || is_flag_ref(id, 264, ssa) || is_flag_ref(id, 97, ssa);
+    let is_zf = |id: VarId| {
+        is_flag_ref(id, 518, ssa)
+            || is_flag_ref(id, 257, ssa)
+            || is_flag_ref(id, 264, ssa)
+            || is_flag_ref(id, 97, ssa)
+    };
     // Helper: check CF (x86=512), CY (ARM64=258,tmpCY=261), CY (ARM32=98)
-    let is_cf = |id: VarId| is_flag_ref(id, 512, ssa) || is_flag_ref(id, 258, ssa) || is_flag_ref(id, 261, ssa) || is_flag_ref(id, 98, ssa);
+    let is_cf = |id: VarId| {
+        is_flag_ref(id, 512, ssa)
+            || is_flag_ref(id, 258, ssa)
+            || is_flag_ref(id, 261, ssa)
+            || is_flag_ref(id, 98, ssa)
+    };
     // Helper: check OF (x86=523), OV (ARM64=259,tmpOV=262), OV (ARM32=99)
-    let is_of = |id: VarId| is_flag_ref(id, 523, ssa) || is_flag_ref(id, 259, ssa) || is_flag_ref(id, 262, ssa) || is_flag_ref(id, 99, ssa);
+    let is_of = |id: VarId| {
+        is_flag_ref(id, 523, ssa)
+            || is_flag_ref(id, 259, ssa)
+            || is_flag_ref(id, 262, ssa)
+            || is_flag_ref(id, 99, ssa)
+    };
     // Helper: check SF (x86=519), NG (ARM64=256,tmpNG=263), NG (ARM32=96)
-    let is_sf = |id: VarId| is_flag_ref(id, 519, ssa) || is_flag_ref(id, 256, ssa) || is_flag_ref(id, 263, ssa) || is_flag_ref(id, 96, ssa);
+    let is_sf = |id: VarId| {
+        is_flag_ref(id, 519, ssa)
+            || is_flag_ref(id, 256, ssa)
+            || is_flag_ref(id, 263, ssa)
+            || is_flag_ref(id, 96, ssa)
+    };
 
     match &vdef.expr {
         // ZF/ZR directly → JE/BEQ → a == b
@@ -2591,9 +3220,7 @@ fn classify_jcc_condition(cond_id: VarId, ssa: &SsaCfg) -> Option<(BinOpKind, bo
         }
 
         // SF/NG directly → JL/BLT → a < b (signed)
-        _ if is_sf(cond_id) => {
-            Some((BinOpKind::SLess, false))
-        }
+        _ if is_sf(cond_id) => Some((BinOpKind::SLess, false)),
 
         // BoolOr(CF, ZF) → JBE → a <= b (unsigned)
         Expr::BinOp(BinOpKind::BoolOr, left, right)
@@ -2609,31 +3236,32 @@ fn classify_jcc_condition(cond_id: VarId, ssa: &SsaCfg) -> Option<(BinOpKind, bo
             let left_def = &ssa.vars[left.0 as usize];
             let right_def = &ssa.vars[right.0 as usize];
             // ZF || (OF != SF) → JLE
-            let zf_or_sfneqof =
-                (is_zf(*left) && matches!(&right_def.expr,
+            let zf_or_sfneqof = (is_zf(*left)
+                && matches!(&right_def.expr,
                     Expr::BinOp(BinOpKind::NotEq, a, b)
                     if (is_of(*a) && is_sf(*b)) || (is_sf(*a) && is_of(*b))))
-                || (is_zf(*right) && matches!(&left_def.expr,
+                || (is_zf(*right)
+                    && matches!(&left_def.expr,
                     Expr::BinOp(BinOpKind::NotEq, a, b)
                     if (is_of(*a) && is_sf(*b)) || (is_sf(*a) && is_of(*b))));
             if zf_or_sfneqof {
                 return Some((BinOpKind::SLessEq, false));
             }
             // AArch64: BoolOr(BoolNot(CY), ZR) → BLS → unsigned a <= b
-            let not_cy_or_zr =
-                (matches!(&left_def.expr, Expr::UnaryOp(UnaryOpKind::BoolNot, inner) if is_cf(*inner))
-                    && is_zf(*right))
+            let not_cy_or_zr = (matches!(&left_def.expr, Expr::UnaryOp(UnaryOpKind::BoolNot, inner) if is_cf(*inner))
+                && is_zf(*right))
                 || (matches!(&right_def.expr, Expr::UnaryOp(UnaryOpKind::BoolNot, inner) if is_cf(*inner))
                     && is_zf(*left));
             if not_cy_or_zr {
                 return Some((BinOpKind::LessEq, false));
             }
             // AArch64: BoolOr(ZR, NotEq(OV, NG)) → signed a <= b
-            let zr_or_ngneqov =
-                (is_zf(*left) && matches!(&right_def.expr,
+            let zr_or_ngneqov = (is_zf(*left)
+                && matches!(&right_def.expr,
                     Expr::BinOp(BinOpKind::NotEq, a, b)
                     if (is_of(*a) && is_sf(*b)) || (is_sf(*a) && is_of(*b))))
-                || (is_zf(*right) && matches!(&left_def.expr,
+                || (is_zf(*right)
+                    && matches!(&left_def.expr,
                     Expr::BinOp(BinOpKind::NotEq, a, b)
                     if (is_of(*a) && is_sf(*b)) || (is_sf(*a) && is_of(*b))));
             if zr_or_ngneqov {
@@ -2684,7 +3312,9 @@ fn is_flag_ref(id: VarId, flag_offset: u64, ssa: &SsaCfg) -> bool {
     // Check one level of Var indirection
     if let Expr::Var(inner) = &v.expr {
         let inner_v = &ssa.vars[inner.0 as usize];
-        if inner_v.varnode.space == AddressSpaceId::Register && inner_v.varnode.offset == flag_offset {
+        if inner_v.varnode.space == AddressSpaceId::Register
+            && inner_v.varnode.offset == flag_offset
+        {
             return true;
         }
     }
@@ -2692,8 +3322,15 @@ fn is_flag_ref(id: VarId, flag_offset: u64, ssa: &SsaCfg) -> bool {
 }
 
 fn is_comparison(kind: BinOpKind) -> bool {
-    matches!(kind, BinOpKind::Eq | BinOpKind::NotEq | BinOpKind::Less
-        | BinOpKind::LessEq | BinOpKind::SLess | BinOpKind::SLessEq)
+    matches!(
+        kind,
+        BinOpKind::Eq
+            | BinOpKind::NotEq
+            | BinOpKind::Less
+            | BinOpKind::LessEq
+            | BinOpKind::SLess
+            | BinOpKind::SLessEq
+    )
 }
 
 // ---- Return Values ----
@@ -2701,16 +3338,26 @@ fn is_comparison(kind: BinOpKind) -> bool {
 fn detect_return_values(ssa: &mut SsaCfg) {
     // Try to detect architecture from register usage:
     // ARM32 r0 = offset 32 (0x20), x86 RAX = offset 0, AArch64 x0 = offset 16384
-    let has_arm32_regs = ssa.vars.iter().any(|v|
-        v.varnode.space == AddressSpaceId::Register && v.varnode.offset == 32 && v.varnode.size == 4
-        && matches!(v.varnode.offset, 32..=92)); // ARM32 r0-r15 range
-    let has_aarch64_regs = ssa.vars.iter().any(|v|
+    let has_arm32_regs = ssa.vars.iter().any(|v| {
+        v.varnode.space == AddressSpaceId::Register
+            && v.varnode.offset == 32
+            && v.varnode.size == 4
+            && matches!(v.varnode.offset, 32..=92)
+    }); // ARM32 r0-r15 range
+    let has_aarch64_regs = ssa.vars.iter().any(|v| {
         v.varnode.space == AddressSpaceId::Register
         && v.varnode.offset >= 16384 && v.varnode.offset <= 16440  // x0-x7 range
-        && (v.varnode.size == 4 || v.varnode.size == 8));
-    let ret_reg_offset = if has_arm32_regs { 32 }
-        else if has_aarch64_regs { 16384 }  // AArch64 x0
-        else { RAX_OFFSET }; // x86 RAX=0
+        && (v.varnode.size == 4 || v.varnode.size == 8)
+    });
+    let ret_reg_offset = if has_arm32_regs {
+        32
+    } else if has_aarch64_regs {
+        16384
+    }
+    // AArch64 x0
+    else {
+        RAX_OFFSET
+    }; // x86 RAX=0
 
     // AArch64: unwrap Zext from existing return values (SSA builder may have picked
     // x0 size=8 when the function actually operates on w0 size=4).
@@ -2729,8 +3376,12 @@ fn detect_return_values(ssa: &mut SsaCfg) {
 
     for bi in 0..ssa.blocks.len() {
         if let SsaTerminator::Return(ref ret_val) = ssa.blocks[bi].terminator {
-            if ret_val.is_some() { continue; }
-        } else { continue; }
+            if ret_val.is_some() {
+                continue;
+            }
+        } else {
+            continue;
+        }
 
         // Strategy 1: Look backwards in this block for RAX/EAX assignment
         let mut found = find_ret_reg_in_block(&ssa.blocks[bi].stmts, &ssa.vars, ret_reg_offset);
@@ -2751,16 +3402,23 @@ fn detect_return_values(ssa: &mut SsaCfg) {
         // Strategy 3: Check predecessors (CMOV patterns, conditional returns)
         if found.is_none() {
             for pred_bi in 0..ssa.blocks.len() {
-                if pred_bi == bi { continue; }
+                if pred_bi == bi {
+                    continue;
+                }
                 let flows_to_bi = match &ssa.blocks[pred_bi].terminator {
                     SsaTerminator::Fallthrough(b) | SsaTerminator::Branch(b) => b.0 == bi,
-                    SsaTerminator::CBranch { taken, fallthrough, .. } => taken.0 == bi || fallthrough.0 == bi,
+                    SsaTerminator::CBranch {
+                        taken, fallthrough, ..
+                    } => taken.0 == bi || fallthrough.0 == bi,
                     SsaTerminator::Call { fallthrough, .. } => fallthrough.0 == bi,
                     _ => false,
                 };
-                if !flows_to_bi { continue; }
+                if !flows_to_bi {
+                    continue;
+                }
 
-                let pred_found = find_ret_reg_in_block(&ssa.blocks[pred_bi].stmts, &ssa.vars, ret_reg_offset);
+                let pred_found =
+                    find_ret_reg_in_block(&ssa.blocks[pred_bi].stmts, &ssa.vars, ret_reg_offset);
                 if pred_found.is_some() {
                     found = pred_found;
                     break;
@@ -2777,7 +3435,9 @@ fn detect_return_values(ssa: &mut SsaCfg) {
                         }
                     }
                 }
-                if found.is_some() { break; }
+                if found.is_some() {
+                    break;
+                }
             }
         }
 
@@ -2792,18 +3452,30 @@ fn detect_return_values(ssa: &mut SsaCfg) {
                 let mut next_frontier = Vec::new();
                 for &target_bi in &frontier {
                     for pred_bi in 0..ssa.blocks.len() {
-                        if visited.contains(&pred_bi) { continue; }
+                        if visited.contains(&pred_bi) {
+                            continue;
+                        }
                         let flows = match &ssa.blocks[pred_bi].terminator {
-                            SsaTerminator::Fallthrough(b) | SsaTerminator::Branch(b) => b.0 == target_bi,
-                            SsaTerminator::CBranch { taken, fallthrough, .. } => taken.0 == target_bi || fallthrough.0 == target_bi,
+                            SsaTerminator::Fallthrough(b) | SsaTerminator::Branch(b) => {
+                                b.0 == target_bi
+                            }
+                            SsaTerminator::CBranch {
+                                taken, fallthrough, ..
+                            } => taken.0 == target_bi || fallthrough.0 == target_bi,
                             SsaTerminator::Call { fallthrough, .. } => fallthrough.0 == target_bi,
                             _ => false,
                         };
-                        if !flows { continue; }
+                        if !flows {
+                            continue;
+                        }
                         visited.insert(pred_bi);
                         next_frontier.push(pred_bi);
 
-                        if let Some(var_id) = find_ret_reg_in_block(&ssa.blocks[pred_bi].stmts, &ssa.vars, ret_reg_offset) {
+                        if let Some(var_id) = find_ret_reg_in_block(
+                            &ssa.blocks[pred_bi].stmts,
+                            &ssa.vars,
+                            ret_reg_offset,
+                        ) {
                             found = Some(var_id);
                             break;
                         }
@@ -2816,39 +3488,70 @@ fn detect_return_values(ssa: &mut SsaCfg) {
                                 }
                             }
                         }
-                        if found.is_some() { break; }
+                        if found.is_some() {
+                            break;
+                        }
                     }
-                    if found.is_some() { break; }
+                    if found.is_some() {
+                        break;
+                    }
                 }
-                if found.is_some() { break; }
+                if found.is_some() {
+                    break;
+                }
                 frontier = next_frontier;
             }
         }
 
         // Strategy 5: Float return — check XMM0 for functions with float ops.
         if found.is_none() {
-            let has_float_ops = ssa.vars.iter().any(|v| matches!(&v.expr,
-                Expr::BinOp(BinOpKind::FloatAdd | BinOpKind::FloatSub
-                    | BinOpKind::FloatMult | BinOpKind::FloatDiv, _, _)
-                | Expr::UnaryOp(UnaryOpKind::FloatNeg | UnaryOpKind::FloatAbs
-                    | UnaryOpKind::FloatSqrt | UnaryOpKind::Int2Float
-                    | UnaryOpKind::Float2Float, _)
-            ));
+            let has_float_ops = ssa.vars.iter().any(|v| {
+                matches!(
+                    &v.expr,
+                    Expr::BinOp(
+                        BinOpKind::FloatAdd
+                            | BinOpKind::FloatSub
+                            | BinOpKind::FloatMult
+                            | BinOpKind::FloatDiv,
+                        _,
+                        _
+                    ) | Expr::UnaryOp(
+                        UnaryOpKind::FloatNeg
+                            | UnaryOpKind::FloatAbs
+                            | UnaryOpKind::FloatSqrt
+                            | UnaryOpKind::Int2Float
+                            | UnaryOpKind::Float2Float,
+                        _
+                    )
+                )
+            });
             if has_float_ops {
                 const XMM0_OFFSET: u64 = 4608;
                 found = find_float_ret_in_block(&ssa.blocks[bi].stmts, &ssa.vars, XMM0_OFFSET);
                 if found.is_none() {
                     for pred_bi in 0..ssa.blocks.len() {
-                        if pred_bi == bi { continue; }
+                        if pred_bi == bi {
+                            continue;
+                        }
                         let flows_to_bi = match &ssa.blocks[pred_bi].terminator {
                             SsaTerminator::Fallthrough(b) | SsaTerminator::Branch(b) => b.0 == bi,
-                            SsaTerminator::CBranch { taken, fallthrough, .. } => taken.0 == bi || fallthrough.0 == bi,
+                            SsaTerminator::CBranch {
+                                taken, fallthrough, ..
+                            } => taken.0 == bi || fallthrough.0 == bi,
                             SsaTerminator::Call { fallthrough, .. } => fallthrough.0 == bi,
                             _ => false,
                         };
-                        if !flows_to_bi { continue; }
-                        found = find_float_ret_in_block(&ssa.blocks[pred_bi].stmts, &ssa.vars, XMM0_OFFSET);
-                        if found.is_some() { break; }
+                        if !flows_to_bi {
+                            continue;
+                        }
+                        found = find_float_ret_in_block(
+                            &ssa.blocks[pred_bi].stmts,
+                            &ssa.vars,
+                            XMM0_OFFSET,
+                        );
+                        if found.is_some() {
+                            break;
+                        }
                     }
                 }
                 // Fallback: DCE may have removed the XMM0 assignment from block stmts
@@ -2859,16 +3562,29 @@ fn detect_return_values(ssa: &mut SsaCfg) {
                     for (vi, vd) in ssa.vars.iter().enumerate() {
                         if vd.varnode.space == AddressSpaceId::Register
                             && vd.varnode.offset == XMM0_OFFSET
-                            && matches!(&vd.expr,
-                                Expr::BinOp(BinOpKind::FloatAdd | BinOpKind::FloatSub
-                                    | BinOpKind::FloatMult | BinOpKind::FloatDiv, _, _)
-                                | Expr::UnaryOp(UnaryOpKind::FloatNeg | UnaryOpKind::FloatAbs
-                                    | UnaryOpKind::FloatSqrt | UnaryOpKind::Int2Float
-                                    | UnaryOpKind::Float2Float, _)
-                                | Expr::Var(_))
+                            && matches!(
+                                &vd.expr,
+                                Expr::BinOp(
+                                    BinOpKind::FloatAdd
+                                        | BinOpKind::FloatSub
+                                        | BinOpKind::FloatMult
+                                        | BinOpKind::FloatDiv,
+                                    _,
+                                    _
+                                ) | Expr::UnaryOp(
+                                    UnaryOpKind::FloatNeg
+                                        | UnaryOpKind::FloatAbs
+                                        | UnaryOpKind::FloatSqrt
+                                        | UnaryOpKind::Int2Float
+                                        | UnaryOpKind::Float2Float,
+                                    _
+                                ) | Expr::Var(_)
+                            )
                         {
                             // Skip params (Unknown expr with param_name)
-                            if vd.param_name.is_some() { continue; }
+                            if vd.param_name.is_some() {
+                                continue;
+                            }
                             best = Some(VarId(vi as u32));
                         }
                     }
@@ -2884,9 +3600,15 @@ fn detect_return_values(ssa: &mut SsaCfg) {
                 if let Expr::UnaryOp(UnaryOpKind::Zext, inner) = &ssa.vars[var_id.0 as usize].expr {
                     if ssa.vars[inner.0 as usize].varnode.size == 4 {
                         *inner
-                    } else { var_id }
-                } else { var_id }
-            } else { var_id };
+                    } else {
+                        var_id
+                    }
+                } else {
+                    var_id
+                }
+            } else {
+                var_id
+            };
 
             if let SsaTerminator::Return(ref mut ret_val) = ssa.blocks[bi].terminator {
                 *ret_val = Some(actual_id);
@@ -2896,7 +3618,11 @@ fn detect_return_values(ssa: &mut SsaCfg) {
 }
 
 /// Search a block's statements backwards for an assignment to a float return register.
-fn find_float_ret_in_block(stmts: &[Stmt], vars: &[VarDef], float_ret_offset: u64) -> Option<VarId> {
+fn find_float_ret_in_block(
+    stmts: &[Stmt],
+    vars: &[VarDef],
+    float_ret_offset: u64,
+) -> Option<VarId> {
     for stmt in stmts.iter().rev() {
         if let Stmt::Assign(var_id) = stmt {
             let vdef = &vars[var_id.0 as usize];
@@ -2956,17 +3682,22 @@ fn collect_call_arguments(ssa: &mut SsaCfg) {
 
         // Check if block ends with a Call terminator
         let call_info = match &ssa.blocks[bi].terminator {
-            SsaTerminator::Call { target, fallthrough, .. } => {
-                Some((target.clone(), *fallthrough))
-            }
+            SsaTerminator::Call {
+                target,
+                fallthrough,
+                ..
+            } => Some((target.clone(), *fallthrough)),
             _ => None,
         };
 
         if let Some((target, fallthrough)) = call_info {
             let n_stmts = ssa.blocks[bi].stmts.len();
             let mut args = if is_x86_32 {
-                let (args, consumed) = collect_stack_args_from_block(&ssa.blocks[bi].stmts, &ssa.vars, n_stmts);
-                if !args.is_empty() { all_consumed.extend(consumed); }
+                let (args, consumed) =
+                    collect_stack_args_from_block(&ssa.blocks[bi].stmts, &ssa.vars, n_stmts);
+                if !args.is_empty() {
+                    all_consumed.extend(consumed);
+                }
                 args
             } else {
                 collect_reg_args_from_block(&ssa.blocks[bi].stmts, &ssa.vars, n_stmts)
@@ -2974,9 +3705,12 @@ fn collect_call_arguments(ssa: &mut SsaCfg) {
 
             if !args.is_empty() {
                 // Preserve existing `out` field if already set
-                let existing_out = if let SsaTerminator::Call { out, .. } = &ssa.blocks[bi].terminator {
-                    *out
-                } else { None };
+                let existing_out =
+                    if let SsaTerminator::Call { out, .. } = &ssa.blocks[bi].terminator {
+                        *out
+                    } else {
+                        None
+                    };
                 ssa.blocks[bi].terminator = SsaTerminator::Call {
                     target,
                     args,
@@ -2989,14 +3723,19 @@ fn collect_call_arguments(ssa: &mut SsaCfg) {
         // Also check for Call statements within the block
         // Process in reverse order so consumed indices from earlier calls don't shift
         let call_indices: Vec<usize> = (0..ssa.blocks[bi].stmts.len())
-            .filter(|si| matches!(&ssa.blocks[bi].stmts[*si],
-                Stmt::Call { args, .. } if args.is_empty()))
+            .filter(|si| {
+                matches!(&ssa.blocks[bi].stmts[*si],
+                Stmt::Call { args, .. } if args.is_empty())
+            })
             .collect();
 
         for &si in call_indices.iter().rev() {
             let mut args = if is_x86_32 {
-                let (args, consumed) = collect_stack_args_from_block(&ssa.blocks[bi].stmts, &ssa.vars, si);
-                if !args.is_empty() { all_consumed.extend(consumed); }
+                let (args, consumed) =
+                    collect_stack_args_from_block(&ssa.blocks[bi].stmts, &ssa.vars, si);
+                if !args.is_empty() {
+                    all_consumed.extend(consumed);
+                }
                 args
             } else {
                 collect_reg_args_from_block(&ssa.blocks[bi].stmts, &ssa.vars, si)
@@ -3025,7 +3764,9 @@ fn collect_call_arguments(ssa: &mut SsaCfg) {
 /// Collect x86-64 register-based arguments before a call (original logic).
 fn collect_reg_args_from_block(stmts: &[Stmt], vars: &[VarDef], up_to: usize) -> Vec<VarId> {
     let arg_offsets = arg_reg_offsets();
-    if arg_offsets.is_empty() { return Vec::new(); }
+    if arg_offsets.is_empty() {
+        return Vec::new();
+    }
     let mut args: Vec<(u64, VarId)> = Vec::new();
     for j in (0..up_to).rev() {
         if let Stmt::Assign(var_id) = &stmts[j] {
@@ -3055,13 +3796,17 @@ fn collect_reg_args_from_block(stmts: &[Stmt], vars: &[VarDef], up_to: usize) ->
             {
                 // Check if a different-sized register at this offset is an arg register
                 for &arg_off in arg_offsets {
-                    if arg_off == vdef.varnode.offset && !args.iter().any(|(off, _)| *off == arg_off) {
+                    if arg_off == vdef.varnode.offset
+                        && !args.iter().any(|(off, _)| *off == arg_off)
+                    {
                         args.push((arg_off, *var_id));
                     }
                 }
             }
         }
-        if matches!(&stmts[j], Stmt::Call { .. }) { break; }
+        if matches!(&stmts[j], Stmt::Call { .. }) {
+            break;
+        }
     }
 
     // Also collect float arguments from XMM registers
@@ -3074,21 +3819,28 @@ fn collect_reg_args_from_block(stmts: &[Stmt], vars: &[VarDef], up_to: usize) ->
                 if vdef.varnode.space == AddressSpaceId::Register
                     && float_offsets.contains(&vdef.varnode.offset)
                 {
-                    if !float_args.iter().any(|(off, _)| *off == vdef.varnode.offset) {
+                    if !float_args
+                        .iter()
+                        .any(|(off, _)| *off == vdef.varnode.offset)
+                    {
                         float_args.push((vdef.varnode.offset, *var_id));
                     }
                 }
             }
-            if matches!(&stmts[j], Stmt::Call { .. }) { break; }
+            if matches!(&stmts[j], Stmt::Call { .. }) {
+                break;
+            }
         }
-        float_args.sort_by_key(|(off, _)| {
-            float_offsets.iter().position(|o| o == off).unwrap_or(99)
-        });
+        float_args
+            .sort_by_key(|(off, _)| float_offsets.iter().position(|o| o == off).unwrap_or(99));
         args.extend(float_args);
     }
 
     args.sort_by_key(|(off, _)| {
-        arg_reg_offsets().iter().position(|o| o == off).unwrap_or(99)
+        arg_reg_offsets()
+            .iter()
+            .position(|o| o == off)
+            .unwrap_or(99)
     });
     args.into_iter().map(|(_, v)| v).collect()
 }
@@ -3098,7 +3850,11 @@ fn collect_reg_args_from_block(stmts: &[Stmt], vars: &[VarDef], up_to: usize) ->
 /// Scans backward from `up_to` for Store { addr: ESP-derived, val } patterns.
 /// Arguments are pushed right-to-left (cdecl), so first push = last arg.
 /// Returns (args in correct call order, indices of consumed statements to remove).
-fn collect_stack_args_from_block(stmts: &[Stmt], vars: &[VarDef], up_to: usize) -> (Vec<VarId>, Vec<usize>) {
+fn collect_stack_args_from_block(
+    stmts: &[Stmt],
+    vars: &[VarDef],
+    up_to: usize,
+) -> (Vec<VarId>, Vec<usize>) {
     let mut pushed_values: Vec<VarId> = Vec::new();
     let mut consumed_indices: Vec<usize> = Vec::new();
     let mut i = up_to;
@@ -3229,7 +3985,9 @@ fn infer_types(ssa: &mut SsaCfg) {
         for vi in 0..n {
             let expr = ssa.vars[vi].expr.clone();
             let propagated = forward_propagate_type(&expr, &ssa.vars);
-            if propagated != InferredType::Unknown && ssa.vars[vi].inferred_type == InferredType::Unknown {
+            if propagated != InferredType::Unknown
+                && ssa.vars[vi].inferred_type == InferredType::Unknown
+            {
                 ssa.vars[vi].inferred_type = propagated;
             }
         }
@@ -3238,7 +3996,9 @@ fn infer_types(ssa: &mut SsaCfg) {
     // Phase 3: Backward propagation — mark operands of typed operations
     for vi in 0..n {
         let ty = ssa.vars[vi].inferred_type;
-        if ty == InferredType::Unknown { continue; }
+        if ty == InferredType::Unknown {
+            continue;
+        }
 
         match ssa.vars[vi].expr.clone() {
             Expr::BinOp(_, left, right) => {
@@ -3265,19 +4025,30 @@ fn infer_types(ssa: &mut SsaCfg) {
         if ssa.vars[vi].size == 1 {
             if let Expr::BinOp(kind, _, _) = &ssa.vars[vi].expr {
                 match kind {
-                    BinOpKind::Eq | BinOpKind::NotEq
-                    | BinOpKind::Less | BinOpKind::LessEq
-                    | BinOpKind::SLess | BinOpKind::SLessEq
-                    | BinOpKind::FloatEq | BinOpKind::FloatNotEq
-                    | BinOpKind::FloatLess | BinOpKind::FloatLessEq
-                    | BinOpKind::Carry | BinOpKind::SCarry | BinOpKind::SBorrow
-                    | BinOpKind::BoolAnd | BinOpKind::BoolOr | BinOpKind::BoolXor => {
+                    BinOpKind::Eq
+                    | BinOpKind::NotEq
+                    | BinOpKind::Less
+                    | BinOpKind::LessEq
+                    | BinOpKind::SLess
+                    | BinOpKind::SLessEq
+                    | BinOpKind::FloatEq
+                    | BinOpKind::FloatNotEq
+                    | BinOpKind::FloatLess
+                    | BinOpKind::FloatLessEq
+                    | BinOpKind::Carry
+                    | BinOpKind::SCarry
+                    | BinOpKind::SBorrow
+                    | BinOpKind::BoolAnd
+                    | BinOpKind::BoolOr
+                    | BinOpKind::BoolXor => {
                         ssa.vars[vi].inferred_type = InferredType::Bool;
                     }
                     _ => {}
                 }
             }
-            if let Expr::UnaryOp(UnaryOpKind::BoolNot | UnaryOpKind::FloatNan, _) = &ssa.vars[vi].expr {
+            if let Expr::UnaryOp(UnaryOpKind::BoolNot | UnaryOpKind::FloatNan, _) =
+                &ssa.vars[vi].expr
+            {
                 ssa.vars[vi].inferred_type = InferredType::Bool;
             }
         }
@@ -3289,10 +4060,14 @@ fn seed_type_from_expr(expr: &Expr, _vars: &[VarDef]) -> InferredType {
     match expr {
         // Float operations
         Expr::BinOp(kind, _, _) => match kind {
-            BinOpKind::FloatAdd | BinOpKind::FloatSub
-            | BinOpKind::FloatMult | BinOpKind::FloatDiv => InferredType::Float,
-            BinOpKind::FloatEq | BinOpKind::FloatNotEq
-            | BinOpKind::FloatLess | BinOpKind::FloatLessEq => InferredType::Bool,
+            BinOpKind::FloatAdd
+            | BinOpKind::FloatSub
+            | BinOpKind::FloatMult
+            | BinOpKind::FloatDiv => InferredType::Float,
+            BinOpKind::FloatEq
+            | BinOpKind::FloatNotEq
+            | BinOpKind::FloatLess
+            | BinOpKind::FloatLessEq => InferredType::Bool,
             // Signed operations
             BinOpKind::SDiv | BinOpKind::SRem => InferredType::Signed,
             BinOpKind::SLess | BinOpKind::SLessEq => InferredType::Bool,
@@ -3307,9 +4082,14 @@ fn seed_type_from_expr(expr: &Expr, _vars: &[VarDef]) -> InferredType {
         },
         Expr::UnaryOp(kind, _) => match kind {
             // Float unary ops
-            UnaryOpKind::FloatNeg | UnaryOpKind::FloatAbs | UnaryOpKind::FloatSqrt
-            | UnaryOpKind::FloatCeil | UnaryOpKind::FloatFloor | UnaryOpKind::FloatRound
-            | UnaryOpKind::Int2Float | UnaryOpKind::Float2Float => InferredType::Float,
+            UnaryOpKind::FloatNeg
+            | UnaryOpKind::FloatAbs
+            | UnaryOpKind::FloatSqrt
+            | UnaryOpKind::FloatCeil
+            | UnaryOpKind::FloatFloor
+            | UnaryOpKind::FloatRound
+            | UnaryOpKind::Int2Float
+            | UnaryOpKind::Float2Float => InferredType::Float,
             UnaryOpKind::FloatNan => InferredType::Bool,
             // Trunc: float→int
             UnaryOpKind::Trunc => InferredType::Signed,
@@ -3346,11 +4126,19 @@ fn forward_propagate_type(expr: &Expr, vars: &[VarDef]) -> InferredType {
         // Sext preserves signed, Zext preserves unsigned
         Expr::UnaryOp(UnaryOpKind::Sext, input) => {
             let it = vars[input.0 as usize].inferred_type;
-            if it == InferredType::Unknown { InferredType::Signed } else { it }
+            if it == InferredType::Unknown {
+                InferredType::Signed
+            } else {
+                it
+            }
         }
         Expr::UnaryOp(UnaryOpKind::Zext, input) => {
             let it = vars[input.0 as usize].inferred_type;
-            if it == InferredType::Unknown { InferredType::Unsigned } else { it }
+            if it == InferredType::Unknown {
+                InferredType::Unsigned
+            } else {
+                it
+            }
         }
         // Neg implies signed result
         Expr::UnaryOp(UnaryOpKind::Neg, _) => InferredType::Signed,
@@ -3381,27 +4169,55 @@ pub(crate) fn recount_uses(ssa: &mut SsaCfg) {
     for v in 0..ssa.vars.len() {
         match &ssa.vars[v].expr {
             Expr::Var(id) => use_counts[id.0 as usize] += 1,
-            Expr::BinOp(_, l, r) => { use_counts[l.0 as usize] += 1; use_counts[r.0 as usize] += 1; }
-            Expr::UnaryOp(_, i) | Expr::Load(i) | Expr::FieldAccess(i, _) => use_counts[i.0 as usize] += 1,
-            Expr::Phi(inputs) => { for i in inputs { use_counts[i.0 as usize] += 1; } }
-            Expr::Ternary(c, t, e) => { use_counts[c.0 as usize] += 1; use_counts[t.0 as usize] += 1; use_counts[e.0 as usize] += 1; }
-            Expr::UserOp { inputs, .. } => { for i in inputs { use_counts[i.0 as usize] += 1; } }
+            Expr::BinOp(_, l, r) => {
+                use_counts[l.0 as usize] += 1;
+                use_counts[r.0 as usize] += 1;
+            }
+            Expr::UnaryOp(_, i) | Expr::Load(i) | Expr::FieldAccess(i, _) => {
+                use_counts[i.0 as usize] += 1
+            }
+            Expr::Phi(inputs) => {
+                for i in inputs {
+                    use_counts[i.0 as usize] += 1;
+                }
+            }
+            Expr::Ternary(c, t, e) => {
+                use_counts[c.0 as usize] += 1;
+                use_counts[t.0 as usize] += 1;
+                use_counts[e.0 as usize] += 1;
+            }
+            Expr::UserOp { inputs, .. } => {
+                for i in inputs {
+                    use_counts[i.0 as usize] += 1;
+                }
+            }
             Expr::Const(_, _) | Expr::Unknown => {}
         }
     }
     for block in &ssa.blocks {
         for stmt in &block.stmts {
             match stmt {
-                Stmt::Store { addr, val } => { use_counts[addr.0 as usize] += 1; use_counts[val.0 as usize] += 1; }
-                Stmt::Call { args, .. } => { for a in args { use_counts[a.0 as usize] += 1; } }
+                Stmt::Store { addr, val } => {
+                    use_counts[addr.0 as usize] += 1;
+                    use_counts[val.0 as usize] += 1;
+                }
+                Stmt::Call { args, .. } => {
+                    for a in args {
+                        use_counts[a.0 as usize] += 1;
+                    }
+                }
                 _ => {}
             }
         }
         match &block.terminator {
             SsaTerminator::CBranch { cond, .. } => use_counts[cond.0 as usize] += 1,
-            SsaTerminator::Return(Some(v)) | SsaTerminator::Indirect(v) => use_counts[v.0 as usize] += 1,
+            SsaTerminator::Return(Some(v)) | SsaTerminator::Indirect(v) => {
+                use_counts[v.0 as usize] += 1
+            }
             SsaTerminator::Call { args, out, .. } => {
-                for a in args { use_counts[a.0 as usize] += 1; }
+                for a in args {
+                    use_counts[a.0 as usize] += 1;
+                }
                 // out var is "defined by" this call — don't count as a use here.
                 // (It's a def, not a use. Printer reads out to emit `lhs = call(...)`)
                 let _ = out; // suppress warning
@@ -3429,7 +4245,8 @@ pub(crate) fn recount_uses(ssa: &mut SsaCfg) {
 fn forward_substitute_block(ssa: &mut SsaCfg) {
     for bi in 0..ssa.blocks.len() {
         // Map: (register offset, size) → the VarId of the value it currently holds
-        let mut reg_value: std::collections::HashMap<(u64, u32), VarId> = std::collections::HashMap::new();
+        let mut reg_value: std::collections::HashMap<(u64, u32), VarId> =
+            std::collections::HashMap::new();
         // Map: VarId (stack/unique) → the VarId of its source value
         let mut alias_map: std::collections::HashMap<u32, VarId> = std::collections::HashMap::new();
 
@@ -3535,7 +4352,9 @@ fn eliminate_save_restore(ssa: &mut SsaCfg) {
     // Replace the restore's expr to point directly at the original register value.
     for v in 0..ssa.vars.len() {
         let vdef = &ssa.vars[v];
-        if vdef.varnode.space != AddressSpaceId::Register { continue; }
+        if vdef.varnode.space != AddressSpaceId::Register {
+            continue;
+        }
         // Is this REG = Var(stack_var)?
         let src_id = match &vdef.expr {
             Expr::Var(id) => Some(*id),
@@ -3565,7 +4384,9 @@ fn eliminate_save_restore(ssa: &mut SsaCfg) {
     let mut sr_replacements: Vec<(usize, VarId)> = Vec::new();
     for v in 0..ssa.vars.len() {
         let vdef = &ssa.vars[v];
-        if vdef.varnode.space != AddressSpaceId::Register { continue; }
+        if vdef.varnode.space != AddressSpaceId::Register {
+            continue;
+        }
         if let Expr::Var(src_id) = &vdef.expr {
             let src = &ssa.vars[src_id.0 as usize];
             if let Expr::Var(orig_id) = &src.expr {
@@ -3604,14 +4425,18 @@ fn eliminate_save_restore(ssa: &mut SsaCfg) {
             }
         }
 
-        if store_map.is_empty() { continue; }
+        if store_map.is_empty() {
+            continue;
+        }
 
         // Find Load assignments in this block that match a store
         let mut load_replacements: Vec<(u32, VarId)> = Vec::new();
         for stmt in &ssa.blocks[bi].stmts {
             if let Stmt::Assign(var_id) = stmt {
                 let vdef = &ssa.vars[var_id.0 as usize];
-                if vdef.varnode.space != AddressSpaceId::Register { continue; }
+                if vdef.varnode.space != AddressSpaceId::Register {
+                    continue;
+                }
                 if let Expr::Load(addr_id) = &vdef.expr {
                     if let Some(offset) = compute_rbp_offset(*addr_id, &ssa.vars) {
                         if let Some(stored_val) = store_map.get(&offset) {
@@ -3648,7 +4473,8 @@ fn compute_rbp_offset(addr_id: VarId, vars: &[VarDef]) -> Option<u64> {
             // One level of indirection on base
             if let Expr::Var(inner) = &base.expr {
                 let inner_v = &vars[inner.0 as usize];
-                if inner_v.varnode.space == AddressSpaceId::Register && inner_v.varnode.offset == 40 {
+                if inner_v.varnode.space == AddressSpaceId::Register && inner_v.varnode.offset == 40
+                {
                     if let Expr::Const(val, _) = &vars[off_id.0 as usize].expr {
                         return Some(*val);
                     }
@@ -3790,11 +4616,15 @@ fn collapse_copy_chains(ssa: &mut SsaCfg) {
     let copy_map: Vec<Option<VarId>> = (0..ssa.vars.len())
         .map(|v| {
             let vdef = &ssa.vars[v];
-            if vdef.call_return { return None; }
+            if vdef.call_return {
+                return None;
+            }
             if vdef.use_count <= 1 && vdef.varnode.space == AddressSpaceId::Register {
                 if let Expr::Var(src) = &vdef.expr {
                     let src_def = &ssa.vars[src.0 as usize];
-                    if src_def.call_return { return None; }
+                    if src_def.call_return {
+                        return None;
+                    }
                     // Only collapse if source is a stack var, constant, or Unique
                     // (not another register that might get overwritten)
                     if src_def.varnode.space != AddressSpaceId::Register {
@@ -3871,9 +4701,13 @@ fn name_parameters(ssa: &mut SsaCfg) {
 }
 
 fn name_parameters_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
-    if ssa.blocks.is_empty() { return; }
+    if ssa.blocks.is_empty() {
+        return;
+    }
     let entry = ssa.entry.0;
-    if entry >= ssa.blocks.len() { return; }
+    if entry >= ssa.blocks.len() {
+        return;
+    }
 
     let mut param_idx = 0u32;
     let mut named_offsets = std::collections::HashSet::new();
@@ -3889,7 +4723,11 @@ fn name_parameters_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
                     && arg_reg_offsets().contains(&vdef.varnode.offset)
                     && !named_offsets.contains(&vdef.varnode.offset)
                 {
-                    to_name.push((var_id.0 as usize, format!("param_{}", param_idx), vdef.varnode.offset));
+                    to_name.push((
+                        var_id.0 as usize,
+                        format!("param_{}", param_idx),
+                        vdef.varnode.offset,
+                    ));
                     named_offsets.insert(vdef.varnode.offset);
                     param_idx += 1;
                 }
@@ -3903,7 +4741,11 @@ fn name_parameters_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
                         && arg_reg_offsets().contains(&vdef.varnode.offset)
                         && !named_offsets.contains(&vdef.varnode.offset)
                     {
-                        to_name.push((val.0 as usize, format!("param_{}", param_idx), vdef.varnode.offset));
+                        to_name.push((
+                            val.0 as usize,
+                            format!("param_{}", param_idx),
+                            vdef.varnode.offset,
+                        ));
                         named_offsets.insert(vdef.varnode.offset);
                         param_idx += 1;
                     }
@@ -3931,16 +4773,23 @@ fn name_parameters_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
         // Build entry-reachable block set (used only when go_strict).
         let early_vars: std::collections::HashSet<usize> = if go_strict {
             let entry_idx = ssa.entry.0;
-            let mut early_blocks: std::collections::HashSet<usize> = std::collections::HashSet::new();
+            let mut early_blocks: std::collections::HashSet<usize> =
+                std::collections::HashSet::new();
             let mut frontier: Vec<usize> = vec![entry_idx];
             for _ in 0..3 {
                 let mut next = Vec::new();
                 for b in frontier.drain(..) {
-                    if !early_blocks.insert(b) { continue; }
-                    if b >= ssa.blocks.len() { continue; }
+                    if !early_blocks.insert(b) {
+                        continue;
+                    }
+                    if b >= ssa.blocks.len() {
+                        continue;
+                    }
                     match &ssa.blocks[b].terminator {
                         SsaTerminator::Branch(t) | SsaTerminator::Fallthrough(t) => next.push(t.0),
-                        SsaTerminator::CBranch { taken, fallthrough, .. } => {
+                        SsaTerminator::CBranch {
+                            taken, fallthrough, ..
+                        } => {
                             next.push(taken.0);
                             next.push(fallthrough.0);
                         }
@@ -3966,15 +4815,27 @@ fn name_parameters_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
 
         let mut to_name: Vec<(usize, String)> = Vec::new();
         for &offset in arg_reg_offsets().iter() {
-            if named_offsets.contains(&offset) { continue; }
+            if named_offsets.contains(&offset) {
+                continue;
+            }
             let mut found: Option<usize> = None;
             for v in 0..ssa.vars.len() {
                 let vdef = &ssa.vars[v];
-                if vdef.varnode.space != AddressSpaceId::Register { continue; }
-                if vdef.varnode.offset != offset { continue; }
-                if vdef.param_name.is_some() { continue; }
-                if !matches!(&vdef.expr, Expr::Unknown | Expr::Phi(_)) { continue; }
-                if go_strict && !early_vars.contains(&v) { continue; }
+                if vdef.varnode.space != AddressSpaceId::Register {
+                    continue;
+                }
+                if vdef.varnode.offset != offset {
+                    continue;
+                }
+                if vdef.param_name.is_some() {
+                    continue;
+                }
+                if !matches!(&vdef.expr, Expr::Unknown | Expr::Phi(_)) {
+                    continue;
+                }
+                if go_strict && !early_vars.contains(&v) {
+                    continue;
+                }
                 found = Some(v);
                 break;
             }
@@ -3998,11 +4859,14 @@ fn name_parameters_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
     if arg_reg_offsets().is_empty() && param_idx == 0 {
         const EBP_OFFSET_32: u64 = 20;
         const RBP_OFFSET_64: u64 = 40;
-        let mut ebp_params: std::collections::BTreeMap<u64, Vec<usize>> = std::collections::BTreeMap::new();
+        let mut ebp_params: std::collections::BTreeMap<u64, Vec<usize>> =
+            std::collections::BTreeMap::new();
 
         for v in 0..ssa.vars.len() {
             let vdef = &ssa.vars[v];
-            if vdef.param_name.is_some() { continue; }
+            if vdef.param_name.is_some() {
+                continue;
+            }
             // Look for Load(ptr) where ptr is EBP/RBP + positive_const
             if let Expr::Load(ptr_id) = &vdef.expr {
                 let ptr = &ssa.vars[ptr_id.0 as usize];
@@ -4010,7 +4874,8 @@ fn name_parameters_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
                     let base = &ssa.vars[base_id.0 as usize];
                     let off = &ssa.vars[off_id.0 as usize];
                     if base.varnode.space == AddressSpaceId::Register
-                        && (base.varnode.offset == EBP_OFFSET_32 || base.varnode.offset == RBP_OFFSET_64)
+                        && (base.varnode.offset == EBP_OFFSET_32
+                            || base.varnode.offset == RBP_OFFSET_64)
                     {
                         if let Expr::Const(off_val, _) = &off.expr {
                             // EBP+8 = param_0, EBP+12 = param_1, ...
@@ -4053,7 +4918,10 @@ fn name_parameters_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
     // in the entry block, it's a parameter read without prior write.
     if arg_reg_offsets().is_empty() {
         const ECX_OFFSET: u64 = 8;
-        let has_ecx_param = ssa.vars.iter().any(|v| v.param_name.as_deref() == Some("this"));
+        let has_ecx_param = ssa
+            .vars
+            .iter()
+            .any(|v| v.param_name.as_deref() == Some("this"));
         if !has_ecx_param {
             for v in 0..ssa.vars.len() {
                 let vdef = &ssa.vars[v];
@@ -4163,7 +5031,9 @@ fn recognize_field_access(ssa: &mut SsaCfg) {
                         let is_stack_frame = base_def.varnode.space == AddressSpaceId::Register
                             && (base_def.varnode.offset == 20 || base_def.varnode.offset == 28)
                             && base_def.varnode.size == 4;
-                        if is_stack_frame { continue; }
+                        if is_stack_frame {
+                            continue;
+                        }
 
                         let base_is_pointer = pointer_vars.contains(base)
                             || base_def.param_name.is_some()
@@ -4194,7 +5064,10 @@ fn recognize_field_access(ssa: &mut SsaCfg) {
 /// For each call whose target resolves to a known function name (via `import_map`),
 /// rename argument variables from generic "param_N" names to the signature's parameter names
 /// and propagate parameter types when not already inferred.
-pub fn apply_signature_names(ssa: &mut SsaCfg, import_map: &std::collections::HashMap<u64, String>) {
+pub fn apply_signature_names(
+    ssa: &mut SsaCfg,
+    import_map: &std::collections::HashMap<u64, String>,
+) {
     // Collect (VarId, new_name, new_type, display_type) to apply after iteration.
     let mut renames: Vec<(VarId, String, InferredType, Option<&'static str>)> = Vec::new();
 
@@ -4210,7 +5083,8 @@ pub fn apply_signature_names(ssa: &mut SsaCfg, import_map: &std::collections::Ha
                 crate::signatures::lookup(name)
             } else {
                 None
-            }.or_else(|| crate::signatures::lookup_addr(addr));
+            }
+            .or_else(|| crate::signatures::lookup_addr(addr));
             let Some(sig) = sig else { return };
             for (i, arg_id) in args.iter().enumerate() {
                 if let Some(param) = sig.params.get(i) {
@@ -4254,15 +5128,24 @@ pub fn apply_signature_names(ssa: &mut SsaCfg, import_map: &std::collections::Ha
 ///
 /// For each call whose target resolves to a known function, set the return variable's
 /// inferred type from the signature when not already inferred.
-pub fn propagate_signature_return_types(ssa: &mut SsaCfg, import_map: &std::collections::HashMap<u64, String>) {
+pub fn propagate_signature_return_types(
+    ssa: &mut SsaCfg,
+    import_map: &std::collections::HashMap<u64, String>,
+) {
     let mut type_updates: Vec<(VarId, InferredType, Option<&'static str>)> = Vec::new();
 
     for block in &ssa.blocks {
         // Stmt::Call with out variable
         for stmt in &block.stmts {
-            if let Stmt::Call { target, out: Some(out_id), .. } = stmt {
+            if let Stmt::Call {
+                target,
+                out: Some(out_id),
+                ..
+            } = stmt
+            {
                 if let CallTarget::Direct(addr) = target {
-                    let sig = import_map.get(addr)
+                    let sig = import_map
+                        .get(addr)
                         .and_then(|name| crate::signatures::lookup(name))
                         .or_else(|| crate::signatures::lookup_addr(*addr));
                     if let Some(sig) = sig {
@@ -4280,9 +5163,15 @@ pub fn propagate_signature_return_types(ssa: &mut SsaCfg, import_map: &std::coll
         }
 
         // SsaTerminator::Call — find call_return var in fallthrough block
-        if let SsaTerminator::Call { target, fallthrough, .. } = &block.terminator {
+        if let SsaTerminator::Call {
+            target,
+            fallthrough,
+            ..
+        } = &block.terminator
+        {
             if let CallTarget::Direct(addr) = target {
-                let sig = import_map.get(addr)
+                let sig = import_map
+                    .get(addr)
                     .and_then(|name| crate::signatures::lookup(name))
                     .or_else(|| crate::signatures::lookup_addr(*addr));
                 if let Some(sig) = sig {
@@ -4294,7 +5183,8 @@ pub fn propagate_signature_return_types(ssa: &mut SsaCfg, import_map: &std::coll
                             for stmt in &ssa.blocks[ft_idx].stmts {
                                 if let Stmt::Assign(var_id) = stmt {
                                     let var = &ssa.vars[var_id.0 as usize];
-                                    if var.call_return && var.inferred_type == InferredType::Unknown {
+                                    if var.call_return && var.inferred_type == InferredType::Unknown
+                                    {
                                         type_updates.push((*var_id, ret_ty, Some(disp)));
                                         break;
                                     }
@@ -4340,7 +5230,9 @@ pub fn propagate_signature_return_types(ssa: &mut SsaCfg, import_map: &std::coll
                 }
             }
         }
-        if !propagated { break; }
+        if !propagated {
+            break;
+        }
     }
 
     // Backward-propagate display types through Load chains.
@@ -4379,14 +5271,18 @@ pub fn propagate_signature_return_types(ssa: &mut SsaCfg, import_map: &std::coll
 fn name_loop_phis(ssa: &mut SsaCfg) {
     let mut loop_phi_count = 0u32;
     for vi in 0..ssa.vars.len() {
-        if ssa.vars[vi].param_name.is_some() { continue; }
+        if ssa.vars[vi].param_name.is_some() {
+            continue;
+        }
         if let Expr::Phi(ref inputs) = ssa.vars[vi].expr {
-            if inputs.len() < 2 { continue; }
+            if inputs.len() < 2 {
+                continue;
+            }
             let phi_id = VarId(vi as u32);
             // Check if any input transitively references this Phi (self-referential)
-            let is_self_ref = inputs.iter().any(|input| {
-                refs_varid(*input, phi_id, &ssa.vars, 6)
-            });
+            let is_self_ref = inputs
+                .iter()
+                .any(|input| refs_varid(*input, phi_id, &ssa.vars, 6));
             if is_self_ref {
                 // This is a loop Phi. Assign a name based on the register size.
                 let vn = ssa.vars[vi].varnode;
@@ -4400,8 +5296,12 @@ fn name_loop_phis(ssa: &mut SsaCfg) {
 
 /// Check if a VarId's expression tree transitively references a target VarId.
 fn refs_varid(id: VarId, target: VarId, vars: &[VarDef], depth: u32) -> bool {
-    if depth == 0 { return false; }
-    if id == target { return true; }
+    if depth == 0 {
+        return false;
+    }
+    if id == target {
+        return true;
+    }
     let vdef = &vars[id.0 as usize];
     match &vdef.expr {
         Expr::Var(inner) => refs_varid(*inner, target, vars, depth - 1),
@@ -4409,7 +5309,9 @@ fn refs_varid(id: VarId, target: VarId, vars: &[VarDef], depth: u32) -> bool {
             refs_varid(*l, target, vars, depth - 1) || refs_varid(*r, target, vars, depth - 1)
         }
         Expr::UnaryOp(_, i) => refs_varid(*i, target, vars, depth - 1),
-        Expr::Phi(inputs) => inputs.iter().any(|i| refs_varid(*i, target, vars, depth - 1)),
+        Expr::Phi(inputs) => inputs
+            .iter()
+            .any(|i| refs_varid(*i, target, vars, depth - 1)),
         _ => false,
     }
 }
@@ -4429,7 +5331,9 @@ fn refs_varid(id: VarId, target: VarId, vars: &[VarDef], depth: u32) -> bool {
 use crate::dominators::compute_dominators;
 
 pub fn rewrite_conditional_phi_to_ternary(ssa: &mut SsaCfg, cfg: &Cfg) {
-    if cfg.blocks.is_empty() { return; }
+    if cfg.blocks.is_empty() {
+        return;
+    }
     let dom = compute_dominators(cfg);
     let preds = cfg.predecessors();
 
@@ -4446,15 +5350,21 @@ pub fn rewrite_conditional_phi_to_ternary(ssa: &mut SsaCfg, cfg: &Cfg) {
     }
 
     for merge_bid in 0..ssa.blocks.len() {
-        if merge_bid >= n { break; }
-        if is_back_target[merge_bid] { continue; }
+        if merge_bid >= n {
+            break;
+        }
+        if is_back_target[merge_bid] {
+            continue;
+        }
         let pred_list = match preds.get(merge_bid) {
             Some(p) if p.len() >= 2 => p.clone(),
             _ => continue,
         };
 
         // Collect Phi stmts at this block.
-        let phi_stmts: Vec<(VarId, Vec<VarId>)> = ssa.blocks[merge_bid].stmts.iter()
+        let phi_stmts: Vec<(VarId, Vec<VarId>)> = ssa.blocks[merge_bid]
+            .stmts
+            .iter()
             .filter_map(|s| match s {
                 Stmt::Assign(v) => match &ssa.vars[v.0 as usize].expr {
                     Expr::Phi(inputs) if inputs.len() == pred_list.len() => {
@@ -4494,20 +5404,28 @@ pub fn rewrite_conditional_phi_to_ternary(ssa: &mut SsaCfg, cfg: &Cfg) {
                     groups.push((input, vec![p]));
                 }
             }
-            if groups.len() != 2 { continue; }
+            if groups.len() != 2 {
+                continue;
+            }
 
             let (val_a, preds_a) = groups[0].clone();
             let (val_b, preds_b) = groups[1].clone();
 
             // Nearest common dominator of all preds.
             let all_preds: Vec<BlockId> = preds_a.iter().chain(preds_b.iter()).copied().collect();
-            let Some(common_dom) = phi_nearest_common_dom(&dom, &all_preds) else { continue; };
-            if common_dom.0 >= ssa.blocks.len() { continue; }
+            let Some(common_dom) = phi_nearest_common_dom(&dom, &all_preds) else {
+                continue;
+            };
+            if common_dom.0 >= ssa.blocks.len() {
+                continue;
+            }
 
             let (cond, taken, fallthrough) = match &ssa.blocks[common_dom.0].terminator {
-                SsaTerminator::CBranch { cond, taken, fallthrough } => {
-                    (*cond, *taken, *fallthrough)
-                }
+                SsaTerminator::CBranch {
+                    cond,
+                    taken,
+                    fallthrough,
+                } => (*cond, *taken, *fallthrough),
                 _ => continue,
             };
 
@@ -4515,17 +5433,14 @@ pub fn rewrite_conditional_phi_to_ternary(ssa: &mut SsaCfg, cfg: &Cfg) {
             let group_under = |ps: &[BlockId], arm: BlockId| -> bool {
                 ps.iter().all(|p| phi_dom_dominates(&dom, arm.0, p.0))
             };
-            let (then_val, else_val) = if group_under(&preds_a, taken)
-                && group_under(&preds_b, fallthrough)
-            {
-                (val_a, val_b)
-            } else if group_under(&preds_a, fallthrough)
-                && group_under(&preds_b, taken)
-            {
-                (val_b, val_a)
-            } else {
-                continue;
-            };
+            let (then_val, else_val) =
+                if group_under(&preds_a, taken) && group_under(&preds_b, fallthrough) {
+                    (val_a, val_b)
+                } else if group_under(&preds_a, fallthrough) && group_under(&preds_b, taken) {
+                    (val_b, val_a)
+                } else {
+                    continue;
+                };
 
             // Collapse `Ternary(c, x, x)` when both arms would render
             // identically in the printer. Same VarId trivially. Same
@@ -4552,7 +5467,9 @@ pub fn rewrite_conditional_phi_to_ternary(ssa: &mut SsaCfg, cfg: &Cfg) {
 }
 
 fn phi_resolve_var_chain(id: VarId, vars: &[VarDef], depth: u32) -> VarId {
-    if depth == 0 { return id; }
+    if depth == 0 {
+        return id;
+    }
     match &vars[id.0 as usize].expr {
         Expr::Var(inner) => phi_resolve_var_chain(*inner, vars, depth - 1),
         _ => id,
@@ -4560,20 +5477,30 @@ fn phi_resolve_var_chain(id: VarId, vars: &[VarDef], depth: u32) -> VarId {
 }
 
 fn phi_dom_dominates(dom: &[BlockId], a: usize, b: usize) -> bool {
-    if a == b { return true; }
-    if a >= dom.len() || b >= dom.len() { return false; }
+    if a == b {
+        return true;
+    }
+    if a >= dom.len() || b >= dom.len() {
+        return false;
+    }
     let mut cur = b;
     for _ in 0..dom.len() {
         let d = dom[cur].0;
-        if d == a { return true; }
-        if d == cur { return false; } // reached root
+        if d == a {
+            return true;
+        }
+        if d == cur {
+            return false;
+        } // reached root
         cur = d;
     }
     false
 }
 
 fn phi_nearest_common_dom(dom: &[BlockId], blocks: &[BlockId]) -> Option<BlockId> {
-    if blocks.is_empty() { return None; }
+    if blocks.is_empty() {
+        return None;
+    }
     let mut cd = blocks[0];
     for &b in &blocks[1..] {
         cd = phi_common_dom_pair(dom, cd, b)?;
@@ -4586,18 +5513,30 @@ fn phi_common_dom_pair(dom: &[BlockId], a: BlockId, b: BlockId) -> Option<BlockI
     let mut cur = a;
     for _ in 0..dom.len() {
         chain_a.insert(cur);
-        if cur.0 >= dom.len() { break; }
+        if cur.0 >= dom.len() {
+            break;
+        }
         let d = dom[cur.0];
-        if d == cur { break; }
+        if d == cur {
+            break;
+        }
         cur = d;
     }
     let mut cur = b;
     for _ in 0..dom.len() {
-        if chain_a.contains(&cur) { return Some(cur); }
-        if cur.0 >= dom.len() { return None; }
+        if chain_a.contains(&cur) {
+            return Some(cur);
+        }
+        if cur.0 >= dom.len() {
+            return None;
+        }
         let d = dom[cur.0];
         if d == cur {
-            return if chain_a.contains(&cur) { Some(cur) } else { None };
+            return if chain_a.contains(&cur) {
+                Some(cur)
+            } else {
+                None
+            };
         }
         cur = d;
     }
