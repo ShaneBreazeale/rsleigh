@@ -1287,20 +1287,32 @@ impl<'a> ExecutionGenerator<'a> {
                 code.extend(quote! { ops.push(pcode_ir::PcodeOp::Subpiece { out: #o, input: #inp, lsb: #lsb }); });
                 (out, code)
             }
-            // All remaining unary ops follow the pattern: allocate out, emit op
+            // All remaining unary ops follow the pattern: allocate out, emit op.
+            //
+            // Size-preserving unary ops (Negative, BitNegation, FloatNegative,
+            // FloatAbs, FloatSqrt, Float{Ceil,Floor,Round}) take the input
+            // size as the output size. Previously these used `addr_size()`
+            // unconditionally — which over-widened 4-byte operands to 8
+            // bytes on 64-bit architectures and produced raw P-code that
+            // diverges from Ghidra (audit oracle: aarch64/csel csetm
+            // INT_2COMP). Compute from the input expression's resolved
+            // bit width.
             other => {
+                let preserve_size = || {
+                    Self::bytes_from_bits(op.input.len_bits(&self.disassembler.sleigh, execution).get())
+                };
                 let (variant, out_size) = match other {
                     Unary::Zext(b) => (quote! { IntZext }, Self::bytes_from_bits(b.get())),
                     Unary::Sext(b) => (quote! { IntSext }, Self::bytes_from_bits(b.get())),
                     Unary::Negation => (quote! { BoolNot }, 1),
-                    Unary::BitNegation => (quote! { IntNot }, self.addr_size() as u64),
-                    Unary::Negative => (quote! { IntNeg }, self.addr_size() as u64),
-                    Unary::FloatNegative => (quote! { FloatNeg }, self.addr_size() as u64),
-                    Unary::FloatAbs => (quote! { FloatAbs }, self.addr_size() as u64),
-                    Unary::FloatSqrt => (quote! { FloatSqrt }, self.addr_size() as u64),
-                    Unary::FloatCeil => (quote! { FloatCeil }, self.addr_size() as u64),
-                    Unary::FloatFloor => (quote! { FloatFloor }, self.addr_size() as u64),
-                    Unary::FloatRound => (quote! { FloatRound }, self.addr_size() as u64),
+                    Unary::BitNegation => (quote! { IntNot }, preserve_size()),
+                    Unary::Negative => (quote! { IntNeg }, preserve_size()),
+                    Unary::FloatNegative => (quote! { FloatNeg }, preserve_size()),
+                    Unary::FloatAbs => (quote! { FloatAbs }, preserve_size()),
+                    Unary::FloatSqrt => (quote! { FloatSqrt }, preserve_size()),
+                    Unary::FloatCeil => (quote! { FloatCeil }, preserve_size()),
+                    Unary::FloatFloor => (quote! { FloatFloor }, preserve_size()),
+                    Unary::FloatRound => (quote! { FloatRound }, preserve_size()),
                     Unary::FloatNan(_) => (quote! { FloatNan }, 1),
                     Unary::Int2Float(b) => (quote! { Int2Float }, Self::bytes_from_bits(b.get())),
                     Unary::Float2Float(b) => {

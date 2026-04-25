@@ -407,12 +407,12 @@ const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
     ),
     (
         "aarch64/csel.ghidra.json",
-        "AArch64 csetm INT_2COMP / IntNeg in rsleigh emits an 8-byte \
-         Unique output for a 4-byte input; Ghidra emits size 4. Real \
-         codegen size-precision bug — same family as the ARM32 \
-         mov-imm Subpiece-of-wider-Const issue but on the output \
-         side. Op count and shape now match after dead-Copy stripping \
-         in the comparator; only the output size diverges.",
+        "AArch64 csinc (csel-family) emits one fewer macro-init Copy \
+         than Ghidra (6 vs 7 ops) at offset 0x8. Distinct from the \
+         csetm INT_2COMP output-size bug (closed by codegen unary \
+         size-preserve fix) — this is a SLEIGH-level macro expansion \
+         shape difference around the conditional select. The csetm \
+         instruction at 0x4 now matches strictly.",
     ),
 ];
 
