@@ -61,7 +61,7 @@ fn is_first_then(
     let constructor_a = &constructors[matcher_a.constructor.0];
     let constructor_b = &constructors[matcher_b.constructor.0];
     let pattern_len_a = constructor_a.pattern.bits_produced();
-    let pattern_len_b = constructor_a.pattern.bits_produced();
+    let pattern_len_b = constructor_b.pattern.bits_produced();
     let pattern_len_max = pattern_len_a.max(pattern_len_b);
     let extend_len_a = pattern_len_max - pattern_len_a;
     let extend_len_b = pattern_len_max - pattern_len_b;

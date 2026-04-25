@@ -155,7 +155,7 @@ Fixture: `test-harness/fixtures/crackmev3.pyd` (PyVMProtect v4).
 
 ## Known limitations
 
-- `ExprValue::Context` returns 0 (unused by x86/ARM/RISC-V)
+- Context reads used by generated lift code are captured at decode time; keep regression coverage around context-dependent operands.
 - `ExprNew` / `ExprCPool` return 0 (JVM/WASM only)
 - Some reg values not traced to defining expr (`iVar1 * factorial(n-1)` instead of `n * factorial(n-1)`)
 - Type inference: basic + Win32 typedef + interprocedural two-pass + heuristic field names; no constraint-based

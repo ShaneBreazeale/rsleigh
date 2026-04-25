@@ -195,7 +195,7 @@ fn optimize_once(ops: &mut Vec<PcodeOp>) {
             // AND with all-ones (for the size) → Copy
             PcodeOp::IntAnd { out, left, right }
                 if right.space == AddressSpaceId::Const
-                    && right.offset == u64::MAX >> (64 - out.size as u64 * 8) =>
+                    && right.offset == all_ones_mask(out.size) =>
             {
                 *op = PcodeOp::Copy {
                     out: *out,
@@ -313,9 +313,7 @@ fn optimize_once(ops: &mut Vec<PcodeOp>) {
         let mut to_remove = Vec::new();
         for (i, entry) in analysis.iter().enumerate() {
             if let Some(info) = entry {
-                if info.future_reads == 0
-                    || matches!(info.next_access, Some(NextAccess::Write))
-                {
+                if info.future_reads == 0 || matches!(info.next_access, Some(NextAccess::Write)) {
                     to_remove.push(i);
                 }
             }
@@ -377,6 +375,15 @@ fn optimize_once(ops: &mut Vec<PcodeOp>) {
             continue;
         }
         i += 1;
+    }
+}
+
+fn all_ones_mask(size_bytes: u32) -> u64 {
+    let bits = size_bytes.saturating_mul(8);
+    if bits >= 64 {
+        u64::MAX
+    } else {
+        u64::MAX >> (64 - bits)
     }
 }
 
@@ -1129,4 +1136,33 @@ pub enum PcodeOp {
         func_id: u64,
         inputs: Vec<Varnode>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn optimize_intand_all_ones_wide_size_no_panic() {
+        let mut ops = vec![
+            PcodeOp::IntAnd {
+                out: Varnode::unique(0, 16),
+                left: Varnode::register(0, 16),
+                right: Varnode::constant(u64::MAX, 16),
+            },
+            PcodeOp::Copy {
+                out: Varnode::register(16, 16),
+                input: Varnode::unique(0, 16),
+            },
+        ];
+
+        optimize(&mut ops);
+
+        assert!(matches!(
+            ops.as_slice(),
+            [PcodeOp::Copy { out, input }]
+                if *out == Varnode::register(16, 16)
+                    && *input == Varnode::register(0, 16)
+        ));
+    }
 }

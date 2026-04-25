@@ -6,6 +6,10 @@ use quote::{format_ident, quote, ToTokens};
 
 use crate::codegen::builder::formater::from_sleigh;
 use crate::codegen::builder::{DisassemblyGenerator, DISPLAY_WORK_TYPE};
+use crate::execution::{
+    AssignmentWrite, AssignmentWriteVariable, DynamicValueType, Export, Expr, ExprElement,
+    ExprValue, Statement,
+};
 
 use super::Disassembler;
 
@@ -31,11 +35,90 @@ pub struct ConstructorStruct {
     pub parser_fun: Ident,
     pub table_fields: IndexMap<crate::TableId, Ident>,
     pub ass_fields: IndexMap<crate::TokenFieldId, Ident>,
+    /// Context values referenced by execution/disassembly expressions and stored
+    /// at decode time so `lift()` does not have to guess.
+    pub context_fields: IndexMap<crate::ContextId, Ident>,
     /// Disassembly variables (e.g. `reloc` in rel8) stored as struct fields
     /// so they're available to both display_extend() and lift().
     pub dis_fields: IndexMap<crate::disassembly::VariableId, Ident>,
 }
 impl ConstructorStruct {
+    fn context_field_ident(sleigh: &crate::Sleigh, context: crate::ContextId) -> Ident {
+        let context = sleigh.context(context);
+        format_ident!("ctx_{}", from_sleigh(context.name()))
+    }
+
+    fn collect_dynamic_context(value: &DynamicValueType, out: &mut Vec<crate::ContextId>) {
+        if let DynamicValueType::Context(context) = value {
+            out.push(*context);
+        }
+    }
+
+    fn collect_expr_contexts(expr: &Expr, out: &mut Vec<crate::ContextId>) {
+        match expr {
+            Expr::Value(element) => Self::collect_expr_element_contexts(element, out),
+            Expr::Op(op) => {
+                Self::collect_expr_contexts(&op.left, out);
+                Self::collect_expr_contexts(&op.right, out);
+            }
+        }
+    }
+
+    fn collect_expr_element_contexts(element: &ExprElement, out: &mut Vec<crate::ContextId>) {
+        match element {
+            ExprElement::Value { value, .. } => Self::collect_expr_value_contexts(value, out),
+            ExprElement::UserCall(call) => {
+                for param in call.params.iter() {
+                    Self::collect_expr_contexts(param, out);
+                }
+            }
+            ExprElement::Reference(_) => {}
+            ExprElement::Op(op) => Self::collect_expr_contexts(&op.input, out),
+            ExprElement::New(new_expr) => {
+                Self::collect_expr_contexts(&new_expr.first, out);
+                if let Some(second) = &new_expr.second {
+                    Self::collect_expr_contexts(second, out);
+                }
+            }
+            ExprElement::CPool(cpool) => {
+                for param in cpool.params.iter() {
+                    Self::collect_expr_contexts(param, out);
+                }
+            }
+        }
+    }
+
+    fn collect_expr_value_contexts(value: &ExprValue, out: &mut Vec<crate::ContextId>) {
+        match value {
+            ExprValue::Context(context) => out.push(context.id),
+            ExprValue::IntDynamic(dynamic) => {
+                Self::collect_dynamic_context(&dynamic.attach_value, out);
+            }
+            ExprValue::VarnodeDynamic(dynamic) => {
+                Self::collect_dynamic_context(&dynamic.attach_value, out);
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_dis_expr_contexts(expr: &crate::disassembly::Expr, out: &mut Vec<crate::ContextId>) {
+        use crate::disassembly::{Expr as DisExpr, ExprElement as DisElement, ReadScope};
+        match expr {
+            DisExpr::Value(element) => match element {
+                DisElement::Value {
+                    value: ReadScope::Context(context),
+                    ..
+                } => out.push(*context),
+                DisElement::Op(_, _, inner) => Self::collect_dis_expr_contexts(inner, out),
+                _ => {}
+            },
+            DisExpr::Op(_, _, left, right) => {
+                Self::collect_dis_expr_contexts(left, out);
+                Self::collect_dis_expr_contexts(right, out);
+            }
+        }
+    }
+
     pub fn new(
         sleigh: &crate::Sleigh,
         table_id: crate::TableId,
@@ -46,6 +129,7 @@ impl ConstructorStruct {
     ) -> Self {
         //let mut calc_fields = IndexMap::new();
         let mut ass_fields: IndexMap<_, _> = IndexMap::new();
+        let mut context_ids = Vec::new();
         //tables are always included to the struct, used or not
         let table_fields = constructor
             .pattern
@@ -118,6 +202,7 @@ impl ConstructorStruct {
                             }
                         }
                     }
+                    Self::collect_dis_expr_contexts(right, &mut context_ids);
                     let mut fields = Vec::new();
                     collect_token_fields(right, &mut fields);
                     for ass in fields {
@@ -129,6 +214,68 @@ impl ConstructorStruct {
                 }
             }
         }
+
+        if let Some(execution) = &constructor.execution {
+            for block in execution.blocks().iter() {
+                for statement in block.statements.iter() {
+                    match statement {
+                        Statement::Assignment(assignment) => {
+                            Self::collect_expr_contexts(&assignment.right, &mut context_ids);
+                            match &assignment.var {
+                                AssignmentWrite::Variable { value, .. } => {
+                                    if let AssignmentWriteVariable::DynVarnode {
+                                        value_id, ..
+                                    } = value
+                                    {
+                                        Self::collect_dynamic_context(value_id, &mut context_ids);
+                                    }
+                                }
+                                AssignmentWrite::Memory { addr, .. } => {
+                                    Self::collect_expr_contexts(addr, &mut context_ids);
+                                }
+                                AssignmentWrite::TableExport { .. } => {}
+                            }
+                        }
+                        Statement::CpuBranch(branch) => {
+                            Self::collect_expr_contexts(&branch.dst, &mut context_ids);
+                            if let Some(cond) = &branch.cond {
+                                Self::collect_expr_contexts(cond, &mut context_ids);
+                            }
+                        }
+                        Statement::LocalGoto(goto) => {
+                            if let Some(cond) = &goto.cond {
+                                Self::collect_expr_contexts(cond, &mut context_ids);
+                            }
+                        }
+                        Statement::UserCall(call) => {
+                            for param in call.params.iter() {
+                                Self::collect_expr_contexts(param, &mut context_ids);
+                            }
+                        }
+                        Statement::Export(export) => match export {
+                            Export::Reference { addr, .. } => {
+                                Self::collect_expr_contexts(addr, &mut context_ids);
+                            }
+                            Export::Value(addr) => {
+                                Self::collect_expr_contexts(addr, &mut context_ids);
+                            }
+                            Export::AttachVarnode { attach_value, .. } => {
+                                Self::collect_dynamic_context(attach_value, &mut context_ids);
+                            }
+                            Export::Table { .. } => {}
+                        },
+                        Statement::Build(_) | Statement::Declare(_) | Statement::Delayslot(_) => {}
+                    }
+                }
+            }
+        }
+
+        context_ids.sort_by_key(|context| context.0);
+        context_ids.dedup();
+        let context_fields: IndexMap<crate::ContextId, Ident> = context_ids
+            .into_iter()
+            .map(|context| (context, Self::context_field_ident(sleigh, context)))
+            .collect();
 
         // Collect disassembly variables as struct fields
         let dis_fields: IndexMap<crate::disassembly::VariableId, Ident> = constructor
@@ -158,6 +305,7 @@ impl ConstructorStruct {
             parser_fun: format_ident!("parse"),
             ass_fields,
             table_fields,
+            context_fields,
             dis_fields,
             constructor_id,
             table_id,
@@ -175,6 +323,7 @@ impl ConstructorStruct {
             table_id,
             table_fields: _,
             ass_fields: _,
+            context_fields: _,
             dis_fields: _,
         } = self;
         let display_param = format_ident!("display");
@@ -391,6 +540,7 @@ impl ConstructorStruct {
             struct_name,
             table_fields,
             ass_fields,
+            context_fields,
             dis_fields,
             parser_fun,
             enum_name: _,
@@ -424,6 +574,9 @@ impl ConstructorStruct {
             }
             quote! { #name: #table_data }
         });
+        let context_fields = context_fields.values().map(|name| {
+            quote! { #name: i128 }
+        });
         let display_impl = self.gen_display(disassembler);
         let lift_impl = self.gen_execution(disassembler);
         let parser_function = root_pattern_function(parser_fun, self, disassembler);
@@ -436,6 +589,7 @@ impl ConstructorStruct {
             pub struct #struct_name {
                 #(pub #ass_fields,)*
                 #(pub #table_fields,)*
+                #(pub #context_fields,)*
                 #(pub #dis_field_defs,)*
             }
             impl #struct_name {

@@ -98,6 +98,7 @@ pub fn root_pattern_function(
                         expr: &crate::disassembly::Expr,
                         inst_start: &Ident,
                         inst_next: &Ident,
+                        context_instance: &Ident,
                         vars: &IndexMap<crate::disassembly::VariableId, Ident>,
                         ass_fields: &IndexMap<crate::TokenFieldId, Ident>,
                         disassembler: &Disassembler,
@@ -124,8 +125,11 @@ pub fn root_pattern_function(
                                             });
                                         quote! { i128::from(#tf_name) }
                                     }
-                                    ReadScope::Context(_) => {
-                                        quote! { 0i128 } // TODO
+                                    ReadScope::Context(context) => {
+                                        let read_call = disassembler
+                                            .context
+                                            .read_call(*context, context_instance);
+                                        quote! { i128::from(#read_call) }
                                     }
                                     ReadScope::Local(var_id) => {
                                         let name = vars.get(var_id).unwrap();
@@ -137,6 +141,7 @@ pub fn root_pattern_function(
                                         inner,
                                         inst_start,
                                         inst_next,
+                                        context_instance,
                                         vars,
                                         ass_fields,
                                         disassembler,
@@ -149,6 +154,7 @@ pub fn root_pattern_function(
                                     left,
                                     inst_start,
                                     inst_next,
+                                    context_instance,
                                     vars,
                                     ass_fields,
                                     disassembler,
@@ -157,6 +163,7 @@ pub fn root_pattern_function(
                                     right,
                                     inst_start,
                                     inst_next,
+                                    context_instance,
                                     vars,
                                     ass_fields,
                                     disassembler,
@@ -169,6 +176,7 @@ pub fn root_pattern_function(
                         &assignment.right,
                         &inst_start,
                         &inst_next_local,
+                        &context_instance,
                         &disassembly_vars,
                         &constructor_struct.ass_fields,
                         disassembler,
@@ -193,8 +201,19 @@ pub fn root_pattern_function(
     let table_fields = constructor_struct.table_fields.values();
     //only pass the token fields that need to be stored
     let token_fields = constructor_struct.ass_fields.values();
+    let context_field_reads = constructor_struct
+        .context_fields
+        .iter()
+        .map(|(context, name)| {
+            let read_call = disassembler.context.read_call(*context, &context_instance);
+            quote! { let #name: i128 = i128::from(#read_call); }
+        });
+    let context_fields = constructor_struct.context_fields.values();
     let dis_fields = constructor_struct.dis_fields.values();
-    let fields = table_fields.chain(token_fields).chain(dis_fields);
+    let fields = table_fields
+        .chain(token_fields)
+        .chain(context_fields)
+        .chain(dis_fields);
     quote! {
         pub fn #parse_fun(
             mut #tokens_current: &[u8],
@@ -213,6 +232,7 @@ pub fn root_pattern_function(
             #blocks_parse
             // Compute post-match disassembly variables (uses inst_next)
             #post_match_dis
+            #(#context_field_reads)*
             //only on instruction table, otherwise this is on a function
             *context = #context_instance;
             Some((

@@ -145,10 +145,20 @@ impl TryFrom<i128> for Number {
         if value.is_negative() {
             let value = i64::try_from(value)?;
             let value = value.abs_diff(0);
-            Ok(Number::Positive(value))
+            Ok(Number::Negative(value))
         } else {
             u64::try_from(value).map(Number::Positive)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Number;
+
+    #[test]
+    fn number_try_from_i128_negative_preserves_sign() {
+        assert_eq!(Number::try_from(-5i128).unwrap(), Number::Negative(5));
     }
 }
 

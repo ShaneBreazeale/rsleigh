@@ -53,6 +53,18 @@ impl<'a> ExecutionGenerator<'a> {
         (bits + 7) / 8
     }
 
+    fn context_field_i128(&self, ctx_id: &crate::ContextId) -> TokenStream {
+        match self.constructor.context_fields.get(ctx_id) {
+            Some(field) => quote! { self.#field },
+            None => quote! { 0i128 },
+        }
+    }
+
+    fn context_field_u64(&self, ctx_id: &crate::ContextId) -> TokenStream {
+        let value = self.context_field_i128(ctx_id);
+        quote! { (#value as u64) }
+    }
+
     /// Emit a varnode expression for a register-space varnode.
     fn varnode_expr(&self, varnode_id: crate::VarnodeId) -> TokenStream {
         let v = self.disassembler.sleigh.varnode(varnode_id);
@@ -134,13 +146,7 @@ impl<'a> ExecutionGenerator<'a> {
                     }
                 }
             }
-            crate::execution::DynamicValueType::Context(ctx_id) => {
-                let _read_fn = &self.disassembler.context.context_functions(*ctx_id).read;
-                // Context is read via self on the ContextMemory but we don't have it in lift.
-                // Context values are fixed at decode time, so we'd need to store them.
-                // For now, generate a zero — context-dependent register selection is rare.
-                quote! { 0u64 }
-            }
+            crate::execution::DynamicValueType::Context(ctx_id) => self.context_field_u64(ctx_id),
         }
     }
 
@@ -262,7 +268,10 @@ impl<'a> ExecutionGenerator<'a> {
         // Referenced tables get their ops/exports cached; unreferenced ones just get ops.
         // Pre-lift all subtable fields, then remap unique offsets so no two subtables
         // collide. Each subtable gets its unique varnodes shifted by (idx+1) * 0x10000.
-        let subtable_cache: TokenStream = self.constructor.table_fields.iter()
+        let subtable_cache: TokenStream = self
+            .constructor
+            .table_fields
+            .iter()
             .enumerate()
             .map(|(idx, (table_id, field))| {
                 let cache_ops = format_ident!("{}_ops", field);
@@ -270,10 +279,13 @@ impl<'a> ExecutionGenerator<'a> {
                 let cache_ref = format_ident!("{}_ref", field);
                 let offset = ((idx as u64) + 1) * 0x10000;
                 // Check if this table field is Optional (from OR patterns)
-                let is_optional = self.disassembler.sleigh
+                let is_optional = self
+                    .disassembler
+                    .sleigh
                     .table(self.constructor.table_id)
                     .constructor(self.constructor.constructor_id)
-                    .pattern.produced_tables()
+                    .pattern
+                    .produced_tables()
                     .find(|pt| pt.table == *table_id)
                     .map(|pt| !pt.always)
                     .unwrap_or(false);
@@ -443,7 +455,7 @@ impl<'a> ExecutionGenerator<'a> {
                         }
                         None => quote! { 0i128 },
                     },
-                    ReadScope::Context(_) => quote! { 0i128 },
+                    ReadScope::Context(context) => self.context_field_i128(context),
                     ReadScope::Local(var_id) => match self.constructor.dis_fields.get(var_id) {
                         Some(name) => quote! { #name },
                         None => quote! { 0i128 },
@@ -993,10 +1005,7 @@ impl<'a> ExecutionGenerator<'a> {
                         match self.constructor.ass_fields.get(&tf.id) {
                             Some(n) => {
                                 let val = self.token_field_as_u64(&tf.id, n);
-                                (
-                                    quote! { pcode_ir::Varnode::constant(#val, #sz) },
-                                    quote! {},
-                                )
+                                (quote! { pcode_ir::Varnode::constant(#val, #sz) }, quote! {})
                             }
                             None => (quote! { pcode_ir::Varnode::constant(0, #sz) }, quote! {}),
                         }
@@ -1095,19 +1104,18 @@ impl<'a> ExecutionGenerator<'a> {
                 match self.constructor.ass_fields.get(&tf.id) {
                     Some(n) => {
                         let val = self.token_field_as_u64(&tf.id, n);
-                        (
-                            quote! { pcode_ir::Varnode::constant(#val, #sz) },
-                            quote! {},
-                        )
+                        (quote! { pcode_ir::Varnode::constant(#val, #sz) }, quote! {})
                     }
                     None => (quote! { pcode_ir::Varnode::constant(0, #sz) }, quote! {}),
                 }
             }
             ExprValue::Context(ctx) => {
-                // Context values are fixed at decode time and rarely appear in P-code
-                // execution. Would need context to be passed to lift() to read properly.
                 let sz = Self::bytes_from_bits(ctx.size.get()) as u32;
-                (quote! { pcode_ir::Varnode::constant(0, #sz) }, quote! {})
+                let value = self.context_field_u64(&ctx.id);
+                (
+                    quote! { pcode_ir::Varnode::constant(#value, #sz) },
+                    quote! {},
+                )
             }
             ExprValue::Table(table_id) => {
                 let sz = self.addr_size();

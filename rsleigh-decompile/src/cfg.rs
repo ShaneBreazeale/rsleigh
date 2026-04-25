@@ -1,11 +1,14 @@
-use std::collections::HashMap;
-use pcode_ir::{PcodeOp, AddressSpaceId, Instruction, Varnode};
 use crate::ir::*;
+use pcode_ir::{AddressSpaceId, Instruction, PcodeOp, Varnode};
+use std::collections::HashMap;
 
 /// Build a control flow graph from decoded instructions.
 pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
     if instructions.is_empty() {
-        return Cfg { blocks: vec![], entry: BlockId(0) };
+        return Cfg {
+            blocks: vec![],
+            entry: BlockId(0),
+        };
     }
 
     // Flatten into (addr, op) pairs, grouped by instruction address
@@ -16,7 +19,8 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
 
     // Find block leaders: first instruction, branch targets, instruction after branch/call/return
     let mut leaders: Vec<u64> = vec![instructions[0].0];
-    let _addr_set: HashMap<u64, usize> = instructions.iter()
+    let _addr_set: HashMap<u64, usize> = instructions
+        .iter()
         .enumerate()
         .map(|(i, (addr, _))| (*addr, i))
         .collect();
@@ -53,22 +57,7 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
     leaders.sort_unstable();
     leaders.dedup();
 
-    // Snap branch targets to the nearest valid instruction address.
-    // Works around rsleigh branch target computation bugs where relative offsets
-    // may be off by a constant (known issue with subtable inst_next).
     let inst_addrs: Vec<u64> = instructions.iter().map(|(a, _)| *a).collect();
-    let snap_to_inst = |addr: u64| -> u64 {
-        if inst_addrs.contains(&addr) { return addr; }
-        // Find nearest instruction address (within 256 bytes)
-        inst_addrs.iter().copied()
-            .filter(|a| (*a as i64 - addr as i64).unsigned_abs() <= 256)
-            .min_by_key(|a| (*a as i64 - addr as i64).unsigned_abs())
-            .unwrap_or(addr)
-    };
-    leaders = leaders.into_iter().map(|a| snap_to_inst(a)).collect();
-    leaders.sort_unstable();
-    leaders.dedup();
-
     // Filter leaders to only include addresses that correspond to instructions
     let valid_addrs: std::collections::HashSet<u64> = inst_addrs.iter().copied().collect();
     leaders.retain(|a| valid_addrs.contains(a));
@@ -81,9 +70,7 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
 
     // Build blocks
     let mut blocks: Vec<BasicBlock> = Vec::new();
-    let func_end = instructions.last()
-        .map(|(a, i)| a + i.len)
-        .unwrap_or(0);
+    let func_end = instructions.last().map(|(a, i)| a + i.len).unwrap_or(0);
 
     for (block_idx, &leader_addr) in leaders.iter().enumerate() {
         // Find the range of instructions in this block
@@ -106,7 +93,7 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
         let next_inst_addr = last_inst_addr + last_inst_len;
 
         // Determine terminator from the last op
-        let terminator = if let Some((_, last_op)) = ops.last() {
+        let terminator = if let Some((_, last_op)) = ops.last().cloned() {
             match last_op {
                 PcodeOp::Return { .. } => {
                     ops.pop();
@@ -115,28 +102,31 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                     Terminator::Return
                 }
                 PcodeOp::Branch { dest } if dest.space == AddressSpaceId::Ram => {
-                    let target = snap_to_inst(dest.offset);
+                    let target = dest.offset;
                     ops.pop();
                     if let Some(&bid) = leader_to_block.get(&target) {
                         Terminator::Branch(bid)
                     } else {
-                        Terminator::Branch(BlockId(block_idx)) // self-loop fallback
+                        Terminator::Indirect(dest)
                     }
                 }
                 PcodeOp::CBranch { dest, cond } if dest.space == AddressSpaceId::Ram => {
-                    let target = snap_to_inst(dest.offset);
-                    let cond = *cond;
+                    let target = dest.offset;
                     ops.pop();
-                    let taken = leader_to_block.get(&target)
-                        .copied()
-                        .unwrap_or(BlockId(block_idx));
-                    let fallthrough = leader_to_block.get(&next_inst_addr)
-                        .copied()
-                        .unwrap_or(BlockId(block_idx));
-                    Terminator::CBranch { cond, taken, fallthrough }
+                    match (
+                        leader_to_block.get(&target).copied(),
+                        leader_to_block.get(&next_inst_addr).copied(),
+                    ) {
+                        (Some(taken), Some(fallthrough)) => Terminator::CBranch {
+                            cond,
+                            taken,
+                            fallthrough,
+                        },
+                        _ => Terminator::Indirect(dest),
+                    }
                 }
                 PcodeOp::BranchInd { dest } => {
-                    let dest_vn = *dest;
+                    let dest_vn = dest;
                     ops.pop();
                     // ARM32: POP {PC} generates BranchInd where dest is loaded from stack.
                     // Detect this as a Return: if the dest was loaded from SP-relative address
@@ -164,32 +154,41 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                     let target = if dest.space == AddressSpaceId::Ram {
                         CallTarget::Direct(dest.offset)
                     } else {
-                        CallTarget::Indirect(*dest)
+                        CallTarget::Indirect(dest)
                     };
                     ops.pop();
                     // Strip x86-32 return address push (IntSub ESP + Store [ESP])
                     strip_call_push_ops(&mut ops);
-                    let fallthrough = leader_to_block.get(&next_inst_addr)
+                    let fallthrough = leader_to_block
+                        .get(&next_inst_addr)
                         .copied()
                         .unwrap_or(BlockId(block_idx));
-                    Terminator::Call { target, fallthrough }
+                    Terminator::Call {
+                        target,
+                        fallthrough,
+                    }
                 }
                 PcodeOp::CallInd { dest } => {
                     // Try to resolve indirect calls through constant Load
                     // (e.g., CALL dword ptr [IAT_addr] → Load tmp, [const]; CallInd tmp)
                     // For MIPS PIC: pass all function ops to resolve GP-relative calls
                     let func_addr = instructions[0].0;
-                    let all_ops: Vec<(u64, PcodeOp)> = instructions.iter()
+                    let all_ops: Vec<(u64, PcodeOp)> = instructions
+                        .iter()
                         .flat_map(|(addr, inst)| inst.ops.iter().map(move |op| (*addr, op.clone())))
                         .collect();
-                    let target = resolve_callind_target(&ops, dest, func_addr, &all_ops);
+                    let target = resolve_callind_target(&ops, &dest, func_addr, &all_ops);
                     ops.pop();
                     // Strip x86-32 return address push (IntSub ESP + Store [ESP])
                     strip_call_push_ops(&mut ops);
-                    let fallthrough = leader_to_block.get(&next_inst_addr)
+                    let fallthrough = leader_to_block
+                        .get(&next_inst_addr)
                         .copied()
                         .unwrap_or(BlockId(block_idx));
-                    Terminator::Call { target, fallthrough }
+                    Terminator::Call {
+                        target,
+                        fallthrough,
+                    }
                 }
                 _ => {
                     // Fallthrough to next block
@@ -281,7 +280,12 @@ fn strip_return_pop_ops(ops: &mut Vec<(u64, PcodeOp)>) {
 ///
 /// Also handles MIPS PIC: `lw t9, -OFFSET(gp); jalr t9` → resolve GP+offset to GOT
 /// entry by tracing the GP register value from the function prologue.
-fn resolve_callind_target(ops: &[(u64, PcodeOp)], dest: &pcode_ir::Varnode, func_addr: u64, all_ops: &[(u64, PcodeOp)]) -> CallTarget {
+fn resolve_callind_target(
+    ops: &[(u64, PcodeOp)],
+    dest: &pcode_ir::Varnode,
+    func_addr: u64,
+    all_ops: &[(u64, PcodeOp)],
+) -> CallTarget {
     // Trace backwards from the CallInd dest through IntAnd/IntSext/IntAdd/Copy chains
     // to find the Load that produced the function address.
     // Accumulate constant adjustments (e.g., addiu t9, t9, -0x68c0).
@@ -301,7 +305,9 @@ fn resolve_callind_target(ops: &[(u64, PcodeOp)], dest: &pcode_ir::Varnode, func
                             }
                             // MIPS PIC: ptr is GP + offset (Unique from IntAdd)
                             if ptr.space == AddressSpaceId::Unique {
-                                if let Some(got_addr) = resolve_gp_relative_addr(ops, ptr, func_addr, all_ops) {
+                                if let Some(got_addr) =
+                                    resolve_gp_relative_addr(ops, ptr, func_addr, all_ops)
+                                {
                                     let addr = (got_addr as i64 + adjustment) as u64;
                                     return CallTarget::Direct(addr);
                                 }
@@ -310,7 +316,11 @@ fn resolve_callind_target(ops: &[(u64, PcodeOp)], dest: &pcode_ir::Varnode, func
                         }
                         // IntAnd (MIPS ISA mode bit masking) — follow through
                         PcodeOp::IntAnd { left, right, .. } => {
-                            target_vn = if right.space == AddressSpaceId::Const { *left } else { *right };
+                            target_vn = if right.space == AddressSpaceId::Const {
+                                *left
+                            } else {
+                                *right
+                            };
                             found_producer = true;
                             break;
                         }
@@ -353,7 +363,9 @@ fn resolve_callind_target(ops: &[(u64, PcodeOp)], dest: &pcode_ir::Varnode, func
                 }
             }
         }
-        if !found_producer { break; }
+        if !found_producer {
+            break;
+        }
     }
     CallTarget::Indirect(*dest)
 }
@@ -361,7 +373,12 @@ fn resolve_callind_target(ops: &[(u64, PcodeOp)], dest: &pcode_ir::Varnode, func
 /// Resolve a GP-relative address for MIPS PIC calls.
 /// Scans backwards for IntAdd(GP_reg, const_offset) that produced the given Unique varnode,
 /// then traces GP to find its constant value from the function prologue.
-fn resolve_gp_relative_addr(ops: &[(u64, PcodeOp)], ptr: &pcode_ir::Varnode, func_addr: u64, all_ops: &[(u64, PcodeOp)]) -> Option<u64> {
+fn resolve_gp_relative_addr(
+    ops: &[(u64, PcodeOp)],
+    ptr: &pcode_ir::Varnode,
+    func_addr: u64,
+    all_ops: &[(u64, PcodeOp)],
+) -> Option<u64> {
     // Find the IntAdd that produced this Unique varnode
     for (_addr, op) in ops.iter().rev() {
         if let PcodeOp::IntAdd { out, left, right } = op {
@@ -398,7 +415,11 @@ fn resolve_gp_relative_addr(ops: &[(u64, PcodeOp)], ptr: &pcode_ir::Varnode, fun
 
 /// Trace a register's constant value by scanning backwards through P-code ops.
 /// Handles MIPS GP setup patterns like: Copy(GP, const) or IntAdd(GP, GP, const).
-fn trace_register_value(ops: &[(u64, PcodeOp)], reg: &pcode_ir::Varnode, func_addr: u64) -> Option<u64> {
+fn trace_register_value(
+    ops: &[(u64, PcodeOp)],
+    reg: &pcode_ir::Varnode,
+    func_addr: u64,
+) -> Option<u64> {
     let mut value: Option<u64> = None;
 
     // Scan FORWARD to build up the register value (handles multi-instruction setup)
@@ -406,15 +427,18 @@ fn trace_register_value(ops: &[(u64, PcodeOp)], reg: &pcode_ir::Varnode, func_ad
         match op {
             // Copy from constant: reg = const (lui produces this)
             PcodeOp::Copy { out, input }
-                if out.offset == reg.offset && out.space == reg.space
+                if out.offset == reg.offset
+                    && out.space == reg.space
                     && input.space == AddressSpaceId::Const =>
             {
                 value = Some(input.offset);
             }
             // IntAdd with constant: reg = reg + const (addiu reg, reg, lo)
             PcodeOp::IntAdd { out, left, right }
-                if out.offset == reg.offset && out.space == reg.space
-                    && left.offset == reg.offset && left.space == reg.space
+                if out.offset == reg.offset
+                    && out.space == reg.space
+                    && left.offset == reg.offset
+                    && left.space == reg.space
                     && right.space == AddressSpaceId::Const =>
             {
                 if let Some(prev) = value {
@@ -424,8 +448,10 @@ fn trace_register_value(ops: &[(u64, PcodeOp)], reg: &pcode_ir::Varnode, func_ad
             // IntAdd with another register: reg = reg + other_reg (addu gp, gp, t9)
             // In MIPS PIC, t9 holds the function address at entry.
             PcodeOp::IntAdd { out, left, right }
-                if out.offset == reg.offset && out.space == reg.space
-                    && left.offset == reg.offset && left.space == reg.space
+                if out.offset == reg.offset
+                    && out.space == reg.space
+                    && left.offset == reg.offset
+                    && left.space == reg.space
                     && right.space == AddressSpaceId::Register =>
             {
                 if let Some(prev) = value {
@@ -436,8 +462,10 @@ fn trace_register_value(ops: &[(u64, PcodeOp)], reg: &pcode_ir::Varnode, func_ad
             }
             // Also: reg = other_reg + reg (commuted form)
             PcodeOp::IntAdd { out, left, right }
-                if out.offset == reg.offset && out.space == reg.space
-                    && right.offset == reg.offset && right.space == reg.space
+                if out.offset == reg.offset
+                    && out.space == reg.space
+                    && right.offset == reg.offset
+                    && right.space == reg.space
                     && left.space == AddressSpaceId::Register =>
             {
                 if let Some(prev) = value {
@@ -447,7 +475,8 @@ fn trace_register_value(ops: &[(u64, PcodeOp)], reg: &pcode_ir::Varnode, func_ad
             // IntAdd where result is in a DIFFERENT output but same logical register
             // (handles t9 = gp + offset patterns where t9 is the output)
             PcodeOp::IntAdd { out, left, right }
-                if out.offset == reg.offset && out.space == reg.space
+                if out.offset == reg.offset
+                    && out.space == reg.space
                     && right.space == AddressSpaceId::Const =>
             {
                 // left must be a register we can resolve
@@ -486,20 +515,17 @@ fn trace_register_value(ops: &[(u64, PcodeOp)], reg: &pcode_ir::Varnode, func_ad
             // GP value after a call. The P-code chain is Load→IntSext→GP.
             // Don't clear tracking — GP is function-invariant.
             PcodeOp::Load { out, .. }
-                if out.offset == reg.offset && out.space == reg.space
-                    && reg.offset == 112 =>
+                if out.offset == reg.offset && out.space == reg.space && reg.offset == 112 =>
             {
                 // GP restore from stack — keep the prologue value
             }
             PcodeOp::IntSext { out, .. }
-                if out.offset == reg.offset && out.space == reg.space
-                    && reg.offset == 112 =>
+                if out.offset == reg.offset && out.space == reg.space && reg.offset == 112 =>
             {
                 // GP restore via sign extension — keep the prologue value
             }
             PcodeOp::Copy { out, .. }
-                if out.offset == reg.offset && out.space == reg.space
-                    && reg.offset == 112 =>
+                if out.offset == reg.offset && out.space == reg.space && reg.offset == 112 =>
             {
                 // GP copy — keep the prologue value
             }
@@ -520,7 +546,8 @@ fn trace_register_value(ops: &[(u64, PcodeOp)], reg: &pcode_ir::Varnode, func_ad
 fn trace_register_value_simple(ops: &[(u64, PcodeOp)], reg: &pcode_ir::Varnode) -> Option<u64> {
     for (_addr, op) in ops.iter().rev() {
         if let PcodeOp::Copy { out, input } = op {
-            if out.offset == reg.offset && out.space == reg.space
+            if out.offset == reg.offset
+                && out.space == reg.space
                 && input.space == AddressSpaceId::Const
             {
                 return Some(input.offset);
@@ -528,13 +555,18 @@ fn trace_register_value_simple(ops: &[(u64, PcodeOp)], reg: &pcode_ir::Varnode) 
         }
         // IntAdd self: reg = reg + const
         if let PcodeOp::IntAdd { out, left, right } = op {
-            if out.offset == reg.offset && out.space == reg.space
-                && left.offset == reg.offset && left.space == reg.space
+            if out.offset == reg.offset
+                && out.space == reg.space
+                && left.offset == reg.offset
+                && left.space == reg.space
                 && right.space == AddressSpaceId::Const
             {
                 // Need previous value — scan further back
                 if let Some(prev) = trace_register_value_simple(
-                    &ops[..ops.iter().rposition(|(_, o)| std::ptr::eq(o, op)).unwrap_or(0)],
+                    &ops[..ops
+                        .iter()
+                        .rposition(|(_, o)| std::ptr::eq(o, op))
+                        .unwrap_or(0)],
                     reg,
                 ) {
                     return Some((prev as i64 + right.offset as i64) as u64);
@@ -545,12 +577,13 @@ fn trace_register_value_simple(ops: &[(u64, PcodeOp)], reg: &pcode_ir::Varnode) 
     None
 }
 
-
 impl Cfg {
     pub fn successors(&self, block: BlockId) -> Vec<BlockId> {
         match &self.blocks[block.0].terminator {
             Terminator::Fallthrough(b) | Terminator::Branch(b) => vec![*b],
-            Terminator::CBranch { taken, fallthrough, .. } => vec![*taken, *fallthrough],
+            Terminator::CBranch {
+                taken, fallthrough, ..
+            } => vec![*taken, *fallthrough],
             Terminator::Call { fallthrough, .. } => vec![*fallthrough],
             Terminator::Return | Terminator::Indirect(_) => vec![],
         }
@@ -566,5 +599,63 @@ impl Cfg {
             }
         }
         preds
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inst(len: u64, ops: Vec<PcodeOp>) -> Instruction {
+        Instruction {
+            len,
+            disassembly: String::new(),
+            ops,
+        }
+    }
+
+    #[test]
+    fn direct_branch_to_non_instruction_target_is_indirect() {
+        let cfg = build_cfg(&[
+            (
+                0x1000,
+                inst(
+                    4,
+                    vec![PcodeOp::Branch {
+                        dest: Varnode::ram(0x1006, 8),
+                    }],
+                ),
+            ),
+            (0x1004, inst(4, vec![])),
+            (0x1008, inst(4, vec![])),
+        ]);
+
+        assert!(matches!(
+            cfg.blocks[0].terminator,
+            Terminator::Indirect(v) if v == Varnode::ram(0x1006, 8)
+        ));
+    }
+
+    #[test]
+    fn conditional_branch_to_non_instruction_target_is_indirect() {
+        let cfg = build_cfg(&[
+            (
+                0x1000,
+                inst(
+                    4,
+                    vec![PcodeOp::CBranch {
+                        dest: Varnode::ram(0x1006, 8),
+                        cond: Varnode::register(0, 1),
+                    }],
+                ),
+            ),
+            (0x1004, inst(4, vec![])),
+            (0x1008, inst(4, vec![])),
+        ]);
+
+        assert!(matches!(
+            cfg.blocks[0].terminator,
+            Terminator::Indirect(v) if v == Varnode::ram(0x1006, 8)
+        ));
     }
 }
