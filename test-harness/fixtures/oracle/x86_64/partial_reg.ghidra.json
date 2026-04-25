@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "arch": "x86:LE:64:default",
+  "binary_sha256": "e613a9cebab09c6ffbc8e1e277bce1d97a25e760cc685eeadfd2c67f387bcd65",
+  "functions": [
+    {
+      "entry": 0,
+      "name": "FUN_00000000",
+      "blocks": [
+        {"start": 0, "end": 8, "succs": []}
+      ],
+      "instructions": [
+        {"addr": 0, "len": 5, "bytes": "b878563412", "disasm": "MOV EAX,0x12345678", "pcode": [{"op": "COPY", "out": {"space": "register", "offset": 0, "size": 8}, "inputs": [{"space": "const", "offset": 305419896, "size": 8}]}]},
+        {"addr": 5, "len": 2, "bytes": "b001", "disasm": "MOV AL,0x1", "pcode": [{"op": "COPY", "out": {"space": "register", "offset": 0, "size": 1}, "inputs": [{"space": "const", "offset": 1, "size": 1}]}]},
+        {"addr": 7, "len": 1, "bytes": "c3", "disasm": "RET", "pcode": [{"op": "LOAD", "out": {"space": "register", "offset": 648, "size": 8}, "inputs": [{"space": "const", "offset": 433, "size": 8}, {"space": "register", "offset": 32, "size": 8}]}, {"op": "INT_ADD", "out": {"space": "register", "offset": 32, "size": 8}, "inputs": [{"space": "register", "offset": 32, "size": 8}, {"space": "const", "offset": 8, "size": 8}]}, {"op": "RETURN", "inputs": [{"space": "register", "offset": 648, "size": 8}]}]}
+      ]
+    }
+  ]
+}

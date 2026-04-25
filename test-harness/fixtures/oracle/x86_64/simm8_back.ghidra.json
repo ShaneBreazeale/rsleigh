@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "arch": "x86:LE:64:default",
+  "binary_sha256": "5646120eb0454c7be94d6609990e7db6889c3f4c976b0e4263cb41fbbcfb4f6a",
+  "functions": [
+    {
+      "entry": 0,
+      "name": "FUN_00000000",
+      "blocks": [
+        {"start": 0, "end": 2, "succs": [0]}
+      ],
+      "instructions": [
+        {"addr": 0, "len": 2, "bytes": "ebfe", "disasm": "JMP 0x00000000", "pcode": [{"op": "BRANCH", "inputs": [{"space": "ram", "offset": 0, "size": 8}]}]}
+      ]
+    }
+  ]
+}

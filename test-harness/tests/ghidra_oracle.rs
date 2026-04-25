@@ -182,23 +182,8 @@ fn rsleigh_op_to_norm(op: &PcodeOp) -> NormOp {
     }
     match op {
         Copy { out, input } => n!("Copy", Some(v(out)), vec![v(input)]),
-        Load { out, space, ptr } => n!(
-            "Load",
-            Some(v(out)),
-            vec![
-                NormVar { space: AddressSpaceId::Const, offset: *space as u64, size: 4 },
-                v(ptr),
-            ]
-        ),
-        Store { space, ptr, val } => n!(
-            "Store",
-            None,
-            vec![
-                NormVar { space: AddressSpaceId::Const, offset: *space as u64, size: 4 },
-                v(ptr),
-                v(val),
-            ]
-        ),
+        Load { out, space: _, ptr } => n!("Load", Some(v(out)), vec![v(ptr)]),
+        Store { space: _, ptr, val } => n!("Store", None, vec![v(ptr), v(val)]),
         Branch { dest } => n!("Branch", None, vec![v(dest)]),
         CBranch { dest, cond } => n!("CBranch", None, vec![v(dest), v(cond)]),
         BranchInd { dest } => n!("BranchInd", None, vec![v(dest)]),
@@ -287,10 +272,18 @@ fn oracle_op_to_norm(op: &OracleOp) -> Option<NormOp> {
     let mnemonic = ghidra_mnemonic_to_rsleigh(&op.op)?;
     let out = op.out.as_ref().and_then(NormVar::from_oracle);
     let inputs: Option<Vec<_>> = op.inputs.iter().map(NormVar::from_oracle).collect();
+    let mut inputs = inputs?;
+    // LOAD/STORE first input is an opaque address-space ID const that Ghidra
+    // and rsleigh encode differently (Ghidra: numeric Ghidra-space-id, rsleigh:
+    // enum discriminant). Strip on both sides; the operand semantics are
+    // recovered by the strict space-tag on the pointer/value varnode itself.
+    if matches!(mnemonic, "Load" | "Store") && !inputs.is_empty() {
+        inputs.remove(0);
+    }
     Some(NormOp {
         mnemonic,
         out,
-        inputs: inputs?,
+        inputs,
     })
 }
 
@@ -364,9 +357,18 @@ fn check_oracle(path: &Path) {
         panic!("unmapped Ghidra arch in {}: {}", path.display(), oracle.arch)
     });
 
+    assert!(
+        !oracle.functions.is_empty(),
+        "{}: oracle has zero functions — Ghidra import didn't disassemble. \
+         Check that ExportRsleighOracle.java forced disassembly + function creation.",
+        path.display()
+    );
+    let mut total_instructions = 0usize;
+
     let mut decoder = Decoder::new(arch);
 
     for func in &oracle.functions {
+        total_instructions += func.instructions.len();
         for ins in &func.instructions {
             let bytes = parse_hex(&ins.bytes);
             let decoded = decoder
@@ -416,6 +418,11 @@ fn check_oracle(path: &Path) {
             }
         }
     }
+    assert!(
+        total_instructions > 0,
+        "{}: oracle has functions but zero instructions",
+        path.display()
+    );
 }
 
 #[test]

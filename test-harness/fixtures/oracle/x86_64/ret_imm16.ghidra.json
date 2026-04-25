@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "arch": "x86:LE:64:default",
+  "binary_sha256": "87f8baa5e69f0f9a3cd456c062db3292501ae03a7964b8ba7470c0cbd47216d3",
+  "functions": [
+    {
+      "entry": 0,
+      "name": "FUN_00000000",
+      "blocks": [
+        {"start": 0, "end": 3, "succs": []}
+      ],
+      "instructions": [
+        {"addr": 0, "len": 3, "bytes": "c21000", "disasm": "RET 0x10", "pcode": [{"op": "LOAD", "out": {"space": "register", "offset": 648, "size": 8}, "inputs": [{"space": "const", "offset": 433, "size": 8}, {"space": "register", "offset": 32, "size": 8}]}, {"op": "INT_ADD", "out": {"space": "register", "offset": 32, "size": 8}, "inputs": [{"space": "register", "offset": 32, "size": 8}, {"space": "const", "offset": 8, "size": 8}]}, {"op": "INT_ADD", "out": {"space": "register", "offset": 32, "size": 8}, "inputs": [{"space": "register", "offset": 32, "size": 8}, {"space": "const", "offset": 16, "size": 8}]}, {"op": "RETURN", "inputs": [{"space": "register", "offset": 648, "size": 8}]}]}
+      ]
+    }
+  ]
+}

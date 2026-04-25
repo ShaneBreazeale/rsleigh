@@ -9,8 +9,11 @@
 //     -postScript ExportRsleighOracle.java <out.json>
 //
 // Output schema is documented in test-harness/fixtures/oracle/README.md.
+import ghidra.app.cmd.disassemble.DisassembleCommand;
+import ghidra.app.cmd.function.CreateFunctionCmd;
 import ghidra.app.script.GhidraScript;
 import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.block.BasicBlockModel;
 import ghidra.program.model.block.CodeBlock;
 import ghidra.program.model.block.CodeBlockIterator;
@@ -36,6 +39,21 @@ public class ExportRsleighOracle extends GhidraScript {
     public void run() throws Exception {
         String[] args = getScriptArgs();
         String outPath = (args.length > 0) ? args[0] : "oracle.json";
+
+        // For raw-blob imports there is no entry point + no defined functions.
+        // Force disassembly across the entire memory image and create a function
+        // at the start of every executable block so HighFunction-free pcode
+        // export still has something to walk.
+        Address minAddr = currentProgram.getMinAddress();
+        Address maxAddr = currentProgram.getMaxAddress();
+        AddressSet body = new AddressSet(minAddr, maxAddr);
+        DisassembleCommand dis = new DisassembleCommand(minAddr, body, true);
+        dis.applyTo(currentProgram, monitor);
+
+        if (currentProgram.getFunctionManager().getFunctionAt(minAddr) == null) {
+            CreateFunctionCmd mk = new CreateFunctionCmd(minAddr);
+            mk.applyTo(currentProgram, monitor);
+        }
 
         StringBuilder json = new StringBuilder();
         json.append("{\n");
