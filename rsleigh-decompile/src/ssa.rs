@@ -27,6 +27,7 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
         blocks: Vec::new(),
         vars: Vec::new(),
         entry: cfg.entry,
+        diagnostics: cfg.diagnostics.clone(),
     };
 
     let preds = cfg.predecessors();
@@ -1216,7 +1217,19 @@ fn build_expr(ssa: &mut SsaCfg, current: &mut HashMap<Varnode, VarId>, op: &Pcod
                 Expr::BinOp(BinOpKind::Lsr, i, shift_amt)
             }
         }
-        _ => Expr::Unknown,
+        // Branching ops (Branch/CBranch/BranchInd/Call/CallInd/Return) are
+        // consumed by the CFG builder before SSA, and Store has no Expr value,
+        // so this fallthrough only fires when a new PcodeOp variant is added
+        // without lowering. Surface it.
+        other => {
+            ssa.diagnostics.push(Diagnostic {
+                severity: Severity::Warn,
+                kind: DiagKind::UnknownPcodeOp,
+                addr: None,
+                detail: format!("build_expr: no lowering for {:?}", other),
+            });
+            Expr::Unknown
+        }
     }
 }
 

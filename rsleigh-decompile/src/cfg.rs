@@ -8,8 +8,10 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
         return Cfg {
             blocks: vec![],
             entry: BlockId(0),
+            diagnostics: vec![],
         };
     }
+    let mut diagnostics: Vec<Diagnostic> = Vec::new();
 
     // Flatten into (addr, op) pairs, grouped by instruction address
     let mut inst_ops: Vec<(u64, Vec<PcodeOp>)> = Vec::new();
@@ -107,6 +109,15 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                     if let Some(&bid) = leader_to_block.get(&target) {
                         Terminator::Branch(bid)
                     } else {
+                        diagnostics.push(Diagnostic {
+                            severity: Severity::Warn,
+                            kind: DiagKind::UnresolvedBranchTarget,
+                            addr: Some(last_inst_addr),
+                            detail: format!(
+                                "Branch target {:#x} not in instruction set",
+                                target
+                            ),
+                        });
                         Terminator::Indirect(dest)
                     }
                 }
@@ -122,7 +133,18 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                             taken,
                             fallthrough,
                         },
-                        _ => Terminator::Indirect(dest),
+                        _ => {
+                            diagnostics.push(Diagnostic {
+                                severity: Severity::Warn,
+                                kind: DiagKind::UnresolvedBranchTarget,
+                                addr: Some(last_inst_addr),
+                                detail: format!(
+                                    "CBranch target {:#x} or fallthrough {:#x} not in instruction set",
+                                    target, next_inst_addr
+                                ),
+                            });
+                            Terminator::Indirect(dest)
+                        }
                     }
                 }
                 PcodeOp::BranchInd { dest } => {
@@ -214,6 +236,7 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
     Cfg {
         entry: BlockId(0),
         blocks,
+        diagnostics,
     }
 }
 

@@ -8,11 +8,60 @@ pub struct BlockId(pub usize);
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct VarId(pub u32);
 
+// ---- Diagnostics ----
+
+/// Severity of a diagnostic emitted during decode/lift/SSA construction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Severity {
+    /// Informational; benign approximation.
+    Info,
+    /// Approximation that may produce wrong output but is recoverable.
+    Warn,
+    /// Hard fallback — semantics likely lost (e.g. silent zero, sentinel).
+    Error,
+}
+
+/// What kind of approximation/fallback fired.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiagKind {
+    /// `safe_var` returned the sentinel for an out-of-bounds VarId.
+    OobVarId,
+    /// CFG could not resolve a direct Branch/CBranch target to a leader; the
+    /// terminator was downgraded to `Indirect`.
+    UnresolvedBranchTarget,
+    /// `build_expr` hit a PcodeOp variant it does not lower; the var carries
+    /// `Expr::Unknown`.
+    UnknownPcodeOp,
+    /// Generated lift code emitted a zero-default for a missing dynamic
+    /// token-field or context value.
+    DynamicValueMissing,
+    /// Generated lift code emitted a zero-default for a context-dependent
+    /// value that was not wired through `ConstructorStruct.context_fields`.
+    ContextNotWired,
+    /// Memory aliasing/SSA stack-slot fallback to conservative unknown.
+    StackAliasingUnknown,
+    /// Indirect call could not be resolved through Load chain / GP-relative
+    /// trace; left as `CallTarget::Indirect`.
+    UnresolvedIndirectCall,
+}
+
+/// One observation surfaced from the decode/lift/SSA pipeline.
+#[derive(Clone, Debug)]
+pub struct Diagnostic {
+    pub severity: Severity,
+    pub kind: DiagKind,
+    /// Instruction address where the fallback fired, if known.
+    pub addr: Option<u64>,
+    pub detail: String,
+}
+
 // ---- CFG types ----
 
 pub struct Cfg {
     pub blocks: Vec<BasicBlock>,
     pub entry: BlockId,
+    /// Approximations recorded during CFG build (unresolved branch targets, etc.).
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 pub struct BasicBlock {
@@ -27,8 +76,15 @@ pub struct BasicBlock {
 pub enum Terminator {
     Fallthrough(BlockId),
     Branch(BlockId),
-    CBranch { cond: Varnode, taken: BlockId, fallthrough: BlockId },
-    Call { target: CallTarget, fallthrough: BlockId },
+    CBranch {
+        cond: Varnode,
+        taken: BlockId,
+        fallthrough: BlockId,
+    },
+    Call {
+        target: CallTarget,
+        fallthrough: BlockId,
+    },
     Return,
     Indirect(Varnode),
 }
@@ -45,6 +101,9 @@ pub struct SsaCfg {
     pub blocks: Vec<SsaBlock>,
     pub vars: Vec<VarDef>,
     pub entry: BlockId,
+    /// Approximations recorded during CFG construction and SSA build.
+    /// Inherited from `Cfg.diagnostics` and extended by lift/SSA passes.
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 pub struct SsaBlock {
@@ -58,8 +117,17 @@ pub struct SsaBlock {
 pub enum SsaTerminator {
     Fallthrough(BlockId),
     Branch(BlockId),
-    CBranch { cond: VarId, taken: BlockId, fallthrough: BlockId },
-    Call { target: CallTarget, args: Vec<VarId>, out: Option<VarId>, fallthrough: BlockId },
+    CBranch {
+        cond: VarId,
+        taken: BlockId,
+        fallthrough: BlockId,
+    },
+    Call {
+        target: CallTarget,
+        args: Vec<VarId>,
+        out: Option<VarId>,
+        fallthrough: BlockId,
+    },
     Return(Option<VarId>),
     Indirect(VarId),
 }
@@ -67,8 +135,15 @@ pub enum SsaTerminator {
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Assign(VarId),
-    Store { addr: VarId, val: VarId },
-    Call { target: CallTarget, args: Vec<VarId>, out: Option<VarId> },
+    Store {
+        addr: VarId,
+        val: VarId,
+    },
+    Call {
+        target: CallTarget,
+        args: Vec<VarId>,
+        out: Option<VarId>,
+    },
 }
 
 /// Inferred type for a variable, propagated by the type inference pass.
@@ -91,7 +166,9 @@ pub enum InferredType {
 impl InferredType {
     /// Merge two types: if they agree, keep it; if they conflict, prefer the more specific.
     pub fn merge(self, other: InferredType) -> InferredType {
-        if self == other { return self; }
+        if self == other {
+            return self;
+        }
         match (self, other) {
             (InferredType::Unknown, t) | (t, InferredType::Unknown) => t,
             // Signed wins over Unsigned (common in mixed contexts)
@@ -139,39 +216,88 @@ pub enum Expr {
     /// `define pcodeop` declarations (e.g. `software_interrupt`,
     /// `supervisor_call`). `func_id` is the SLEIGH user-function index;
     /// printer maps well-known IDs to readable names.
-    UserOp { func_id: u64, inputs: Vec<VarId> },
+    UserOp {
+        func_id: u64,
+        inputs: Vec<VarId>,
+    },
     Unknown,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum BinOpKind {
-    Add, Sub, Mult, Div, SDiv, Rem, SRem,
-    And, Or, Xor,
-    Lsl, Lsr, Asr,
-    Eq, NotEq, Less, LessEq, SLess, SLessEq,
-    Carry, SCarry, SBorrow,
-    BoolAnd, BoolOr, BoolXor,
-    FloatAdd, FloatSub, FloatMult, FloatDiv,
-    FloatEq, FloatNotEq, FloatLess, FloatLessEq,
+    Add,
+    Sub,
+    Mult,
+    Div,
+    SDiv,
+    Rem,
+    SRem,
+    And,
+    Or,
+    Xor,
+    Lsl,
+    Lsr,
+    Asr,
+    Eq,
+    NotEq,
+    Less,
+    LessEq,
+    SLess,
+    SLessEq,
+    Carry,
+    SCarry,
+    SBorrow,
+    BoolAnd,
+    BoolOr,
+    BoolXor,
+    FloatAdd,
+    FloatSub,
+    FloatMult,
+    FloatDiv,
+    FloatEq,
+    FloatNotEq,
+    FloatLess,
+    FloatLessEq,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum UnaryOpKind {
-    Neg, Not, Zext, Sext,
+    Neg,
+    Not,
+    Zext,
+    Sext,
     BoolNot,
-    FloatNeg, FloatAbs, FloatSqrt, FloatNan,
-    Int2Float, Float2Float, Trunc,
-    FloatCeil, FloatFloor, FloatRound,
-    Popcount, Lzcount,
+    FloatNeg,
+    FloatAbs,
+    FloatSqrt,
+    FloatNan,
+    Int2Float,
+    Float2Float,
+    Trunc,
+    FloatCeil,
+    FloatFloor,
+    FloatRound,
+    Popcount,
+    Lzcount,
 }
 
 // ---- Structured output types ----
 
 #[derive(Debug, Clone)]
 pub enum StructuredStmt {
-    Assign { lhs: VarId, rhs: VarId },
-    Store { addr: VarId, val: VarId },
-    Call { target: CallTarget, args: Vec<VarId>, out: Option<VarId> },
+    Assign {
+        lhs: VarId,
+        rhs: VarId,
+    },
+    Store {
+        addr: VarId,
+        val: VarId,
+    },
+    Call {
+        target: CallTarget,
+        args: Vec<VarId>,
+        out: Option<VarId>,
+    },
     Return(Option<VarId>),
     IfElse {
         cond: VarId,
@@ -192,7 +318,7 @@ pub enum StructuredStmt {
     /// Switch/case recovered from if-else chains or jump tables.
     Switch {
         expr: VarId,
-        cases: Vec<(Vec<i64>, Vec<StructuredStmt>)>,  // (case values, body)
+        cases: Vec<(Vec<i64>, Vec<StructuredStmt>)>, // (case values, body)
         default: Vec<StructuredStmt>,
     },
     Break,
@@ -210,7 +336,11 @@ pub fn safe_var(vars: &[VarDef], id: VarId) -> &VarDef {
 
 static SENTINEL_VARDEF: std::sync::LazyLock<VarDef> = std::sync::LazyLock::new(|| VarDef {
     id: VarId(u32::MAX),
-    varnode: Varnode { space: pcode_ir::AddressSpaceId::Const, offset: 0, size: 0 },
+    varnode: Varnode {
+        space: pcode_ir::AddressSpaceId::Const,
+        offset: 0,
+        size: 0,
+    },
     expr: Expr::Unknown,
     size: 0,
     use_count: 0,
@@ -236,7 +366,11 @@ impl SsaCfg {
             while self.vars.len() <= idx {
                 self.vars.push(VarDef {
                     id: VarId(self.vars.len() as u32),
-                    varnode: Varnode { space: pcode_ir::AddressSpaceId::Const, offset: 0, size: 0 },
+                    varnode: Varnode {
+                        space: pcode_ir::AddressSpaceId::Const,
+                        offset: 0,
+                        size: 0,
+                    },
                     expr: Expr::Unknown,
                     size: 0,
                     use_count: 0,
