@@ -141,7 +141,7 @@ pub fn abi(cc: CallingConv) -> Abi {
         CallingConv::AArch64 => Abi {
             int_args: AARCH64_ARG_REGS,
             float_args: AARCH64_FLOAT_ARG_REGS,
-            return_reg_int: Some(16384),  // x0
+            return_reg_int: Some(16384),   // x0
             return_reg_float: Some(20480), // v0
             callee_cleanup_stack: false,
             shadow_space_bytes: 0,
@@ -180,6 +180,11 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
     FLOAT_ARG_REG_OFFSETS_TLS.with(|r| {
         *r.borrow_mut() = abi_for_cc.float_args;
     });
+    // Reset the safe_var OOB counter so this fold pass sees a clean slate.
+    // Drained back at the end so any sentinel fallbacks fired during fold
+    // become a single OobVarId diagnostic on `ssa.diagnostics`.
+    let _ = crate::ir::take_safe_var_oob_count();
+
     // Collect call arguments FIRST, before any optimization.
     // Arg register writes (RCX/RDX for Win64, RDI/RSI for SysV) have use_count=0
     // because the Call terminator doesn't reference them by VarId. If we run
@@ -242,6 +247,24 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
     // converged type info.
     if matches!(cc, CallingConv::GoAmd64) {
         infer_go_header_params(ssa);
+    }
+
+    // Drain the safe_var OOB counter into a single diagnostic on the
+    // SSA. A nonzero count means at least one fold pass tried to look up
+    // a VarId past the end of `ssa.vars` and got the sentinel — symptom
+    // of corrupted SSA state that the silent fallback had been hiding.
+    let oob = crate::ir::take_safe_var_oob_count();
+    if oob > 0 {
+        ssa.diagnostics.push(crate::ir::Diagnostic {
+            severity: crate::ir::Severity::Warn,
+            kind: crate::ir::DiagKind::OobVarId,
+            addr: None,
+            detail: format!(
+                "safe_var sentinel fallback fired {} time(s) during fold; \
+                 SSA references a VarId past end of vars[]",
+                oob
+            ),
+        });
     }
 }
 

@@ -334,11 +334,37 @@ pub enum StructuredStmt {
     Label(u64),
 }
 
+std::thread_local! {
+    /// Counter for `safe_var` sentinel fallbacks within the current fold pass.
+    /// Drained by `take_safe_var_oob_count` and surfaced as a single
+    /// `OobVarId` diagnostic on `SsaCfg.diagnostics` so silent sentinel
+    /// returns become observable without forcing the borrow checker to
+    /// thread `&mut Vec<Diagnostic>` through every safe_var call site.
+    static SAFE_VAR_OOB_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Drain and return the in-thread safe_var OOB counter. Call once per
+/// fold round; the returned value is the number of sentinel fallbacks
+/// that fired since the last drain.
+pub fn take_safe_var_oob_count() -> usize {
+    SAFE_VAR_OOB_COUNT.with(|c| {
+        let n = c.get();
+        c.set(0);
+        n
+    })
+}
+
 /// Sentinel VarDef returned for out-of-bounds VarId lookups.
 /// Prevents panics on malformed/adversarial input.
 /// Safe VarDef lookup from a slice — returns sentinel for OOB access.
 pub fn safe_var(vars: &[VarDef], id: VarId) -> &VarDef {
-    vars.get(id.0 as usize).unwrap_or(&SENTINEL_VARDEF)
+    match vars.get(id.0 as usize) {
+        Some(v) => v,
+        None => {
+            SAFE_VAR_OOB_COUNT.with(|c| c.set(c.get() + 1));
+            &SENTINEL_VARDEF
+        }
+    }
 }
 
 static SENTINEL_VARDEF: std::sync::LazyLock<VarDef> = std::sync::LazyLock::new(|| VarDef {
