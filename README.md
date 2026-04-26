@@ -17,6 +17,24 @@ and lifter are the most stable part of the project. The decompiler, malware
 heuristics, and text output are moving quickly and should be treated as analysis
 assistance, not ground truth.
 
+## Contents
+
+- [Why this exists](#why-this-exists)
+- [Status](#status)
+- [Supported targets](#supported-targets)
+- [Installation](#installation)
+- [Quickstart](#quickstart)
+- [Rust API](#rust-api)
+- [Decompiler](#decompiler)
+- [Malware and Triage Features](#malware-and-triage-features)
+- [Testing and Benchmarks](#testing-and-benchmarks)
+- [Known Limitations](#known-limitations)
+- [Security Posture](#security-posture)
+- [Workspace Layout](#workspace-layout)
+- [Prior Art](#prior-art)
+- [Contributing](#contributing)
+- [License](#license)
+
 ## Why this exists
 
 rsleigh started as the native analysis backend for
@@ -70,21 +88,40 @@ same register-machine model cleanly.
 Generated decoder crates are large. Compile time and final binary size are real
 costs, especially for x86 and AArch64.
 
-## Quick Start
+## Installation
 
-From a checkout:
+From crates.io (CLI only):
 
 ```bash
-make test
+cargo install rsleigh-cli           # installs `rsleigh` binary
 ```
 
-Or step by step:
+The `rsleigh-api` and `pcode-ir` crates are published for library use:
+
+```toml
+[dependencies]
+rsleigh-api = "0.3"
+pcode-ir    = "0.3"
+```
+
+### From source
+
+Requires Rust 2021 stable and `make`. From a checkout:
 
 ```bash
-cargo run -p rsleigh-generate
-cargo test -p test-harness
+make test                          # generate + build + test (~30s slaspec parse, then build)
+cargo install --path rsleigh-cli   # install the `rsleigh` binary
+```
+
+Step by step, if `make test` is too coarse:
+
+```bash
+cargo run -p rsleigh-generate      # parse .slaspec → generate decoder crates
+cargo test -p test-harness         # compile and run the regression suite
 cargo install --path rsleigh-cli
 ```
+
+## Quickstart
 
 Basic CLI usage:
 
@@ -332,20 +369,30 @@ If you only need a SLEIGH frontend and do not need rsleigh's generated Rust
 decoder crates or decompiler experiments, one of those projects may be a better
 fit.
 
-## Roadmap
+## Contributing
 
-Near-term work is focused on making the existing pipeline more trustworthy
-rather than adding more analysis modes:
+Issues and PRs welcome. Before opening a PR:
 
-- improve use-def linking and diagnostic reporting;
-- broaden differential testing against Ghidra;
-- add encoded-instruction fuzzing rather than only random-byte fuzzing;
-- make benchmark fixtures easier to reproduce;
-- tighten type recovery and indirect-call resolution;
-- separate stable CLI/API behavior from experimental output more clearly;
-- document changes in a changelog once releases settle down.
+```bash
+make test                              # full regression sweep
+cargo test -p rsleigh-decompile --release --lib   # fast inner loop
+```
 
-The longer roadmap lives in `ROADMAP.md`.
+Guidelines:
+
+- Land regression tests with bug fixes — the harness in `test-harness/` is the
+  primary safety net.
+- Keep `rsleigh-api` source-compatible; experimental changes belong in
+  `rsleigh-decompile` or behind a CLI flag.
+- For new SLEIGH targets, generate decoder crates via `cargo run -p
+  rsleigh-generate` and add golden P-code coverage.
+- See `docs/TESTING.md` for the test philosophy and `docs/decompiler-passes.md`
+  for the pass pipeline.
+
+Near-term focus is reliability over new analysis modes: tighter use-def
+linking, broader Ghidra-differential coverage, encoded-instruction fuzzing,
+reproducible benchmark fixtures, and clearer separation between stable and
+experimental CLI surface.
 
 ## License
 
