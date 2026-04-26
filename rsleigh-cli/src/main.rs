@@ -1666,7 +1666,25 @@ fn decode_func(
         return vec![];
     };
     let max = 4096.min(data.len() - off as usize);
-    let bytes = &data[off as usize..off as usize + max];
+    let raw_bytes = &data[off as usize..off as usize + max];
+    // Function-start padding skip. When a CALL rel32 target lands on
+    // inter-function zero padding (or .pdata reports a stale entry into
+    // an unmapped slot), the bogus decode floods the disassembly. Only
+    // skip when leading 4 bytes are all 0x00 — that pattern is benign
+    // padding on x86/x86-64 and the AArch64 `udf #0` trap, neither of
+    // which is a real function start.
+    let pad_skip: usize = if raw_bytes.len() >= 4 && raw_bytes[..4] == [0u8; 4] {
+        raw_bytes
+            .iter()
+            .take(32)
+            .position(|&b| b != 0x00)
+            .unwrap_or(raw_bytes.len().min(32))
+    } else {
+        0
+    };
+    let fa = fa + pad_skip as u64;
+    let bytes = &raw_bytes[pad_skip..];
+    let max = bytes.len();
     let next_func = symbols
         .iter()
         .filter(|(a, name)| *a > fa && !name.starts_with("seh_scope_"))
