@@ -69,7 +69,9 @@ fn generate_arch(
     constructors_per_file: usize,
     num_batches: usize,
 ) {
-    let out_dir = Path::new("generated");
+    // Single collapsed crate per arch: generated/<prefix>/out/{shared,subtables,batch_NN,root}.rs
+    let arch_out = Path::new("generated").join(prefix).join("out");
+    std::fs::create_dir_all(&arch_out).unwrap();
 
     eprintln!("Parsing {display_name} slaspec...");
     let modules = rsleigh::codegen::generate_split_disassembler(
@@ -88,20 +90,16 @@ fn generate_arch(
             GeneratedModuleKind::Shared | GeneratedModuleKind::Root => {}
             GeneratedModuleKind::TableBatch => {
                 if m.is_instruction_table {
-                    // Instruction constructors go to instr batch crates
                     instr_files.push(m);
                 } else {
-                    // Non-instruction large table constructors stay in subtables
                     subtable_files.push(m);
                 }
             }
             GeneratedModuleKind::TableEnum => subtable_files.push(m),
             GeneratedModuleKind::SplitTableEnum => {
                 if m.is_instruction_table {
-                    // Instruction table enum goes to root (depends on batch crates)
                     split_enum_files.push(m);
                 } else {
-                    // Non-instruction split enums stay with their constructors in subtables
                     subtable_files.push(m);
                 }
             }
@@ -115,24 +113,19 @@ fn generate_arch(
         subtable_files.len()
     );
 
-    // Write shared.rs
-    let shared_dir = out_dir.join(format!("{prefix}-shared/out"));
-    std::fs::create_dir_all(&shared_dir).unwrap();
+    // shared.rs
     let shared = modules.iter().find(|m| m.filename == "shared.rs").unwrap();
-    write_module(&shared_dir.join("shared.rs"), shared);
+    write_module(&arch_out.join("shared.rs"), shared);
 
-    // Write subtables (self-contained table modules only)
-    let subtable_dir = out_dir.join(format!("{prefix}-subtables/out"));
-    std::fs::create_dir_all(&subtable_dir).unwrap();
+    // subtables.rs
     {
         let mut combined = String::new();
         for m in &subtable_files {
-            let code = get_code(m);
-            let code = strip_super_import(&code);
+            let code = strip_super_import(&get_code(m));
             combined.push_str(&code);
             combined.push('\n');
         }
-        std::fs::write(subtable_dir.join("subtables.rs"), &combined).unwrap();
+        std::fs::write(arch_out.join("subtables.rs"), &combined).unwrap();
         eprintln!("  subtables: {:.1} KB", combined.len() as f64 / 1e3);
     }
 
@@ -150,7 +143,7 @@ fn generate_arch(
         }
     }
 
-    // Split non-recursive into batches
+    // Split non-recursive into batch_NN.rs
     let actual_batches = num_batches.min(nonrecursive_files.len().max(1));
     let files_per_batch = if nonrecursive_files.is_empty() {
         1
@@ -159,10 +152,6 @@ fn generate_arch(
     };
 
     for batch_idx in 0..actual_batches {
-        let batch_name = format!("{prefix}-instr-{:02}", batch_idx);
-        let batch_dir = out_dir.join(&batch_name).join("out");
-        std::fs::create_dir_all(&batch_dir).unwrap();
-
         let start = batch_idx * files_per_batch;
         let end = (start + files_per_batch).min(nonrecursive_files.len());
         let mut combined = String::new();
@@ -170,25 +159,22 @@ fn generate_arch(
             combined.push_str(code);
             combined.push('\n');
         }
-        std::fs::write(batch_dir.join("batch.rs"), &combined).unwrap();
+        let fname = format!("batch_{:02}.rs", batch_idx);
+        std::fs::write(arch_out.join(&fname), &combined).unwrap();
         eprintln!(
-            "  {batch_name}: {:.1} KB ({} files)",
+            "  {fname}: {:.1} KB ({} files)",
             combined.len() as f64 / 1e3,
             end - start
         );
     }
 
-    // Write empty batches for unused slots (so crate shells don't fail)
+    // Empty placeholder files for unused batch slots so lib.rs include! list stays fixed.
     for batch_idx in actual_batches..num_batches {
-        let batch_name = format!("{prefix}-instr-{:02}", batch_idx);
-        let batch_dir = out_dir.join(&batch_name).join("out");
-        std::fs::create_dir_all(&batch_dir).unwrap();
-        std::fs::write(batch_dir.join("batch.rs"), "").unwrap();
+        let fname = format!("batch_{:02}.rs", batch_idx);
+        std::fs::write(arch_out.join(&fname), "").unwrap();
     }
 
-    // Write root.rs
-    let root_dir = out_dir.join(format!("{prefix}-root/out"));
-    std::fs::create_dir_all(&root_dir).unwrap();
+    // root.rs (split enums + recursive instr constructors + parse_instruction)
     let root = modules.iter().find(|m| m.filename == "root.rs").unwrap();
     let parse_fn = if let Some(raw) = &root.raw_code {
         let mut result = String::new();
@@ -204,8 +190,6 @@ fn generate_arch(
     };
 
     let mut root_code = String::new();
-    // Split table enums reference types from batch crates — place them in root
-    // which depends on all batch crates.
     for m in &split_enum_files {
         let code = strip_super_import(&get_code(m));
         root_code.push_str(&code);
@@ -214,7 +198,7 @@ fn generate_arch(
     root_code.push_str(&recursive_code);
     root_code.push('\n');
     root_code.push_str(&parse_fn);
-    std::fs::write(root_dir.join("root.rs"), &root_code).unwrap();
+    std::fs::write(arch_out.join("root.rs"), &root_code).unwrap();
     eprintln!("  root: {:.1} KB", root_code.len() as f64 / 1e3);
 
     eprintln!("  Done!");

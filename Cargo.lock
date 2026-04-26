@@ -514,12 +514,12 @@ name = "rsleigh-api"
 version = "0.2.0"
 dependencies = [
  "pcode-ir",
- "rsleigh-gen-aarch64-root",
- "rsleigh-gen-arm32-root",
- "rsleigh-gen-mips-root",
- "rsleigh-gen-riscv-root",
- "rsleigh-gen-x86-32-root",
- "rsleigh-gen-x86-root",
+ "rsleigh-gen-aarch64",
+ "rsleigh-gen-arm32",
+ "rsleigh-gen-mips",
+ "rsleigh-gen-riscv",
+ "rsleigh-gen-x86",
+ "rsleigh-gen-x86-32",
 ]
 
 [[package]]
@@ -571,367 +571,45 @@ dependencies = [
 ]
 
 [[package]]
-name = "rsleigh-gen-aarch64-instr-00"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-aarch64-shared",
- "rsleigh-gen-aarch64-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-aarch64-instr-01"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-aarch64-shared",
- "rsleigh-gen-aarch64-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-aarch64-instr-02"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-aarch64-shared",
- "rsleigh-gen-aarch64-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-aarch64-instr-03"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-aarch64-shared",
- "rsleigh-gen-aarch64-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-aarch64-root"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-aarch64-instr-00",
- "rsleigh-gen-aarch64-instr-01",
- "rsleigh-gen-aarch64-instr-02",
- "rsleigh-gen-aarch64-instr-03",
- "rsleigh-gen-aarch64-shared",
- "rsleigh-gen-aarch64-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-aarch64-shared"
+name = "rsleigh-gen-aarch64"
 version = "0.2.0"
 dependencies = [
  "pcode-ir",
 ]
 
 [[package]]
-name = "rsleigh-gen-aarch64-subtables"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-aarch64-shared",
-]
-
-[[package]]
-name = "rsleigh-gen-arm32-instr-00"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-arm32-shared",
- "rsleigh-gen-arm32-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-arm32-instr-01"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-arm32-shared",
- "rsleigh-gen-arm32-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-arm32-root"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-arm32-instr-00",
- "rsleigh-gen-arm32-instr-01",
- "rsleigh-gen-arm32-shared",
- "rsleigh-gen-arm32-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-arm32-shared"
+name = "rsleigh-gen-arm32"
 version = "0.2.0"
 dependencies = [
  "pcode-ir",
 ]
 
 [[package]]
-name = "rsleigh-gen-arm32-subtables"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-arm32-shared",
-]
-
-[[package]]
-name = "rsleigh-gen-mips-instr-00"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-mips-shared",
- "rsleigh-gen-mips-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-mips-instr-01"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-mips-shared",
- "rsleigh-gen-mips-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-mips-root"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-mips-instr-00",
- "rsleigh-gen-mips-instr-01",
- "rsleigh-gen-mips-shared",
- "rsleigh-gen-mips-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-mips-shared"
+name = "rsleigh-gen-mips"
 version = "0.2.0"
 dependencies = [
  "pcode-ir",
 ]
 
 [[package]]
-name = "rsleigh-gen-mips-subtables"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-mips-shared",
-]
-
-[[package]]
-name = "rsleigh-gen-riscv-instr-00"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-riscv-shared",
- "rsleigh-gen-riscv-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-riscv-instr-01"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-riscv-shared",
- "rsleigh-gen-riscv-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-riscv-root"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-riscv-instr-00",
- "rsleigh-gen-riscv-instr-01",
- "rsleigh-gen-riscv-shared",
- "rsleigh-gen-riscv-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-riscv-shared"
+name = "rsleigh-gen-riscv"
 version = "0.2.0"
 dependencies = [
  "pcode-ir",
 ]
 
 [[package]]
-name = "rsleigh-gen-riscv-subtables"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-riscv-shared",
-]
-
-[[package]]
-name = "rsleigh-gen-x86-32-instr-00"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-x86-32-shared",
- "rsleigh-gen-x86-32-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-x86-32-instr-01"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-x86-32-shared",
- "rsleigh-gen-x86-32-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-x86-32-instr-02"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-x86-32-shared",
- "rsleigh-gen-x86-32-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-x86-32-instr-03"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-x86-32-shared",
- "rsleigh-gen-x86-32-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-x86-32-root"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-x86-32-instr-00",
- "rsleigh-gen-x86-32-instr-01",
- "rsleigh-gen-x86-32-instr-02",
- "rsleigh-gen-x86-32-instr-03",
- "rsleigh-gen-x86-32-shared",
- "rsleigh-gen-x86-32-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-x86-32-shared"
+name = "rsleigh-gen-x86"
 version = "0.2.0"
 dependencies = [
  "pcode-ir",
 ]
 
 [[package]]
-name = "rsleigh-gen-x86-32-subtables"
+name = "rsleigh-gen-x86-32"
 version = "0.2.0"
 dependencies = [
  "pcode-ir",
- "rsleigh-gen-x86-32-shared",
-]
-
-[[package]]
-name = "rsleigh-gen-x86-instr-00"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-x86-shared",
- "rsleigh-gen-x86-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-x86-instr-01"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-x86-shared",
- "rsleigh-gen-x86-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-x86-instr-02"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-x86-shared",
- "rsleigh-gen-x86-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-x86-instr-03"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-x86-shared",
- "rsleigh-gen-x86-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-x86-instr-04"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-x86-shared",
- "rsleigh-gen-x86-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-x86-instr-05"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-x86-shared",
- "rsleigh-gen-x86-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-x86-instr-06"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-x86-shared",
- "rsleigh-gen-x86-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-x86-instr-07"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-x86-shared",
- "rsleigh-gen-x86-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-x86-root"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-x86-instr-00",
- "rsleigh-gen-x86-instr-01",
- "rsleigh-gen-x86-instr-02",
- "rsleigh-gen-x86-instr-03",
- "rsleigh-gen-x86-instr-04",
- "rsleigh-gen-x86-instr-05",
- "rsleigh-gen-x86-instr-06",
- "rsleigh-gen-x86-instr-07",
- "rsleigh-gen-x86-shared",
- "rsleigh-gen-x86-subtables",
-]
-
-[[package]]
-name = "rsleigh-gen-x86-shared"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
-]
-
-[[package]]
-name = "rsleigh-gen-x86-subtables"
-version = "0.2.0"
-dependencies = [
- "pcode-ir",
- "rsleigh-gen-x86-shared",
 ]
 
 [[package]]
@@ -1114,11 +792,11 @@ dependencies = [
  "pcode-ir",
  "rsleigh-api",
  "rsleigh-decompile",
- "rsleigh-gen-aarch64-root",
- "rsleigh-gen-arm32-root",
- "rsleigh-gen-mips-root",
- "rsleigh-gen-riscv-root",
- "rsleigh-gen-x86-root",
+ "rsleigh-gen-aarch64",
+ "rsleigh-gen-arm32",
+ "rsleigh-gen-mips",
+ "rsleigh-gen-riscv",
+ "rsleigh-gen-x86",
  "serde",
  "serde_json",
 ]

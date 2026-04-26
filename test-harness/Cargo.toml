@@ -6,11 +6,11 @@ publish = false
 
 [dependencies]
 pcode-ir = { path = "../pcode-ir" }
-x86-root = { package = "rsleigh-gen-x86-root", path = "../generated/x86-root" }
-aarch64-root = { package = "rsleigh-gen-aarch64-root", path = "../generated/aarch64-root" }
-riscv-root = { package = "rsleigh-gen-riscv-root", path = "../generated/riscv-root" }
-mips-root = { package = "rsleigh-gen-mips-root", path = "../generated/mips-root" }
-arm32-root = { package = "rsleigh-gen-arm32-root", path = "../generated/arm32-root" }
+x86-root = { package = "rsleigh-gen-x86", path = "../generated/x86" }
+aarch64-root = { package = "rsleigh-gen-aarch64", path = "../generated/aarch64" }
+riscv-root = { package = "rsleigh-gen-riscv", path = "../generated/riscv" }
+mips-root = { package = "rsleigh-gen-mips", path = "../generated/mips" }
+arm32-root = { package = "rsleigh-gen-arm32", path = "../generated/arm32" }
 rsleigh-api = { path = "../rsleigh-api" }
 rsleigh-decompile = { path = "../rsleigh-decompile" }
 goblin = "0.9"

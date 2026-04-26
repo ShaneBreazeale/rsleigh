@@ -1,0 +1,15 @@
+[package]
+name = "rsleigh-gen-riscv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "rsleigh generated decoder for RISC-V 64 (internal — use rsleigh-api)"
+include = ["src/**", "out/**", "Cargo.toml"]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+pcode-ir = { path = "../../pcode-ir", version = "0.2.0" }
