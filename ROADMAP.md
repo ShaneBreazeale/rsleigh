@@ -109,6 +109,18 @@ gap is concentrated in type recovery + control-flow shape.
 
 ## Recently shipped (current session)
 
+- Custom-VM packer recon suite (15 modules, 110+ lib tests):
+  vm_fingerprint, jmp_rax_trampoline, xor_vtable, vm_dispatch_extract,
+  vm_handler_classify, tag_dispatch, handler_summary, vm_bytecode_disasm,
+  api_resolver (ROR13/DJB2/DJB2a/FNV-1), peb_walk_detect, antidebug_timing,
+  scratch_leak, sha256_func_detect, crypto_constants, rip_xref. CLI flags:
+  `--vm-dispatch`, `--vm-classify-handlers`, `--tag-dispatch`,
+  `--summarise-handlers`, `--vm-bytecode`/`--vm-handlers`, `--annotate-crypto`.
+  Auto-banners on every PE64 binary surface family fingerprint, trampoline
+  gadgets, hash resolvers, PEB-walk sites, timing probes, scratch leaks,
+  SHA-256 regions.
+- decode_func zero-padding skip — CALL rel32 targets landing on inter-function
+  zero padding no longer flood disassembly with `ADD byte ptr [RAX], AL`.
 - Qt5 signature database (23,274 entries extracted from bundled .so files)
 - rsleigh-fid crate end-to-end (scaffold → CLI → match helper)
 - Glibc / musl / libstdc++ bundled FID blobs (6 files, 287KB, 13,612 entries)

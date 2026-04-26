@@ -135,6 +135,24 @@ Those modes are heuristics over the current analysis pipeline. They are useful
 for triage, but they are not sound vulnerability detection, taint analysis, or
 semantic differencing.
 
+Custom-VM packer recon helpers (PE64-focused; auto-banners run on every PE64
+binary, the flags below take comma-separated hex VA lists):
+
+```bash
+rsleigh ./packed.exe --vm-dispatch 0x18001fc70           # dispatcher data slots
+rsleigh ./packed.exe --vm-classify-handlers 0x18001eb00,0x180018960
+rsleigh ./packed.exe --tag-dispatch 0x180012ec0          # CMP/JZ chain extract
+rsleigh ./packed.exe --summarise-handlers 0x180018960    # IAT-API per handler
+rsleigh ./packed.exe --vm-bytecode 0x180063858:0x400 \
+                    --vm-handlers handlers.json          # bytecode disasm
+rsleigh ./packed.exe main --annotate-crypto              # rewrite crypto consts
+```
+
+Auto-banners surface family fingerprint, JMP `<reg>` trampolines, XOR-encoded
+dispatchers, hash-resolved API resolvers (ROR13/DJB2/DJB2a/FNV-1), PEB-walk
+sites, RDTSC/RDPMC timing-probe pairs, scratch-buffer leak candidates, and
+SHA-256 implementation regions. See `docs/features.md` for the full module list.
+
 ## Rust API
 
 ```rust
@@ -197,10 +215,22 @@ Current examples include:
 
 - PE64 SEH/TLS static patch discovery for some self-modifying-code patterns
 - direct x64 syscall annotation for a Win11 24H2-oriented table
-- ROR13 API-hash comments for a curated set of common Windows APIs
+- ROR13 / DJB2 / DJB2a / FNV-1 API-hash resolver classification
 - bundled function-ID databases for selected libc/libstdc++/musl builds
 - Win32 and C/POSIX signature hints used by the decompiler printer
 - C++ RTTI-oriented class recovery experiments
+- Custom-VM packer recon (PyVMProtect / Themida / Stantinko / Trickbot Anchor style):
+  vm-fingerprint, JMP `<reg>` trampoline gadgets, XOR-encoded dispatcher detection,
+  PEB-walk anti-debug, RDTSC/RDPMC timing-pair anti-emu, scratch-buffer leak heuristic,
+  SHA-256 constant-density region detection, crypto-constant inline annotation.
+- `--vm-dispatch <addr>` extracts dispatcher metadata; `--vm-classify-handlers`
+  classifies variable-length opcode handlers; `--tag-dispatch` extracts
+  `CMP r8, imm; JZ` chains; `--summarise-handlers` reports IAT-API + stack-pop
+  signature per handler; `--vm-bytecode <bc_va>:<size> --vm-handlers <path.json>`
+  disassembles VM bytecode once handlers are classified.
+- `--annotate-crypto` rewrites raw hex literals and `DAT_<hex>` labels to stable
+  symbolic names (`KNUTH_9E3779B9`, `PCG_045D9F3B`, `SHA_256_6A09E667`) for
+  readability across crypto-heavy functions.
 
 These features can miss real behavior and can produce false positives. Treat
 them as leads to inspect, not conclusions.
