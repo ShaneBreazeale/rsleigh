@@ -38,6 +38,7 @@ resolver = "2"
 [[bin]]
 name = "rsleigh"
 path = "src/bin/rsleigh.rs"
+required-features = ["cli"]
 
 [dependencies]
 nom = "7"
@@ -48,9 +49,16 @@ bitvec = "1"
 proc-macro2 = "1"
 indexmap = "1.9"
 ethnum = "1"
-rsleigh-cli = { path = "rsleigh-cli", version = "0.3" }
+rsleigh-cli = { path = "rsleigh-cli", version = "0.3", optional = true }
 
 [features]
+default = ["cli"]
+# `cli` pulls in rsleigh-cli (and transitively rsleigh-decompile +
+# generated arch crates). Disabled by tooling that runs *before* the
+# generated crates exist on disk — most importantly rsleigh-generate,
+# which depends on the root crate's parser/codegen modules but must
+# build before `cargo run -p rsleigh-generate` populates `generated/*/out/`.
+cli = ["dep:rsleigh-cli"]
 thread = []
 no_overflow_inline = []
 strict_solve = []
