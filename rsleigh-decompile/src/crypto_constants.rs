@@ -198,6 +198,108 @@ pub fn worth_checking(val: u32) -> bool {
     true
 }
 
+/// Generate a stable C-style identifier for a crypto constant. Used by
+/// `--annotate-crypto` to replace raw hex literals with named symbols.
+/// Format: `<ALG_UPPER>_<HEX>` where ALG is upper-snake, HEX is 8 chars.
+pub fn symbol(val: u32) -> Option<String> {
+    let ann = resolve(val)?;
+    let mut alg = String::new();
+    for c in ann.algorithm.chars() {
+        if c.is_ascii_alphanumeric() {
+            alg.push(c.to_ascii_uppercase());
+        } else if !alg.is_empty() && !alg.ends_with('_') {
+            alg.push('_');
+        }
+    }
+    let alg = alg.trim_matches('_').to_string();
+    Some(format!("{}_{:08X}", alg, val))
+}
+
+/// Rewrite a decompile output blob, replacing any hex literal whose
+/// value matches a crypto-catalogue entry with a stable symbolic name.
+/// Constants embedded in `/* ... */` annotation comments are left
+/// untouched so the comment still reads naturally.
+pub fn rewrite_text(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    let mut in_comment = false;
+    while i < bytes.len() {
+        // Track /* ... */ block-comment depth so we don't rewrite
+        // constants inside the inline-annotation comment we already
+        // emit.
+        if !in_comment && i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            in_comment = true;
+            out.push('/');
+            out.push('*');
+            i += 2;
+            continue;
+        }
+        if in_comment && i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+            in_comment = false;
+            out.push('*');
+            out.push('/');
+            i += 2;
+            continue;
+        }
+        if !in_comment
+            && bytes[i] == b'0'
+            && i + 1 < bytes.len()
+            && (bytes[i + 1] == b'x' || bytes[i + 1] == b'X')
+        {
+            let mut j = i + 2;
+            while j < bytes.len() && bytes[j].is_ascii_hexdigit() {
+                j += 1;
+            }
+            if j > i + 2 && j - (i + 2) <= 8 {
+                let hex = &input[i + 2..j];
+                if let Ok(v) = u32::from_str_radix(hex, 16) {
+                    if let Some(sym) = symbol(v) {
+                        out.push_str(&sym);
+                        i = j;
+                        continue;
+                    }
+                }
+            }
+            // Not a crypto match — emit verbatim.
+            out.push_str(&input[i..j]);
+            i = j;
+            continue;
+        }
+        // Printer renders large immediate constants as `DAT_<hex>` data
+        // labels when the value isn't decodable as a known data type.
+        // For crypto magic, that re-render is misleading — the bytes are
+        // the constant itself, not a pointer. Replace the matching
+        // `DAT_<hex>` with the canonical symbol.
+        if !in_comment
+            && i + 4 < bytes.len()
+            && &bytes[i..i + 4] == b"DAT_"
+            && bytes[i + 4].is_ascii_hexdigit()
+        {
+            let mut j = i + 4;
+            while j < bytes.len() && bytes[j].is_ascii_hexdigit() {
+                j += 1;
+            }
+            if j - (i + 4) <= 8 {
+                let hex = &input[i + 4..j];
+                if let Ok(v) = u32::from_str_radix(hex, 16) {
+                    if let Some(sym) = symbol(v) {
+                        out.push_str(&sym);
+                        i = j;
+                        continue;
+                    }
+                }
+            }
+            out.push_str(&input[i..j]);
+            i = j;
+            continue;
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,6 +326,50 @@ mod tests {
     fn random_value_does_not_resolve() {
         assert!(resolve(0xdeadbeef).is_none());
         assert!(resolve(0x12345678).is_none());
+    }
+
+    #[test]
+    fn symbol_for_known_constant() {
+        assert_eq!(symbol(0x9e3779b9).as_deref(), Some("KNUTH_9E3779B9"));
+        assert_eq!(symbol(0x01000193).as_deref(), Some("FNV_1_01000193"));
+        assert_eq!(symbol(0x6a09e667).as_deref(), Some("SHA_256_6A09E667"));
+        assert!(symbol(0xdeadbeef).is_none());
+    }
+
+    #[test]
+    fn rewrite_replaces_known_const() {
+        let out = rewrite_text("EAX *= 0x9e3779b9;\n");
+        assert!(out.contains("KNUTH_9E3779B9"));
+        assert!(!out.contains("0x9e3779b9"));
+    }
+
+    #[test]
+    fn rewrite_leaves_unknowns_alone() {
+        let s = "var = 0x12345678 + 0xdeadbeef;\n";
+        assert_eq!(rewrite_text(s), s);
+    }
+
+    #[test]
+    fn rewrite_replaces_dat_label() {
+        let out = rewrite_text("x = y * DAT_45d9f3b;\n");
+        assert!(out.contains("PCG_045D9F3B"));
+        assert!(!out.contains("DAT_45d9f3b"));
+    }
+
+    #[test]
+    fn rewrite_leaves_dat_address_alone() {
+        let s = "ptr = DAT_1800639d8;\n";
+        assert_eq!(rewrite_text(s), s);
+    }
+
+    #[test]
+    fn rewrite_skips_inline_annotation_comment() {
+        let s = "x = 0x9e3779b9 /* Knuth golden ratio multiplier */;\n";
+        let out = rewrite_text(s);
+        // Hex outside the comment got replaced; identical text inside
+        // the existing inline annotation block stays untouched.
+        assert!(out.contains("KNUTH_9E3779B9"));
+        assert!(out.contains("Knuth golden ratio multiplier"));
     }
 
     #[test]

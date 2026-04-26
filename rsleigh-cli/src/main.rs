@@ -11,6 +11,17 @@
 mod wasm;
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static ANNOTATE_CRYPTO: AtomicBool = AtomicBool::new(false);
+
+fn maybe_annotate_crypto(s: String) -> String {
+    if ANNOTATE_CRYPTO.load(Ordering::Relaxed) {
+        rsleigh_decompile::crypto_constants::rewrite_text(&s)
+    } else {
+        s
+    }
+}
 
 /// Demangle a Swift symbol name to a human-readable form.
 /// Returns None if not a Swift symbol.
@@ -145,6 +156,8 @@ fn main() {
     let classes_mode = args.iter().any(|a| a == "--classes");
     let compact_mode = args.iter().any(|a| a == "--compact");
     let brief_mode = args.iter().any(|a| a == "--brief");
+    let annotate_crypto_mode = args.iter().any(|a| a == "--annotate-crypto");
+    ANNOTATE_CRYPTO.store(annotate_crypto_mode, Ordering::Relaxed);
     let min_complexity: usize = args
         .iter()
         .position(|a| a == "--min-complexity")
@@ -1164,6 +1177,7 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                             Some(path),
                         )
                     }))
+                    .map(maybe_annotate_crypto)
                     .unwrap_or_default();
 
                     // Extract metadata from decompiled output
@@ -1834,7 +1848,12 @@ fn decompile_func(
     if insts.is_empty() {
         return "// no instructions\n".to_string();
     }
-    rsleigh_decompile::decompile_with_binary(arch, &insts, Some(data), Some(path))
+    maybe_annotate_crypto(rsleigh_decompile::decompile_with_binary(
+        arch,
+        &insts,
+        Some(data),
+        Some(path),
+    ))
 }
 
 /// Generate a YARA detection rule from binary analysis.
@@ -1950,8 +1969,12 @@ fn diff_binaries(old_path: &str, new_path: &str, func_filter: &[String]) {
             }
 
             if !insts.is_empty() {
-                let output =
-                    rsleigh_decompile::decompile_with_binary(arch, &insts, Some(&data), Some(p));
+                let output = maybe_annotate_crypto(rsleigh_decompile::decompile_with_binary(
+                    arch,
+                    &insts,
+                    Some(&data),
+                    Some(p),
+                ));
                 if !output.trim().is_empty() {
                     result.insert(func_name.clone(), output);
                 }
@@ -4438,8 +4461,12 @@ fn run_raw(
                 }
             }
             if !insts.is_empty() {
-                let output =
-                    rsleigh_decompile::decompile_with_binary(arch, &insts, Some(data), Some(path));
+                let output = maybe_annotate_crypto(rsleigh_decompile::decompile_with_binary(
+                    arch,
+                    &insts,
+                    Some(data),
+                    Some(path),
+                ));
                 if !output.trim().is_empty() {
                     println!("// {}", name);
                     println!("{}", output);

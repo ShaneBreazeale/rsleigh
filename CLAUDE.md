@@ -49,6 +49,11 @@ rsleigh <binary> --classes [--json]    # C++ hierarchies
 rsleigh <binary> --compact             # -24% size
 rsleigh <binary> --brief                # calls + cflow only, -35%
 rsleigh <binary> --min-complexity N    # skip trivial funcs
+rsleigh <binary> --annotate-crypto     # rewrite crypto consts to symbolic names
+rsleigh <binary> --vm-dispatch <addr>  # extract VM dispatcher metadata
+rsleigh <binary> --vm-classify-handlers <addrs>  # opcode handler classifier
+rsleigh <binary> --tag-dispatch <addrs>          # CMP r8/JZ chain extractor
+rsleigh <binary> --summarise-handlers <addrs>    # IAT-API + stack-pop signature
 rsleigh --raw <arch> <binary>          # raw firmware blob
 ```
 
