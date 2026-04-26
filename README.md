@@ -1,8 +1,16 @@
 # rsleigh
 
+[![crates.io](https://img.shields.io/crates/v/rsleigh.svg)](https://crates.io/crates/rsleigh)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-2021%20stable-orange.svg)](https://www.rust-lang.org)
+
 rsleigh is a Rust workspace for decoding machine code with Ghidra SLEIGH
 specifications, lifting instructions to P-code, and experimenting with C-like
 decompilation and binary triage workflows.
+
+> **Showcase:** [crackme3 PyVMProtect — full static lift to `CTF{pyvm_r0cks}`](docs/showcase/crackme3-pyvmprotect.md)
+> — 53-opcode custom VM, multi-layer PCG + zlib decrypt, per-entry VARINT flag,
+> solved end-to-end with rsleigh annotations and Python (no Ghidra JVM, no debugger).
 
 The short version:
 
@@ -19,6 +27,7 @@ assistance, not ground truth.
 
 ## Contents
 
+- [Showcase](#showcase)
 - [Why this exists](#why-this-exists)
 - [Status](#status)
 - [Supported targets](#supported-targets)
@@ -34,6 +43,18 @@ assistance, not ground truth.
 - [Prior Art](#prior-art)
 - [Contributing](#contributing)
 - [License](#license)
+
+## Showcase
+
+End-to-end real-world solve, no live debugger, no Ghidra JVM:
+
+- **[crackme3 PyVMProtect — `CTF{pyvm_r0cks}`](docs/showcase/crackme3-pyvmprotect.md)**
+  — PE64 Python C-extension with a 53-opcode custom VM, 117-stage polymorphic
+  init chain, two-pass PCG + zlib bytecode decryption, sbox-permuted handler
+  dispatch, and per-entry VARINT-encoded flag bytes. rsleigh's
+  `--annotate-crypto`, `--vm-classify-handlers`, `--summarise-handlers`, and
+  `--vm-bytecode` modes did the heavy lifting; the finishing decoder is a
+  short Python script.
 
 ## Why this exists
 
