@@ -2723,12 +2723,29 @@ fn run_xrefs(binary_path: &str, data: &[u8], target_name: &str) {
         target_display, target_addr
     );
     println!();
-    println!("Called by ({} callers):", callers.len());
-    if callers.is_empty() {
+    let mut caller_counts: std::collections::BTreeMap<(u64, String), usize> =
+        std::collections::BTreeMap::new();
+    for (addr, name) in &callers {
+        *caller_counts.entry((*addr, name.clone())).or_insert(0) += 1;
+    }
+    let n_callers = caller_counts.len();
+    let n_sites = callers.len();
+    println!(
+        "Called by ({} {}, {} call site{}):",
+        n_callers,
+        if n_callers == 1 { "caller" } else { "callers" },
+        n_sites,
+        if n_sites == 1 { "" } else { "s" }
+    );
+    if caller_counts.is_empty() {
         println!("  (none found — may be called indirectly or is entry point)");
     }
-    for (addr, name) in &callers {
-        println!("  0x{:012x}  {}", addr, name);
+    for ((addr, name), count) in &caller_counts {
+        if *count > 1 {
+            println!("  0x{:012x}  {}  (×{})", addr, name, count);
+        } else {
+            println!("  0x{:012x}  {}", addr, name);
+        }
     }
     println!();
     println!("Calls ({} callees):", callees.len());
