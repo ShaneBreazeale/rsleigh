@@ -17394,12 +17394,21 @@ fn try_xor_decrypt_single(va: u64, ctx: &PrintCtx) -> Option<(String, u8)> {
     if data.len() < 4 {
         return None;
     }
-    // Skip if the data is already a plaintext string (no encryption needed)
+    // Skip if the data is already a plaintext string (no encryption needed).
+    // XML/HTML/JSON manifests embedded in PE resources routinely contain \r\n
+    // and \t, so the plaintext check must accept those — otherwise the byte
+    // pattern slips past this guard, the brute-force loop below finds a
+    // coincidental "printable" XOR key, and the decompiler prints garbage
+    // text labeled as a decrypted string. Concrete repro: a Win32 PE that
+    // embeds the standard <assembly>/<trustInfo> manifest in .data was
+    // being annotated with "// decrypted: \"DCiiiiuf:,*<; =0wDCii...\"
+    // (XOR 0x49)" — that text is just the manifest XOR'd back through 0x49,
+    // not real recovered plaintext.
     let null_pos_raw = data.iter().position(|&b| b == 0).unwrap_or(data.len());
     if null_pos_raw >= 4 && null_pos_raw <= 200 {
         if data[..null_pos_raw]
             .iter()
-            .all(|&b| (b >= 0x20 && b < 0x7f) || b == b'\n')
+            .all(|&b| (b >= 0x20 && b < 0x7f) || b == b'\n' || b == b'\r' || b == b'\t')
         {
             return None; // Already plaintext
         }
@@ -17425,10 +17434,20 @@ fn try_xor_decrypt_single(va: u64, ctx: &PrintCtx) -> Option<(String, u8)> {
                 let key_char_count = candidate.iter().filter(|&&b| b == key).count();
                 let has_letter = candidate.iter().any(|&b| b.is_ascii_alphabetic());
                 // Require: 5+ unique chars, has letters, key byte isn't dominant
+                let alnum_count = candidate
+                    .iter()
+                    .filter(|&&b| b.is_ascii_alphanumeric() || b == b' ')
+                    .count();
+                // Real recovered plaintext is overwhelmingly letters/digits/spaces.
+                // Coincidental XOR-key matches against random data tend to look like
+                // "DCiiiiuf:,*<; =0wDCii..." — heavy on punctuation. Require >=70%
+                // alnum-or-space to filter those.
+                let alnum_ratio_ok = alnum_count * 10 >= candidate.len() * 7;
                 if unique.len() >= 5
                     && has_letter
                     && key_char_count * 3 < candidate.len()
                     && s.trim().len() >= 6
+                    && alnum_ratio_ok
                 {
                     return Some((s.to_string(), key));
                 }
@@ -17445,9 +17464,13 @@ fn try_xor_decrypt_multi(va: u64, ctx: &PrintCtx) -> Option<(String, Vec<u8>)> {
     if data.len() < 12 {
         return None;
     }
-    // Skip if already plaintext
+    // Skip if already plaintext (XML/HTML/JSON manifests carry \r\n\t).
     let null_raw = data.iter().position(|&b| b == 0).unwrap_or(data.len());
-    if null_raw >= 6 && data[..null_raw].iter().all(|&b| b >= 0x20 && b < 0x7f) {
+    if null_raw >= 6
+        && data[..null_raw]
+            .iter()
+            .all(|&b| (b >= 0x20 && b < 0x7f) || b == b'\n' || b == b'\r' || b == b'\t')
+    {
         return None;
     }
 
