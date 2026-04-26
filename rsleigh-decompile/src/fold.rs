@@ -292,6 +292,16 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
         infer_go_header_params(ssa);
     }
 
+    // Optional opaque-predicate fold. Off by default; enable with
+    // RSLEIGH_OPAQUE_FOLD=1 until the SMT verifier (smt_verify) is
+    // wired in to back-check sampling-positive results.
+    if std::env::var("RSLEIGH_OPAQUE_FOLD").as_deref() == Ok("1") {
+        let n = crate::opaque_pred::fold_opaque_branches(ssa);
+        if n > 0 {
+            eprintln!("[opaque-pred] folded {} CBranch terminator(s)", n);
+        }
+    }
+
     // Drain the safe_var OOB counter into a single diagnostic on the
     // SSA. A nonzero count means at least one fold pass tried to look up
     // a VarId past the end of `ssa.vars` and got the sentinel — symptom
@@ -3939,7 +3949,7 @@ fn collect_call_arguments(ssa: &mut SsaCfg) {
 
         if let Some((target, fallthrough)) = call_info {
             let n_stmts = ssa.blocks[bi].stmts.len();
-            let mut args = if is_x86_32 {
+            let args = if is_x86_32 {
                 let (args, consumed) =
                     collect_stack_args_from_block(&ssa.blocks[bi].stmts, &ssa.vars, n_stmts);
                 if !args.is_empty() {
@@ -3977,7 +3987,7 @@ fn collect_call_arguments(ssa: &mut SsaCfg) {
             .collect();
 
         for &si in call_indices.iter().rev() {
-            let mut args = if is_x86_32 {
+            let args = if is_x86_32 {
                 let (args, consumed) =
                     collect_stack_args_from_block(&ssa.blocks[bi].stmts, &ssa.vars, si);
                 if !args.is_empty() {

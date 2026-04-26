@@ -19,6 +19,9 @@ categories = ["development-tools"]
 # SEH static walkers, and the syscall/ROR13 annotation tables.
 default = ["experimental"]
 experimental = []
+# SMT-backed opaque-predicate verifier. Off by default — enabling pulls
+# in the `z3` crate which links libz3 (apt: libz3-dev / brew: z3).
+smt = ["dep:z3"]
 
 [dependencies]
 pcode-ir = { path = "../pcode-ir", version = "0.3.0" }
@@ -35,3 +38,4 @@ flate2 = "1"
 egg = "0.11"
 msvc-demangler = "0.11"
 iced-x86 = { version = "1", default-features = false, features = ["decoder", "std", "no_vex", "no_evex", "no_xop", "no_d3now", "instr_info"] }
+z3 = { version = "0.12", optional = true }

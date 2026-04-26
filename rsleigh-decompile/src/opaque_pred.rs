@@ -36,6 +36,36 @@ pub struct OpaqueBranch {
     pub free_var_count: usize,
 }
 
+/// Fold pass: rewrite each opaque CBranch into an unconditional Branch
+/// to the proven-taken / proven-not-taken successor. Returns the number
+/// of rewrites. Default-off — gate at the call site (env var or feature
+/// flag) until the SMT verifier (see `smt_verify`) is wired in to
+/// double-check sampling-positive results.
+pub fn fold_opaque_branches(ssa: &mut SsaCfg) -> usize {
+    let mut rewrites: Vec<(usize, BlockId)> = Vec::new();
+    for (idx, blk) in ssa.blocks.iter().enumerate() {
+        if let SsaTerminator::CBranch {
+            cond,
+            taken,
+            fallthrough,
+        } = &blk.terminator
+        {
+            if let Some(class) = classify_branch(*cond, &ssa.vars) {
+                let target = match class {
+                    BranchClass::AlwaysTaken => *taken,
+                    BranchClass::NeverTaken => *fallthrough,
+                };
+                rewrites.push((idx, target));
+            }
+        }
+    }
+    let n = rewrites.len();
+    for (idx, target) in rewrites {
+        ssa.blocks[idx].terminator = SsaTerminator::Branch(target);
+    }
+    n
+}
+
 pub fn scan_opaque_branches(ssa: &SsaCfg) -> Vec<OpaqueBranch> {
     let mut out = Vec::new();
     for blk in &ssa.blocks {

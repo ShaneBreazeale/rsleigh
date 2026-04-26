@@ -22,6 +22,8 @@ pub mod imports;
 pub mod ir;
 pub mod jmp_rax_trampoline;
 pub mod opaque_pred;
+pub mod smt_verify;
+pub mod vm_handler_cluster;
 pub mod pdb_info;
 pub mod peb_walk;
 pub mod peb_walk_detect;

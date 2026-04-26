@@ -1442,7 +1442,8 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
     // P-code the lifter produced and what SSA fold did with it.
     let pcode_json = args.iter().any(|a| a == "--pcode-json");
     let ssa_json = args.iter().any(|a| a == "--ssa-json");
-    if pcode_json || ssa_json {
+    let opaque_scan = args.iter().any(|a| a == "--opaque-scan");
+    if pcode_json || ssa_json || opaque_scan {
         for name in &targets {
             let func_addr =
                 if let Some(hex) = name.strip_prefix("0x").or_else(|| name.strip_prefix("0X")) {
@@ -1554,6 +1555,46 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                     }))
                     .unwrap()
                 );
+            }
+            if opaque_scan {
+                let cfg = rsleigh_decompile::cfg::build_cfg(&insts);
+                let cc = match arch {
+                    rsleigh_api::Architecture::X86_64
+                        if rsleigh_decompile::go_pclntab::parse(&data)
+                            .keys()
+                            .next()
+                            .is_some() =>
+                    {
+                        rsleigh_decompile::fold::CallingConv::GoAmd64
+                    }
+                    rsleigh_api::Architecture::X86_32 | rsleigh_api::Architecture::MIPS32 => {
+                        rsleigh_decompile::fold::CallingConv::Cdecl32
+                    }
+                    rsleigh_api::Architecture::ARM32 => rsleigh_decompile::fold::CallingConv::Arm32,
+                    rsleigh_api::Architecture::AArch64 => {
+                        rsleigh_decompile::fold::CallingConv::AArch64
+                    }
+                    _ => rsleigh_decompile::fold::CallingConv::SysV,
+                };
+                let mut ssa = rsleigh_decompile::ssa::build_ssa_with_cc(&cfg, cc);
+                rsleigh_decompile::fold::fold_with_cc(&mut ssa, cc);
+                let findings = rsleigh_decompile::opaque_pred::scan_opaque_branches(&ssa);
+                if findings.is_empty() {
+                    println!("// {} 0x{:x} — no opaque branches", func_name, func_addr);
+                } else {
+                    println!(
+                        "// {} 0x{:x} — {} opaque branch(es)",
+                        func_name,
+                        func_addr,
+                        findings.len()
+                    );
+                    for f in findings {
+                        println!(
+                            "  block 0x{:x}  cond=v{}  free_vars={}  -> {:?}",
+                            f.block_addr, f.cond.0, f.free_var_count, f.class
+                        );
+                    }
+                }
             }
         }
         return;
