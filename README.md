@@ -8,9 +8,7 @@ rsleigh is a Rust workspace for decoding machine code with Ghidra SLEIGH
 specifications, lifting instructions to P-code, and experimenting with C-like
 decompilation and binary triage workflows.
 
-> **Showcase:** [crackme3 PyVMProtect — full static lift to `CTF{pyvm_r0cks}`](docs/showcase/crackme3-pyvmprotect.md)
-> — 53-opcode custom VM, multi-layer PCG + zlib decrypt, per-entry VARINT flag,
-> solved end-to-end with rsleigh annotations and Python (no Ghidra JVM, no debugger).
+> **Showcase:** [crackme3 PyVMProtect white paper](docs/showcase/crackme3-pyvmprotect.md)
 
 The short version:
 
@@ -223,8 +221,12 @@ assert_eq!(inst.disassembly, "MOV RAX,RBX");
 assert_eq!(inst.len, 3);
 ```
 
-The decompiler can also be embedded, but its API is not stable yet. Pin an exact
-version or commit if you build on `rsleigh-decompile`.
+The decompiler can also be embedded via `rsleigh-decompile`. Top-level entry
+points — `decompile`, `decompile_with_binary`, `extract_learned_types`,
+`extract_learned_structs` — rarely change in shape. Internal IR
+(`ssa::*`, `fold::Expr`, `printer::*`, signature enums) churns between
+releases as passes evolve, and public enums are not yet `#[non_exhaustive]`.
+Pin an exact version or commit if you build on the internals.
 
 ## Decompiler
 
