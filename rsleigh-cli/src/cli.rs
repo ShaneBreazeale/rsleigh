@@ -127,6 +127,7 @@ pub fn entrypoint() {
         eprintln!("  rsleigh <binary> --search --const <hex> Find functions with constant");
         eprintln!("  rsleigh <binary> --seh-fixpoint      Apply SEH-driven SMC patches until fixpoint, report new functions");
         eprintln!("  rsleigh <binary> --vulnscan          Scan for vulnerability patterns");
+        eprintln!("  rsleigh <binary> --ioc [--json]      Extract IOCs (URLs, IPs, paths, registry keys)");
         eprintln!(
             "  rsleigh <binary> --all --compact     Token-efficient output (no decls/blanks)"
         );
@@ -153,6 +154,7 @@ pub fn entrypoint() {
     let xrefs_mode = args.iter().any(|a| a == "--xrefs");
     let search_mode = args.iter().any(|a| a == "--search");
     let vulnscan_mode = args.iter().any(|a| a == "--vulnscan");
+    let ioc_mode = args.iter().any(|a| a == "--ioc");
     let classes_mode = args.iter().any(|a| a == "--classes");
     let compact_mode = args.iter().any(|a| a == "--compact");
     let brief_mode = args.iter().any(|a| a == "--brief");
@@ -539,7 +541,7 @@ pub fn entrypoint() {
     }
 
     // Summary/Xrefs/Search/Vulnscan/Callgraph modes
-    if summary_mode || xrefs_mode || search_mode || vulnscan_mode || callgraph_mode {
+    if summary_mode || xrefs_mode || search_mode || vulnscan_mode || callgraph_mode || ioc_mode {
         let data = match std::fs::read(binary_path) {
             Ok(d) => d,
             Err(e) => {
@@ -564,6 +566,9 @@ pub fn entrypoint() {
                     run_xrefs(&bp, &data, &target);
                 } else if vulnscan_mode {
                     run_vulnscan(&bp, &data);
+                } else if ioc_mode {
+                    let json = args_clone.iter().any(|a| a == "--json");
+                    run_ioc(&bp, &data, json);
                 } else if callgraph_mode {
                     run_callgraph(&bp, &data);
                 } else {
@@ -3660,6 +3665,450 @@ fn run_vulnscan(binary_path: &str, data: &[u8]) {
         if !context.is_empty() {
             println!("        {}", context);
         }
+    }
+}
+
+/// Extract indicators of compromise (IOCs) from a binary's strings.
+///
+/// Pulls ASCII and UTF-16LE strings out of the raw image and bins each
+/// match into a category that a triage workflow actually wants:
+///   * URLs (http/https/ftp)
+///   * IPv4 literals (with octet validation)
+///   * Domain names (TLD-anchored, length-bounded)
+///   * Filesystem paths (Win drive letters, %ENVVAR%, /tmp /etc /var /usr)
+///   * Registry keys (HKEY_*, HKLM\, HKCU\)
+///   * Windows mutex / kernel object names (Global\, Local\, Session\)
+///   * Credential/secret-related keywords (token=, password=, api_key=, ...)
+///
+/// The point is to give an analyst a one-pager of "where does this binary
+/// reach out to and what does it touch" without making them grep the strings
+/// dump by hand. Output is grouped by category, deduped, and sorted.
+fn run_ioc(binary_path: &str, data: &[u8], json: bool) {
+    use std::collections::BTreeSet;
+
+    // Pull strings: ASCII (>=6 chars) + UTF-16LE (>=4 chars). Window size is
+    // generous because installer binaries embed long config blobs. Caps
+    // prevent pathological hits in compressed/encrypted regions.
+    let mut texts: Vec<String> = Vec::new();
+    let mut run = Vec::with_capacity(64);
+    for &b in data.iter() {
+        if (0x20..0x7f).contains(&b) || b == b'\t' {
+            run.push(b);
+        } else {
+            if run.len() >= 6 {
+                if let Ok(s) = std::str::from_utf8(&run) {
+                    texts.push(s.to_string());
+                }
+            }
+            run.clear();
+        }
+    }
+    if run.len() >= 6 {
+        if let Ok(s) = std::str::from_utf8(&run) {
+            texts.push(s.to_string());
+        }
+    }
+    // UTF-16LE pass: read pairs (b, 0x00) of printable bytes.
+    let mut wide_run: Vec<u8> = Vec::with_capacity(64);
+    let mut i = 0usize;
+    while i + 1 < data.len() {
+        let lo = data[i];
+        let hi = data[i + 1];
+        if hi == 0 && ((0x20..0x7f).contains(&lo) || lo == b'\t') {
+            wide_run.push(lo);
+            i += 2;
+        } else {
+            if wide_run.len() >= 4 {
+                if let Ok(s) = std::str::from_utf8(&wide_run) {
+                    texts.push(s.to_string());
+                }
+            }
+            wide_run.clear();
+            i += 1;
+        }
+    }
+    if wide_run.len() >= 4 {
+        if let Ok(s) = std::str::from_utf8(&wide_run) {
+            texts.push(s.to_string());
+        }
+    }
+
+    let mut urls: BTreeSet<String> = BTreeSet::new();
+    let mut ips: BTreeSet<String> = BTreeSet::new();
+    let mut domains: BTreeSet<String> = BTreeSet::new();
+    let mut paths: BTreeSet<String> = BTreeSet::new();
+    let mut registry: BTreeSet<String> = BTreeSet::new();
+    let mut mutexes: BTreeSet<String> = BTreeSet::new();
+    let mut secrets: BTreeSet<String> = BTreeSet::new();
+
+    // TLDs that show up in real malware C2 — short list keeps domain
+    // detection from matching every "foo.exe" / "bar.dll" string. Add to
+    // taste; staying conservative beats false positives.
+    const TLDS: &[&str] = &[
+        "com", "net", "org", "io", "co", "ru", "cn", "tk", "ml", "ga", "cf",
+        "xyz", "info", "biz", "top", "online", "site", "pro", "dev", "app",
+        "gov", "edu", "mil", "uk", "de", "fr", "jp", "br", "in", "us",
+        "ws", "to", "cc", "su", "icu", "club", "host", "live", "fun", "shop",
+    ];
+    let known_tld = |label: &str| TLDS.iter().any(|t| label.eq_ignore_ascii_case(t));
+
+    let valid_ipv4 = |s: &str| {
+        let parts: Vec<&str> = s.split('.').collect();
+        if parts.len() != 4 {
+            return false;
+        }
+        let octets: Vec<u16> = match parts
+            .iter()
+            .map(|p| {
+                if p.is_empty() || p.len() > 3 || !p.bytes().all(|b| b.is_ascii_digit()) {
+                    return None;
+                }
+                p.parse::<u16>().ok().filter(|n| *n <= 255)
+            })
+            .collect::<Option<Vec<_>>>()
+        {
+            Some(o) => o,
+            None => return false,
+        };
+        // .NET / file-format versions encode as W.X.Y.Z and routinely have
+        // multiple zero octets ("4.0.0.0", "3.5.0.0", "2.0.0.0"). Real
+        // routable IPs almost never have 2+ zero octets — public address
+        // space won't have a trailing .0 host octet, and netblocks don't
+        // collapse to .0.0 except as network addresses (still not IOCs).
+        // Reject when 2 or more octets are zero.
+        let zeros = octets.iter().filter(|&&n| n == 0).count();
+        if zeros >= 2 {
+            return false;
+        }
+        if octets.iter().all(|&n| n == 255) {
+            return false;
+        }
+        true
+    };
+
+    let push_domain_if_useful = |domains: &mut BTreeSet<String>, host: &str| {
+        // Reject obvious file refs and intra-binary noise.
+        let lower = host.to_ascii_lowercase();
+        if lower.ends_with(".dll") || lower.ends_with(".exe") || lower.ends_with(".sys")
+            || lower.ends_with(".pdb") || lower.ends_with(".cpp") || lower.ends_with(".c")
+            || lower.ends_with(".h") || lower.ends_with(".obj") || lower.ends_with(".lib")
+            || lower.ends_with(".cs") || lower.ends_with(".vb") || lower.ends_with(".rs")
+            || lower.ends_with(".py") || lower.ends_with(".js") || lower.ends_with(".ts")
+            || lower.ends_with(".cab") || lower.ends_with(".msi") || lower.ends_with(".log")
+            || lower.ends_with(".tmp") || lower.ends_with(".dat") || lower.ends_with(".ini")
+            || lower.ends_with(".xml") || lower.ends_with(".json") || lower.ends_with(".txt")
+            || lower.ends_with(".crl") || lower.ends_with(".crt") || lower.ends_with(".cer")
+            || lower.ends_with(".bak")
+        {
+            return;
+        }
+        // Domain must have at least one fully-lowercase label (real domains
+        // are case-insensitive but always written lowercase in malware
+        // configs). PascalCase identifiers like "System.IO" or
+        // "MyApplication.app" are CLR namespaces / bundle IDs, not hosts.
+        if !lower.bytes().any(|b| b.is_ascii_lowercase()) {
+            return;
+        }
+        if !host.split('.').all(|label| {
+            !label.is_empty() && label.bytes().any(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        }) {
+            return;
+        }
+        // Reject tokens that contain `/` or `\` — that's a Go import path
+        // ("os/exec.in"), a file path, or other non-host noise.
+        if host.contains('/') || host.contains('\\') || host.contains(':') {
+            return;
+        }
+        // Reject namespace-like tokens with PascalCase labels.
+        let pascal_labels = host
+            .split('.')
+            .filter(|l| {
+                l.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false)
+                    && l.bytes().any(|b| b.is_ascii_lowercase())
+            })
+            .count();
+        if pascal_labels > 0 {
+            return;
+        }
+        if let Some(last_dot) = host.rfind('.') {
+            let tld = &host[last_dot + 1..];
+            if known_tld(tld) && host.len() >= 5 && host.len() <= 253 {
+                domains.insert(host.to_string());
+            }
+        }
+    };
+
+    for s in &texts {
+        // URLs
+        let mut idx = 0;
+        let bytes = s.as_bytes();
+        while idx < bytes.len() {
+            let rest = &s[idx..];
+            let url_start = ["http://", "https://", "ftp://"]
+                .iter()
+                .filter_map(|p| rest.find(p).map(|n| (n, p.len())))
+                .min_by_key(|(n, _)| *n);
+            let Some((rel, plen)) = url_start else { break };
+            let abs = idx + rel;
+            let scheme_end = abs + plen;
+            // Read URL chars until whitespace, control, or " ' < > )
+            let url_end = s[scheme_end..]
+                .find(|c: char| {
+                    c.is_whitespace() || c.is_control()
+                        || matches!(c, '"' | '\'' | '<' | '>' | ')' | '(' | '`')
+                })
+                .map(|n| scheme_end + n)
+                .unwrap_or(s.len());
+            if url_end > scheme_end && url_end - abs >= 10 && url_end - abs <= 2048 {
+                let mut u = s[abs..url_end]
+                    .trim_end_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | '/' | ']' | '}'))
+                    .to_string();
+                // PE security-directory PKCS7 blobs often immediately follow
+                // an embedded URL with one or two ASN.1 DER tag bytes (e.g.
+                // 0x30 0x45 = "0E", 0x30 0x53 = "0S"), which our character
+                // set treats as continuation. Strip a trailing 1-2 alnum
+                // tail when the URL ends in a known cert file extension
+                // suffixed with that tail.
+                for ext in &["crl", "crt", "cer", "axd", "p7s", "p7b"] {
+                    let needle = format!(".{}", ext);
+                    if let Some(idx) = u.to_ascii_lowercase().rfind(&needle) {
+                        let end = idx + needle.len();
+                        let tail = &u[end..];
+                        if !tail.is_empty()
+                            && tail.len() <= 2
+                            && tail.bytes().all(|b| b.is_ascii_alphanumeric())
+                        {
+                            u.truncate(end);
+                            break;
+                        }
+                    }
+                }
+                // Bare-host URL with no path (http://host[junk]) — trim a
+                // trailing 1-2 char tail of alnum or backslash that the
+                // PE security blob's DER tags routinely append.
+                if let Some(scheme_idx) = u.find("://") {
+                    let host_start = scheme_idx + 3;
+                    if !u[host_start..].contains('/') && !u[host_start..].contains('?') {
+                        // Only trim if the host body has a digit-or-letter
+                        // tail of length 1-2 after the last '.'.
+                        if let Some(last_dot) = u[host_start..].rfind('.') {
+                            let abs_dot = host_start + last_dot;
+                            let after_dot = &u[abs_dot + 1..];
+                            // TLD is the part after last dot; if there's a
+                            // tail of >=3 chars where the last 1-2 are
+                            // single-uppercase or backslash and the prefix
+                            // looks like a TLD, strip the tail.
+                            if after_dot.len() >= 3 {
+                                let tail_start = after_dot
+                                    .bytes()
+                                    .position(|b| b == b'\\' || b.is_ascii_uppercase() || b.is_ascii_digit())
+                                    .unwrap_or(after_dot.len());
+                                let probable_tld_len = tail_start;
+                                let tail_len = after_dot.len() - tail_start;
+                                if probable_tld_len >= 2
+                                    && tail_len >= 1
+                                    && tail_len <= 2
+                                    && after_dot[..probable_tld_len]
+                                        .bytes()
+                                        .all(|b| b.is_ascii_lowercase())
+                                    && known_tld(&after_dot[..probable_tld_len])
+                                {
+                                    u.truncate(abs_dot + 1 + probable_tld_len);
+                                }
+                            }
+                        }
+                    }
+                }
+                if u.len() >= 10 {
+                    urls.insert(u);
+                }
+            }
+            idx = url_end.max(abs + 1);
+        }
+
+        // IPv4 + domain extraction over tokens
+        for tok in s.split(|c: char| {
+            !(c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '\\' | '/' | ':' | '%' | '$'))
+        }) {
+            if tok.len() < 4 || tok.len() > 256 {
+                continue;
+            }
+            // IPv4 (allow optional :port suffix)
+            let (host_part, _) = tok.split_once(':').unwrap_or((tok, ""));
+            if valid_ipv4(host_part) {
+                // Reject 0.0.0.0 / 127.0.0.1 obvious-noise filters off — they
+                // can still be IOC-relevant (e.g. localhost C2 in dev malware).
+                ips.insert(host_part.to_string());
+            } else if host_part.contains('.') {
+                push_domain_if_useful(&mut domains, host_part);
+            }
+        }
+
+        // File paths. Each candidate must consist of path-valid characters
+        // throughout, otherwise we end up emitting random binary tokens like
+        // `%GYK%+caWN,\` or `p:/H(k6` that just happen to start with an
+        // env-var or drive-letter prefix.
+        let path_valid = |s: &str| {
+            s.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || matches!(c, '\\' | '/' | '.' | '_' | '-' | ' ' | '%' | '(' | ')'
+                                 | '$' | '~' | '+' | ':' | '@' | '#' | '{' | '}')
+            })
+        };
+        for tok in s.split_whitespace() {
+            if tok.len() < 5 || tok.len() > 260 {
+                continue;
+            }
+            // Windows drive-letter paths. Drive letter is conventionally
+            // uppercase; lowercase first char is almost always a token-split
+            // artifact ("p:/" out of `cpp:/foo` etc.).
+            if tok.len() >= 4
+                && tok.as_bytes()[1] == b':'
+                && (tok.as_bytes()[2] == b'\\' || tok.as_bytes()[2] == b'/')
+                && tok.as_bytes()[0].is_ascii_uppercase()
+                && path_valid(tok)
+            {
+                paths.insert(tok.to_string());
+            }
+            // Env-var paths. Reject printf-style format strings:
+            // %s, %d, %lu, %ls, %u, %x, %.3f, %02d etc. carry no IOC value.
+            // The variable name between the two % must be valid env-var
+            // syntax (uppercase letters/digits/underscore) AND the remainder
+            // of the token must be path-valid.
+            else if tok.starts_with('%')
+                && tok.len() >= 5
+                && tok.find('%').and_then(|first| {
+                    tok[first + 1..].find('%').map(|rel| {
+                        let inner = &tok[first + 1..first + 1 + rel];
+                        !inner.is_empty()
+                            && inner.len() >= 2
+                            && inner.len() <= 32
+                            && inner.bytes().all(|b| {
+                                b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_'
+                            })
+                    })
+                }).unwrap_or(false)
+                && path_valid(tok)
+            {
+                paths.insert(tok.to_string());
+            }
+            // Unix-ish absolute paths into common locations
+            else if (tok.starts_with("/tmp/") || tok.starts_with("/var/")
+                || tok.starts_with("/etc/") || tok.starts_with("/usr/")
+                || tok.starts_with("/home/") || tok.starts_with("/root/")
+                || tok.starts_with("/dev/") || tok.starts_with("/proc/"))
+                && path_valid(tok)
+            {
+                paths.insert(tok.to_string());
+            }
+        }
+
+        // Registry keys — match "HKEY_*", "HKLM\", "HKCU\" prefix and grab
+        // the rest of the alphabetic / backslash run.
+        for prefix in &[
+            "HKEY_LOCAL_MACHINE", "HKEY_CURRENT_USER", "HKEY_CLASSES_ROOT",
+            "HKEY_USERS", "HKEY_CURRENT_CONFIG", "HKLM\\", "HKCU\\", "HKCR\\",
+        ] {
+            let mut start = 0;
+            while let Some(rel) = s[start..].find(prefix) {
+                let abs = start + rel;
+                let end = s[abs..]
+                    .find(|c: char| {
+                        !(c.is_alphanumeric()
+                            || matches!(c, '\\' | '_' | '-' | '.' | '{' | '}' | '/' | ' '))
+                    })
+                    .map(|n| abs + n)
+                    .unwrap_or(s.len());
+                let key = s[abs..end].trim_end();
+                if key.len() >= prefix.len() + 2 && key.len() <= 256 {
+                    registry.insert(key.to_string());
+                }
+                start = end.max(abs + 1);
+            }
+        }
+
+        // Mutex / named-object paths.
+        for prefix in &["Global\\", "Local\\", "Session\\", "BaseNamedObjects\\"] {
+            let mut start = 0;
+            while let Some(rel) = s[start..].find(prefix) {
+                let abs = start + rel;
+                let end = s[abs..]
+                    .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '\0'))
+                    .map(|n| abs + n)
+                    .unwrap_or(s.len());
+                let m = s[abs..end].trim();
+                if m.len() >= prefix.len() + 2 && m.len() <= 200 {
+                    mutexes.insert(m.to_string());
+                }
+                start = end.max(abs + 1);
+            }
+        }
+
+        // Credential / secret-ish keywords, embedded in config-like strings.
+        // Reject .NET assembly identity strings whose `PublicKeyToken=` /
+        // `Culture=neutral, ...` syntax otherwise produces a flood of
+        // not-really-secrets in any managed binary.
+        let lower = s.to_ascii_lowercase();
+        let is_dotnet_identity = lower.contains("publickeytoken=")
+            || lower.contains("culture=neutral")
+            || lower.contains(", version=") && lower.contains(", culture=");
+        // Skip very long blob-like strings (terminfo databases, embedded
+        // resource catalogs) that catch unrelated env-var fragments.
+        if !is_dotnet_identity && s.len() <= 256 {
+            for needle in &[
+                "password=", "passwd=",
+                "api_key=", "apikey=", "api-key=",
+                "access_token=", "auth_token=", "auth-token=", "bearer_token=",
+                "bearer ", "client_secret=", "client-secret=",
+                "private_key=", "ssh-rsa ", "-----BEGIN PRIVATE",
+            ] {
+                if lower.contains(needle) {
+                    secrets.insert(s.trim().to_string());
+                    break;
+                }
+            }
+        }
+    }
+
+    if json {
+        let payload = serde_json::json!({
+            "binary": binary_path,
+            "urls":     urls.iter().collect::<Vec<_>>(),
+            "ips":      ips.iter().collect::<Vec<_>>(),
+            "domains":  domains.iter().collect::<Vec<_>>(),
+            "paths":    paths.iter().collect::<Vec<_>>(),
+            "registry": registry.iter().collect::<Vec<_>>(),
+            "mutexes":  mutexes.iter().collect::<Vec<_>>(),
+            "secrets":  secrets.iter().collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+        return;
+    }
+
+    println!("=== IOCs from {} ===", binary_path);
+    let print_section = |label: &str, set: &BTreeSet<String>| {
+        if set.is_empty() {
+            return;
+        }
+        println!("\n{} ({})", label, set.len());
+        for v in set {
+            println!("  {}", v);
+        }
+    };
+    print_section("URLs", &urls);
+    print_section("IPv4", &ips);
+    print_section("Domains", &domains);
+    print_section("Paths", &paths);
+    print_section("Registry", &registry);
+    print_section("Mutexes/Named Objects", &mutexes);
+    print_section("Secret-like strings", &secrets);
+
+    let total = urls.len() + ips.len() + domains.len() + paths.len()
+        + registry.len() + mutexes.len() + secrets.len();
+    if total == 0 {
+        println!("\n(no IOCs found)");
+    } else {
+        println!("\nTotal: {} indicators", total);
     }
 }
 
