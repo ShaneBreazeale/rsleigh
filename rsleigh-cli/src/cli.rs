@@ -5497,9 +5497,20 @@ fn discover_pe_functions(
     }
 
     let sorted: Vec<u64> = found.into_iter().collect();
+    // Attach import names to thunk stubs so `CALL <thunk_va>` callers
+    // render as the resolved import (e.g. `URLDownloadToFileW`) rather than
+    // an opaque `FUN_004038f2` for a 6-byte `FF 25 disp32` JMP-thunk that
+    // imports.rs has already resolved.
+    let import_map = rsleigh_decompile::imports::resolve_imports(data);
     sorted
         .iter()
-        .map(|addr| (*addr, format!("FUN_{:08x}", addr)))
+        .map(|addr| {
+            let name = import_map
+                .get(addr)
+                .cloned()
+                .unwrap_or_else(|| format!("FUN_{:08x}", addr));
+            (*addr, name)
+        })
         .collect()
 }
 
