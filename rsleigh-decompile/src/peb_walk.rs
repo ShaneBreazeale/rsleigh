@@ -293,6 +293,27 @@ const API_SEEDS: &[(&str, &str)] = &[
     ("ntdll.dll", "LdrLoadDll"),
     ("ntdll.dll", "LdrGetProcedureAddress"),
     ("ntdll.dll", "LdrFindResourceEx_U"),
+    ("ntdll.dll", "NtReadFile"),
+    ("ntdll.dll", "NtOpenFile"),
+    // tlhelp32 process / thread enumeration — sandbox + analyst-tool detection
+    ("kernel32.dll", "CreateToolhelp32Snapshot"),
+    ("kernel32.dll", "Process32First"),
+    ("kernel32.dll", "Process32Next"),
+    ("kernel32.dll", "Thread32First"),
+    ("kernel32.dll", "Thread32Next"),
+    ("kernel32.dll", "Module32First"),
+    ("kernel32.dll", "Module32Next"),
+    // additional kernel32 APIs observed in PyVMProtect-class loaders
+    ("kernel32.dll", "GetModuleHandleExA"),
+    ("kernel32.dll", "GetModuleHandleExW"),
+    ("kernel32.dll", "GetVolumeInformationA"),
+    ("kernel32.dll", "GetVolumeInformationW"),
+    ("kernel32.dll", "GetSystemFirmwareTable"),
+    ("kernel32.dll", "QueryPerformanceCounter"),
+    ("kernel32.dll", "QueryPerformanceFrequency"),
+    ("kernel32.dll", "GetThreadContext"),
+    ("kernel32.dll", "SetThreadContext"),
+    ("kernel32.dll", "CreateThread"),
 ];
 
 /// DJB2 hash (Dan Bernstein), the second-most-common API-resolution hash
