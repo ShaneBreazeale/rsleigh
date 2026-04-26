@@ -21,8 +21,8 @@ default = ["experimental"]
 experimental = []
 
 [dependencies]
-pcode-ir = { path = "../pcode-ir", version = "0.2.0" }
-rsleigh-api = { path = "../rsleigh-api", version = "0.2.0" }
+pcode-ir = { path = "../pcode-ir", version = "0.3.0" }
+rsleigh-api = { path = "../rsleigh-api", version = "0.3.0" }
 goblin = "0.9"
 gimli = "0.31"
 object = "0.36"
