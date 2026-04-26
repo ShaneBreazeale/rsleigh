@@ -38,6 +38,24 @@ Implementation under `rsleigh-decompile/` + `rsleigh-cli/`. See `docs/decompiler
 - `--summary` (one-line per func), `--xrefs`, `--search` by string/API/const
 - Raw firmware (`--raw <arch>`)
 
+## Triage
+
+Constant-time string + structure scans for first-pass IR / malware
+triage. Independent of the decoder pipeline. Full reference, JSON
+schemas, and recommended workflow in
+[`docs/cli-triage.md`](cli-triage.md).
+
+- `--ioc [--json]` — URLs, IPv4, domains, paths, registry keys,
+  mutexes, secret-like strings. `.NET` assembly identities and
+  printf-style format strings filtered out.
+- `--sigcheck [--json]` — Authenticode signer / issuer / signing
+  time / counter-signature / full chain. Hand-rolled DER walk; no
+  ASN.1 dependency.
+- `--resources [--dump DIR] [--json]` — PE resource directory walk
+  with magic-byte type sniffing (PE, MSI, CAB, PNG, JPEG). `--dump`
+  extracts every blob to `<DIR>/<TYPE>_<id>_<lang>.bin` for nested
+  triage (run `rsleigh` again on each extracted payload).
+
 ## C++
 
 - CppClass/VirtualMethod/ClassField structs

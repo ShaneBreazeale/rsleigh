@@ -185,11 +185,16 @@ rsleigh ./binary --diff ./binary_v2
 rsleigh ./binary --taint main
 rsleigh ./binary --vulnscan
 rsleigh ./binary --yara
+rsleigh ./binary --ioc        [--json]
+rsleigh ./binary --sigcheck   [--json]
+rsleigh ./binary --resources  [--dump DIR] [--json]
 ```
 
 Those modes are heuristics over the current analysis pipeline. They are useful
 for triage, but they are not sound vulnerability detection, taint analysis, or
-semantic differencing.
+semantic differencing. The last three (`--ioc`, `--sigcheck`, `--resources`)
+are constant-time string + structure scans; see [`docs/cli-triage.md`](docs/cli-triage.md)
+for the full reference, JSON schemas, and a recommended IR workflow.
 
 Custom-VM packer recon helpers (PE64-focused; auto-banners run on every PE64
 binary, the flags below take comma-separated hex VA lists):

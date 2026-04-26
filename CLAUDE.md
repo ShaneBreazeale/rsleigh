@@ -48,6 +48,9 @@ rsleigh <binary> --yara                # generate YARA
 rsleigh <binary> --diff <binary2>      # side-by-side diff
 rsleigh <binary> --taint <func>        # taint analysis
 rsleigh <binary> --vulnscan            # 27 vuln patterns
+rsleigh <binary> --ioc [--json]        # IOC extraction (URLs/IPs/paths/registry/mutexes/secrets); see docs/cli-triage.md
+rsleigh <binary> --sigcheck [--json]   # Authenticode signer/issuer/timestamp/chain; see docs/cli-triage.md
+rsleigh <binary> --resources [--dump DIR] [--json]  # PE resource walk + extraction; see docs/cli-triage.md
 rsleigh <binary> --callgraph           # JSON + behavioral tags
 rsleigh <binary> --classes [--json]    # C++ hierarchies
 rsleigh <binary> --compact             # -24% size
