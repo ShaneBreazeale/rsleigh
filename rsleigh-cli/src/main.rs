@@ -190,6 +190,16 @@ fn main() {
         .position(|a| a == "--vm-dispatch")
         .and_then(|i| args.get(i + 1))
         .cloned();
+    let vm_bytecode_arg = args
+        .iter()
+        .position(|a| a == "--vm-bytecode")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
+    let vm_handlers_arg = args
+        .iter()
+        .position(|a| a == "--vm-handlers")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
 
     if sections_mode {
         let data = match std::fs::read(binary_path) {
@@ -211,6 +221,7 @@ fn main() {
         || tag_dispatch_arg.is_some()
         || summarise_arg.is_some()
         || vm_dispatch_arg.is_some()
+        || vm_bytecode_arg.is_some()
     {
         let data = match std::fs::read(binary_path) {
             Ok(d) => d,
@@ -273,6 +284,95 @@ fn main() {
                 } else {
                     println!("dispatcher @ {:#x}: extraction failed", a);
                 }
+            }
+            return;
+        }
+        if let Some(arg) = vm_bytecode_arg.as_ref() {
+            // Format: <bc_va>:<size> e.g. 0x180018000:0x400
+            let parts: Vec<&str> = arg.split(':').collect();
+            if parts.len() != 2 {
+                eprintln!("--vm-bytecode expects <bc_va>:<size> (hex), got {arg}");
+                std::process::exit(1);
+            }
+            let parse_hex = |s: &str| -> Option<u64> {
+                let s = s.trim().trim_start_matches("0x").trim_start_matches("0X");
+                u64::from_str_radix(s, 16).ok()
+            };
+            let bc_va = match parse_hex(parts[0]) {
+                Some(v) => v,
+                None => {
+                    eprintln!("--vm-bytecode: bad VA {}", parts[0]);
+                    std::process::exit(1);
+                }
+            };
+            let bc_size = match parse_hex(parts[1]) {
+                Some(v) => v as usize,
+                None => {
+                    eprintln!("--vm-bytecode: bad size {}", parts[1]);
+                    std::process::exit(1);
+                }
+            };
+            let handlers_path = match vm_handlers_arg.as_ref() {
+                Some(p) => p,
+                None => {
+                    eprintln!("--vm-bytecode requires --vm-handlers <path.json>");
+                    std::process::exit(1);
+                }
+            };
+            let json = match std::fs::read_to_string(handlers_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("--vm-handlers: cannot read {handlers_path}: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let vtable = match rsleigh_decompile::vm_bytecode_disasm::parse_handlers_json(&json) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("--vm-handlers: parse error: {e}");
+                    std::process::exit(1);
+                }
+            };
+            // Resolve bc_va → file slice via PE sections.
+            let bytecode = if let goblin::Object::PE(pe) = &obj {
+                let mut found: Option<&[u8]> = None;
+                for sec in &pe.sections {
+                    let svaddr = pe.image_base as u64 + sec.virtual_address as u64;
+                    let sv = sec.virtual_size as u64;
+                    if bc_va >= svaddr && bc_va < svaddr + sv {
+                        let raddr = sec.pointer_to_raw_data as usize;
+                        let rsize = sec.size_of_raw_data as usize;
+                        let off_in_section = (bc_va - svaddr) as usize;
+                        if off_in_section >= rsize {
+                            // VA is in virtual_size but past size_of_raw_data —
+                            // BSS-style uninitialised tail, no file bytes.
+                            break;
+                        }
+                        let off = raddr + off_in_section;
+                        if off >= data.len() {
+                            break;
+                        }
+                        let avail = (rsize - off_in_section).min(data.len() - off);
+                        let end = off + bc_size.min(avail);
+                        found = Some(&data[off..end]);
+                        break;
+                    }
+                }
+                found
+            } else {
+                None
+            };
+            let bytecode = match bytecode {
+                Some(b) => b,
+                None => {
+                    eprintln!("--vm-bytecode: VA {:#x} not in any PE section", bc_va);
+                    std::process::exit(1);
+                }
+            };
+            let insts =
+                rsleigh_decompile::vm_bytecode_disasm::disassemble(bytecode, bc_va, &vtable);
+            for line in rsleigh_decompile::vm_bytecode_disasm::render(&insts) {
+                println!("{}", line);
             }
             return;
         }

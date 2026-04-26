@@ -41,6 +41,7 @@ pub mod ssa;
 pub mod structure;
 pub mod syscall_table;
 pub mod tag_dispatch;
+pub mod vm_bytecode_disasm;
 pub mod vm_dispatch_extract;
 pub mod vm_fingerprint;
 pub mod vm_handler_classify;

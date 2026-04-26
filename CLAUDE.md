@@ -54,6 +54,7 @@ rsleigh <binary> --vm-dispatch <addr>  # extract VM dispatcher metadata
 rsleigh <binary> --vm-classify-handlers <addrs>  # opcode handler classifier
 rsleigh <binary> --tag-dispatch <addrs>          # CMP r8/JZ chain extractor
 rsleigh <binary> --summarise-handlers <addrs>    # IAT-API + stack-pop signature
+rsleigh <binary> --vm-bytecode <bc_va>:<size> --vm-handlers <path.json>  # VM bytecode disasm
 rsleigh --raw <arch> <binary>          # raw firmware blob
 ```
 
