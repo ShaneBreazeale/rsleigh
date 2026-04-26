@@ -17473,6 +17473,19 @@ fn try_xor_decrypt_multi(va: u64, ctx: &PrintCtx) -> Option<(String, Vec<u8>)> {
     {
         return None;
     }
+    // Skip null-heavy regions. The prefix-attack derives a key from
+    // data[..key_len] XOR prefix, then XORs the entire buffer. Wherever
+    // raw data is 0x00, the output reproduces the key bytes verbatim,
+    // generating long runs of repeated text like "powe@nwe@nwe...". This
+    // is the dominant false positive against PE .data structs (counters,
+    // flag fields, mostly-null bookkeeping). Block when >40% of the first
+    // 64 bytes are null — real encrypted strings have ~uniform byte
+    // distribution and almost never hit this ratio.
+    let probe_len = data.len().min(64);
+    let null_count = data[..probe_len].iter().filter(|&&b| b == 0).count();
+    if null_count * 5 > probe_len * 2 {
+        return None;
+    }
 
     // Try common plaintext prefixes to derive the key
     let prefixes: &[&[u8]] = &[
@@ -17525,7 +17538,27 @@ fn try_xor_decrypt_multi(va: u64, ctx: &PrintCtx) -> Option<(String, Vec<u8>)> {
                 if let Ok(s) = std::str::from_utf8(candidate) {
                     let unique: std::collections::HashSet<u8> = candidate.iter().copied().collect();
                     let has_letter = candidate.iter().any(|&b| b.is_ascii_alphabetic());
-                    if unique.len() >= 5 && has_letter && s.trim().len() >= 8 {
+                    // The prefix-attack guarantees `candidate[..key_len]` matches
+                    // `prefix` by construction. To stop accepting matches that
+                    // start with a real prefix and continue with gibberish (the
+                    // common false-positive on UTF-16LE data and on random
+                    // .data bytes that happen to admit a printable XOR key),
+                    // also require the body to look at least roughly English-
+                    // like by vowel ratio. English is ~25-50% vowels; random
+                    // letter sequences land outside that band almost every time.
+                    let letters: Vec<u8> = candidate
+                        .iter()
+                        .copied()
+                        .filter(|b| b.is_ascii_alphabetic())
+                        .collect();
+                    let vowels = letters
+                        .iter()
+                        .filter(|b| matches!(b.to_ascii_lowercase(), b'a' | b'e' | b'i' | b'o' | b'u'))
+                        .count();
+                    let vowel_ok = !letters.is_empty()
+                        && vowels * 4 >= letters.len()      // >= 25%
+                        && vowels * 2 <= letters.len() + 1; // <= ~55%
+                    if unique.len() >= 5 && has_letter && s.trim().len() >= 8 && vowel_ok {
                         return Some((s.to_string(), key));
                     }
                 }
