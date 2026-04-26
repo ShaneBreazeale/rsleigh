@@ -11,10 +11,10 @@
 //! 5. Persist rows (full_hash, specific_hash, name, lib_id) in compact
 //!    binary format; ship as gzipped blob for runtime match pass.
 
-pub mod hash;
-pub mod mask;
 pub mod db;
+pub mod hash;
 pub mod ingest;
+pub mod mask;
 
 pub use db::{FidDb, FidEntry};
 pub use hash::FidHashQuad;
@@ -34,7 +34,10 @@ pub fn bundled_dbs(arch: rsleigh_api::Architecture) -> Vec<(&'static str, FidDb)
         ],
         rsleigh_api::Architecture::AArch64 => &[
             ("glibc", include_bytes!("../data/glibc-aarch64.fidb")),
-            ("libstdcxx", include_bytes!("../data/libstdcxx-aarch64.fidb")),
+            (
+                "libstdcxx",
+                include_bytes!("../data/libstdcxx-aarch64.fidb"),
+            ),
             ("musl", include_bytes!("../data/musl-aarch64.fidb")),
             ("zlib", include_bytes!("../data/zlib-aarch64.fidb")),
             ("openssl", include_bytes!("../data/openssl-aarch64.fidb")),
@@ -79,7 +82,10 @@ pub fn identify<'a>(
         if idxs.iter().all(|i| &db.entries[*i].name == first) {
             return Some(first);
         }
-        if idxs.iter().all(|i| is_cxx_abi_variant(&db.entries[*i].name, first)) {
+        if idxs
+            .iter()
+            .all(|i| is_cxx_abi_variant(&db.entries[*i].name, first))
+        {
             // Pick complete-object variant if present, else first.
             if let Some(i) = idxs.iter().find(|i| {
                 let n = &db.entries[**i].name;
@@ -91,8 +97,7 @@ pub fn identify<'a>(
         }
         None
     };
-    resolve(db.match_specific(hq.specific))
-        .or_else(|| resolve(db.match_full(hq.full)))
+    resolve(db.match_specific(hq.specific)).or_else(|| resolve(db.match_full(hq.full)))
 }
 
 /// Are `a` and `b` Itanium C++ ABI ctor/dtor variants of the same
@@ -106,8 +111,14 @@ fn is_cxx_abi_variant(a: &str, b: &str) -> bool {
     // Extract (group, position) for each name. If both share group + prefix
     // + suffix, they are body-equivalent by ABI.
     let locate = |s: &str| -> Option<(char, usize)> {
-        for &(ch, tag) in &[('C', "C1E"), ('C', "C2E"), ('C', "C3E"),
-                            ('D', "D0E"), ('D', "D1E"), ('D', "D2E")] {
+        for &(ch, tag) in &[
+            ('C', "C1E"),
+            ('C', "C2E"),
+            ('C', "C3E"),
+            ('D', "D0E"),
+            ('D', "D1E"),
+            ('D', "D2E"),
+        ] {
             if let Some(p) = s.find(tag) {
                 return Some((ch, p));
             }

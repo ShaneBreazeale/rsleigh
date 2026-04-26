@@ -47,12 +47,8 @@ pub fn scan_region(code: &[u8], base_va: u64) -> Vec<PebHit> {
     while off + 9 <= code.len() {
         if &code[off..off + 5] == &[0x65, 0x48, 0x8b, 0x04, 0x25] {
             // Check disp32 == 0x60.
-            let disp = u32::from_le_bytes([
-                code[off + 5],
-                code[off + 6],
-                code[off + 7],
-                code[off + 8],
-            ]);
+            let disp =
+                u32::from_le_bytes([code[off + 5], code[off + 6], code[off + 7], code[off + 8]]);
             if disp == 0x60 {
                 hits.push(PebHit {
                     va: base_va + off as u64,
@@ -65,8 +61,7 @@ pub fn scan_region(code: &[u8], base_va: u64) -> Vec<PebHit> {
                 // or `48 8b 50 18` etc. Look for `48 8b ?? 18` pattern.
                 let mut k = 0;
                 while k + 4 <= win.len() {
-                    if win[k] == 0x48 && win[k + 1] == 0x8b && win[k + 3] == 0x18
-                    {
+                    if win[k] == 0x48 && win[k + 1] == 0x8b && win[k + 3] == 0x18 {
                         hits.push(PebHit {
                             va: win_va + k as u64,
                             kind: PebHitKind::PebLdrAccess,
@@ -78,9 +73,7 @@ pub fn scan_region(code: &[u8], base_va: u64) -> Vec<PebHit> {
                 // BeingDebugged: `cmp/test byte ptr [rXX + 0x2]`
                 let mut k = 0;
                 while k + 3 <= win.len() {
-                    if (win[k] == 0x80 || win[k] == 0x38)
-                        && win[k + 2] == 0x02
-                    {
+                    if (win[k] == 0x80 || win[k] == 0x38) && win[k + 2] == 0x02 {
                         hits.push(PebHit {
                             va: win_va + k as u64,
                             kind: PebHitKind::BeingDebugged,
@@ -92,9 +85,7 @@ pub fn scan_region(code: &[u8], base_va: u64) -> Vec<PebHit> {
                 // NtGlobalFlag: `test ... + 0xbc, imm`
                 let mut k = 0;
                 while k + 3 <= win.len() {
-                    if (win[k] == 0xf6 || win[k] == 0xf7)
-                        && win[k + 2] == 0xbc
-                    {
+                    if (win[k] == 0xf6 || win[k] == 0xf7) && win[k + 2] == 0xbc {
                         hits.push(PebHit {
                             va: win_va + k as u64,
                             kind: PebHitKind::NtGlobalFlag,
@@ -127,8 +118,7 @@ pub fn scan(obj: &Object<'_>, data: &[u8]) -> Vec<PebHit> {
                 if raddr + rsize > data.len() {
                     continue;
                 }
-                let base_va =
-                    pe.image_base as u64 + sec.virtual_address as u64;
+                let base_va = pe.image_base as u64 + sec.virtual_address as u64;
                 hits.extend(scan_region(&data[raddr..raddr + rsize], base_va));
             }
             hits

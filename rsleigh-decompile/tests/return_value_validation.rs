@@ -174,10 +174,7 @@ fn validate_returns_demotes_when_no_caller_reads() {
                     }],
                 ),
             ),
-            (
-                0x105,
-                inst(1, vec![PcodeOp::Return { dest: ram(0, 8) }]),
-            ),
+            (0x105, inst(1, vec![PcodeOp::Return { dest: ram(0, 8) }])),
         ];
         let cfg = build_cfg(&insts);
         let mut ssa = build_ssa_with_cc(&cfg, CallingConv::SysV);
@@ -208,7 +205,11 @@ fn validate_returns_demotes_when_no_caller_reads() {
     assert!(
         !g_returns_some,
         "g must not still hold Return(Some) after demotion: {:?}",
-        g_after.blocks.iter().map(|b| &b.terminator).collect::<Vec<_>>()
+        g_after
+            .blocks
+            .iter()
+            .map(|b| &b.terminator)
+            .collect::<Vec<_>>()
     );
     // demoted is 0 if the diag never fired (DCE path) or 1 if it did.
     assert!(demoted <= 1, "demoted={} should be 0 or 1", demoted);
@@ -220,7 +221,15 @@ fn validate_returns_skips_when_external_callers_assumed() {
     // — preserves the wrap() interpretation for library exports.
     let make_call_then_ret = |target: u64| {
         let insts = vec![
-            (0x100, inst(5, vec![PcodeOp::Call { dest: ram(target, 8) }])),
+            (
+                0x100,
+                inst(
+                    5,
+                    vec![PcodeOp::Call {
+                        dest: ram(target, 8),
+                    }],
+                ),
+            ),
             (0x105, inst(1, vec![PcodeOp::Return { dest: ram(0, 8) }])),
         ];
         let cfg = build_cfg(&insts);

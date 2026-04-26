@@ -15,7 +15,9 @@ const MAGIC_GO120: u32 = 0xfffffff1;
 /// Go 1.20+ header, and yields (function_pc, name) pairs. Returns an
 /// empty map when the section is absent or unsupported.
 pub fn parse(binary: &[u8]) -> HashMap<u64, String> {
-    let Ok(obj) = goblin::Object::parse(binary) else { return HashMap::new(); };
+    let Ok(obj) = goblin::Object::parse(binary) else {
+        return HashMap::new();
+    };
     let (section_data, section_va) = match find_gopclntab(&obj, binary) {
         Some(v) => v,
         None => return HashMap::new(),
@@ -100,20 +102,29 @@ fn parse_table(data: &[u8], _section_va: u64) -> Option<HashMap<u64, String>> {
     let _ = minlc;
     let mut p = 8usize;
     let read_word = |p: usize| -> Option<u64> {
-        if p + ptrsize > data.len() { return None; }
+        if p + ptrsize > data.len() {
+            return None;
+        }
         Some(match ptrsize {
             8 => u64::from_le_bytes(data[p..p + 8].try_into().ok()?),
             4 => u32::from_le_bytes(data[p..p + 4].try_into().ok()?) as u64,
             _ => unreachable!(),
         })
     };
-    let nfunc = read_word(p)?; p += ptrsize;
-    let _nfiles = read_word(p)?; p += ptrsize;
-    let text_start = read_word(p)?; p += ptrsize;
-    let funcname_off = read_word(p)? as usize; p += ptrsize;
-    let _cu_off = read_word(p)?; p += ptrsize;
-    let _filetab_off = read_word(p)?; p += ptrsize;
-    let _pctab_off = read_word(p)?; p += ptrsize;
+    let nfunc = read_word(p)?;
+    p += ptrsize;
+    let _nfiles = read_word(p)?;
+    p += ptrsize;
+    let text_start = read_word(p)?;
+    p += ptrsize;
+    let funcname_off = read_word(p)? as usize;
+    p += ptrsize;
+    let _cu_off = read_word(p)?;
+    p += ptrsize;
+    let _filetab_off = read_word(p)?;
+    p += ptrsize;
+    let _pctab_off = read_word(p)?;
+    p += ptrsize;
     let pcln_off = read_word(p)? as usize;
 
     if funcname_off >= data.len() || pcln_off >= data.len() {
@@ -127,33 +138,41 @@ fn parse_table(data: &[u8], _section_va: u64) -> Option<HashMap<u64, String>> {
     let max = (nfunc as usize).min(65536);
     for i in 0..max {
         let base = i * entry_size;
-        if base + entry_size > pcln.len() { break; }
-        let entry_off =
-            u32::from_le_bytes(pcln[base..base + 4].try_into().ok()?) as u64;
-        let func_off =
-            u32::from_le_bytes(pcln[base + 4..base + 8].try_into().ok()?) as u64;
+        if base + entry_size > pcln.len() {
+            break;
+        }
+        let entry_off = u32::from_le_bytes(pcln[base..base + 4].try_into().ok()?) as u64;
+        let func_off = u32::from_le_bytes(pcln[base + 4..base + 8].try_into().ok()?) as u64;
         let pc = text_start.wrapping_add(entry_off);
         // _func struct at pcln_off + func_off.
         let fpos = pcln_off + func_off as usize;
-        if fpos + 8 > data.len() { continue; }
+        if fpos + 8 > data.len() {
+            continue;
+        }
         // Go 1.20+ _func layout starts with:
         //   u32 entryoff (pc offset from textStart — duplicate)
         //   u32 nameoff  (offset into funcnametab)
         let name_off = u32::from_le_bytes(data[fpos + 4..fpos + 8].try_into().ok()?) as usize;
         let name_abs = funcname_off + name_off;
-        if name_abs >= data.len() { continue; }
+        if name_abs >= data.len() {
+            continue;
+        }
         // Name is null-terminated ASCII.
         let end = data[name_abs..]
             .iter()
             .position(|&b| b == 0)
             .map(|p| name_abs + p)
             .unwrap_or(data.len());
-        if end - name_abs == 0 || end - name_abs > 512 { continue; }
+        if end - name_abs == 0 || end - name_abs > 512 {
+            continue;
+        }
         let name = match std::str::from_utf8(&data[name_abs..end]) {
             Ok(s) => s,
             Err(_) => continue,
         };
-        if name.is_empty() { continue; }
+        if name.is_empty() {
+            continue;
+        }
         out.insert(pc, sanitize(name));
     }
     Some(out)

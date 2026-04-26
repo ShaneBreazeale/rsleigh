@@ -46,7 +46,10 @@ fn is_random_lowercase_alphanumeric(name: &str) -> bool {
     if stem.len() < 4 || stem.len() > 6 {
         return false;
     }
-    if !stem.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) {
+    if !stem
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    {
         return false;
     }
     // Reject well-known names that happen to be all-lowercase: text, data,
@@ -54,10 +57,30 @@ fn is_random_lowercase_alphanumeric(name: &str) -> bool {
     // bound, srdata, sxdata, ndata, rodata, sdata, sbss.
     matches!(
         stem,
-        "text" | "data" | "bss" | "rdata" | "idata" | "edata" | "pdata"
-            | "rsrc" | "reloc" | "tls" | "debug" | "init"
-            | "bound" | "srdata" | "sxdata" | "ndata" | "rodata"
-            | "sdata" | "sbss" | "got" | "plt" | "fini" | "ctors" | "dtors"
+        "text"
+            | "data"
+            | "bss"
+            | "rdata"
+            | "idata"
+            | "edata"
+            | "pdata"
+            | "rsrc"
+            | "reloc"
+            | "tls"
+            | "debug"
+            | "init"
+            | "bound"
+            | "srdata"
+            | "sxdata"
+            | "ndata"
+            | "rodata"
+            | "sdata"
+            | "sbss"
+            | "got"
+            | "plt"
+            | "fini"
+            | "ctors"
+            | "dtors"
             | "rsrcz"
     )
     .not()
@@ -100,9 +123,7 @@ fn detect_pe(pe: &goblin::pe::PE) -> Option<Fingerprint> {
             // Single large executable random-named section is the
             // signature.
             const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
-            if (section.characteristics & IMAGE_SCN_MEM_EXECUTE) != 0
-                && vsize >= 0x10_000
-            {
+            if (section.characteristics & IMAGE_SCN_MEM_EXECUTE) != 0 && vsize >= 0x10_000 {
                 large_exec_random = true;
             }
             random_named.push(name.to_string());

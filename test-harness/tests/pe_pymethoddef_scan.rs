@@ -30,7 +30,11 @@ fn locate_fixture() -> Option<PathBuf> {
     // Cargo sets CARGO_MANIFEST_DIR to the test-harness crate root.
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let p = base.join("fixtures").join("crackmev3.pyd");
-    if p.exists() { Some(p) } else { None }
+    if p.exists() {
+        Some(p)
+    } else {
+        None
+    }
 }
 
 fn locate_binary() -> PathBuf {

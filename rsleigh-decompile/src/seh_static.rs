@@ -63,9 +63,15 @@ pub struct SehRecord {
 }
 
 impl SehRecord {
-    pub fn has_ehandler(&self) -> bool { (self.flags & 0x1) != 0 }
-    pub fn has_uhandler(&self) -> bool { (self.flags & 0x2) != 0 }
-    pub fn has_chaininfo(&self) -> bool { (self.flags & 0x4) != 0 }
+    pub fn has_ehandler(&self) -> bool {
+        (self.flags & 0x1) != 0
+    }
+    pub fn has_uhandler(&self) -> bool {
+        (self.flags & 0x2) != 0
+    }
+    pub fn has_chaininfo(&self) -> bool {
+        (self.flags & 0x4) != 0
+    }
 }
 
 /// Parse PE64 SEH records.  Returns an empty vec for non-PE, PE32, or
@@ -74,25 +80,41 @@ impl SehRecord {
 /// `image_data` is the raw file bytes.  Handler / scope-table addresses are
 /// returned as virtual addresses (image base added).
 pub fn parse_pe64_seh(image_data: &[u8]) -> Vec<SehRecord> {
-    let obj = match goblin::Object::parse(image_data) { Ok(o) => o, Err(_) => return vec![] };
-    let pe = match obj { goblin::Object::PE(pe) => pe, _ => return vec![] };
-    if !pe.is_64 { return vec![]; }
+    let obj = match goblin::Object::parse(image_data) {
+        Ok(o) => o,
+        Err(_) => return vec![],
+    };
+    let pe = match obj {
+        goblin::Object::PE(pe) => pe,
+        _ => return vec![],
+    };
+    if !pe.is_64 {
+        return vec![];
+    }
     let base = pe.image_base as u64;
 
     // Find the .pdata section.  goblin does not expose the exception
     // directory separately, so we locate the section by name.
-    let pdata = pe.sections.iter()
-        .find(|s| std::str::from_utf8(&s.name).unwrap_or("").trim_end_matches('\0') == ".pdata");
-    let Some(pdata) = pdata else { return vec![]; };
+    let pdata = pe.sections.iter().find(|s| {
+        std::str::from_utf8(&s.name)
+            .unwrap_or("")
+            .trim_end_matches('\0')
+            == ".pdata"
+    });
+    let Some(pdata) = pdata else {
+        return vec![];
+    };
     let pd_fo = pdata.pointer_to_raw_data as usize;
     let pd_sz = pdata.virtual_size.min(pdata.size_of_raw_data) as usize;
-    if pd_fo + pd_sz > image_data.len() || pd_sz < 12 { return vec![]; }
+    if pd_fo + pd_sz > image_data.len() || pd_sz < 12 {
+        return vec![];
+    }
 
     // Helper: RVA -> file offset using the section table.
     let rva_to_fo = |rva: u32| -> Option<usize> {
         let rva = rva as u64;
         for sec in &pe.sections {
-            let va  = sec.virtual_address as u64;
+            let va = sec.virtual_address as u64;
             let vsz = sec.virtual_size as u64;
             if rva >= va && rva < va + vsz {
                 return Some(sec.pointer_to_raw_data as usize + (rva - va) as usize);
@@ -102,7 +124,9 @@ pub fn parse_pe64_seh(image_data: &[u8]) -> Vec<SehRecord> {
     };
 
     let read_u32 = |fo: usize| -> Option<u32> {
-        if fo + 4 > image_data.len() { return None; }
+        if fo + 4 > image_data.len() {
+            return None;
+        }
         Some(u32::from_le_bytes(image_data[fo..fo + 4].try_into().ok()?))
     };
 
@@ -121,22 +145,29 @@ pub fn parse_pe64_seh(image_data: &[u8]) -> Vec<SehRecord> {
         rva_to_fo: &dyn Fn(u32) -> Option<usize>,
         depth: u32,
     ) -> Option<UnwindSummary> {
-        if depth > 8 { return None; }
+        if depth > 8 {
+            return None;
+        }
         if (unwind_rva & 1) != 0 {
             // Follow the RUNTIME_FUNCTION reference.
             let rf_fo = rva_to_fo(unwind_rva & !1)?;
-            if rf_fo + 12 > image.len() { return None; }
-            let next_unwind = u32::from_le_bytes(
-                image[rf_fo + 8..rf_fo + 12].try_into().ok()?);
+            if rf_fo + 12 > image.len() {
+                return None;
+            }
+            let next_unwind = u32::from_le_bytes(image[rf_fo + 8..rf_fo + 12].try_into().ok()?);
             unwind_rva = next_unwind;
         }
         let fo = rva_to_fo(unwind_rva)?;
-        if fo + 4 > image.len() { return None; }
+        if fo + 4 > image.len() {
+            return None;
+        }
         let hdr0 = image[fo];
         let count_of_codes = image[fo + 2] as usize;
         let version = hdr0 & 0x07;
-        let flags   = (hdr0 >> 3) & 0x1f;
-        if version == 0 || version > 2 { return None; }
+        let flags = (hdr0 >> 3) & 0x1f;
+        if version == 0 || version > 2 {
+            return None;
+        }
 
         // UNWIND_CODE entries: 2 bytes each, DWORD-padded as a block.
         let codes_bytes = ((count_of_codes + 1) & !1) * 2;
@@ -146,17 +177,21 @@ pub fn parse_pe64_seh(image_data: &[u8]) -> Vec<SehRecord> {
             // CHAININFO: trailer is a RUNTIME_FUNCTION.  Recurse on its
             // UnwindData to pick up the handler that actually lives at the
             // chain's tail.
-            if trailer_fo + 12 > image.len() { return None; }
-            let next_unwind = u32::from_le_bytes(
-                image[trailer_fo + 8..trailer_fo + 12].try_into().ok()?);
+            if trailer_fo + 12 > image.len() {
+                return None;
+            }
+            let next_unwind =
+                u32::from_le_bytes(image[trailer_fo + 8..trailer_fo + 12].try_into().ok()?);
             return resolve_unwind(next_unwind, image, rva_to_fo, depth + 1);
         }
 
         if flags & 0x3 != 0 {
             // Handler present: trailer is (ExceptionHandlerRVA, ExceptionData[]).
-            if trailer_fo + 4 > image.len() { return None; }
-            let handler_rva = u32::from_le_bytes(
-                image[trailer_fo..trailer_fo + 4].try_into().ok()?);
+            if trailer_fo + 4 > image.len() {
+                return None;
+            }
+            let handler_rva =
+                u32::from_le_bytes(image[trailer_fo..trailer_fo + 4].try_into().ok()?);
             let scope_rva = (trailer_fo + 4) as u32; // file offset; we convert below
             return Some(UnwindSummary {
                 version,
@@ -168,39 +203,52 @@ pub fn parse_pe64_seh(image_data: &[u8]) -> Vec<SehRecord> {
             });
         }
 
-        Some(UnwindSummary { version, flags, handler_rva: None, scope_table_rva: None })
+        Some(UnwindSummary {
+            version,
+            flags,
+            handler_rva: None,
+            scope_table_rva: None,
+        })
     }
 
     // Walk each 12-byte RUNTIME_FUNCTION.
     let mut out = Vec::new();
     let mut off = 0;
     while off + 12 <= pd_sz {
-        let Some(begin) = read_u32(pd_fo + off)       else { break; };
-        let Some(end)   = read_u32(pd_fo + off + 4)   else { break; };
-        let Some(uwd)   = read_u32(pd_fo + off + 8)   else { break; };
+        let Some(begin) = read_u32(pd_fo + off) else {
+            break;
+        };
+        let Some(end) = read_u32(pd_fo + off + 4) else {
+            break;
+        };
+        let Some(uwd) = read_u32(pd_fo + off + 8) else {
+            break;
+        };
         off += 12;
         // Sentinel: end of table.
-        if begin == 0 && end == 0 && uwd == 0 { break; }
+        if begin == 0 && end == 0 && uwd == 0 {
+            break;
+        }
 
         let Some(summary) = resolve_unwind(uwd, image_data, &rva_to_fo, 0) else {
             out.push(SehRecord {
                 func_begin: base + begin as u64,
-                func_end:   base + end   as u64,
-                handler:    None,
-                scope_table:None,
-                version:    1,
-                flags:      0,
+                func_end: base + end as u64,
+                handler: None,
+                scope_table: None,
+                version: 1,
+                flags: 0,
             });
             continue;
         };
 
         out.push(SehRecord {
             func_begin: base + begin as u64,
-            func_end:   base + end   as u64,
-            handler:    summary.handler_rva.map(|r| base + r as u64),
-            scope_table:summary.scope_table_rva.map(|r| base + r as u64),
-            version:    summary.version,
-            flags:      summary.flags,
+            func_end: base + end as u64,
+            handler: summary.handler_rva.map(|r| base + r as u64),
+            scope_table: summary.scope_table_rva.map(|r| base + r as u64),
+            version: summary.version,
+            flags: summary.flags,
         });
     }
     out
@@ -218,9 +266,17 @@ pub fn parse_pe64_seh(image_data: &[u8]) -> Vec<SehRecord> {
 /// begin >= end, etc.), it returns an empty vector so callers can safely
 /// ignore non-C-handler scope data.
 pub fn read_scope_table(image: &[u8], scope_table_va: u64) -> Vec<ScopeRecord> {
-    let obj = match goblin::Object::parse(image) { Ok(o) => o, _ => return vec![] };
-    let pe = match obj { goblin::Object::PE(p) => p, _ => return vec![] };
-    if !pe.is_64 { return vec![]; }
+    let obj = match goblin::Object::parse(image) {
+        Ok(o) => o,
+        _ => return vec![],
+    };
+    let pe = match obj {
+        goblin::Object::PE(p) => p,
+        _ => return vec![],
+    };
+    if !pe.is_64 {
+        return vec![];
+    }
     let base = pe.image_base as u64;
 
     let va_to_fo = |va: u64| -> Option<usize> {
@@ -233,28 +289,42 @@ pub fn read_scope_table(image: &[u8], scope_table_va: u64) -> Vec<ScopeRecord> {
         }
         None
     };
-    let Some(fo) = va_to_fo(scope_table_va) else { return vec![]; };
-    if fo + 4 > image.len() { return vec![]; }
+    let Some(fo) = va_to_fo(scope_table_va) else {
+        return vec![];
+    };
+    if fo + 4 > image.len() {
+        return vec![];
+    }
     let count = u32::from_le_bytes(image[fo..fo + 4].try_into().unwrap_or([0; 4]));
-    if count == 0 || count > 1024 { return vec![]; }
+    if count == 0 || count > 1024 {
+        return vec![];
+    }
     let need = 4usize + count as usize * 16;
-    if fo + need > image.len() { return vec![]; }
+    if fo + need > image.len() {
+        return vec![];
+    }
 
     let mut out = Vec::with_capacity(count as usize);
     for i in 0..count as usize {
         let r = fo + 4 + i * 16;
-        let begin    = u32::from_le_bytes(image[r     ..r + 4 ].try_into().unwrap()) as u64;
-        let end      = u32::from_le_bytes(image[r + 4 ..r + 8 ].try_into().unwrap()) as u64;
-        let handler  = u32::from_le_bytes(image[r + 8 ..r + 12].try_into().unwrap()) as u64;
-        let jump     = u32::from_le_bytes(image[r + 12..r + 16].try_into().unwrap()) as u64;
+        let begin = u32::from_le_bytes(image[r..r + 4].try_into().unwrap()) as u64;
+        let end = u32::from_le_bytes(image[r + 4..r + 8].try_into().unwrap()) as u64;
+        let handler = u32::from_le_bytes(image[r + 8..r + 12].try_into().unwrap()) as u64;
+        let jump = u32::from_le_bytes(image[r + 12..r + 16].try_into().unwrap()) as u64;
         // Sanity: begin/end should form a valid covered range; handler 0 or 1
         // is a __finally sentinel, otherwise it must land in the image.
-        if end <= begin { return vec![]; }
+        if end <= begin {
+            return vec![];
+        }
         out.push(ScopeRecord {
-            begin_va:       base + begin,
-            end_va:         base + end,
-            handler_va:     if handler <= 1 { handler } else { base + handler },
-            jump_target_va: if jump == 0    { 0        } else { base + jump    },
+            begin_va: base + begin,
+            end_va: base + end,
+            handler_va: if handler <= 1 {
+                handler
+            } else {
+                base + handler
+            },
+            jump_target_va: if jump == 0 { 0 } else { base + jump },
         });
     }
     out
@@ -295,8 +365,12 @@ pub fn scope_table_addresses(image: &[u8]) -> Vec<u64> {
     }
 
     while let Some((st_va, depth)) = queue.pop_front() {
-        if depth > 8 { continue; }
-        if !visited_st.insert(st_va) { continue; }
+        if depth > 8 {
+            continue;
+        }
+        if !visited_st.insert(st_va) {
+            continue;
+        }
         for sr in read_scope_table(image, st_va) {
             if sr.handler_va > 1 {
                 out.insert(sr.handler_va);
@@ -323,7 +397,9 @@ pub fn scope_table_addresses(image: &[u8]) -> Vec<u64> {
 pub fn handler_addresses(records: &[SehRecord]) -> Vec<u64> {
     let mut set: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
     for r in records {
-        if let Some(h) = r.handler { set.insert(h); }
+        if let Some(h) = r.handler {
+            set.insert(h);
+        }
     }
     set.into_iter().collect()
 }
@@ -449,16 +525,24 @@ pub fn analyse_all_handlers(image: &[u8]) -> std::collections::BTreeMap<u64, Han
 pub fn analyse_handler(image: &[u8], handler_va: u64) -> Option<HandlerAnalysis> {
     use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind, Register};
 
-    let obj = match goblin::Object::parse(image) { Ok(o) => o, _ => return None };
-    let pe = match obj { goblin::Object::PE(p) => p, _ => return None };
-    if !pe.is_64 { return None; }
+    let obj = match goblin::Object::parse(image) {
+        Ok(o) => o,
+        _ => return None,
+    };
+    let pe = match obj {
+        goblin::Object::PE(p) => p,
+        _ => return None,
+    };
+    if !pe.is_64 {
+        return None;
+    }
     let base = pe.image_base as u64;
 
     // Locate handler body: find the .text section containing handler_va, then
     // read a bounded window. Stop at the first RET (or UD2 / INT3 run).
     let mut handler_fo: Option<usize> = None;
     for sec in &pe.sections {
-        let va  = base + sec.virtual_address as u64;
+        let va = base + sec.virtual_address as u64;
         let vsz = sec.virtual_size as u64;
         if handler_va >= va && handler_va < va + vsz {
             let delta = (handler_va - va) as usize;
@@ -468,11 +552,12 @@ pub fn analyse_handler(image: &[u8], handler_va: u64) -> Option<HandlerAnalysis>
     }
     let fo = handler_fo?;
     let max_len = 4096usize.min(image.len().saturating_sub(fo));
-    if max_len == 0 { return None; }
+    if max_len == 0 {
+        return None;
+    }
 
     // IAT slot -> imported symbol name, for call target resolution.
-    let mut iat_name: std::collections::HashMap<u64, String> =
-        std::collections::HashMap::new();
+    let mut iat_name: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
     if let Some(imports) = pe.imports.iter().next().map(|_| &pe.imports) {
         for imp in imports.iter() {
             let slot = base + imp.offset as u64;
@@ -495,14 +580,22 @@ pub fn analyse_handler(image: &[u8], handler_va: u64) -> Option<HandlerAnalysis>
     let mut exc_trig_set: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
     let reg_idx = |r: Register| -> Option<usize> {
         match r {
-            Register::RAX => Some(0), Register::RCX => Some(1),
-            Register::RDX => Some(2), Register::RBX => Some(3),
-            Register::RSP => Some(4), Register::RBP => Some(5),
-            Register::RSI => Some(6), Register::RDI => Some(7),
-            Register::R8  => Some(8), Register::R9  => Some(9),
-            Register::R10 => Some(10), Register::R11 => Some(11),
-            Register::R12 => Some(12), Register::R13 => Some(13),
-            Register::R14 => Some(14), Register::R15 => Some(15),
+            Register::RAX => Some(0),
+            Register::RCX => Some(1),
+            Register::RDX => Some(2),
+            Register::RBX => Some(3),
+            Register::RSP => Some(4),
+            Register::RBP => Some(5),
+            Register::RSI => Some(6),
+            Register::RDI => Some(7),
+            Register::R8 => Some(8),
+            Register::R9 => Some(9),
+            Register::R10 => Some(10),
+            Register::R11 => Some(11),
+            Register::R12 => Some(12),
+            Register::R13 => Some(13),
+            Register::R14 => Some(14),
+            Register::R15 => Some(15),
             _ => None,
         }
     };
@@ -529,9 +622,7 @@ pub fn analyse_handler(image: &[u8], handler_va: u64) -> Option<HandlerAnalysis>
             if let Some(i) = reg_idx(insn.op_register(0)) {
                 imm64_of[i] = Some(insn.immediate64());
             }
-        } else if op == Mnemonic::Mov
-            && insn.op_count() == 2
-            && insn.op_kind(0) == OpKind::Register
+        } else if op == Mnemonic::Mov && insn.op_count() == 2 && insn.op_kind(0) == OpKind::Register
         {
             // Any other write to a register clears the tracked immediate.
             if let Some(i) = reg_idx(insn.op_register(0)) {
@@ -544,7 +635,8 @@ pub fn analyse_handler(image: &[u8], handler_va: u64) -> Option<HandlerAnalysis>
         // `mov dst, qword ptr [rcx + 8]`  →  dst holds ExceptionAddress.
         // Reads via other tagged pointer (e.g. copied ExcRecordPtr) also
         // propagate.
-        if op == Mnemonic::Mov && insn.op_count() == 2
+        if op == Mnemonic::Mov
+            && insn.op_count() == 2
             && insn.op_kind(0) == OpKind::Register
             && insn.op_kind(1) == OpKind::Memory
             && insn.memory_index() == Register::None
@@ -558,7 +650,7 @@ pub fn analyse_handler(image: &[u8], handler_va: u64) -> Option<HandlerAnalysis>
                     tag_of[di] = match disp {
                         0x00 => 2, // ExcCode
                         0x08 => 3, // ExcAddress
-                        _    => 0,
+                        _ => 0,
                     };
                     if tag_of[di] != 0 {
                         a.reads_exception_info = true;
@@ -569,14 +661,17 @@ pub fn analyse_handler(image: &[u8], handler_va: u64) -> Option<HandlerAnalysis>
                 // above by imm64 clear for the unconditional clear path, so mirror).
                 tag_of[di] = 0;
             }
-        } else if op == Mnemonic::Mov && insn.op_count() == 2
+        } else if op == Mnemonic::Mov
+            && insn.op_count() == 2
             && insn.op_kind(0) == OpKind::Register
             && insn.op_kind(1) == OpKind::Register
         {
             // `mov dst, src` — copy the source's symbolic tag.
             let di = reg_idx(insn.op_register(0));
             let si = reg_idx(insn.op_register(1));
-            if let (Some(di), Some(si)) = (di, si) { tag_of[di] = tag_of[si]; }
+            if let (Some(di), Some(si)) = (di, si) {
+                tag_of[di] = tag_of[si];
+            }
         }
 
         // ---- CMP on ExceptionCode → record the trigger value ----------
@@ -589,15 +684,21 @@ pub fn analyse_handler(image: &[u8], handler_va: u64) -> Option<HandlerAnalysis>
                     if let Some(ri) = reg_idx(insn.op_register(0)) {
                         if tag_of[ri] == 2 {
                             let imm = match insn.op_kind(1) {
-                                OpKind::Immediate8 | OpKind::Immediate8to16
-                                | OpKind::Immediate8to32 | OpKind::Immediate8to64 =>
-                                    Some(insn.immediate8() as i8 as i32 as u32),
+                                OpKind::Immediate8
+                                | OpKind::Immediate8to16
+                                | OpKind::Immediate8to32
+                                | OpKind::Immediate8to64 => {
+                                    Some(insn.immediate8() as i8 as i32 as u32)
+                                }
                                 OpKind::Immediate16 => Some(insn.immediate16() as u32),
-                                OpKind::Immediate32 | OpKind::Immediate32to64 =>
-                                    Some(insn.immediate32()),
+                                OpKind::Immediate32 | OpKind::Immediate32to64 => {
+                                    Some(insn.immediate32())
+                                }
                                 _ => None,
                             };
-                            if let Some(v) = imm { exc_trig_set.insert(v); }
+                            if let Some(v) = imm {
+                                exc_trig_set.insert(v);
+                            }
                         }
                     }
                 }
@@ -607,12 +708,16 @@ pub fn analyse_handler(image: &[u8], handler_va: u64) -> Option<HandlerAnalysis>
                         let base_tag = reg_idx(base).map(|i| tag_of[i]).unwrap_or(0);
                         if base_tag == 1 && insn.memory_displacement64() == 0 {
                             let imm = match insn.op_kind(1) {
-                                OpKind::Immediate8 | OpKind::Immediate8to16
-                                | OpKind::Immediate8to32 | OpKind::Immediate8to64 =>
-                                    Some(insn.immediate8() as i8 as i32 as u32),
+                                OpKind::Immediate8
+                                | OpKind::Immediate8to16
+                                | OpKind::Immediate8to32
+                                | OpKind::Immediate8to64 => {
+                                    Some(insn.immediate8() as i8 as i32 as u32)
+                                }
                                 OpKind::Immediate16 => Some(insn.immediate16() as u32),
-                                OpKind::Immediate32 | OpKind::Immediate32to64 =>
-                                    Some(insn.immediate32()),
+                                OpKind::Immediate32 | OpKind::Immediate32to64 => {
+                                    Some(insn.immediate32())
+                                }
                                 _ => None,
                             };
                             if let Some(v) = imm {
@@ -674,9 +779,8 @@ pub fn analyse_handler(image: &[u8], handler_va: u64) -> Option<HandlerAnalysis>
         // Look for `[rcx + N]` reads where N lies in ExceptionRecord.  N=0x8
         // = ExceptionAddress; N=0x20..=0x30 = ExceptionInformation[0..2].
         for i in 0..insn.op_count() {
-            if insn.op_kind(i) == OpKind::Memory
-                && insn.memory_base() == Register::RCX
-                && i > 0 // skip destination operand
+            if insn.op_kind(i) == OpKind::Memory && insn.memory_base() == Register::RCX && i > 0
+            // skip destination operand
             {
                 let disp = insn.memory_displacement64();
                 if disp == 0x08 || (0x20..=0x30).contains(&disp) {
@@ -684,10 +788,7 @@ pub fn analyse_handler(image: &[u8], handler_va: u64) -> Option<HandlerAnalysis>
                 }
             }
             // DispatcherContext via R9 — ControlPc at +0x00, TargetIp at +0x20.
-            if insn.op_kind(i) == OpKind::Memory
-                && insn.memory_base() == Register::R9
-                && i > 0
-            {
+            if insn.op_kind(i) == OpKind::Memory && insn.memory_base() == Register::R9 && i > 0 {
                 let disp = insn.memory_displacement64();
                 if disp == 0x00 || disp == 0x20 {
                     a.reads_dispatcher_context = true;
@@ -696,7 +797,9 @@ pub fn analyse_handler(image: &[u8], handler_va: u64) -> Option<HandlerAnalysis>
         }
 
         // ---- REP MOVSB / REP MOVSD / REP MOVSQ ---------------------------
-        if insn.has_rep_prefix() && matches!(op, Mnemonic::Movsb | Mnemonic::Movsd | Mnemonic::Movsq) {
+        if insn.has_rep_prefix()
+            && matches!(op, Mnemonic::Movsb | Mnemonic::Movsd | Mnemonic::Movsq)
+        {
             a.uses_rep_movs = true;
         }
 
@@ -712,14 +815,16 @@ pub fn analyse_handler(image: &[u8], handler_va: u64) -> Option<HandlerAnalysis>
                     a.iat_calls.push(name.clone());
                 }
                 match name.as_str() {
-                    "WriteProcessMemory" | "NtWriteVirtualMemory"
-                        | "ZwWriteVirtualMemory" => a.calls_wpm = true,
-                    "VirtualProtect" | "VirtualProtectEx"
-                        | "NtProtectVirtualMemory" | "ZwProtectVirtualMemory"
-                        => a.calls_vprotect = true,
-                    "RtlAddFunctionTable" | "RtlInstallFunctionTableCallback"
-                        | "RtlDeleteFunctionTable"
-                        => a.registers_runtime_tables = true,
+                    "WriteProcessMemory" | "NtWriteVirtualMemory" | "ZwWriteVirtualMemory" => {
+                        a.calls_wpm = true
+                    }
+                    "VirtualProtect"
+                    | "VirtualProtectEx"
+                    | "NtProtectVirtualMemory"
+                    | "ZwProtectVirtualMemory" => a.calls_vprotect = true,
+                    "RtlAddFunctionTable"
+                    | "RtlInstallFunctionTableCallback"
+                    | "RtlDeleteFunctionTable" => a.registers_runtime_tables = true,
                     _ => {}
                 }
             }
@@ -778,12 +883,7 @@ pub struct ImagePatch {
 /// 32-bit-signed tables (common in MSVC `/Gm-` switch lowering) are
 /// handled separately by computing `table_va + i32(entry)`; this variant
 /// is tried when the naive read does not produce in-range targets.
-fn enumerate_jump_table(
-    pe: &goblin::pe::PE,
-    image: &[u8],
-    table_va: u64,
-    scale: u64,
-) -> Vec<u64> {
+fn enumerate_jump_table(pe: &goblin::pe::PE, image: &[u8], table_va: u64, scale: u64) -> Vec<u64> {
     let base = pe.image_base as u64;
     // Accumulate executable ranges once.
     let mut text: Vec<(u64, u64)> = Vec::new();
@@ -813,24 +913,38 @@ fn enumerate_jump_table(
     if stride == 8 {
         for i in 0..MAX_ENTRIES {
             let entry_va = table_va.wrapping_add(i * stride);
-            let Some(fo) = va_to_fo(entry_va) else { break; };
-            if fo + 8 > image.len() { break; }
+            let Some(fo) = va_to_fo(entry_va) else {
+                break;
+            };
+            if fo + 8 > image.len() {
+                break;
+            }
             let v = u64::from_le_bytes(image[fo..fo + 8].try_into().unwrap());
-            if v == 0 || !in_text(v) { break; }
+            if v == 0 || !in_text(v) {
+                break;
+            }
             out.push(v);
         }
-        if !out.is_empty() { return out; }
+        if !out.is_empty() {
+            return out;
+        }
     }
 
     // Attempt 2: MSVC-style `(table_va as i32-relative)` 32-bit entries.
     // Each slot is an i32 delta from the table base.  Stride = 4.
     for i in 0..MAX_ENTRIES {
         let entry_va = table_va.wrapping_add(i * 4);
-        let Some(fo) = va_to_fo(entry_va) else { break; };
-        if fo + 4 > image.len() { break; }
+        let Some(fo) = va_to_fo(entry_va) else {
+            break;
+        };
+        if fo + 4 > image.len() {
+            break;
+        }
         let off = i32::from_le_bytes(image[fo..fo + 4].try_into().unwrap()) as i64;
         let target = (table_va as i64).wrapping_add(off) as u64;
-        if target == 0 || !in_text(target) { break; }
+        if target == 0 || !in_text(target) {
+            break;
+        }
         out.push(target);
     }
     out
@@ -885,22 +999,28 @@ fn walk_helper_linear(
     budget: usize,
 ) {
     use iced_x86::{Decoder, DecoderOptions, Mnemonic, OpKind, Register};
-    if call_depth >= 3 || budget == 0 { return; }
+    if call_depth >= 3 || budget == 0 {
+        return;
+    }
     let base = pe.image_base as u64;
 
     // Locate body.
     let mut fo: Option<usize> = None;
     for sec in &pe.sections {
-        let va  = base + sec.virtual_address as u64;
+        let va = base + sec.virtual_address as u64;
         let vsz = sec.virtual_size as u64;
         if entry_va >= va && entry_va < va + vsz {
             fo = Some(sec.pointer_to_raw_data as usize + (entry_va - va) as usize);
             break;
         }
     }
-    let Some(start) = fo else { return; };
+    let Some(start) = fo else {
+        return;
+    };
     let span = (budget * 16).min(image.len().saturating_sub(start));
-    if span == 0 { return; }
+    if span == 0 {
+        return;
+    }
 
     // Helpers mirroring the main interpreter.
     let va_to_fo = |va: u64| -> Option<usize> {
@@ -915,24 +1035,39 @@ fn walk_helper_linear(
     };
     let read_bytes = |va: u64, len: usize| -> Option<Vec<u8>> {
         let o = va_to_fo(va)?;
-        if o + len > image.len() { return None; }
+        if o + len > image.len() {
+            return None;
+        }
         Some(image[o..o + len].to_vec())
     };
     let reg_idx = |r: Register| -> Option<usize> {
         match r {
-            Register::RAX=>Some(0), Register::RCX=>Some(1),
-            Register::RDX=>Some(2), Register::RBX=>Some(3),
-            Register::RSP=>Some(4), Register::RBP=>Some(5),
-            Register::RSI=>Some(6), Register::RDI=>Some(7),
-            Register::R8=>Some(8),  Register::R9=>Some(9),
-            Register::R10=>Some(10),Register::R11=>Some(11),
-            Register::R12=>Some(12),Register::R13=>Some(13),
-            Register::R14=>Some(14),Register::R15=>Some(15),
+            Register::RAX => Some(0),
+            Register::RCX => Some(1),
+            Register::RDX => Some(2),
+            Register::RBX => Some(3),
+            Register::RSP => Some(4),
+            Register::RBP => Some(5),
+            Register::RSI => Some(6),
+            Register::RDI => Some(7),
+            Register::R8 => Some(8),
+            Register::R9 => Some(9),
+            Register::R10 => Some(10),
+            Register::R11 => Some(11),
+            Register::R12 => Some(12),
+            Register::R13 => Some(13),
+            Register::R14 => Some(14),
+            Register::R15 => Some(15),
             _ => None,
         }
     };
 
-    let mut dec = Decoder::with_ip(64, &image[start..start + span], entry_va, DecoderOptions::NONE);
+    let mut dec = Decoder::with_ip(
+        64,
+        &image[start..start + span],
+        entry_va,
+        DecoderOptions::NONE,
+    );
     let mut insn = iced_x86::Instruction::default();
     let mut count = 0usize;
 
@@ -940,18 +1075,23 @@ fn walk_helper_linear(
         dec.decode_out(&mut insn);
         count += 1;
         let op = insn.mnemonic();
-        if matches!(op, Mnemonic::Ret | Mnemonic::Ud2 | Mnemonic::Int3) { return; }
+        if matches!(op, Mnemonic::Ret | Mnemonic::Ud2 | Mnemonic::Int3) {
+            return;
+        }
 
         // Track reg loads (imm, lea, reg-to-reg). Skipped for brevity — only
         // the writes below rely on regs, and the caller may already have
         // resolved values for the common SMC idiom.
         if op == Mnemonic::Mov && insn.op_count() == 2 && insn.op_kind(0) == OpKind::Register {
-            let Some(di) = reg_idx(insn.op_register(0)) else { continue; };
+            let Some(di) = reg_idx(insn.op_register(0)) else {
+                continue;
+            };
             regs[di] = match insn.op_kind(1) {
                 OpKind::Immediate64 => RegVal::Imm(insn.immediate64()),
                 OpKind::Immediate32to64 => RegVal::Imm(insn.immediate64()),
                 OpKind::Register => reg_idx(insn.op_register(1))
-                    .map(|i| regs[i]).unwrap_or(RegVal::Top),
+                    .map(|i| regs[i])
+                    .unwrap_or(RegVal::Top),
                 _ => RegVal::Top,
             };
             continue;
@@ -960,21 +1100,28 @@ fn walk_helper_linear(
         // Memory write (same rule as main interpreter).
         if op == Mnemonic::Mov && insn.op_count() == 2 && insn.op_kind(0) == OpKind::Memory {
             let base_reg = insn.memory_base();
-            if matches!(base_reg, Register::R8 | Register::RCX) { continue; }
+            if matches!(base_reg, Register::R8 | Register::RCX) {
+                continue;
+            }
             let tva = if insn.is_ip_rel_memory_operand() {
                 Some(insn.ip_rel_memory_address())
             } else if base_reg != Register::None && insn.memory_index() == Register::None {
-                reg_idx(base_reg).and_then(|i| regs[i].as_concrete())
+                reg_idx(base_reg)
+                    .and_then(|i| regs[i].as_concrete())
                     .map(|v| v.wrapping_add(insn.memory_displacement64()))
-            } else { None };
-            let Some(tva) = tva else { continue; };
+            } else {
+                None
+            };
+            let Some(tva) = tva else {
+                continue;
+            };
             let width = insn.memory_size().size();
-            if width == 0 || width > 8 { continue; }
+            if width == 0 || width > 8 {
+                continue;
+            }
             let v: Option<u64> = match insn.op_kind(1) {
-                OpKind::Immediate8 | OpKind::Immediate8to64
-                    => Some(insn.immediate8() as u64),
-                OpKind::Immediate32 | OpKind::Immediate32to64
-                    => Some(insn.immediate32() as u64),
+                OpKind::Immediate8 | OpKind::Immediate8to64 => Some(insn.immediate8() as u64),
+                OpKind::Immediate32 | OpKind::Immediate32to64 => Some(insn.immediate32() as u64),
                 OpKind::Immediate64 => Some(insn.immediate64()),
                 OpKind::Register => {
                     let full = insn.op_register(1).full_register();
@@ -986,24 +1133,39 @@ fn walk_helper_linear(
                 let mut buf = v.to_le_bytes().to_vec();
                 buf.truncate(width);
                 if patch_set.insert((tva, buf.clone())) {
-                    patches.push(ImagePatch { target_va: tva, bytes: buf, handler_va });
+                    patches.push(ImagePatch {
+                        target_va: tva,
+                        bytes: buf,
+                        handler_va,
+                    });
                 }
             }
             continue;
         }
 
         // rep movs — same rule as main interpreter.
-        if insn.has_rep_prefix() && matches!(op, Mnemonic::Movsb | Mnemonic::Movsd | Mnemonic::Movsq) {
+        if insn.has_rep_prefix()
+            && matches!(op, Mnemonic::Movsb | Mnemonic::Movsd | Mnemonic::Movsq)
+        {
             let rdi = regs[reg_idx(Register::RDI).unwrap()].as_concrete();
             let rsi = regs[reg_idx(Register::RSI).unwrap()].as_concrete();
             let rcx = regs[reg_idx(Register::RCX).unwrap()].as_concrete();
             if let (Some(dst), Some(src), Some(cnt)) = (rdi, rsi, rcx) {
-                let unit = match op { Mnemonic::Movsb => 1, Mnemonic::Movsd => 4, Mnemonic::Movsq => 8, _ => 1 };
+                let unit = match op {
+                    Mnemonic::Movsb => 1,
+                    Mnemonic::Movsd => 4,
+                    Mnemonic::Movsq => 8,
+                    _ => 1,
+                };
                 let total = (cnt as usize).saturating_mul(unit);
                 if total > 0 && total <= 0x10000 {
                     if let Some(body) = read_bytes(src, total) {
                         if patch_set.insert((dst, body.clone())) {
-                            patches.push(ImagePatch { target_va: dst, bytes: body, handler_va });
+                            patches.push(ImagePatch {
+                                target_va: dst,
+                                bytes: body,
+                                handler_va,
+                            });
                         }
                     }
                 }
@@ -1016,19 +1178,46 @@ fn walk_helper_linear(
 
         // Nested direct CALL — recurse with depth+1.
         if op == Mnemonic::Call && insn.op_count() == 1 && insn.op_kind(0) == OpKind::NearBranch64 {
-            walk_helper_linear(pe, image, insn.near_branch64(), handler_va,
-                               regs, patches, patch_set, call_depth + 1, budget.saturating_sub(count));
-            for r in [Register::RAX, Register::RCX, Register::RDX,
-                      Register::R8, Register::R9, Register::R10, Register::R11] {
-                if let Some(i) = reg_idx(r) { regs[i] = RegVal::Top; }
+            walk_helper_linear(
+                pe,
+                image,
+                insn.near_branch64(),
+                handler_va,
+                regs,
+                patches,
+                patch_set,
+                call_depth + 1,
+                budget.saturating_sub(count),
+            );
+            for r in [
+                Register::RAX,
+                Register::RCX,
+                Register::RDX,
+                Register::R8,
+                Register::R9,
+                Register::R10,
+                Register::R11,
+            ] {
+                if let Some(i) = reg_idx(r) {
+                    regs[i] = RegVal::Top;
+                }
             }
             continue;
         }
 
         // Unconditional branch (tail call) — retarget linearly.
         if op == Mnemonic::Jmp && insn.op_count() == 1 && insn.op_kind(0) == OpKind::NearBranch64 {
-            walk_helper_linear(pe, image, insn.near_branch64(), handler_va,
-                               regs, patches, patch_set, call_depth + 1, budget.saturating_sub(count));
+            walk_helper_linear(
+                pe,
+                image,
+                insn.near_branch64(),
+                handler_va,
+                regs,
+                patches,
+                patch_set,
+                call_depth + 1,
+                budget.saturating_sub(count),
+            );
             return;
         }
 
@@ -1058,24 +1247,36 @@ fn walk_helper_linear(
 pub fn extract_handler_patches(image: &[u8], handler_va: u64) -> Vec<ImagePatch> {
     use iced_x86::{Decoder, DecoderOptions, FlowControl, Mnemonic, OpKind, Register};
 
-    let obj = match goblin::Object::parse(image) { Ok(o) => o, _ => return vec![] };
-    let pe = match obj { goblin::Object::PE(p) => p, _ => return vec![] };
-    if !pe.is_64 { return vec![]; }
+    let obj = match goblin::Object::parse(image) {
+        Ok(o) => o,
+        _ => return vec![],
+    };
+    let pe = match obj {
+        goblin::Object::PE(p) => p,
+        _ => return vec![],
+    };
+    if !pe.is_64 {
+        return vec![];
+    }
     let base = pe.image_base as u64;
 
     // Locate handler body in the file.
     let mut handler_fo: Option<usize> = None;
     for sec in &pe.sections {
-        let va  = base + sec.virtual_address as u64;
+        let va = base + sec.virtual_address as u64;
         let vsz = sec.virtual_size as u64;
         if handler_va >= va && handler_va < va + vsz {
             handler_fo = Some(sec.pointer_to_raw_data as usize + (handler_va - va) as usize);
             break;
         }
     }
-    let Some(fo) = handler_fo else { return vec![]; };
+    let Some(fo) = handler_fo else {
+        return vec![];
+    };
     let max_len = 8192usize.min(image.len().saturating_sub(fo));
-    if max_len == 0 { return vec![]; }
+    if max_len == 0 {
+        return vec![];
+    }
     let bytes_slice = &image[fo..fo + max_len];
 
     // Helper to read at a VA from the file image (not the in-memory image).
@@ -1091,25 +1292,37 @@ pub fn extract_handler_patches(image: &[u8], handler_va: u64) -> Vec<ImagePatch>
     };
     let read_u64 = |va: u64| -> Option<u64> {
         let o = va_to_fo(va)?;
-        if o + 8 > image.len() { return None; }
+        if o + 8 > image.len() {
+            return None;
+        }
         Some(u64::from_le_bytes(image[o..o + 8].try_into().ok()?))
     };
     let read_bytes = |va: u64, len: usize| -> Option<Vec<u8>> {
         let o = va_to_fo(va)?;
-        if o + len > image.len() { return None; }
+        if o + len > image.len() {
+            return None;
+        }
         Some(image[o..o + len].to_vec())
     };
 
     let reg_idx = |r: Register| -> Option<usize> {
         match r {
-            Register::RAX => Some(0), Register::RCX => Some(1),
-            Register::RDX => Some(2), Register::RBX => Some(3),
-            Register::RSP => Some(4), Register::RBP => Some(5),
-            Register::RSI => Some(6), Register::RDI => Some(7),
-            Register::R8  => Some(8), Register::R9  => Some(9),
-            Register::R10 => Some(10), Register::R11 => Some(11),
-            Register::R12 => Some(12), Register::R13 => Some(13),
-            Register::R14 => Some(14), Register::R15 => Some(15),
+            Register::RAX => Some(0),
+            Register::RCX => Some(1),
+            Register::RDX => Some(2),
+            Register::RBX => Some(3),
+            Register::RSP => Some(4),
+            Register::RBP => Some(5),
+            Register::RSI => Some(6),
+            Register::RDI => Some(7),
+            Register::R8 => Some(8),
+            Register::R9 => Some(9),
+            Register::R10 => Some(10),
+            Register::R11 => Some(11),
+            Register::R12 => Some(12),
+            Register::R13 => Some(13),
+            Register::R14 => Some(14),
+            Register::R15 => Some(15),
             _ => None,
         }
     };
@@ -1127,7 +1340,8 @@ pub fn extract_handler_patches(image: &[u8], handler_va: u64) -> Vec<ImagePatch>
         }
         out
     };
-    let mut visited: std::collections::HashMap<u64, [RegVal; 16]> = std::collections::HashMap::new();
+    let mut visited: std::collections::HashMap<u64, [RegVal; 16]> =
+        std::collections::HashMap::new();
     let mut worklist: Vec<(u64, [RegVal; 16])> = Vec::new();
     worklist.push((handler_va, [RegVal::Top; 16]));
     let mut patches: Vec<ImagePatch> = Vec::new();
@@ -1140,7 +1354,9 @@ pub fn extract_handler_patches(image: &[u8], handler_va: u64) -> Vec<ImagePatch>
         // Merge with any prior state at this entry; if unchanged, skip.
         if let Some(prev) = visited.get(&pc_start) {
             let merged = merge(*prev, regs);
-            if merged == *prev { continue; }
+            if merged == *prev {
+                continue;
+            }
             visited.insert(pc_start, merged);
             regs = merged;
         } else {
@@ -1150,11 +1366,17 @@ pub fn extract_handler_patches(image: &[u8], handler_va: u64) -> Vec<ImagePatch>
         // Locate file offset for pc_start (could equal handler_va or a
         // jump-target a few basic blocks away).
         let Some(start_off) = (|| -> Option<usize> {
-            if pc_start < handler_va { return None; }
+            if pc_start < handler_va {
+                return None;
+            }
             let delta = (pc_start - handler_va) as usize;
-            if delta >= bytes_slice.len() { return None; }
+            if delta >= bytes_slice.len() {
+                return None;
+            }
             Some(delta)
-        })() else { continue; };
+        })() else {
+            continue;
+        };
 
         let mut dec = Decoder::with_ip(
             64,
@@ -1165,12 +1387,16 @@ pub fn extract_handler_patches(image: &[u8], handler_va: u64) -> Vec<ImagePatch>
         let mut insn = iced_x86::Instruction::default();
 
         while dec.can_decode() {
-            if total_icount >= icount_cap { break 'outer; }
+            if total_icount >= icount_cap {
+                break 'outer;
+            }
             dec.decode_out(&mut insn);
             total_icount += 1;
 
             let op = insn.mnemonic();
-            if matches!(op, Mnemonic::Ret | Mnemonic::Ud2 | Mnemonic::Int3) { break; }
+            if matches!(op, Mnemonic::Ret | Mnemonic::Ud2 | Mnemonic::Int3) {
+                break;
+            }
 
             // Branches: handle before generic fallthrough logic.
             match insn.flow_control() {
@@ -1223,7 +1449,9 @@ pub fn extract_handler_patches(image: &[u8], handler_va: u64) -> Vec<ImagePatch>
                                         .map(|v| v.wrapping_add(insn.memory_displacement64()));
                                     if let Some(table_va) = base_va {
                                         resolved.extend(enumerate_jump_table(
-                                            &pe, image, table_va,
+                                            &pe,
+                                            image,
+                                            table_va,
                                             insn.memory_index_scale() as u64,
                                         ));
                                     }
@@ -1242,239 +1470,299 @@ pub fn extract_handler_patches(image: &[u8], handler_va: u64) -> Vec<ImagePatch>
                 _ => {}
             }
 
-        // ---- Pure register updates --------------------------------------
-        if op == Mnemonic::Mov && insn.op_count() == 2 && insn.op_kind(0) == OpKind::Register {
-            let dst = insn.op_register(0);
-            let Some(di) = reg_idx(dst) else {
-                // Destination is a subregister we do not model — fall through.
-                continue;
-            };
-            match insn.op_kind(1) {
-                OpKind::Immediate64 => regs[di] = RegVal::Imm(insn.immediate64()),
-                OpKind::Immediate32to64 => regs[di] = RegVal::Imm(insn.immediate64()),
-                OpKind::Immediate32 => regs[di] = RegVal::Imm(insn.immediate32() as u64),
-                OpKind::Register => {
-                    if let Some(si) = reg_idx(insn.op_register(1)) {
-                        regs[di] = regs[si];
-                    } else {
-                        regs[di] = RegVal::Top;
-                    }
-                }
-                OpKind::Memory => {
-                    // Constant address load: `mov reg, [rip + disp]` or
-                    // `mov reg, [abs imm]`.  Used for constant tables.
-                    if insn.is_ip_rel_memory_operand() {
-                        let a = insn.ip_rel_memory_address();
-                        if let Some(v) = read_u64(a) {
-                            regs[di] = RegVal::Imm(v);
+            // ---- Pure register updates --------------------------------------
+            if op == Mnemonic::Mov && insn.op_count() == 2 && insn.op_kind(0) == OpKind::Register {
+                let dst = insn.op_register(0);
+                let Some(di) = reg_idx(dst) else {
+                    // Destination is a subregister we do not model — fall through.
+                    continue;
+                };
+                match insn.op_kind(1) {
+                    OpKind::Immediate64 => regs[di] = RegVal::Imm(insn.immediate64()),
+                    OpKind::Immediate32to64 => regs[di] = RegVal::Imm(insn.immediate64()),
+                    OpKind::Immediate32 => regs[di] = RegVal::Imm(insn.immediate32() as u64),
+                    OpKind::Register => {
+                        if let Some(si) = reg_idx(insn.op_register(1)) {
+                            regs[di] = regs[si];
                         } else {
                             regs[di] = RegVal::Top;
                         }
+                    }
+                    OpKind::Memory => {
+                        // Constant address load: `mov reg, [rip + disp]` or
+                        // `mov reg, [abs imm]`.  Used for constant tables.
+                        if insn.is_ip_rel_memory_operand() {
+                            let a = insn.ip_rel_memory_address();
+                            if let Some(v) = read_u64(a) {
+                                regs[di] = RegVal::Imm(v);
+                            } else {
+                                regs[di] = RegVal::Top;
+                            }
+                        } else {
+                            regs[di] = RegVal::Top;
+                        }
+                    }
+                    _ => regs[di] = RegVal::Top,
+                }
+                continue;
+            }
+
+            // LEA reg, [rip + disp] — common for loading addresses of
+            // patch source / destination constants.
+            if op == Mnemonic::Lea
+                && insn.op_count() == 2
+                && insn.op_kind(0) == OpKind::Register
+                && insn.op_kind(1) == OpKind::Memory
+            {
+                let dst = insn.op_register(0);
+                if let Some(di) = reg_idx(dst) {
+                    if insn.is_ip_rel_memory_operand() {
+                        regs[di] = RegVal::Addr(insn.ip_rel_memory_address());
+                    } else if insn.memory_base() != Register::None
+                        && insn.memory_index() == Register::None
+                    {
+                        if let Some(si) = reg_idx(insn.memory_base()) {
+                            if let Some(v) = regs[si].as_concrete() {
+                                regs[di] =
+                                    RegVal::Addr(v.wrapping_add(insn.memory_displacement64()));
+                                continue;
+                            }
+                        }
+                        regs[di] = RegVal::Top;
                     } else {
                         regs[di] = RegVal::Top;
                     }
                 }
-                _ => regs[di] = RegVal::Top,
+                continue;
             }
-            continue;
-        }
 
-        // LEA reg, [rip + disp] — common for loading addresses of
-        // patch source / destination constants.
-        if op == Mnemonic::Lea
-            && insn.op_count() == 2
-            && insn.op_kind(0) == OpKind::Register
-            && insn.op_kind(1) == OpKind::Memory
-        {
-            let dst = insn.op_register(0);
-            if let Some(di) = reg_idx(dst) {
-                if insn.is_ip_rel_memory_operand() {
-                    regs[di] = RegVal::Addr(insn.ip_rel_memory_address());
+            // ---- Direct memory write ----------------------------------------
+            //   `mov [base_reg + disp], imm`  or  `mov [base_reg + disp], src_reg`
+            //
+            // Emit a patch iff base_reg is tracked as Addr/Imm *and* the disp
+            // resolves to a known VA *and* the source is known.  Skip writes to
+            // the ContextRecord (base == r8) — those are handled by the upstream
+            // analyser, not patches to the image.
+            if op == Mnemonic::Mov && insn.op_count() == 2 && insn.op_kind(0) == OpKind::Memory {
+                // Determine target VA.
+                let target_va = if insn.is_ip_rel_memory_operand() {
+                    Some(insn.ip_rel_memory_address())
                 } else if insn.memory_base() != Register::None
                     && insn.memory_index() == Register::None
                 {
-                    if let Some(si) = reg_idx(insn.memory_base()) {
-                        if let Some(v) = regs[si].as_concrete() {
-                            regs[di] = RegVal::Addr(v.wrapping_add(insn.memory_displacement64()));
-                            continue;
-                        }
+                    let base_reg = insn.memory_base();
+                    // Skip writes through r8 / rcx — those are ContextRecord /
+                    // ExceptionRecord fields, not image bytes.
+                    if matches!(base_reg, Register::R8 | Register::RCX) {
+                        None
+                    } else if let Some(bi) = reg_idx(base_reg) {
+                        regs[bi]
+                            .as_concrete()
+                            .map(|v| v.wrapping_add(insn.memory_displacement64()))
+                    } else {
+                        None
                     }
-                    regs[di] = RegVal::Top;
                 } else {
-                    regs[di] = RegVal::Top;
+                    None
+                };
+                let Some(tva) = target_va else {
+                    continue;
+                };
+
+                // Determine value to store and its width.
+                let width = insn.memory_size().size();
+                if width == 0 || width > 8 {
+                    continue;
                 }
-            }
-            continue;
-        }
-
-        // ---- Direct memory write ----------------------------------------
-        //   `mov [base_reg + disp], imm`  or  `mov [base_reg + disp], src_reg`
-        //
-        // Emit a patch iff base_reg is tracked as Addr/Imm *and* the disp
-        // resolves to a known VA *and* the source is known.  Skip writes to
-        // the ContextRecord (base == r8) — those are handled by the upstream
-        // analyser, not patches to the image.
-        if op == Mnemonic::Mov
-            && insn.op_count() == 2
-            && insn.op_kind(0) == OpKind::Memory
-        {
-            // Determine target VA.
-            let target_va = if insn.is_ip_rel_memory_operand() {
-                Some(insn.ip_rel_memory_address())
-            } else if insn.memory_base() != Register::None
-                && insn.memory_index() == Register::None
-            {
-                let base_reg = insn.memory_base();
-                // Skip writes through r8 / rcx — those are ContextRecord /
-                // ExceptionRecord fields, not image bytes.
-                if matches!(base_reg, Register::R8 | Register::RCX) { None }
-                else if let Some(bi) = reg_idx(base_reg) {
-                    regs[bi].as_concrete().map(|v| v.wrapping_add(insn.memory_displacement64()))
-                } else { None }
-            } else {
-                None
-            };
-            let Some(tva) = target_va else { continue; };
-
-            // Determine value to store and its width.
-            let width = insn.memory_size().size();
-            if width == 0 || width > 8 { continue; }
-            let value: Option<u64> = match insn.op_kind(1) {
-                OpKind::Immediate8 | OpKind::Immediate8to16
-                | OpKind::Immediate8to32 | OpKind::Immediate8to64 => Some(insn.immediate8() as i8 as i64 as u64),
-                OpKind::Immediate16 => Some(insn.immediate16() as u64),
-                OpKind::Immediate32 | OpKind::Immediate32to64 => Some(insn.immediate32() as u64),
-                OpKind::Immediate64 => Some(insn.immediate64()),
-                OpKind::Register => {
-                    // Map subregisters (AL/AX/EAX/...) to their full GPR
-                    // so the tracked value is visible.
-                    let full = insn.op_register(1).full_register();
-                    reg_idx(full).and_then(|si| regs[si].as_concrete())
+                let value: Option<u64> = match insn.op_kind(1) {
+                    OpKind::Immediate8
+                    | OpKind::Immediate8to16
+                    | OpKind::Immediate8to32
+                    | OpKind::Immediate8to64 => Some(insn.immediate8() as i8 as i64 as u64),
+                    OpKind::Immediate16 => Some(insn.immediate16() as u64),
+                    OpKind::Immediate32 | OpKind::Immediate32to64 => {
+                        Some(insn.immediate32() as u64)
+                    }
+                    OpKind::Immediate64 => Some(insn.immediate64()),
+                    OpKind::Register => {
+                        // Map subregisters (AL/AX/EAX/...) to their full GPR
+                        // so the tracked value is visible.
+                        let full = insn.op_register(1).full_register();
+                        reg_idx(full).and_then(|si| regs[si].as_concrete())
+                    }
+                    _ => None,
+                };
+                let Some(v) = value else {
+                    continue;
+                };
+                let mut buf = v.to_le_bytes().to_vec();
+                buf.truncate(width);
+                if patch_set.insert((tva, buf.clone())) {
+                    patches.push(ImagePatch {
+                        target_va: tva,
+                        bytes: buf,
+                        handler_va,
+                    });
                 }
-                _ => None,
-            };
-            let Some(v) = value else { continue; };
-            let mut buf = v.to_le_bytes().to_vec();
-            buf.truncate(width);
-            if patch_set.insert((tva, buf.clone())) {
-                patches.push(ImagePatch { target_va: tva, bytes: buf, handler_va });
+                continue;
             }
-            continue;
-        }
 
-        // ---- Direct CALL into a local helper — inline its body ---------
-        //
-        // A handler often delegates the actual write/copy to a short
-        // helper. Without following the CALL we lose the patch.  We
-        // inline the callee's linear body (no CF reasoning inside it;
-        // the caller's CF worklist handles branches in the handler
-        // proper) up to 128 instructions, tracked with the caller's
-        // register state.  Call depth capped at 3 to bound recursion.
-        //
-        // After the call returns, volatile regs (Win64 ABI) are clobbered.
-        if op == Mnemonic::Call
-            && insn.op_count() == 1
-            && insn.op_kind(0) == OpKind::NearBranch64
-        {
-            let callee = insn.near_branch64();
-            // Only follow into executable sections.
-            let in_text = pe.sections.iter().any(|sec| {
-                if (sec.characteristics & 0x20000000) == 0 { return false; }
-                let va = base + sec.virtual_address as u64;
-                callee >= va && callee < va + sec.virtual_size as u64
-            });
-            if in_text {
-                walk_helper_linear(
-                    &pe, image, callee, handler_va,
-                    &mut regs, &mut patches, &mut patch_set,
-                    /* call_depth */ 0, /* budget */ 128,
-                );
-            }
-            // Win64 ABI: volatile regs clobbered across any call.
-            for r in [Register::RAX, Register::RCX, Register::RDX,
-                      Register::R8, Register::R9, Register::R10, Register::R11] {
-                if let Some(i) = reg_idx(r) { regs[i] = RegVal::Top; }
-            }
-            continue;
-        }
-
-        // ---- IAT CALL: WriteProcessMemory / NtWriteVirtualMemory -------
-        //   Win64 ABI: rcx=hProc, rdx=dst, r8=src, r9=size, [rsp+0x28]=&out
-        //   If rdx/r8/r9 are all tracked as concrete values AND src lies
-        //   inside the image, copy `size` bytes from src → emit patch at dst.
-        //
-        //   Same shape used by NtWriteVirtualMemory / ZwWriteVirtualMemory
-        //   (rcx=hProc, rdx=dst, r8=src, r9=size, +shadow for &bytes).
-        if op == Mnemonic::Call
-            && insn.op_count() == 1
-            && insn.op_kind(0) == OpKind::Memory
-            && insn.is_ip_rel_memory_operand()
-        {
-            let tgt = insn.ip_rel_memory_address();
-            let name = pe.imports.iter()
-                .find(|imp| base + imp.offset as u64 == tgt)
-                .map(|imp| imp.name.to_string())
-                .unwrap_or_default();
-            if matches!(name.as_str(),
-                "WriteProcessMemory" | "NtWriteVirtualMemory"
-                | "ZwWriteVirtualMemory")
+            // ---- Direct CALL into a local helper — inline its body ---------
+            //
+            // A handler often delegates the actual write/copy to a short
+            // helper. Without following the CALL we lose the patch.  We
+            // inline the callee's linear body (no CF reasoning inside it;
+            // the caller's CF worklist handles branches in the handler
+            // proper) up to 128 instructions, tracked with the caller's
+            // register state.  Call depth capped at 3 to bound recursion.
+            //
+            // After the call returns, volatile regs (Win64 ABI) are clobbered.
+            if op == Mnemonic::Call
+                && insn.op_count() == 1
+                && insn.op_kind(0) == OpKind::NearBranch64
             {
-                let dst = regs[reg_idx(Register::RDX).unwrap()].as_concrete();
-                let src = regs[reg_idx(Register::R8 ).unwrap()].as_concrete();
-                let cnt = regs[reg_idx(Register::R9 ).unwrap()].as_concrete();
-                if let (Some(d), Some(s), Some(c)) = (dst, src, cnt) {
-                    if c > 0 && c <= 0x100000 {
-                        if let Some(body) = read_bytes(s, c as usize) {
-                            if patch_set.insert((d, body.clone())) {
-                                patches.push(ImagePatch { target_va: d, bytes: body, handler_va });
+                let callee = insn.near_branch64();
+                // Only follow into executable sections.
+                let in_text = pe.sections.iter().any(|sec| {
+                    if (sec.characteristics & 0x20000000) == 0 {
+                        return false;
+                    }
+                    let va = base + sec.virtual_address as u64;
+                    callee >= va && callee < va + sec.virtual_size as u64
+                });
+                if in_text {
+                    walk_helper_linear(
+                        &pe,
+                        image,
+                        callee,
+                        handler_va,
+                        &mut regs,
+                        &mut patches,
+                        &mut patch_set,
+                        /* call_depth */ 0,
+                        /* budget */ 128,
+                    );
+                }
+                // Win64 ABI: volatile regs clobbered across any call.
+                for r in [
+                    Register::RAX,
+                    Register::RCX,
+                    Register::RDX,
+                    Register::R8,
+                    Register::R9,
+                    Register::R10,
+                    Register::R11,
+                ] {
+                    if let Some(i) = reg_idx(r) {
+                        regs[i] = RegVal::Top;
+                    }
+                }
+                continue;
+            }
+
+            // ---- IAT CALL: WriteProcessMemory / NtWriteVirtualMemory -------
+            //   Win64 ABI: rcx=hProc, rdx=dst, r8=src, r9=size, [rsp+0x28]=&out
+            //   If rdx/r8/r9 are all tracked as concrete values AND src lies
+            //   inside the image, copy `size` bytes from src → emit patch at dst.
+            //
+            //   Same shape used by NtWriteVirtualMemory / ZwWriteVirtualMemory
+            //   (rcx=hProc, rdx=dst, r8=src, r9=size, +shadow for &bytes).
+            if op == Mnemonic::Call
+                && insn.op_count() == 1
+                && insn.op_kind(0) == OpKind::Memory
+                && insn.is_ip_rel_memory_operand()
+            {
+                let tgt = insn.ip_rel_memory_address();
+                let name = pe
+                    .imports
+                    .iter()
+                    .find(|imp| base + imp.offset as u64 == tgt)
+                    .map(|imp| imp.name.to_string())
+                    .unwrap_or_default();
+                if matches!(
+                    name.as_str(),
+                    "WriteProcessMemory" | "NtWriteVirtualMemory" | "ZwWriteVirtualMemory"
+                ) {
+                    let dst = regs[reg_idx(Register::RDX).unwrap()].as_concrete();
+                    let src = regs[reg_idx(Register::R8).unwrap()].as_concrete();
+                    let cnt = regs[reg_idx(Register::R9).unwrap()].as_concrete();
+                    if let (Some(d), Some(s), Some(c)) = (dst, src, cnt) {
+                        if c > 0 && c <= 0x100000 {
+                            if let Some(body) = read_bytes(s, c as usize) {
+                                if patch_set.insert((d, body.clone())) {
+                                    patches.push(ImagePatch {
+                                        target_va: d,
+                                        bytes: body,
+                                        handler_va,
+                                    });
+                                }
                             }
                         }
                     }
                 }
+                // Calls clobber volatile regs per Win64 ABI.
+                for r in [
+                    Register::RAX,
+                    Register::RCX,
+                    Register::RDX,
+                    Register::R8,
+                    Register::R9,
+                    Register::R10,
+                    Register::R11,
+                ] {
+                    if let Some(i) = reg_idx(r) {
+                        regs[i] = RegVal::Top;
+                    }
+                }
+                continue;
             }
-            // Calls clobber volatile regs per Win64 ABI.
-            for r in [Register::RAX, Register::RCX, Register::RDX,
-                      Register::R8, Register::R9, Register::R10, Register::R11] {
-                if let Some(i) = reg_idx(r) { regs[i] = RegVal::Top; }
-            }
-            continue;
-        }
 
-        // ---- REP MOVSB / MOVSQ ------------------------------------------
-        //   rep movsb  ; dst=rdi, src=rsi, count=rcx
-        //   rep movsq  ; count in qwords
-        // If all three are tracked as concrete addresses/immediates, read
-        // `count` bytes from `src` and emit a patch at `dst`.
-        if insn.has_rep_prefix() && matches!(op, Mnemonic::Movsb | Mnemonic::Movsq | Mnemonic::Movsd) {
-            let rdi = regs[reg_idx(Register::RDI).unwrap()].as_concrete();
-            let rsi = regs[reg_idx(Register::RSI).unwrap()].as_concrete();
-            let rcx = regs[reg_idx(Register::RCX).unwrap()].as_concrete();
-            if let (Some(dst), Some(src), Some(cnt)) = (rdi, rsi, rcx) {
-                let unit = match op { Mnemonic::Movsb => 1, Mnemonic::Movsd => 4, Mnemonic::Movsq => 8, _ => 1 };
-                let total = (cnt as usize).saturating_mul(unit);
-                // Guard against absurd sizes from stale register tracking.
-                if total > 0 && total <= 0x10000 {
-                    if let Some(body) = read_bytes(src, total) {
-                        if patch_set.insert((dst, body.clone())) {
-                            patches.push(ImagePatch { target_va: dst, bytes: body, handler_va });
+            // ---- REP MOVSB / MOVSQ ------------------------------------------
+            //   rep movsb  ; dst=rdi, src=rsi, count=rcx
+            //   rep movsq  ; count in qwords
+            // If all three are tracked as concrete addresses/immediates, read
+            // `count` bytes from `src` and emit a patch at `dst`.
+            if insn.has_rep_prefix()
+                && matches!(op, Mnemonic::Movsb | Mnemonic::Movsq | Mnemonic::Movsd)
+            {
+                let rdi = regs[reg_idx(Register::RDI).unwrap()].as_concrete();
+                let rsi = regs[reg_idx(Register::RSI).unwrap()].as_concrete();
+                let rcx = regs[reg_idx(Register::RCX).unwrap()].as_concrete();
+                if let (Some(dst), Some(src), Some(cnt)) = (rdi, rsi, rcx) {
+                    let unit = match op {
+                        Mnemonic::Movsb => 1,
+                        Mnemonic::Movsd => 4,
+                        Mnemonic::Movsq => 8,
+                        _ => 1,
+                    };
+                    let total = (cnt as usize).saturating_mul(unit);
+                    // Guard against absurd sizes from stale register tracking.
+                    if total > 0 && total <= 0x10000 {
+                        if let Some(body) = read_bytes(src, total) {
+                            if patch_set.insert((dst, body.clone())) {
+                                patches.push(ImagePatch {
+                                    target_va: dst,
+                                    bytes: body,
+                                    handler_va,
+                                });
+                            }
                         }
                     }
                 }
+                // After rep, count is consumed; be conservative and invalidate.
+                regs[reg_idx(Register::RCX).unwrap()] = RegVal::Top;
+                regs[reg_idx(Register::RDI).unwrap()] = RegVal::Top;
+                regs[reg_idx(Register::RSI).unwrap()] = RegVal::Top;
+                continue;
             }
-            // After rep, count is consumed; be conservative and invalidate.
-            regs[reg_idx(Register::RCX).unwrap()] = RegVal::Top;
-            regs[reg_idx(Register::RDI).unwrap()] = RegVal::Top;
-            regs[reg_idx(Register::RSI).unwrap()] = RegVal::Top;
-            continue;
-        }
 
-        // Any other instruction that writes to a general-purpose register
-        // clears our tracking for that register.
-        if insn.op_count() >= 1 && insn.op_kind(0) == OpKind::Register {
-            if let Some(di) = reg_idx(insn.op_register(0)) {
-                regs[di] = RegVal::Top;
+            // Any other instruction that writes to a general-purpose register
+            // clears our tracking for that register.
+            if insn.op_count() >= 1 && insn.op_kind(0) == OpKind::Register {
+                if let Some(di) = reg_idx(insn.op_register(0)) {
+                    regs[di] = RegVal::Top;
+                }
             }
-        }
         } // inner `while dec.can_decode()`
     } // outer 'outer worklist loop
 
@@ -1508,14 +1796,25 @@ pub fn extract_all_patches(image: &[u8]) -> Vec<ImagePatch> {
 /// order. Empty when the binary has no TLS directory or an unreadable callback
 /// array.
 pub fn tls_callback_addresses(image: &[u8]) -> Vec<u64> {
-    let obj = match goblin::Object::parse(image) { Ok(o) => o, _ => return vec![] };
-    let pe  = match obj { goblin::Object::PE(pe) => pe, _ => return vec![] };
-    if !pe.is_64 { return vec![]; }
+    let obj = match goblin::Object::parse(image) {
+        Ok(o) => o,
+        _ => return vec![],
+    };
+    let pe = match obj {
+        goblin::Object::PE(pe) => pe,
+        _ => return vec![],
+    };
+    if !pe.is_64 {
+        return vec![];
+    }
     let base = pe.image_base as u64;
 
     // IMAGE_DATA_DIRECTORY[9] = TLS table. Copy out fields before the
     // optional_header reference goes out of scope.
-    let oh = match pe.header.optional_header { Some(o) => o, None => return vec![] };
+    let oh = match pe.header.optional_header {
+        Some(o) => o,
+        None => return vec![],
+    };
     let (tls_va, tls_sz) = match oh.data_directories.get_tls_table() {
         Some(d) if d.virtual_address != 0 && d.size >= 0x28 => (d.virtual_address, d.size),
         _ => return vec![],
@@ -1546,17 +1845,26 @@ pub fn tls_callback_addresses(image: &[u8]) -> Vec<u64> {
         _ => return vec![],
     };
     let callbacks_va = u64::from_le_bytes(image[tls_fo + 0x18..tls_fo + 0x20].try_into().unwrap());
-    if callbacks_va == 0 || callbacks_va < base { return vec![]; }
+    if callbacks_va == 0 || callbacks_va < base {
+        return vec![];
+    }
     let callbacks_rva = callbacks_va - base;
-    let mut cb_fo = match rva_to_fo(callbacks_rva) { Some(f) => f, None => return vec![] };
+    let mut cb_fo = match rva_to_fo(callbacks_rva) {
+        Some(f) => f,
+        None => return vec![],
+    };
 
     let mut out: Vec<u64> = Vec::new();
     // NULL-terminated VA array. Cap at 64 entries — any binary with more is
     // pathological; treat as malformed and bail.
     for _ in 0..64 {
-        if cb_fo + 8 > image.len() { break; }
+        if cb_fo + 8 > image.len() {
+            break;
+        }
         let va = u64::from_le_bytes(image[cb_fo..cb_fo + 8].try_into().unwrap());
-        if va == 0 { break; }
+        if va == 0 {
+            break;
+        }
         out.push(va);
         cb_fo += 8;
     }
@@ -1582,7 +1890,9 @@ pub fn extract_patches_at_candidates(image: &[u8], candidate_vas: &[u64]) -> Vec
     for &va in candidate_vas {
         for p in extract_handler_patches(image, va) {
             let key = (p.target_va, p.bytes.clone());
-            if seen.insert(key) { out.push(p); }
+            if seen.insert(key) {
+                out.push(p);
+            }
         }
     }
     out
@@ -1649,24 +1959,23 @@ pub struct FixpointResult {
 /// For tests or simple callers that only care about SEH-derived functions,
 /// use [`smc_fixpoint_seh_only`] which re-enumerates SEH handlers +
 /// scope-table addresses at every step.
-pub fn smc_fixpoint<F>(
-    image: &[u8],
-    max_iters: usize,
-    mut discover_fn: F,
-) -> FixpointResult
+pub fn smc_fixpoint<F>(image: &[u8], max_iters: usize, mut discover_fn: F) -> FixpointResult
 where
     F: FnMut(&[u8]) -> Vec<u64>,
 {
     let mut working = image.to_vec();
     let mut applied: Vec<ImagePatch> = Vec::new();
-    let mut applied_set: std::collections::HashSet<(u64, Vec<u8>)> = std::collections::HashSet::new();
+    let mut applied_set: std::collections::HashSet<(u64, Vec<u8>)> =
+        std::collections::HashSet::new();
     let mut discovered: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
     // Seed discovery with pre-patch function set so we report deltas only.
     let baseline: std::collections::BTreeSet<u64> = discover_fn(&working).into_iter().collect();
 
     let mut iter = 0usize;
     let converged = loop {
-        if iter >= max_iters { break false; }
+        if iter >= max_iters {
+            break false;
+        }
         iter += 1;
 
         // 1. Extract patches from the current image — SEH handlers + TLS
@@ -1737,31 +2046,52 @@ pub fn smc_fixpoint_seh_only(image: &[u8], max_iters: usize) -> FixpointResult {
 /// Out-of-bounds patches are silently skipped (they would indicate a bug in
 /// the extractor or a handler whose target lies outside the shipped file).
 pub fn apply_patches(image: &mut [u8], patches: &[ImagePatch]) -> usize {
-    let obj = match goblin::Object::parse(image) { Ok(o) => o, _ => return 0 };
-    let pe = match obj { goblin::Object::PE(p) => p, _ => return 0 };
-    if !pe.is_64 { return 0; }
+    let obj = match goblin::Object::parse(image) {
+        Ok(o) => o,
+        _ => return 0,
+    };
+    let pe = match obj {
+        goblin::Object::PE(p) => p,
+        _ => return 0,
+    };
+    if !pe.is_64 {
+        return 0;
+    }
     let base = pe.image_base as u64;
     // Snapshot the section table to a local vec so we can release the borrow
     // before mutating.
-    let secs: Vec<(u64, u64, usize, usize)> = pe.sections.iter().map(|s| (
-        base + s.virtual_address as u64,
-        s.virtual_size as u64,
-        s.pointer_to_raw_data as usize,
-        s.size_of_raw_data as usize,
-    )).collect();
+    let secs: Vec<(u64, u64, usize, usize)> = pe
+        .sections
+        .iter()
+        .map(|s| {
+            (
+                base + s.virtual_address as u64,
+                s.virtual_size as u64,
+                s.pointer_to_raw_data as usize,
+                s.size_of_raw_data as usize,
+            )
+        })
+        .collect();
     drop(pe);
 
     let mut n = 0usize;
     for p in patches {
-        let Some((va, vsz, fo, fsz)) = secs.iter()
+        let Some((va, vsz, fo, fsz)) = secs
+            .iter()
             .find(|(va, vsz, _, _)| p.target_va >= *va && p.target_va < va + vsz)
             .copied()
-        else { continue };
+        else {
+            continue;
+        };
         let in_section = (p.target_va - va) as usize;
-        if in_section >= fsz { continue; }
+        if in_section >= fsz {
+            continue;
+        }
         let end = in_section + p.bytes.len();
-        if end > fsz || fo + end > image.len() { continue; }
-        image[fo + in_section .. fo + end].copy_from_slice(&p.bytes);
+        if end > fsz || fo + end > image.len() {
+            continue;
+        }
+        image[fo + in_section..fo + end].copy_from_slice(&p.bytes);
         n += 1;
         let _ = vsz; // silence unused warning
     }
@@ -1780,7 +2110,9 @@ mod tests {
     fn crackmev3_pdata_parses() {
         // Locate the fixture relative to the crate manifest.
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let fixture  = manifest.parent().unwrap()
+        let fixture = manifest
+            .parent()
+            .unwrap()
             .join("test-harness/fixtures/crackmev3.pyd");
         if !fixture.exists() {
             eprintln!("skipping: {:?} not staged", fixture);
@@ -1791,17 +2123,26 @@ mod tests {
         assert!(!recs.is_empty(), "expected at least one .pdata record");
         // All records must reference addresses in the PE64 image range.
         for r in &recs {
-            assert!(r.func_begin >= 0x180000000 && r.func_begin < 0x181000000,
-                "func_begin {:#x} out of range", r.func_begin);
-            assert!(r.func_end > r.func_begin,
-                "end {:#x} <= begin {:#x}", r.func_end, r.func_begin);
+            assert!(
+                r.func_begin >= 0x180000000 && r.func_begin < 0x181000000,
+                "func_begin {:#x} out of range",
+                r.func_begin
+            );
+            assert!(
+                r.func_end > r.func_begin,
+                "end {:#x} <= begin {:#x}",
+                r.func_end,
+                r.func_begin
+            );
         }
     }
 
     #[test]
     fn crackmev3_handler_analysis_detects_rtl_unwind() {
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let fixture  = manifest.parent().unwrap()
+        let fixture = manifest
+            .parent()
+            .unwrap()
             .join("test-harness/fixtures/crackmev3.pyd");
         if !fixture.exists() {
             eprintln!("skipping: crackmev3.pyd not staged");
@@ -1809,21 +2150,35 @@ mod tests {
         }
         let bytes = std::fs::read(&fixture).unwrap();
         let analyses = analyse_all_handlers(&bytes);
-        assert!(!analyses.is_empty(), "expected at least one handler analysed");
+        assert!(
+            !analyses.is_empty(),
+            "expected at least one handler analysed"
+        );
         // 0x180019ca0 is the MSVC personality-function handler in this
         // fixture; it definitely calls RtlUnwindEx.
-        let h = analyses.get(&0x180019ca0)
+        let h = analyses
+            .get(&0x180019ca0)
             .expect("handler 0x180019ca0 missing");
-        assert!(h.insn_count > 50,
-            "expected > 50 instructions in personality handler, got {}", h.insn_count);
-        assert!(h.iat_calls.iter().any(|s| s == "RtlUnwindEx"),
-            "expected RtlUnwindEx IAT call, got: {:?}", h.iat_calls);
+        assert!(
+            h.insn_count > 50,
+            "expected > 50 instructions in personality handler, got {}",
+            h.insn_count
+        );
+        assert!(
+            h.iat_calls.iter().any(|s| s == "RtlUnwindEx"),
+            "expected RtlUnwindEx IAT call, got: {:?}",
+            h.iat_calls
+        );
         // No SMC flags should fire on this v4 sample (v4 uses inline PCG,
         // not SEH-driven self-modification). This guards against false
         // positives when handler scanning evolves.
         for (va, a) in &analyses {
-            assert!(!a.is_smc_candidate(),
-                "handler {:#x} wrongly flagged as SMC: {:?}", va, a);
+            assert!(
+                !a.is_smc_candidate(),
+                "handler {:#x} wrongly flagged as SMC: {:?}",
+                va,
+                a
+            );
         }
     }
 
@@ -1832,7 +2187,9 @@ mod tests {
         // crackmev3 v4 has zero SMC. The fixpoint loop must converge on
         // the first iteration: no patches, no new functions from re-enum.
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let fixture  = manifest.parent().unwrap()
+        let fixture = manifest
+            .parent()
+            .unwrap()
             .join("test-harness/fixtures/crackmev3.pyd");
         if !fixture.exists() {
             eprintln!("skipping: crackmev3.pyd not staged");
@@ -1852,7 +2209,9 @@ mod tests {
         // Pathological discover_fn that always claims to find a new fn.
         // Fixpoint should bail at max_iters and report converged=false.
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let fixture  = manifest.parent().unwrap()
+        let fixture = manifest
+            .parent()
+            .unwrap()
             .join("test-harness/fixtures/crackmev3.pyd");
         if !fixture.exists() {
             eprintln!("skipping: crackmev3.pyd not staged");
@@ -1865,7 +2224,10 @@ mod tests {
             // Always return a brand-new VA to force non-convergence.
             vec![0x180_0000_0000 + counter]
         });
-        assert!(!r.converged, "expected non-convergence under adversarial oracle");
+        assert!(
+            !r.converged,
+            "expected non-convergence under adversarial oracle"
+        );
         assert_eq!(r.iterations, 4);
         assert!(r.newly_discovered_fns.len() >= 4);
     }
@@ -1883,12 +2245,18 @@ mod tests {
             eprintln!("skipping: {:?} not staged", path);
             return;
         }
-        let bytes = match std::fs::read(path) { Ok(b) => b, Err(_) => return };
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(_) => return,
+        };
         let analyses = analyse_all_handlers(&bytes);
-        let found = analyses.values()
+        let found = analyses
+            .values()
             .any(|a| a.exc_code_triggers.contains(&0xe06d7363));
-        assert!(found,
-            "expected at least one handler to case-split on MSVC C++ exception code 0xe06d7363");
+        assert!(
+            found,
+            "expected at least one handler to case-split on MSVC C++ exception code 0xe06d7363"
+        );
     }
 
     #[test]
@@ -1896,23 +2264,35 @@ mod tests {
         // v4 of the sample reads ExceptionRecord but not DispatcherContext,
         // and does not register runtime function tables. Lock that in.
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let fixture  = manifest.parent().unwrap()
+        let fixture = manifest
+            .parent()
+            .unwrap()
             .join("test-harness/fixtures/crackmev3.pyd");
-        if !fixture.exists() { return; }
+        if !fixture.exists() {
+            return;
+        }
         let bytes = std::fs::read(&fixture).unwrap();
         let analyses = analyse_all_handlers(&bytes);
         for (va, a) in &analyses {
-            assert!(!a.registers_runtime_tables,
-                "handler {:#x} wrongly flagged registers_runtime_tables", va);
-            assert!(!a.reads_dispatcher_context,
-                "handler {:#x} wrongly flagged reads_dispatcher_context", va);
+            assert!(
+                !a.registers_runtime_tables,
+                "handler {:#x} wrongly flagged registers_runtime_tables",
+                va
+            );
+            assert!(
+                !a.reads_dispatcher_context,
+                "handler {:#x} wrongly flagged reads_dispatcher_context",
+                va
+            );
         }
     }
 
     #[test]
     fn crackmev3_scope_tables_parse() {
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let fixture  = manifest.parent().unwrap()
+        let fixture = manifest
+            .parent()
+            .unwrap()
             .join("test-harness/fixtures/crackmev3.pyd");
         if !fixture.exists() {
             eprintln!("skipping: crackmev3.pyd not staged");
@@ -1923,11 +2303,16 @@ mod tests {
         // tables to parse.  Total scope-table-derived addresses should be
         // non-zero and all addresses should fall inside the image.
         let extra = scope_table_addresses(&bytes);
-        assert!(!extra.is_empty(),
-            "expected at least one scope-table-derived address");
+        assert!(
+            !extra.is_empty(),
+            "expected at least one scope-table-derived address"
+        );
         for a in &extra {
-            assert!(*a >= 0x180000000 && *a < 0x181000000,
-                "scope address {:#x} out of image range", a);
+            assert!(
+                *a >= 0x180000000 && *a < 0x181000000,
+                "scope address {:#x} out of image range",
+                a
+            );
         }
     }
 
@@ -1938,7 +2323,9 @@ mod tests {
         // registered handler.  Catching a spurious patch here would be a
         // false positive from the abstract interpreter.
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let fixture  = manifest.parent().unwrap()
+        let fixture = manifest
+            .parent()
+            .unwrap()
             .join("test-harness/fixtures/crackmev3.pyd");
         if !fixture.exists() {
             eprintln!("skipping: crackmev3.pyd not staged");
@@ -1946,9 +2333,12 @@ mod tests {
         }
         let bytes = std::fs::read(&fixture).unwrap();
         let patches = extract_all_patches(&bytes);
-        assert!(patches.is_empty(),
+        assert!(
+            patches.is_empty(),
             "expected zero patches on crackmev3 v4, got {} (first: {:?})",
-            patches.len(), patches.first());
+            patches.len(),
+            patches.first()
+        );
     }
 
     // Assemble a tiny x86-64 sequence that writes two concrete bytes at a
@@ -1965,14 +2355,22 @@ mod tests {
         let mut patches: Vec<ImagePatch> = Vec::new();
         let reg_idx = |r: Register| -> Option<usize> {
             match r {
-                Register::RAX=>Some(0), Register::RCX=>Some(1),
-                Register::RDX=>Some(2), Register::RBX=>Some(3),
-                Register::RSP=>Some(4), Register::RBP=>Some(5),
-                Register::RSI=>Some(6), Register::RDI=>Some(7),
-                Register::R8=>Some(8),  Register::R9=>Some(9),
-                Register::R10=>Some(10),Register::R11=>Some(11),
-                Register::R12=>Some(12),Register::R13=>Some(13),
-                Register::R14=>Some(14),Register::R15=>Some(15),
+                Register::RAX => Some(0),
+                Register::RCX => Some(1),
+                Register::RDX => Some(2),
+                Register::RBX => Some(3),
+                Register::RSP => Some(4),
+                Register::RBP => Some(5),
+                Register::RSI => Some(6),
+                Register::RDI => Some(7),
+                Register::R8 => Some(8),
+                Register::R9 => Some(9),
+                Register::R10 => Some(10),
+                Register::R11 => Some(11),
+                Register::R12 => Some(12),
+                Register::R13 => Some(13),
+                Register::R14 => Some(14),
+                Register::R15 => Some(15),
                 _ => None,
             }
         };
@@ -1981,38 +2379,51 @@ mod tests {
         while dec.can_decode() {
             dec.decode_out(&mut insn);
             let op = insn.mnemonic();
-            if matches!(op, Mnemonic::Ret | Mnemonic::Ud2 | Mnemonic::Int3) { break; }
-            if op == Mnemonic::Mov && insn.op_count()==2 && insn.op_kind(0)==OpKind::Register {
-                let Some(di) = reg_idx(insn.op_register(0)) else { continue; };
+            if matches!(op, Mnemonic::Ret | Mnemonic::Ud2 | Mnemonic::Int3) {
+                break;
+            }
+            if op == Mnemonic::Mov && insn.op_count() == 2 && insn.op_kind(0) == OpKind::Register {
+                let Some(di) = reg_idx(insn.op_register(0)) else {
+                    continue;
+                };
                 regs[di] = match insn.op_kind(1) {
                     OpKind::Immediate64 => RegVal::Imm(insn.immediate64()),
                     OpKind::Immediate32to64 => RegVal::Imm(insn.immediate64()),
                     OpKind::Register => reg_idx(insn.op_register(1))
-                        .map(|i| regs[i]).unwrap_or(RegVal::Top),
+                        .map(|i| regs[i])
+                        .unwrap_or(RegVal::Top),
                     _ => RegVal::Top,
                 };
             }
-            if op == Mnemonic::Mov && insn.op_count()==2 && insn.op_kind(0)==OpKind::Memory {
+            if op == Mnemonic::Mov && insn.op_count() == 2 && insn.op_kind(0) == OpKind::Memory {
                 let base = insn.memory_base();
                 if !matches!(base, Register::R8 | Register::RCX) {
-                    let tva = reg_idx(base).and_then(|i| regs[i].as_concrete())
+                    let tva = reg_idx(base)
+                        .and_then(|i| regs[i].as_concrete())
                         .map(|v| v.wrapping_add(insn.memory_displacement64()));
                     if let Some(tva) = tva {
                         let width = insn.memory_size().size();
                         let v: Option<u64> = match insn.op_kind(1) {
-                            OpKind::Immediate8 | OpKind::Immediate8to64 =>
-                                Some(insn.immediate8() as u64),
-                            OpKind::Immediate32 | OpKind::Immediate32to64 =>
-                                Some(insn.immediate32() as u64),
+                            OpKind::Immediate8 | OpKind::Immediate8to64 => {
+                                Some(insn.immediate8() as u64)
+                            }
+                            OpKind::Immediate32 | OpKind::Immediate32to64 => {
+                                Some(insn.immediate32() as u64)
+                            }
                             OpKind::Immediate64 => Some(insn.immediate64()),
-                            OpKind::Register => reg_idx(insn.op_register(1))
-                                .and_then(|i| regs[i].as_concrete()),
+                            OpKind::Register => {
+                                reg_idx(insn.op_register(1)).and_then(|i| regs[i].as_concrete())
+                            }
                             _ => None,
                         };
                         if let Some(v) = v {
                             let mut buf = v.to_le_bytes().to_vec();
                             buf.truncate(width);
-                            patches.push(ImagePatch { target_va: tva, bytes: buf, handler_va: 0 });
+                            patches.push(ImagePatch {
+                                target_va: tva,
+                                bytes: buf,
+                                handler_va: 0,
+                            });
                         }
                     }
                 }
@@ -2029,9 +2440,9 @@ mod tests {
         // ret
         let bytes = [
             0x48, 0xB8, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // mov rax, imm64
-            0xC6, 0x40, 0x10, 0x90,                                     // mov byte [rax+0x10], 0x90
-            0xC6, 0x40, 0x11, 0x90,                                     // mov byte [rax+0x11], 0x90
-            0xC3,                                                        // ret
+            0xC6, 0x40, 0x10, 0x90, // mov byte [rax+0x10], 0x90
+            0xC6, 0x40, 0x11, 0x90, // mov byte [rax+0x11], 0x90
+            0xC3, // ret
         ];
         let patches = abstract_patches_from(&bytes);
         assert_eq!(patches.len(), 2);
@@ -2071,37 +2482,65 @@ mod tests {
         // 0x19: C3                                ret
         bytes[0x19] = 0xC3;
         // 0x20: 88 11                             mov byte [rcx], dl
-        bytes[0x20] = 0x88; bytes[0x21] = 0x11;
+        bytes[0x20] = 0x88;
+        bytes[0x21] = 0x11;
         // 0x22: C3                                ret
         bytes[0x22] = 0xC3;
 
         // Reimplement the caller driver inline so the test is free of PE setup.
         fn reg_idx(r: Register) -> Option<usize> {
             match r {
-                Register::RAX=>Some(0), Register::RCX=>Some(1),
-                Register::RDX=>Some(2), Register::RBX=>Some(3),
-                Register::RSP=>Some(4), Register::RBP=>Some(5),
-                Register::RSI=>Some(6), Register::RDI=>Some(7),
-                Register::R8=>Some(8),  Register::R9=>Some(9),
-                Register::R10=>Some(10),Register::R11=>Some(11),
-                Register::R12=>Some(12),Register::R13=>Some(13),
-                Register::R14=>Some(14),Register::R15=>Some(15),
+                Register::RAX => Some(0),
+                Register::RCX => Some(1),
+                Register::RDX => Some(2),
+                Register::RBX => Some(3),
+                Register::RSP => Some(4),
+                Register::RBP => Some(5),
+                Register::RSI => Some(6),
+                Register::RDI => Some(7),
+                Register::R8 => Some(8),
+                Register::R9 => Some(9),
+                Register::R10 => Some(10),
+                Register::R11 => Some(11),
+                Register::R12 => Some(12),
+                Register::R13 => Some(13),
+                Register::R14 => Some(14),
+                Register::R15 => Some(15),
                 _ => None,
             }
         }
-        fn walk(bytes: &[u8], start_va: u64, entry_off: usize,
-                regs: &mut [RegVal; 16], patches: &mut Vec<ImagePatch>,
-                patch_set: &mut std::collections::HashSet<(u64, Vec<u8>)>,
-                depth: u32) {
-            if depth >= 3 { return; }
-            let mut dec = Decoder::with_ip(64, &bytes[entry_off..], start_va + entry_off as u64, DecoderOptions::NONE);
+        fn walk(
+            bytes: &[u8],
+            start_va: u64,
+            entry_off: usize,
+            regs: &mut [RegVal; 16],
+            patches: &mut Vec<ImagePatch>,
+            patch_set: &mut std::collections::HashSet<(u64, Vec<u8>)>,
+            depth: u32,
+        ) {
+            if depth >= 3 {
+                return;
+            }
+            let mut dec = Decoder::with_ip(
+                64,
+                &bytes[entry_off..],
+                start_va + entry_off as u64,
+                DecoderOptions::NONE,
+            );
             let mut insn = iced_x86::Instruction::default();
             while dec.can_decode() {
                 dec.decode_out(&mut insn);
                 let op = insn.mnemonic();
-                if matches!(op, Mnemonic::Ret | Mnemonic::Ud2 | Mnemonic::Int3) { return; }
-                if op == Mnemonic::Mov && insn.op_count()==2 && insn.op_kind(0)==OpKind::Register {
-                    let Some(di) = reg_idx(insn.op_register(0)) else { continue; };
+                if matches!(op, Mnemonic::Ret | Mnemonic::Ud2 | Mnemonic::Int3) {
+                    return;
+                }
+                if op == Mnemonic::Mov
+                    && insn.op_count() == 2
+                    && insn.op_kind(0) == OpKind::Register
+                {
+                    let Some(di) = reg_idx(insn.op_register(0)) else {
+                        continue;
+                    };
                     regs[di] = match insn.op_kind(1) {
                         OpKind::Immediate64 => RegVal::Imm(insn.immediate64()),
                         OpKind::Immediate32to64 => RegVal::Imm(insn.immediate64()),
@@ -2109,10 +2548,12 @@ mod tests {
                     };
                     continue;
                 }
-                if op == Mnemonic::Mov && insn.op_count()==2 && insn.op_kind(0)==OpKind::Memory {
+                if op == Mnemonic::Mov && insn.op_count() == 2 && insn.op_kind(0) == OpKind::Memory
+                {
                     let base = insn.memory_base();
                     if !matches!(base, Register::R8) {
-                        let tva = reg_idx(base).and_then(|i| regs[i].as_concrete())
+                        let tva = reg_idx(base)
+                            .and_then(|i| regs[i].as_concrete())
                             .map(|v| v.wrapping_add(insn.memory_displacement64()));
                         if let Some(tva) = tva {
                             let v: Option<u64> = match insn.op_kind(1) {
@@ -2126,16 +2567,31 @@ mod tests {
                             if let Some(v) = v {
                                 let buf = vec![(v & 0xff) as u8];
                                 if patch_set.insert((tva, buf.clone())) {
-                                    patches.push(ImagePatch { target_va: tva, bytes: buf, handler_va: 0 });
+                                    patches.push(ImagePatch {
+                                        target_va: tva,
+                                        bytes: buf,
+                                        handler_va: 0,
+                                    });
                                 }
                             }
                         }
                     }
                     continue;
                 }
-                if op == Mnemonic::Call && insn.op_count()==1 && insn.op_kind(0)==OpKind::NearBranch64 {
+                if op == Mnemonic::Call
+                    && insn.op_count() == 1
+                    && insn.op_kind(0) == OpKind::NearBranch64
+                {
                     let cb = insn.near_branch64() - start_va;
-                    walk(bytes, start_va, cb as usize, regs, patches, patch_set, depth + 1);
+                    walk(
+                        bytes,
+                        start_va,
+                        cb as usize,
+                        regs,
+                        patches,
+                        patch_set,
+                        depth + 1,
+                    );
                     continue;
                 }
             }
@@ -2145,7 +2601,12 @@ mod tests {
         let mut patches: Vec<ImagePatch> = Vec::new();
         let mut pset: std::collections::HashSet<(u64, Vec<u8>)> = std::collections::HashSet::new();
         walk(&bytes, 0x1000, 0, &mut regs, &mut patches, &mut pset, 0);
-        assert_eq!(patches.len(), 1, "expected one patch from helper, got: {:?}", patches);
+        assert_eq!(
+            patches.len(),
+            1,
+            "expected one patch from helper, got: {:?}",
+            patches
+        );
         assert_eq!(patches[0].target_va, 0x500000);
         assert_eq!(patches[0].bytes, vec![0xAB]);
     }
@@ -2160,17 +2621,25 @@ mod tests {
             "/Users/shane/repos/qbridge/node_modules/7zip-bin/win/x64/7za.exe",
         ] {
             let p = std::path::Path::new(candidate);
-            if !p.exists() { continue; }
-            let bytes = match std::fs::read(p) { Ok(b) => b, Err(_) => continue };
+            if !p.exists() {
+                continue;
+            }
+            let bytes = match std::fs::read(p) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
             // A poor man's benchmark on a real handler surface; we're only
             // asserting that no handler-body path causes the enumerator
             // to explode into runaway iteration.
             let t0 = std::time::Instant::now();
             let patches = extract_all_patches(&bytes);
             let elapsed = t0.elapsed();
-            assert!(elapsed.as_secs() < 30,
+            assert!(
+                elapsed.as_secs() < 30,
                 "extract_all_patches on {:?} took {:?} — jump-table resolver may be unbounded",
-                p.file_name(), elapsed);
+                p.file_name(),
+                elapsed
+            );
             // MSVC binaries rarely emit SEH-driven SMC; the set should be
             // small but the function must return normally.
             let _ = patches;
@@ -2201,20 +2670,20 @@ mod tests {
             // 0x10: 74 06                              je +6
             0x74, 0x06,
             // 0x12: C6 40 10 90                        mov byte [rax+0x10], 0x90
-            0xC6, 0x40, 0x10, 0x90,
-            // 0x16: C3                                 ret
-            0xC3,
-            // 0x17: 90                                 nop (padding before target)
-            0x90,
-            // 0x18: C6 40 20 CC                        mov byte [rax+0x20], 0xCC
-            0xC6, 0x40, 0x20, 0xCC,
-            // 0x1C: C3                                 ret
-            0xC3,
-            // 0x1D..0x1F: padding
+            0xC6, 0x40, 0x10, 0x90, // 0x16: C3                                 ret
+            0xC3, // 0x17: 90                                 nop (padding before target)
+            0x90, // 0x18: C6 40 20 CC                        mov byte [rax+0x20], 0xCC
+            0xC6, 0x40, 0x20, 0xCC, // 0x1C: C3                                 ret
+            0xC3, // 0x1D..0x1F: padding
             0x90, 0x90, 0x90,
         ];
         let patches = cf_abstract_patches_from(&bytes);
-        assert_eq!(patches.len(), 2, "both branches should yield a patch: {:?}", patches);
+        assert_eq!(
+            patches.len(),
+            2,
+            "both branches should yield a patch: {:?}",
+            patches
+        );
         let tvas: std::collections::BTreeSet<u64> = patches.iter().map(|p| p.target_va).collect();
         assert_eq!(tvas, vec![0x00400010, 0x00400020].into_iter().collect());
     }
@@ -2233,85 +2702,118 @@ mod tests {
         }
         let reg_idx = |r: Register| -> Option<usize> {
             match r {
-                Register::RAX=>Some(0), Register::RCX=>Some(1),
-                Register::RDX=>Some(2), Register::RBX=>Some(3),
-                Register::RSP=>Some(4), Register::RBP=>Some(5),
-                Register::RSI=>Some(6), Register::RDI=>Some(7),
-                Register::R8=>Some(8),  Register::R9=>Some(9),
-                Register::R10=>Some(10),Register::R11=>Some(11),
-                Register::R12=>Some(12),Register::R13=>Some(13),
-                Register::R14=>Some(14),Register::R15=>Some(15),
+                Register::RAX => Some(0),
+                Register::RCX => Some(1),
+                Register::RDX => Some(2),
+                Register::RBX => Some(3),
+                Register::RSP => Some(4),
+                Register::RBP => Some(5),
+                Register::RSI => Some(6),
+                Register::RDI => Some(7),
+                Register::R8 => Some(8),
+                Register::R9 => Some(9),
+                Register::R10 => Some(10),
+                Register::R11 => Some(11),
+                Register::R12 => Some(12),
+                Register::R13 => Some(13),
+                Register::R14 => Some(14),
+                Register::R15 => Some(15),
                 _ => None,
             }
         };
         let start_va = 0x1000u64;
         let mut worklist: Vec<(u64, [RegVal; 16])> = vec![(start_va, [RegVal::Top; 16])];
-        let mut visited: std::collections::HashMap<u64, [RegVal; 16]> = std::collections::HashMap::new();
+        let mut visited: std::collections::HashMap<u64, [RegVal; 16]> =
+            std::collections::HashMap::new();
         let mut patches: Vec<ImagePatch> = Vec::new();
-        let mut patch_set: std::collections::HashSet<(u64, Vec<u8>)> = std::collections::HashSet::new();
+        let mut patch_set: std::collections::HashSet<(u64, Vec<u8>)> =
+            std::collections::HashSet::new();
 
         while let Some((pc, mut regs)) = worklist.pop() {
             if let Some(prev) = visited.get(&pc) {
                 let m = merge(*prev, regs);
-                if m == *prev { continue; }
+                if m == *prev {
+                    continue;
+                }
                 visited.insert(pc, m);
                 regs = m;
-            } else { visited.insert(pc, regs); }
+            } else {
+                visited.insert(pc, regs);
+            }
             let off = (pc - start_va) as usize;
-            if off >= bytes.len() { continue; }
+            if off >= bytes.len() {
+                continue;
+            }
             let mut dec = Decoder::with_ip(64, &bytes[off..], pc, DecoderOptions::NONE);
             let mut insn = iced_x86::Instruction::default();
             while dec.can_decode() {
                 dec.decode_out(&mut insn);
                 let op = insn.mnemonic();
-                if matches!(op, Mnemonic::Ret | Mnemonic::Ud2 | Mnemonic::Int3) { break; }
+                if matches!(op, Mnemonic::Ret | Mnemonic::Ud2 | Mnemonic::Int3) {
+                    break;
+                }
                 match insn.flow_control() {
                     FlowControl::UnconditionalBranch => {
-                        if insn.op_count()==1 && insn.op_kind(0)==OpKind::NearBranch64 {
+                        if insn.op_count() == 1 && insn.op_kind(0) == OpKind::NearBranch64 {
                             worklist.push((insn.near_branch64(), regs));
                         }
                         break;
                     }
                     FlowControl::ConditionalBranch => {
-                        if insn.op_count()==1 && insn.op_kind(0)==OpKind::NearBranch64 {
+                        if insn.op_count() == 1 && insn.op_kind(0) == OpKind::NearBranch64 {
                             worklist.push((insn.near_branch64(), regs));
                         }
                     }
                     FlowControl::IndirectBranch => break,
                     _ => {}
                 }
-                if op == Mnemonic::Mov && insn.op_count()==2 && insn.op_kind(0)==OpKind::Register {
-                    let Some(di) = reg_idx(insn.op_register(0)) else { continue; };
+                if op == Mnemonic::Mov
+                    && insn.op_count() == 2
+                    && insn.op_kind(0) == OpKind::Register
+                {
+                    let Some(di) = reg_idx(insn.op_register(0)) else {
+                        continue;
+                    };
                     regs[di] = match insn.op_kind(1) {
                         OpKind::Immediate64 => RegVal::Imm(insn.immediate64()),
                         OpKind::Immediate32to64 => RegVal::Imm(insn.immediate64()),
                         OpKind::Register => reg_idx(insn.op_register(1))
-                            .map(|i| regs[i]).unwrap_or(RegVal::Top),
+                            .map(|i| regs[i])
+                            .unwrap_or(RegVal::Top),
                         _ => RegVal::Top,
                     };
                 }
-                if op == Mnemonic::Mov && insn.op_count()==2 && insn.op_kind(0)==OpKind::Memory {
+                if op == Mnemonic::Mov && insn.op_count() == 2 && insn.op_kind(0) == OpKind::Memory
+                {
                     let base = insn.memory_base();
                     if !matches!(base, Register::R8 | Register::RCX) {
-                        let tva = reg_idx(base).and_then(|i| regs[i].as_concrete())
+                        let tva = reg_idx(base)
+                            .and_then(|i| regs[i].as_concrete())
                             .map(|v| v.wrapping_add(insn.memory_displacement64()));
                         if let Some(tva) = tva {
                             let width = insn.memory_size().size();
                             let v: Option<u64> = match insn.op_kind(1) {
-                                OpKind::Immediate8 | OpKind::Immediate8to64 =>
-                                    Some(insn.immediate8() as u64),
-                                OpKind::Immediate32 | OpKind::Immediate32to64 =>
-                                    Some(insn.immediate32() as u64),
+                                OpKind::Immediate8 | OpKind::Immediate8to64 => {
+                                    Some(insn.immediate8() as u64)
+                                }
+                                OpKind::Immediate32 | OpKind::Immediate32to64 => {
+                                    Some(insn.immediate32() as u64)
+                                }
                                 OpKind::Immediate64 => Some(insn.immediate64()),
-                                OpKind::Register => reg_idx(insn.op_register(1))
-                                    .and_then(|i| regs[i].as_concrete()),
+                                OpKind::Register => {
+                                    reg_idx(insn.op_register(1)).and_then(|i| regs[i].as_concrete())
+                                }
                                 _ => None,
                             };
                             if let Some(v) = v {
                                 let mut buf = v.to_le_bytes().to_vec();
                                 buf.truncate(width);
                                 if patch_set.insert((tva, buf.clone())) {
-                                    patches.push(ImagePatch { target_va: tva, bytes: buf, handler_va: 0 });
+                                    patches.push(ImagePatch {
+                                        target_va: tva,
+                                        bytes: buf,
+                                        handler_va: 0,
+                                    });
                                 }
                             }
                         }
@@ -2325,7 +2827,9 @@ mod tests {
     #[test]
     fn apply_patches_oob_is_noop() {
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let fixture  = manifest.parent().unwrap()
+        let fixture = manifest
+            .parent()
+            .unwrap()
             .join("test-harness/fixtures/crackmev3.pyd");
         if !fixture.exists() {
             eprintln!("skipping: crackmev3.pyd not staged");
@@ -2333,8 +2837,16 @@ mod tests {
         }
         let mut bytes = std::fs::read(&fixture).unwrap();
         let bogus = vec![
-            ImagePatch { target_va: 0xDEADBEEF_00000000, bytes: vec![0u8; 4], handler_va: 0 },
-            ImagePatch { target_va: 0,                   bytes: vec![0u8; 4], handler_va: 0 },
+            ImagePatch {
+                target_va: 0xDEADBEEF_00000000,
+                bytes: vec![0u8; 4],
+                handler_va: 0,
+            },
+            ImagePatch {
+                target_va: 0,
+                bytes: vec![0u8; 4],
+                handler_va: 0,
+            },
         ];
         let n = apply_patches(&mut bytes, &bogus);
         assert_eq!(n, 0, "out-of-bounds patches should be ignored");
@@ -2343,18 +2855,38 @@ mod tests {
     #[test]
     fn handler_addresses_deduped() {
         let rs = vec![
-            SehRecord { func_begin: 0x1000, func_end: 0x1100,
-                        handler: Some(0x2000), scope_table: None,
-                        version: 1, flags: 1 },
-            SehRecord { func_begin: 0x1200, func_end: 0x1300,
-                        handler: Some(0x2000), scope_table: None,
-                        version: 1, flags: 1 },
-            SehRecord { func_begin: 0x1400, func_end: 0x1500,
-                        handler: None, scope_table: None,
-                        version: 1, flags: 0 },
-            SehRecord { func_begin: 0x1600, func_end: 0x1700,
-                        handler: Some(0x3000), scope_table: None,
-                        version: 1, flags: 1 },
+            SehRecord {
+                func_begin: 0x1000,
+                func_end: 0x1100,
+                handler: Some(0x2000),
+                scope_table: None,
+                version: 1,
+                flags: 1,
+            },
+            SehRecord {
+                func_begin: 0x1200,
+                func_end: 0x1300,
+                handler: Some(0x2000),
+                scope_table: None,
+                version: 1,
+                flags: 1,
+            },
+            SehRecord {
+                func_begin: 0x1400,
+                func_end: 0x1500,
+                handler: None,
+                scope_table: None,
+                version: 1,
+                flags: 0,
+            },
+            SehRecord {
+                func_begin: 0x1600,
+                func_end: 0x1700,
+                handler: Some(0x3000),
+                scope_table: None,
+                version: 1,
+                flags: 1,
+            },
         ];
         let addrs = handler_addresses(&rs);
         assert_eq!(addrs, vec![0x2000, 0x3000]);
@@ -2363,7 +2895,9 @@ mod tests {
     #[test]
     fn tls_callback_addresses_empty_on_non_tls_binary() {
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let fixture  = manifest.parent().unwrap()
+        let fixture = manifest
+            .parent()
+            .unwrap()
             .join("test-harness/fixtures/crackmev3.pyd");
         if !fixture.exists() {
             eprintln!("skipping: {:?} not staged", fixture);
@@ -2374,23 +2908,34 @@ mod tests {
         // parse without panic and return empty, not fail on missing data
         // directory.
         let cbs = tls_callback_addresses(&bytes);
-        assert!(cbs.len() <= 4, "unexpectedly many TLS callbacks: {}", cbs.len());
+        assert!(
+            cbs.len() <= 4,
+            "unexpectedly many TLS callbacks: {}",
+            cbs.len()
+        );
     }
 
     #[test]
     fn extract_patches_at_candidates_dedups() {
         let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let fixture  = manifest.parent().unwrap()
+        let fixture = manifest
+            .parent()
+            .unwrap()
             .join("test-harness/fixtures/crackmev3.pyd");
-        if !fixture.exists() { return; }
+        if !fixture.exists() {
+            return;
+        }
         let bytes = std::fs::read(&fixture).unwrap();
 
-        let via_seh     = extract_all_patches(&bytes);
+        let via_seh = extract_all_patches(&bytes);
         let via_general = extract_all_patches_extended(&bytes, &[]);
         // General pass includes SEH candidates + TLS; must be a superset
         // (or equal when no TLS callbacks exist).
-        assert!(via_general.len() >= via_seh.len(),
+        assert!(
+            via_general.len() >= via_seh.len(),
             "general patch set smaller than SEH-only: {} < {}",
-            via_general.len(), via_seh.len());
+            via_general.len(),
+            via_seh.len()
+        );
     }
 }

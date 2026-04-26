@@ -48,11 +48,7 @@ fn va_to_file_offset(obj: &Object<'_>, va: u64) -> Option<usize> {
     None
 }
 
-pub fn extract(
-    obj: &Object<'_>,
-    data: &[u8],
-    dispatcher_va: u64,
-) -> Option<DispatchInfo> {
+pub fn extract(obj: &Object<'_>, data: &[u8], dispatcher_va: u64) -> Option<DispatchInfo> {
     let off = va_to_file_offset(obj, dispatcher_va)?;
     let scan_len = 0x200.min(data.len() - off);
     let body = &data[off..off + scan_len];
@@ -64,18 +60,10 @@ pub fn extract(
     while k + 6 <= body.len() {
         // MOV r64, [RIP+disp32] = 48 8b ?? d32 with mod=00 r/m=101
         // Or 4c 8b ?? for r8..r15 destination.
-        if k + 7 <= body.len()
-            && (body[k] == 0x48 || body[k] == 0x4c)
-            && body[k + 1] == 0x8b
-        {
+        if k + 7 <= body.len() && (body[k] == 0x48 || body[k] == 0x4c) && body[k + 1] == 0x8b {
             let modrm = body[k + 2];
             if modrm & 0xc0 == 0 && modrm & 0x07 == 0x05 {
-                let d32 = i32::from_le_bytes([
-                    body[k + 3],
-                    body[k + 4],
-                    body[k + 5],
-                    body[k + 6],
-                ]);
+                let d32 = i32::from_le_bytes([body[k + 3], body[k + 4], body[k + 5], body[k + 6]]);
                 let next_rip = dispatcher_va.wrapping_add((k + 7) as u64);
                 let slot = next_rip.wrapping_add(d32 as i64 as u64);
                 if !data_slots.contains(&slot) {
@@ -87,12 +75,7 @@ pub fn extract(
         }
         // CALL [RIP+disp32] = ff 15 d32 (6 bytes)
         if body[k] == 0xff && body[k + 1] == 0x15 && trampoline_slot.is_none() {
-            let d32 = i32::from_le_bytes([
-                body[k + 2],
-                body[k + 3],
-                body[k + 4],
-                body[k + 5],
-            ]);
+            let d32 = i32::from_le_bytes([body[k + 2], body[k + 3], body[k + 4], body[k + 5]]);
             let next_rip = dispatcher_va.wrapping_add((k + 6) as u64);
             let slot = next_rip.wrapping_add(d32 as i64 as u64);
             trampoline_slot = Some(slot);
@@ -124,10 +107,7 @@ pub fn extract(
 
 pub fn render(info: &DispatchInfo) -> Vec<String> {
     let mut out = Vec::new();
-    out.push(format!(
-        "dispatcher @ {:#x}",
-        info.dispatcher_va
-    ));
+    out.push(format!("dispatcher @ {:#x}", info.dispatcher_va));
     if let Some(t) = info.trampoline_slot {
         out.push(format!("  trampoline_slot: {:#x}", t));
     }
@@ -143,19 +123,12 @@ pub fn render(info: &DispatchInfo) -> Vec<String> {
     if let Some(m) = info.opcode_mask {
         out.push(format!("  opcode_mask candidate: {:#04x}", m));
     }
+    out.push("  decode procedure:".to_string());
     out.push(
-        "  decode procedure:".to_string(),
+        "    runtime_vtable_va = data_slot[0] XOR data_slot[1]   (snapshot post-init)".to_string(),
     );
-    out.push(
-        "    runtime_vtable_va = data_slot[0] XOR data_slot[1]   (snapshot post-init)"
-            .to_string(),
-    );
-    out.push(
-        "    handler[i] = data_slot[?] XOR mem[runtime_vtable_va + i*8]".to_string(),
-    );
-    out.push(
-        "    (caller emulates init chain, snapshots scratch, runs the XOR)".to_string(),
-    );
+    out.push("    handler[i] = data_slot[?] XOR mem[runtime_vtable_va + i*8]".to_string());
+    out.push("    (caller emulates init chain, snapshots scratch, runs the XOR)".to_string());
     out
 }
 
@@ -180,12 +153,8 @@ mod tests {
             if (body[k] == 0x48 || body[k] == 0x4c) && body[k + 1] == 0x8b {
                 let modrm = body[k + 2];
                 if modrm & 0xc0 == 0 && modrm & 0x07 == 0x05 {
-                    let d32 = i32::from_le_bytes([
-                        body[k + 3],
-                        body[k + 4],
-                        body[k + 5],
-                        body[k + 6],
-                    ]);
+                    let d32 =
+                        i32::from_le_bytes([body[k + 3], body[k + 4], body[k + 5], body[k + 6]]);
                     let next_rip = info.dispatcher_va.wrapping_add((k + 7) as u64);
                     info.data_slots
                         .push(next_rip.wrapping_add(d32 as i64 as u64));

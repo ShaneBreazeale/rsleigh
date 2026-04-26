@@ -1,7 +1,7 @@
-use rsleigh_api::{Decoder, Architecture};
+use rsleigh_api::{Architecture, Decoder};
 fn main() {
     let mut dec = Decoder::new(Architecture::AArch64);
-    
+
     // Test cases with different Rd/Rn/Rm combinations
     let tests: Vec<(&str, Vec<u8>)> = vec![
         // CSEL w0, w1, w2, lt (Rd=w0, Rn=w1, Rm=w2 — all different)

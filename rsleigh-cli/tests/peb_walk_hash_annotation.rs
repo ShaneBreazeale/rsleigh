@@ -36,7 +36,8 @@ fn const_matching_ror13_api_hash_is_annotated() {
     assert!(
         text.contains(&needle),
         "expected ROR13 annotation for {} in output:\n{}",
-        target, text
+        target,
+        text
     );
 }
 

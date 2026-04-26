@@ -77,8 +77,7 @@ pub fn build_iat_map(obj: &Object<'_>, data: &[u8]) -> HashMap<u64, String> {
             break;
         }
         let oft_rva =
-            u32::from_le_bytes([descbytes[0], descbytes[1], descbytes[2], descbytes[3]])
-                as usize;
+            u32::from_le_bytes([descbytes[0], descbytes[1], descbytes[2], descbytes[3]]) as usize;
         let ft_rva =
             u32::from_le_bytes([descbytes[16], descbytes[17], descbytes[18], descbytes[19]])
                 as usize;
@@ -117,8 +116,7 @@ pub fn build_iat_map(obj: &Object<'_>, data: &[u8]) -> HashMap<u64, String> {
                         end += 1;
                     }
                     if let Ok(name) = std::str::from_utf8(&data[name_off..end]) {
-                        let slot_va =
-                            pe.image_base as u64 + (iat_rva + j * 8) as u64;
+                        let slot_va = pe.image_base as u64 + (iat_rva + j * 8) as u64;
                         map.insert(slot_va, name.to_string());
                     }
                 }
@@ -168,19 +166,13 @@ pub fn summarise_handler(
     let body = &data[off..off + scan_len];
 
     let mut apis = Vec::new();
-    let mut seen_apis: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut seen_apis: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut pop_count = 0u32;
     let mut k = 0;
     while k + 6 <= body.len() {
         // CALL [RIP+disp32] = FF 15 d32 (6 bytes)
         if body[k] == 0xff && body[k + 1] == 0x15 {
-            let d32 = i32::from_le_bytes([
-                body[k + 2],
-                body[k + 3],
-                body[k + 4],
-                body[k + 5],
-            ]);
+            let d32 = i32::from_le_bytes([body[k + 2], body[k + 3], body[k + 4], body[k + 5]]);
             let next_rip = addr.wrapping_add((k + 6) as u64);
             let target = next_rip.wrapping_add(d32 as i64 as u64);
             if let Some(name) = iat.get(&target) {
@@ -223,11 +215,7 @@ pub fn summarise_handler(
     })
 }
 
-pub fn summarise_all(
-    obj: &Object<'_>,
-    data: &[u8],
-    addrs: &[u64],
-) -> Vec<HandlerSummary> {
+pub fn summarise_all(obj: &Object<'_>, data: &[u8], addrs: &[u64]) -> Vec<HandlerSummary> {
     let iat = build_iat_map(obj, data);
     addrs
         .iter()
@@ -238,11 +226,6 @@ pub fn summarise_all(
 pub fn render(summaries: &[HandlerSummary]) -> Vec<String> {
     summaries
         .iter()
-        .map(|s| {
-            format!(
-                "{:#x}  pops={}  apis={:?}",
-                s.addr, s.pop_count, s.apis
-            )
-        })
+        .map(|s| format!("{:#x}  pops={}  apis={:?}", s.addr, s.pop_count, s.apis))
         .collect()
 }

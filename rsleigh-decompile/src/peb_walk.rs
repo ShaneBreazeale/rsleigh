@@ -390,7 +390,8 @@ pub fn resolve_ror13_hash(h: u32) -> Option<&'static str> {
 /// the earlier-checked variant.
 pub fn resolve_api_hash(h: u32) -> Option<(&'static str, &'static str)> {
     let name = HASH_INDEX.get(&h).copied()?;
-    if ror13_api(name) == h || ror13_module_api("kernel32.dll", name) == h
+    if ror13_api(name) == h
+        || ror13_module_api("kernel32.dll", name) == h
         || ror13_module_api("ntdll.dll", name) == h
     {
         return Some((name, "ROR13"));
@@ -522,10 +523,7 @@ mod tests {
                 let h = variant(name);
                 if let Some(prev) = seen.insert(h, name) {
                     if prev != name {
-                        panic!(
-                            "hash collision between {} and {} ({:#x})",
-                            prev, name, h
-                        );
+                        panic!("hash collision between {} and {} ({:#x})", prev, name, h);
                     }
                 }
             }

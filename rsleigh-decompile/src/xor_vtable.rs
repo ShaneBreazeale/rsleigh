@@ -61,15 +61,10 @@ pub fn scan_region(
     while off + 6 <= code.len() {
         // CALL [RIP+disp32] = FF 15 d32 (6 bytes).
         if code[off] == 0xff && code[off + 1] == 0x15 {
-            let d32 = i32::from_le_bytes([
-                code[off + 2],
-                code[off + 3],
-                code[off + 4],
-                code[off + 5],
-            ]);
+            let d32 =
+                i32::from_le_bytes([code[off + 2], code[off + 3], code[off + 4], code[off + 5]]);
             let next_rip = base_va.wrapping_add((off + 6) as u64);
-            let target_slot =
-                next_rip.wrapping_add(d32 as i64 as u64);
+            let target_slot = next_rip.wrapping_add(d32 as i64 as u64);
             if trampoline_slots.contains(&target_slot) {
                 // Look back ~80 bytes for the dispatch shape.
                 let lb_start = off.saturating_sub(80);
@@ -123,17 +118,14 @@ fn shape_matches(window: &[u8]) -> bool {
                 }
             }
             // mod=00 r/m=101 → RIP-relative disp32
-            if modrm & 0xc0 == 0 && modrm & 0x07 == 0x05
-                && k + 7 <= window.len()
-            {
+            if modrm & 0xc0 == 0 && modrm & 0x07 == 0x05 && k + 7 <= window.len() {
                 rip_load_count += 1;
                 k += 7;
                 continue;
             }
         }
         // 48 31 ?? or 48 33 ?? — XOR r64, r64 (3 bytes total)
-        if window[k] == 0x48 && (window[k + 1] == 0x31 || window[k + 1] == 0x33)
-        {
+        if window[k] == 0x48 && (window[k + 1] == 0x31 || window[k + 1] == 0x33) {
             let modrm = window[k + 2];
             if modrm & 0xc0 == 0xc0 {
                 xor_count += 1;
@@ -191,8 +183,7 @@ pub fn scan(
                 if raddr + rsize > data.len() {
                     continue;
                 }
-                let base_va =
-                    pe.image_base as u64 + sec.virtual_address as u64;
+                let base_va = pe.image_base as u64 + sec.virtual_address as u64;
                 hits.extend(scan_region(
                     &data[raddr..raddr + rsize],
                     base_va,
@@ -218,8 +209,7 @@ pub fn iat_slots_for_trampolines(
     if trampolines.is_empty() {
         return out;
     }
-    let trampoline_set: std::collections::HashSet<u64> =
-        trampolines.iter().copied().collect();
+    let trampoline_set: std::collections::HashSet<u64> = trampolines.iter().copied().collect();
     if let Object::PE(pe) = obj {
         // Scan every read-only data section for 8-byte values matching
         // any trampoline. IAT slots are typically in `.idata` /
@@ -234,8 +224,7 @@ pub fn iat_slots_for_trampolines(
             if raddr + rsize > data.len() {
                 continue;
             }
-            let base_va =
-                pe.image_base as u64 + sec.virtual_address as u64;
+            let base_va = pe.image_base as u64 + sec.virtual_address as u64;
             let bytes = &data[raddr..raddr + rsize];
             let mut k = 0;
             while k + 8 <= bytes.len() {

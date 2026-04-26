@@ -16,20 +16,28 @@ fn main() {
         std::process::exit(2);
     };
     let bytes = std::fs::read(&path).expect("read PE");
-    let recs  = parse_pe64_seh(&bytes);
+    let recs = parse_pe64_seh(&bytes);
 
     println!("{} SEH records", recs.len());
     for r in &recs {
-        let handler = r.handler.map(|h| format!("{:#x}", h)).unwrap_or_else(|| "—".into());
-        let scope   = r.scope_table.map(|s| format!("{:#x}", s)).unwrap_or_else(|| "—".into());
+        let handler = r
+            .handler
+            .map(|h| format!("{:#x}", h))
+            .unwrap_or_else(|| "—".into());
+        let scope = r
+            .scope_table
+            .map(|s| format!("{:#x}", s))
+            .unwrap_or_else(|| "—".into());
         let tag = match (r.has_ehandler(), r.has_uhandler(), r.has_chaininfo()) {
             (true, _, _) => "EH",
             (_, true, _) => "UH",
             (_, _, true) => "CHAIN",
-            _            => "unwind-only",
+            _ => "unwind-only",
         };
-        println!("  {:#x}..{:#x}  v{}  flags=0x{:02x} {:11} handler={} scope={}",
-                 r.func_begin, r.func_end, r.version, r.flags, tag, handler, scope);
+        println!(
+            "  {:#x}..{:#x}  v{}  flags=0x{:02x} {:11} handler={} scope={}",
+            r.func_begin, r.func_end, r.version, r.flags, tag, handler, scope
+        );
     }
 
     let addrs = handler_addresses(&recs);
@@ -42,26 +50,63 @@ fn main() {
     let analyses = analyse_all_handlers(&bytes);
     for (va, a) in &analyses {
         let mut tags: Vec<&str> = Vec::new();
-        if a.redirects_rip       { tags.push("REDIRECT_RIP"); }
-        if a.skips_rip           { tags.push("SKIP_RIP"); }
-        if a.mutates_context     { tags.push("CTX_MUTATE"); }
-        if a.reads_exception_info{ tags.push("READS_EXC_INFO"); }
-        if a.calls_wpm           { tags.push("WriteProcessMemory"); }
-        if a.calls_vprotect      { tags.push("VirtualProtect"); }
-        if a.uses_rep_movs       { tags.push("REP_MOVS"); }
-        if a.registers_runtime_tables { tags.push("RtlAddFunctionTable"); }
-        if a.reads_dispatcher_context { tags.push("DISP_CTX"); }
+        if a.redirects_rip {
+            tags.push("REDIRECT_RIP");
+        }
+        if a.skips_rip {
+            tags.push("SKIP_RIP");
+        }
+        if a.mutates_context {
+            tags.push("CTX_MUTATE");
+        }
+        if a.reads_exception_info {
+            tags.push("READS_EXC_INFO");
+        }
+        if a.calls_wpm {
+            tags.push("WriteProcessMemory");
+        }
+        if a.calls_vprotect {
+            tags.push("VirtualProtect");
+        }
+        if a.uses_rep_movs {
+            tags.push("REP_MOVS");
+        }
+        if a.registers_runtime_tables {
+            tags.push("RtlAddFunctionTable");
+        }
+        if a.reads_dispatcher_context {
+            tags.push("DISP_CTX");
+        }
         let smc = if a.is_smc_candidate() { "  [SMC]" } else { "" };
-        let rip = a.resumption_va.map(|r| format!(" resume={:#x}", r)).unwrap_or_default();
-        let calls = if a.iat_calls.is_empty() { String::new() }
-                    else { format!(" calls=[{}]", a.iat_calls.join(", ")) };
-        let triggers = if a.exc_code_triggers.is_empty() { String::new() } else {
-            let parts: Vec<String> = a.exc_code_triggers.iter()
-                .map(|c| format!("{:#010x}", c)).collect();
+        let rip = a
+            .resumption_va
+            .map(|r| format!(" resume={:#x}", r))
+            .unwrap_or_default();
+        let calls = if a.iat_calls.is_empty() {
+            String::new()
+        } else {
+            format!(" calls=[{}]", a.iat_calls.join(", "))
+        };
+        let triggers = if a.exc_code_triggers.is_empty() {
+            String::new()
+        } else {
+            let parts: Vec<String> = a
+                .exc_code_triggers
+                .iter()
+                .map(|c| format!("{:#010x}", c))
+                .collect();
             format!(" exc_codes={{{}}}", parts.join(","))
         };
-        println!("  {:#x}  insn={:3}  [{}]{}{}{}{}",
-                 va, a.insn_count, tags.join(","), smc, rip, calls, triggers);
+        println!(
+            "  {:#x}  insn={:3}  [{}]{}{}{}{}",
+            va,
+            a.insn_count,
+            tags.join(","),
+            smc,
+            rip,
+            calls,
+            triggers
+        );
     }
 
     println!("\n--- extracted patches ---");
@@ -70,11 +115,22 @@ fn main() {
         println!("  (none — handlers emit no statically-resolvable writes)");
     } else {
         for p in &patches {
-            let preview: String = p.bytes.iter().take(16)
-                .map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+            let preview: String = p
+                .bytes
+                .iter()
+                .take(16)
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join(" ");
             let more = if p.bytes.len() > 16 { " .." } else { "" };
-            println!("  patch @ {:#x}  len={:4}  from handler {:#x}  [{}{}]",
-                     p.target_va, p.bytes.len(), p.handler_va, preview, more);
+            println!(
+                "  patch @ {:#x}  len={:4}  from handler {:#x}  [{}{}]",
+                p.target_va,
+                p.bytes.len(),
+                p.handler_va,
+                preview,
+                more
+            );
         }
     }
 }

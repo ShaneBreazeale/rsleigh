@@ -14,7 +14,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(r) => {
                 println!("0x{:x}: {} regions:", addr, r.len());
                 for tr in r.iter().take(3) {
-                    println!("  [0x{:x}..0x{:x}) -> LP 0x{:x}", tr.start, tr.end, tr.landing_pad);
+                    println!(
+                        "  [0x{:x}..0x{:x}) -> LP 0x{:x}",
+                        tr.start, tr.end, tr.landing_pad
+                    );
                 }
             }
             None => println!("0x{:x}: no regions", addr),

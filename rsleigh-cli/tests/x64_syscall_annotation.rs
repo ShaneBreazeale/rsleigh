@@ -15,11 +15,7 @@ fn mov_eax_const_then_syscall_emits_nt_api_hint() {
     // mov eax, 0x19     ; B8 19 00 00 00
     // syscall           ; 0F 05
     // ret               ; C3
-    let bytes: &[u8] = &[
-        0xB8, 0x19, 0x00, 0x00, 0x00,
-        0x0F, 0x05,
-        0xC3,
-    ];
+    let bytes: &[u8] = &[0xB8, 0x19, 0x00, 0x00, 0x00, 0x0F, 0x05, 0xC3];
     let tmp = tempfile_bytes(bytes);
     let out = Command::new(RSLEIGH_BIN)
         .args([tmp.to_str().unwrap(), "--raw", "x86-64", "--all"])

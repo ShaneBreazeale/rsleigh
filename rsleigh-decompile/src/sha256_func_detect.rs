@@ -11,14 +11,12 @@
 use goblin::Object;
 
 const SHA256_H0: [u32; 8] = [
-    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c,
-    0x1f83d9ab, 0x5be0cd19,
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
 const SHA256_K_FIRST_16: [u32; 16] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
-    0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,9 +83,7 @@ pub fn scan_region(code: &[u8], base_va: u64) -> Vec<Sha256Hit> {
 
 fn find_constant(haystack: &[u8], needle: u32) -> bool {
     let needle_bytes = needle.to_le_bytes();
-    haystack
-        .windows(4)
-        .any(|w| w == needle_bytes)
+    haystack.windows(4).any(|w| w == needle_bytes)
 }
 
 pub fn scan(obj: &Object<'_>, data: &[u8]) -> Vec<Sha256Hit> {
@@ -104,8 +100,7 @@ pub fn scan(obj: &Object<'_>, data: &[u8]) -> Vec<Sha256Hit> {
                 if raddr + rsize > data.len() {
                     continue;
                 }
-                let base_va =
-                    pe.image_base as u64 + sec.virtual_address as u64;
+                let base_va = pe.image_base as u64 + sec.virtual_address as u64;
                 hits.extend(scan_region(&data[raddr..raddr + rsize], base_va));
             }
             hits

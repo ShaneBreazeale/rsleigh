@@ -30,11 +30,16 @@ fn decompile_func(func_va: u64, max_len: usize) -> Option<String> {
     while io < bytes.len() {
         match dec.decode(&bytes[io..], func_va + io as u64) {
             Ok(inst) => {
-                let is_ret = inst.ops.iter().any(|op| matches!(op, PcodeOp::Return { .. }));
+                let is_ret = inst
+                    .ops
+                    .iter()
+                    .any(|op| matches!(op, PcodeOp::Return { .. }));
                 let l = inst.len as usize;
                 insts.push((func_va + io as u64, inst));
                 io += l;
-                if is_ret { break; }
+                if is_ret {
+                    break;
+                }
             }
             Err(_) => break,
         }
@@ -59,16 +64,19 @@ fn no_string_literal_as_load_address() {
         .spawn(|| {
             let out = match decompile_func(0x140001154, 0x400) {
                 Some(s) => s,
-                None => { eprintln!("skipping: fixture not found"); return; }
+                None => {
+                    eprintln!("skipping: fixture not found");
+                    return;
+                }
             };
 
             // Check for any deref-of-string-literal pattern: *("...") anywhere in output
-            let bad_lines: Vec<&str> = out.lines()
+            let bad_lines: Vec<&str> = out
+                .lines()
                 .filter(|l| {
                     // *(  "  — direct deref of string
                     // *( something *)( "  — typed deref of string
-                    (l.contains("*(\"") )
-                    || (l.contains("*(") && l.contains("*)(\""))
+                    (l.contains("*(\"")) || (l.contains("*(") && l.contains("*)(\""))
                 })
                 .collect();
             assert!(
@@ -90,11 +98,15 @@ fn load_address_uses_dat_or_hex() {
         .spawn(|| {
             let out = match decompile_func(0x140001154, 0x400) {
                 Some(s) => s,
-                None => { eprintln!("skipping: fixture not found"); return; }
+                None => {
+                    eprintln!("skipping: fixture not found");
+                    return;
+                }
             };
             assert!(
                 out.contains("DAT_") || out.contains("0x1400"),
-                "expected DAT_ or hex address in output after fix:\n{}", out
+                "expected DAT_ or hex address in output after fix:\n{}",
+                out
             );
         })
         .expect("thread spawn");
@@ -110,11 +122,15 @@ fn real_strings_still_resolved() {
         .spawn(|| {
             let out = match decompile_func(0x140001a68, 0x400) {
                 Some(s) => s,
-                None => { eprintln!("skipping: fixture not found"); return; }
+                None => {
+                    eprintln!("skipping: fixture not found");
+                    return;
+                }
             };
             assert!(
                 out.contains("\"v`cav"),
-                "real string literal was suppressed by the fix:\n{}", out
+                "real string literal was suppressed by the fix:\n{}",
+                out
             );
         })
         .expect("thread spawn");

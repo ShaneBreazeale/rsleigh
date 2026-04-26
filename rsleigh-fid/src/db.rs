@@ -51,7 +51,10 @@ impl FidDb {
     pub fn insert(&mut self, entry: FidEntry) {
         let idx = self.entries.len();
         self.by_full.entry(entry.hash.full).or_default().push(idx);
-        self.by_specific.entry(entry.hash.specific).or_default().push(idx);
+        self.by_specific
+            .entry(entry.hash.specific)
+            .or_default()
+            .push(idx);
         self.entries.push(entry);
     }
 
@@ -59,7 +62,10 @@ impl FidDb {
     /// Prefer specific over full: disambiguates funcs with same body
     /// but different callees.
     pub fn match_specific(&self, specific: u64) -> &[usize] {
-        self.by_specific.get(&specific).map(|v| v.as_slice()).unwrap_or(&[])
+        self.by_specific
+            .get(&specific)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn match_full(&self, full: u64) -> &[usize] {
@@ -105,7 +111,10 @@ impl FidDb {
             libs.push(String::from_utf8_lossy(&buf).into_owned());
         }
         let n_entries = gz.read_u32::<LittleEndian>()?;
-        let mut db = FidDb { libs, ..Self::default() };
+        let mut db = FidDb {
+            libs,
+            ..Self::default()
+        };
         for _ in 0..n_entries {
             let full = gz.read_u64::<LittleEndian>()?;
             let specific = gz.read_u64::<LittleEndian>()?;
@@ -117,7 +126,12 @@ impl FidDb {
             gz.read_exact(&mut buf)?;
             let name = String::from_utf8_lossy(&buf).into_owned();
             db.insert(FidEntry {
-                hash: FidHashQuad { full, specific, code_units, body_len },
+                hash: FidHashQuad {
+                    full,
+                    specific,
+                    code_units,
+                    body_len,
+                },
                 lib_id,
                 name,
             });

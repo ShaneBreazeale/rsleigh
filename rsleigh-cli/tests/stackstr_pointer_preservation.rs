@@ -13,7 +13,9 @@ const GIT_REPACK: &str = "/tmp/git-repack/git-repack";
 const RSLEIGH_BIN: &str = env!("CARGO_BIN_EXE_rsleigh");
 
 fn fixture_available() -> bool {
-    if Path::new(GIT_REPACK).exists() { return true; }
+    if Path::new(GIT_REPACK).exists() {
+        return true;
+    }
     if std::env::var_os("RSLEIGH_REQUIRE_GIT_REPACK_FIXTURE").is_some() {
         panic!("git-repack fixture missing at {GIT_REPACK}");
     }
@@ -23,15 +25,26 @@ fn fixture_available() -> bool {
 
 #[test]
 fn global_pointer_string_inits_survive_stackstr_pass() {
-    if !fixture_available() { return; }
+    if !fixture_available() {
+        return;
+    }
     let out = Command::new(RSLEIGH_BIN)
         .args([GIT_REPACK, "0x4de45c"])
         .output()
         .expect("rsleigh invocation");
-    assert!(out.status.success(), "rsleigh failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "rsleigh failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = String::from_utf8(out.stdout).expect("UTF-8");
 
-    for needle in ["\"gone\"", "\"ahead %d\"", "\"behind %d\"", "\"ahead %d, behind %d\""] {
+    for needle in [
+        "\"gone\"",
+        "\"ahead %d\"",
+        "\"behind %d\"",
+        "\"ahead %d, behind %d\"",
+    ] {
         assert!(
             text.contains(needle),
             "missing string literal {needle} — STACKSTR may be eating pointer writes again\n{text}"

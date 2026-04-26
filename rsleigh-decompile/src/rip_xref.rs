@@ -52,12 +52,7 @@ pub enum XrefKind {
 /// Try every plausible disp32-bearing instruction starting at offset
 /// `off`, returning Some(Xref) when any encoding's effective address
 /// equals `target_va`.
-fn try_match(
-    code: &[u8],
-    off: usize,
-    base_va: u64,
-    target_va: u64,
-) -> Option<Xref> {
+fn try_match(code: &[u8], off: usize, base_va: u64, target_va: u64) -> Option<Xref> {
     // Each encoding: (leading prefix bytes, total instruction length).
     // The disp32 lives at `off + prefix_len`. The instruction's "next
     // RIP" used for RIP-relative computation is `off + total_len`.

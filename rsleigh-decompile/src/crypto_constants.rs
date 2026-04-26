@@ -46,13 +46,25 @@ const ENTRIES: &[(u32, &str, &str)] = &[
     (0x045d9f3b, "PCG", "32-bit hash multiplier 1"),
     (0x27d4eb2d, "PCG", "32-bit hash multiplier 2"),
     (0x165667b1, "PCG", "32-bit hash additive"),
-    (0x3d4d51cb, "PCG", "Murmur-style finalizer multiplier (signed-neg)"),
-    (0xc2b2ae35, "PCG", "Murmur-style finalizer multiplier (unsigned)"),
+    (
+        0x3d4d51cb,
+        "PCG",
+        "Murmur-style finalizer multiplier (signed-neg)",
+    ),
+    (
+        0xc2b2ae35,
+        "PCG",
+        "Murmur-style finalizer multiplier (unsigned)",
+    ),
     // ── MurmurHash3 ─────────────────────────────────────────────────────
     (0xcc9e2d51, "MurmurHash3", "x86_32 c1"),
     (0x1b873593, "MurmurHash3", "x86_32 c2"),
     (0x85ebca6b, "MurmurHash3", "x86_32 finalizer m1"),
-    (0xc2b2ae35_u32.wrapping_mul(0), "MurmurHash3", "x86_32 finalizer m2"), // dup
+    (
+        0xc2b2ae35_u32.wrapping_mul(0),
+        "MurmurHash3",
+        "x86_32 finalizer m2",
+    ), // dup
     (0x239b961b, "MurmurHash3", "x86_128 c1"),
     (0xab0e9789, "MurmurHash3", "x86_128 c2"),
     (0x38b34ae5, "MurmurHash3", "x86_128 c3"),
@@ -148,7 +160,10 @@ static CATALOGUE: LazyLock<HashMap<u32, Annotation>> = LazyLock::new(|| {
         }
         // First-write-wins: earlier entries take precedence on collision
         // so we keep the most canonical/common interpretation.
-        m.entry(val).or_insert(Annotation { algorithm: alg, role });
+        m.entry(val).or_insert(Annotation {
+            algorithm: alg,
+            role,
+        });
     }
     m
 });
@@ -173,7 +188,10 @@ pub fn worth_checking(val: u32) -> bool {
     }
     // ASCII-printable packed: 0x20..0x7e per byte. Probably a string fragment.
     let bytes = val.to_le_bytes();
-    let printable = bytes.iter().filter(|&&b| (0x20..=0x7e).contains(&b)).count();
+    let printable = bytes
+        .iter()
+        .filter(|&&b| (0x20..=0x7e).contains(&b))
+        .count();
     if printable == 4 {
         return false;
     }

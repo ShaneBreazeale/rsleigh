@@ -23,7 +23,9 @@ const BED: &str = "/tmp/bed/bed_v0.2.8_linux_amd64/bed";
 const RSLEIGH_BIN: &str = env!("CARGO_BIN_EXE_rsleigh");
 
 fn bed_available() -> bool {
-    if Path::new(BED).exists() { return true; }
+    if Path::new(BED).exists() {
+        return true;
+    }
     if std::env::var_os("RSLEIGH_REQUIRE_BED_FIXTURE").is_some() {
         panic!("bed fixture missing at {BED}");
     }
@@ -36,13 +38,19 @@ fn decompile(addr: &str) -> String {
         .args([BED, addr])
         .output()
         .expect("rsleigh invocation");
-    assert!(out.status.success(), "rsleigh failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "rsleigh failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8(out.stdout).expect("UTF-8")
 }
 
 #[test]
 fn no_phi_function_leaks_in_output() {
-    if !bed_available() { return; }
+    if !bed_available() {
+        return;
+    }
     // Scan a handful of funcs known to have merges; none should emit
     // a `phi(` call-like expression anywhere.
     for addr in ["0x42d620", "0x455b60", "0x46b020", "0x46c7e0"] {
@@ -56,7 +64,9 @@ fn no_phi_function_leaks_in_output() {
 
 #[test]
 fn conditional_merge_emits_ternary_on_bed() {
-    if !bed_available() { return; }
+    if !bed_available() {
+        return;
+    }
     // FUN_0046b020 has `(puVar9 == 0) ? 0 : lVar2` — a conditional
     // merge where the two arms are clearly distinct. After the
     // rewrite the ternary must survive to the final output.
@@ -69,7 +79,9 @@ fn conditional_merge_emits_ternary_on_bed() {
 
 #[test]
 fn same_var_ternary_collapses_to_bare_var() {
-    if !bed_available() { return; }
+    if !bed_available() {
+        return;
+    }
     // `(cond) ? lVar1 : lVar1` pattern. Both arms resolve to the
     // same name through Var-chains; the Ternary collapse must emit
     // the bare var instead of a self-identity conditional.
@@ -82,7 +94,8 @@ fn same_var_ternary_collapses_to_bare_var() {
             let after_q = &t[qpos + 4..];
             if let Some(colon) = after_q.find(" : ") {
                 let then_tok = after_q[..colon].trim();
-                let else_tok_end = after_q[colon + 3..].find(|c: char| !c.is_ascii_alphanumeric() && c != '_');
+                let else_tok_end =
+                    after_q[colon + 3..].find(|c: char| !c.is_ascii_alphanumeric() && c != '_');
                 let else_tok = match else_tok_end {
                     Some(n) => after_q[colon + 3..colon + 3 + n].trim(),
                     None => after_q[colon + 3..].trim_end_matches(';').trim(),

@@ -7,7 +7,9 @@ use crate::dwarf::{FunctionDebugInfo, StructFieldMap};
 
 /// Parse PDB debug info from a companion .pdb file for a PE binary.
 /// Searches for <binary_stem>.pdb in the same directory.
-pub fn parse_pdb_from_path(binary_path: &Path) -> (HashMap<u64, FunctionDebugInfo>, StructFieldMap) {
+pub fn parse_pdb_from_path(
+    binary_path: &Path,
+) -> (HashMap<u64, FunctionDebugInfo>, StructFieldMap) {
     // Look for <name>.pdb next to the binary
     let pdb_path = binary_path.with_extension("pdb");
     if pdb_path.exists() {
@@ -161,7 +163,9 @@ fn extract_functions(pdb: &mut pdb::PDB<'_, std::fs::File>) -> HashMap<u64, Func
 /// First 4 params: RCX, RDX, R8, R9 with home space at RSP+8..RSP+32.
 fn is_likely_parameter(name: &str, offset: i32) -> bool {
     // Common parameter naming patterns
-    if name.starts_with("__formal") { return true; }
+    if name.starts_with("__formal") {
+        return true;
+    }
     // In MSVC debug builds, parameters typically live at small positive offsets
     // (the "home space" above the return address)
     offset >= 0 && offset <= 64
@@ -174,12 +178,10 @@ fn resolve_procedure_return_type(
 ) -> Option<String> {
     let item = finder.find(type_index).ok()?;
     match item.parse().ok()? {
-        pdb::TypeData::Procedure(proc) => {
-            proc.return_type.and_then(|rt| resolve_type_name(finder, rt))
-        }
-        pdb::TypeData::MemberFunction(mf) => {
-            resolve_type_name(finder, mf.return_type)
-        }
+        pdb::TypeData::Procedure(proc) => proc
+            .return_type
+            .and_then(|rt| resolve_type_name(finder, rt)),
+        pdb::TypeData::MemberFunction(mf) => resolve_type_name(finder, mf.return_type),
         _ => None,
     }
 }
@@ -193,26 +195,18 @@ fn resolve_type_name(finder: &pdb::TypeFinder<'_>, type_index: pdb::TypeIndex) -
 
     let item = finder.find(type_index).ok()?;
     match item.parse().ok()? {
-        pdb::TypeData::Primitive(prim) => {
-            Some(format!("{:?}", prim.kind))
-        }
-        pdb::TypeData::Class(class) => {
-            Some(class.name.to_string().to_string())
-        }
-        pdb::TypeData::Union(u) => {
-            Some(u.name.to_string().to_string())
-        }
-        pdb::TypeData::Enumeration(e) => {
-            Some(e.name.to_string().to_string())
-        }
+        pdb::TypeData::Primitive(prim) => Some(format!("{:?}", prim.kind)),
+        pdb::TypeData::Class(class) => Some(class.name.to_string().to_string()),
+        pdb::TypeData::Union(u) => Some(u.name.to_string().to_string()),
+        pdb::TypeData::Enumeration(e) => Some(e.name.to_string().to_string()),
         pdb::TypeData::Pointer(ptr) => {
             let inner = resolve_type_name(finder, ptr.underlying_type)
                 .unwrap_or_else(|| "void".to_string());
             Some(format!("{}*", inner))
         }
         pdb::TypeData::Array(arr) => {
-            let elem = resolve_type_name(finder, arr.element_type)
-                .unwrap_or_else(|| "?".to_string());
+            let elem =
+                resolve_type_name(finder, arr.element_type).unwrap_or_else(|| "?".to_string());
             Some(format!("{}[]", elem))
         }
         pdb::TypeData::Modifier(m) => {
@@ -226,7 +220,8 @@ fn resolve_type_name(finder: &pdb::TypeFinder<'_>, type_index: pdb::TypeIndex) -
             }
         }
         pdb::TypeData::Procedure(proc) => {
-            let ret = proc.return_type
+            let ret = proc
+                .return_type
                 .and_then(|rt| resolve_type_name(finder, rt))
                 .unwrap_or_else(|| "void".to_string());
             Some(format!("{}(*)()", ret))
@@ -239,39 +234,39 @@ fn resolve_type_name(finder: &pdb::TypeFinder<'_>, type_index: pdb::TypeIndex) -
 /// See https://llvm.org/docs/PDB/TpiStream.html#type-indices
 fn primitive_type_name(idx: u32) -> &'static str {
     match idx {
-        0x0000 => "void",        // T_NOTYPE
-        0x0003 => "void",        // T_VOID
-        0x0010 => "int8_t",      // T_CHAR
-        0x0011 => "int16_t",     // T_SHORT
-        0x0012 => "int32_t",     // T_LONG
-        0x0013 => "int64_t",     // T_QUAD
-        0x0020 => "uint8_t",     // T_UCHAR
-        0x0021 => "uint16_t",    // T_USHORT
-        0x0022 => "uint32_t",    // T_ULONG
-        0x0023 => "uint64_t",    // T_UQUAD
-        0x0030 => "bool",        // T_BOOL08
-        0x0040 => "float",       // T_REAL32
-        0x0041 => "double",      // T_REAL64
-        0x0068 => "int8_t",      // T_INT1
-        0x0069 => "uint8_t",     // T_UINT1
-        0x0070 => "char",        // T_RCHAR
-        0x0071 => "wchar_t",     // T_WCHAR
-        0x0072 => "int16_t",     // T_INT2
-        0x0073 => "uint16_t",    // T_UINT2
-        0x0074 => "int32_t",     // T_INT4
-        0x0075 => "uint32_t",    // T_UINT4
-        0x0076 => "int64_t",     // T_INT8
-        0x0077 => "uint64_t",    // T_UINT8
-        0x0103 => "void*",       // T_PVOID (32-bit pointer)
-        0x0403 => "void*",       // T_32PVOID
-        0x0603 => "void*",       // T_64PVOID
-        0x0410 => "char*",       // T_32PCHAR
-        0x0610 => "char*",       // T_64PCHAR
-        0x0470 => "char*",       // T_32PRCHAR
-        0x0670 => "char*",       // T_64PRCHAR
-        0x0471 => "wchar_t*",    // T_32PWCHAR
-        0x0671 => "wchar_t*",    // T_64PWCHAR
-        _ => "int",              // fallback
+        0x0000 => "void",     // T_NOTYPE
+        0x0003 => "void",     // T_VOID
+        0x0010 => "int8_t",   // T_CHAR
+        0x0011 => "int16_t",  // T_SHORT
+        0x0012 => "int32_t",  // T_LONG
+        0x0013 => "int64_t",  // T_QUAD
+        0x0020 => "uint8_t",  // T_UCHAR
+        0x0021 => "uint16_t", // T_USHORT
+        0x0022 => "uint32_t", // T_ULONG
+        0x0023 => "uint64_t", // T_UQUAD
+        0x0030 => "bool",     // T_BOOL08
+        0x0040 => "float",    // T_REAL32
+        0x0041 => "double",   // T_REAL64
+        0x0068 => "int8_t",   // T_INT1
+        0x0069 => "uint8_t",  // T_UINT1
+        0x0070 => "char",     // T_RCHAR
+        0x0071 => "wchar_t",  // T_WCHAR
+        0x0072 => "int16_t",  // T_INT2
+        0x0073 => "uint16_t", // T_UINT2
+        0x0074 => "int32_t",  // T_INT4
+        0x0075 => "uint32_t", // T_UINT4
+        0x0076 => "int64_t",  // T_INT8
+        0x0077 => "uint64_t", // T_UINT8
+        0x0103 => "void*",    // T_PVOID (32-bit pointer)
+        0x0403 => "void*",    // T_32PVOID
+        0x0603 => "void*",    // T_64PVOID
+        0x0410 => "char*",    // T_32PCHAR
+        0x0610 => "char*",    // T_64PCHAR
+        0x0470 => "char*",    // T_32PRCHAR
+        0x0670 => "char*",    // T_64PRCHAR
+        0x0471 => "wchar_t*", // T_32PWCHAR
+        0x0671 => "wchar_t*", // T_64PWCHAR
+        _ => "int",           // fallback
     }
 }
 

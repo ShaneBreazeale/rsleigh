@@ -6,35 +6,30 @@ pub mod cfg;
 // fold/printer/decompile-pipeline coupling. Pinning the boundary at these
 // two modules makes the limitation honest and gives the gate something
 // concrete to enforce.
+pub mod antidebug_timing;
+pub mod api_resolver;
 #[cfg(feature = "experimental")]
 pub mod cpp_class;
+pub mod crypto_constants;
 pub mod dominators;
 pub mod dwarf;
 pub mod eh_frame;
 pub mod eqsat;
 pub mod fold;
 pub mod go_pclntab;
+pub mod handler_summary;
 pub mod imports;
 pub mod ir;
+pub mod jmp_rax_trampoline;
 pub mod pdb_info;
 pub mod peb_walk;
 pub mod peb_walk_detect;
-pub mod crypto_constants;
-pub mod vm_fingerprint;
-pub mod jmp_rax_trampoline;
-pub mod rip_xref;
-pub mod antidebug_timing;
-pub mod xor_vtable;
-pub mod api_resolver;
-pub mod vm_handler_classify;
-pub mod tag_dispatch;
-pub mod handler_summary;
-pub mod sha256_func_detect;
-pub mod scratch_leak;
-pub mod vm_dispatch_extract;
 pub mod printer;
+pub mod rip_xref;
+pub mod scratch_leak;
 #[cfg(feature = "experimental")]
 pub mod seh_static;
+pub mod sha256_func_detect;
 pub mod signatures;
 mod signatures_crypto;
 mod signatures_cxxabi;
@@ -44,7 +39,12 @@ mod signatures_python;
 mod signatures_win32;
 pub mod ssa;
 pub mod structure;
-pub mod syscall_table; // used by printer
+pub mod syscall_table;
+pub mod tag_dispatch;
+pub mod vm_dispatch_extract;
+pub mod vm_fingerprint;
+pub mod vm_handler_classify;
+pub mod xor_vtable; // used by printer
 
 use pcode_ir::Instruction;
 use rsleigh_api::Architecture;

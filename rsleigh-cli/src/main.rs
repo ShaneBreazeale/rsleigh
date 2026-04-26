@@ -194,7 +194,11 @@ fn main() {
     // VM-RE helper flags. Each takes a comma-separated list of hex
     // addresses (or single address). Emit one line per handler and
     // exit.
-    if vm_classify_arg.is_some() || tag_dispatch_arg.is_some() || summarise_arg.is_some() || vm_dispatch_arg.is_some() {
+    if vm_classify_arg.is_some()
+        || tag_dispatch_arg.is_some()
+        || summarise_arg.is_some()
+        || vm_dispatch_arg.is_some()
+    {
         let data = match std::fs::read(binary_path) {
             Ok(d) => d,
             Err(e) => {
@@ -220,9 +224,7 @@ fn main() {
         };
         if let Some(arg) = vm_classify_arg.as_ref() {
             let addrs = parse_addrs(arg);
-            let encs = rsleigh_decompile::vm_handler_classify::classify_all(
-                &obj, &data, &addrs,
-            );
+            let encs = rsleigh_decompile::vm_handler_classify::classify_all(&obj, &data, &addrs);
             for line in rsleigh_decompile::vm_handler_classify::render(&encs) {
                 println!("{}", line);
             }
@@ -231,8 +233,7 @@ fn main() {
         if let Some(arg) = tag_dispatch_arg.as_ref() {
             let addrs = parse_addrs(arg);
             for &a in &addrs {
-                let cases =
-                    rsleigh_decompile::tag_dispatch::scan_function(&obj, &data, a);
+                let cases = rsleigh_decompile::tag_dispatch::scan_function(&obj, &data, a);
                 println!("=== {:#x} — {} cases ===", a, cases.len());
                 for line in rsleigh_decompile::tag_dispatch::render(&cases) {
                     println!("  {}", line);
@@ -242,8 +243,7 @@ fn main() {
         }
         if let Some(arg) = summarise_arg.as_ref() {
             let addrs = parse_addrs(arg);
-            let summaries =
-                rsleigh_decompile::handler_summary::summarise_all(&obj, &data, &addrs);
+            let summaries = rsleigh_decompile::handler_summary::summarise_all(&obj, &data, &addrs);
             for line in rsleigh_decompile::handler_summary::render(&summaries) {
                 println!("{}", line);
             }
@@ -252,8 +252,7 @@ fn main() {
         if let Some(arg) = vm_dispatch_arg.as_ref() {
             let addrs = parse_addrs(arg);
             for &a in &addrs {
-                if let Some(info) =
-                    rsleigh_decompile::vm_dispatch_extract::extract(&obj, &data, a)
+                if let Some(info) = rsleigh_decompile::vm_dispatch_extract::extract(&obj, &data, a)
                 {
                     for line in rsleigh_decompile::vm_dispatch_extract::render(&info) {
                         println!("{}", line);
@@ -752,12 +751,10 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
     // already found.
     if !trampolines.is_empty() {
         let tramp_vas: Vec<u64> = trampolines.iter().map(|t| t.addr).collect();
-        let iat_slots = rsleigh_decompile::xor_vtable::iat_slots_for_trampolines(
-            &obj, &data, &tramp_vas,
-        );
+        let iat_slots =
+            rsleigh_decompile::xor_vtable::iat_slots_for_trampolines(&obj, &data, &tramp_vas);
         if !iat_slots.is_empty() {
-            let dispatchers =
-                rsleigh_decompile::xor_vtable::scan(&obj, &data, &iat_slots);
+            let dispatchers = rsleigh_decompile::xor_vtable::scan(&obj, &data, &iat_slots);
             if !dispatchers.is_empty() {
                 eprintln!(
                     "// [xor-vtable] found {} XOR-encoded dispatcher site(s):",
@@ -796,8 +793,9 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
             "// [api-resolver] found {} hash-resolved API resolver(s):",
             resolvers.len()
         );
-        for line in
-            rsleigh_decompile::api_resolver::render(&resolvers).iter().take(8)
+        for line in rsleigh_decompile::api_resolver::render(&resolvers)
+            .iter()
+            .take(8)
         {
             eprintln!("//   - {}", line);
         }
@@ -809,10 +807,7 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
     // PEB-walk anti-debug + API-resolver pattern.
     let peb_hits = rsleigh_decompile::peb_walk_detect::scan(&obj, &data);
     if !peb_hits.is_empty() {
-        eprintln!(
-            "// [peb-walk] found {} PEB-access site(s):",
-            peb_hits.len()
-        );
+        eprintln!("// [peb-walk] found {} PEB-access site(s):", peb_hits.len());
         for line in rsleigh_decompile::peb_walk_detect::render(&peb_hits)
             .iter()
             .take(8)
@@ -838,11 +833,10 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                 continue;
             }
             let base_va = pe.image_base as u64 + sec.virtual_address as u64;
-            let (_reads, probes) =
-                rsleigh_decompile::antidebug_timing::scan_region(
-                    &data[raddr..raddr + rsize],
-                    base_va,
-                );
+            let (_reads, probes) = rsleigh_decompile::antidebug_timing::scan_region(
+                &data[raddr..raddr + rsize],
+                base_va,
+            );
             all_probes.extend(probes);
         }
         if !all_probes.is_empty() {
@@ -865,10 +859,7 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
     // SHA-256 implementation detection via H0/K constant density.
     let sha_hits = rsleigh_decompile::sha256_func_detect::scan(&obj, &data);
     if !sha_hits.is_empty() {
-        eprintln!(
-            "// [sha256] found {} SHA-256 region(s):",
-            sha_hits.len()
-        );
+        eprintln!("// [sha256] found {} SHA-256 region(s):", sha_hits.len());
         for line in rsleigh_decompile::sha256_func_detect::render(&sha_hits)
             .iter()
             .take(8)
@@ -1015,8 +1006,7 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                     if raddr + rsize > data.len() {
                         continue;
                     }
-                    let base_va =
-                        pe.image_base as u64 + sec.virtual_address as u64;
+                    let base_va = pe.image_base as u64 + sec.virtual_address as u64;
                     let body = &data[raddr..raddr + rsize];
                     let mut k = 0;
                     while k + 5 <= body.len() {
@@ -1042,12 +1032,8 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                             && body[k + 1] == 0x89
                             && body[k + 2] == 0x5c
                             && body[k + 3] == 0x24)
-                            || (body[k] == 0x48
-                                && body[k + 1] == 0x83
-                                && body[k + 2] == 0xec)
-                            || (body[k] == 0x48
-                                && body[k + 1] == 0x81
-                                && body[k + 2] == 0xec)
+                            || (body[k] == 0x48 && body[k + 1] == 0x83 && body[k + 2] == 0xec)
+                            || (body[k] == 0x48 && body[k + 1] == 0x81 && body[k + 2] == 0xec)
                             || (body[k] == 0x40 && body[k + 1] == 0x53)
                             || (body[k] == 0x40 && body[k + 1] == 0x55)
                             || (body[k] == 0x40 && body[k + 1] == 0x57);

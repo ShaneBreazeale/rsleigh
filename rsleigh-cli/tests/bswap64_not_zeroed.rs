@@ -16,7 +16,9 @@ const GIT_REPACK: &str = "/tmp/git-repack/git-repack";
 const RSLEIGH_BIN: &str = env!("CARGO_BIN_EXE_rsleigh");
 
 fn fixture_available() -> bool {
-    if Path::new(GIT_REPACK).exists() { return true; }
+    if Path::new(GIT_REPACK).exists() {
+        return true;
+    }
     if std::env::var_os("RSLEIGH_REQUIRE_GIT_REPACK_FIXTURE").is_some() {
         panic!("git-repack fixture missing at {GIT_REPACK}");
     }
@@ -26,12 +28,18 @@ fn fixture_available() -> bool {
 
 #[test]
 fn bswap64_upper_half_shift_survives_simba() {
-    if !fixture_available() { return; }
+    if !fixture_available() {
+        return;
+    }
     let out = Command::new(RSLEIGH_BIN)
         .args([GIT_REPACK, "0x49ae98"])
         .output()
         .expect("rsleigh invocation");
-    assert!(out.status.success(), "rsleigh failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "rsleigh failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = String::from_utf8(out.stdout).expect("UTF-8");
 
     // Must mention both the upper mask (0xff00...00) and a right shift —

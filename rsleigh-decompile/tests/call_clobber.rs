@@ -5,8 +5,8 @@
 
 use pcode_ir::{AddressSpaceId, Instruction, PcodeOp, Varnode};
 use rsleigh_api::{Architecture, Decoder};
-use rsleigh_decompile::decompile_with_binary;
 use rsleigh_decompile::cfg::build_cfg;
+use rsleigh_decompile::decompile_with_binary;
 use rsleigh_decompile::fold::CallingConv;
 use rsleigh_decompile::ir::Expr;
 use rsleigh_decompile::ssa::build_ssa_with_cc;
@@ -43,13 +43,15 @@ fn post_call_rax_is_unknown_win64() {
             // call rel32 (to +0x20)      E8 13 00 00 00    (returns to insn after call)
             // mov rdx, rax               48 89 C2
             let bytes: [u8; 18] = [
-                0x48, 0x8D, 0x05, 0x10, 0x00, 0x00, 0x00,
-                0x48, 0x89, 0xC1,
-                0xE8, 0x13, 0x00, 0x00, 0x00,
-                0x48, 0x89, 0xC2,
+                0x48, 0x8D, 0x05, 0x10, 0x00, 0x00, 0x00, 0x48, 0x89, 0xC1, 0xE8, 0x13, 0x00, 0x00,
+                0x00, 0x48, 0x89, 0xC2,
             ];
             let insts = decode(&bytes, 0x1000);
-            assert!(insts.len() >= 4, "expected >=4 instructions, got {}", insts.len());
+            assert!(
+                insts.len() >= 4,
+                "expected >=4 instructions, got {}",
+                insts.len()
+            );
 
             let cfg = build_cfg(&insts);
             let ssa = build_ssa_with_cc(&cfg, CallingConv::Win64);
@@ -57,7 +59,11 @@ fn post_call_rax_is_unknown_win64() {
             // The "mov rdx, rax" instruction reads RAX post-call. Its source must be
             // a VarDef whose expr is Expr::Unknown (a fresh clobber), NOT the LEA
             // expression from before the call.
-            let rdx_vn = Varnode { space: AddressSpaceId::Register, offset: 16, size: 8 };
+            let rdx_vn = Varnode {
+                space: AddressSpaceId::Register,
+                offset: 16,
+                size: 8,
+            };
             let rdx_var = ssa
                 .vars
                 .iter()
@@ -105,7 +111,10 @@ fn check2_no_star_c_after_clobber() {
     let pe = match goblin::pe::PE::parse(&data) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("skipping check2_no_star_c_after_clobber: PE parse error: {}", e);
+            eprintln!(
+                "skipping check2_no_star_c_after_clobber: PE parse error: {}",
+                e
+            );
             return;
         }
     };
@@ -140,11 +149,16 @@ fn check2_no_star_c_after_clobber() {
             while io < bytes.len() {
                 match dec.decode(&bytes[io..], func_va + io as u64) {
                     Ok(inst) => {
-                        let is_ret = inst.ops.iter().any(|op| matches!(op, PcodeOp::Return { .. }));
+                        let is_ret = inst
+                            .ops
+                            .iter()
+                            .any(|op| matches!(op, PcodeOp::Return { .. }));
                         let l = inst.len as usize;
                         insts.push((func_va + io as u64, inst));
                         io += l;
-                        if is_ret { break; }
+                        if is_ret {
+                            break;
+                        }
                     }
                     Err(_) => break,
                 }
@@ -159,7 +173,10 @@ fn check2_no_star_c_after_clobber() {
             assert!(
                 !out.contains("*(C)"),
                 "printer rendered *(C) after call-clobber fix; output snippet:\n{}",
-                out.lines().filter(|l| l.contains("*(C)")).collect::<Vec<_>>().join("\n")
+                out.lines()
+                    .filter(|l| l.contains("*(C)"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             );
         })
         .expect("thread spawn failed");

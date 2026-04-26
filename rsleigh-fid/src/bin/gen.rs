@@ -77,7 +77,11 @@ fn ingest_any(data: &[u8], arch: Architecture) -> Vec<(String, u64, Vec<u8>)> {
     }
 }
 
-fn ingest_macho(data: &[u8], _arch: Architecture, mach: goblin::mach::Mach) -> Vec<(String, u64, Vec<u8>)> {
+fn ingest_macho(
+    data: &[u8],
+    _arch: Architecture,
+    mach: goblin::mach::Mach,
+) -> Vec<(String, u64, Vec<u8>)> {
     use goblin::mach::Mach;
     let mo = match mach {
         Mach::Binary(m) => m,
@@ -89,7 +93,12 @@ fn ingest_macho(data: &[u8], _arch: Architecture, mach: goblin::mach::Mach) -> V
     // Build vm→file mapping from segments.
     let mut segs: Vec<(u64, u64, u64, u64)> = Vec::new();
     for seg in mo.segments.iter() {
-        segs.push((seg.vmaddr, seg.vmaddr + seg.vmsize, seg.fileoff, seg.filesize));
+        segs.push((
+            seg.vmaddr,
+            seg.vmaddr + seg.vmsize,
+            seg.fileoff,
+            seg.filesize,
+        ));
     }
     let va_to_off = |va: u64, sz: u64| -> Option<(usize, usize)> {
         for (s, e, o, f) in &segs {
@@ -108,14 +117,20 @@ fn ingest_macho(data: &[u8], _arch: Architecture, mach: goblin::mach::Mach) -> V
     if let Ok(it) = mo.symbols.as_ref().ok_or(()).map(|s| s.iter()) {
         for r in it {
             if let Ok((name, nlist)) = r {
-                if nlist.is_stab() { continue; }
+                if nlist.is_stab() {
+                    continue;
+                }
                 if (nlist.n_type & goblin::mach::symbols::N_TYPE) != goblin::mach::symbols::N_SECT {
                     continue;
                 }
                 if nlist.n_value == 0 || name.is_empty() {
                     continue;
                 }
-                let n = if let Some(s) = name.strip_prefix('_') { s } else { name };
+                let n = if let Some(s) = name.strip_prefix('_') {
+                    s
+                } else {
+                    name
+                };
                 syms.push((nlist.n_value, n.to_string()));
             }
         }
@@ -185,7 +200,11 @@ fn ingest_pe(data: &[u8], _arch: Architecture, pe: goblin::pe::PE) -> Vec<(Strin
     out
 }
 
-fn ingest_archive(data: &[u8], arch: Architecture, archive: goblin::archive::Archive) -> Vec<(String, u64, Vec<u8>)> {
+fn ingest_archive(
+    data: &[u8],
+    arch: Architecture,
+    archive: goblin::archive::Archive,
+) -> Vec<(String, u64, Vec<u8>)> {
     let mut out = Vec::new();
     for (name, member, _) in archive.summarize() {
         let start = member.offset as usize;
@@ -210,7 +229,7 @@ fn ingest_archive(data: &[u8], arch: Architecture, archive: goblin::archive::Arc
 }
 
 fn ingest_elf(data: &[u8], arch: Architecture) -> Vec<(String, u64, Vec<u8>)> {
-    use goblin::elf::{Elf, sym::STT_FUNC};
+    use goblin::elf::{sym::STT_FUNC, Elf};
     let elf = match Elf::parse(data) {
         Ok(e) => e,
         Err(_) => return Vec::new(),
@@ -220,7 +239,14 @@ fn ingest_elf(data: &[u8], arch: Architecture) -> Vec<(String, u64, Vec<u8>)> {
         .program_headers
         .iter()
         .filter(|ph| ph.p_type == goblin::elf::program_header::PT_LOAD)
-        .map(|ph| (ph.p_vaddr, ph.p_vaddr + ph.p_memsz, ph.p_offset, ph.p_filesz))
+        .map(|ph| {
+            (
+                ph.p_vaddr,
+                ph.p_vaddr + ph.p_memsz,
+                ph.p_offset,
+                ph.p_filesz,
+            )
+        })
         .collect();
     segs.sort_by_key(|s| s.0);
     let va_to_off = |va: u64, sz: u64| -> Option<(usize, usize)> {
@@ -253,7 +279,11 @@ fn ingest_elf(data: &[u8], arch: Architecture) -> Vec<(String, u64, Vec<u8>)> {
         if off + len > data.len() {
             continue;
         }
-        let name = match elf.strtab.get_at(sym.st_name).or(elf.dynstrtab.get_at(sym.st_name)) {
+        let name = match elf
+            .strtab
+            .get_at(sym.st_name)
+            .or(elf.dynstrtab.get_at(sym.st_name))
+        {
             Some(n) => n.to_string(),
             None => continue,
         };

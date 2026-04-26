@@ -27,15 +27,14 @@
 
 use std::path::Path;
 
-const EXECUTION_RS: &str =
-    "src/codegen/builder/disassembler/constructor/execution.rs";
+const EXECUTION_RS: &str = "src/codegen/builder/disassembler/constructor/execution.rs";
 const SILENT_FALLBACK_BUDGET: usize = 5;
 
 #[test]
 fn codegen_silent_fallback_count_within_budget() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(EXECUTION_RS);
-    let src = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    let src =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
 
     let count = src
         .lines()
@@ -52,8 +51,6 @@ fn codegen_silent_fallback_count_within_budget() {
         "silent-fallback budget violated: counted {} occurrences in {}, \
          expected exactly {}. Either remove the new fallback or update \
          SILENT_FALLBACK_BUDGET + the MOTIVATIONS list in this test.",
-        count,
-        EXECUTION_RS,
-        SILENT_FALLBACK_BUDGET
+        count, EXECUTION_RS, SILENT_FALLBACK_BUDGET
     );
 }

@@ -2135,9 +2135,7 @@ fn simplify_expr(expr: Expr, vars: &[VarDef]) -> Expr {
                 // -(-x) → x
                 Expr::UnaryOp(UnaryOpKind::Neg, x) => Expr::Var(*x),
                 // -(a - b) → b - a — distribute negation through Sub.
-                Expr::BinOp(BinOpKind::Sub, a, b) => {
-                    Expr::BinOp(BinOpKind::Sub, *b, *a)
-                }
+                Expr::BinOp(BinOpKind::Sub, a, b) => Expr::BinOp(BinOpKind::Sub, *b, *a),
                 _ => expr,
             }
         }

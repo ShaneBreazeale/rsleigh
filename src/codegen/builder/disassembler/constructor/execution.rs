@@ -1299,7 +1299,11 @@ impl<'a> ExecutionGenerator<'a> {
             // bit width.
             other => {
                 let preserve_size = || {
-                    Self::bytes_from_bits(op.input.len_bits(&self.disassembler.sleigh, execution).get())
+                    Self::bytes_from_bits(
+                        op.input
+                            .len_bits(&self.disassembler.sleigh, execution)
+                            .get(),
+                    )
                 };
                 let (variant, out_size) = match other {
                     Unary::Zext(b) => (quote! { IntZext }, Self::bytes_from_bits(b.get())),

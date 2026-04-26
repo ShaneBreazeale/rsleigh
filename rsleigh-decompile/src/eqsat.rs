@@ -4,7 +4,7 @@
 //! that prefers fewer operations. The e-graph explores all equivalent forms
 //! simultaneously, then extracts the cheapest one.
 
-use egg::{define_language, rewrite, Id, Language, RecExpr, Runner, Rewrite, CostFunction};
+use egg::{define_language, rewrite, CostFunction, Id, Language, RecExpr, Rewrite, Runner};
 
 // Define the expression language for MBA simplification.
 // This is a standalone language (not our SSA IR) — we convert to/from it.
@@ -73,24 +73,20 @@ pub fn mba_rules() -> Vec<Rewrite<Mba, ()>> {
         rewrite!("or-0-l";  "(| 0 ?a)" => "?a"),
         rewrite!("xor-0-r"; "(^ ?a 0)" => "?a"),
         rewrite!("xor-0-l"; "(^ 0 ?a)" => "?a"),
-
         // === Self-operations ===
         rewrite!("sub-self"; "(- ?a ?a)" => "0"),
         rewrite!("xor-self"; "(^ ?a ?a)" => "0"),
         rewrite!("and-self"; "(& ?a ?a)" => "?a"),
         rewrite!("or-self";  "(| ?a ?a)" => "?a"),
-
         // === Double negation ===
         rewrite!("neg-neg"; "(neg (neg ?a))" => "?a"),
         rewrite!("not-not"; "(~ (~ ?a))" => "?a"),
-
         // === Commutativity ===
         rewrite!("add-comm"; "(+ ?a ?b)" => "(+ ?b ?a)"),
         rewrite!("mul-comm"; "(* ?a ?b)" => "(* ?b ?a)"),
         rewrite!("and-comm"; "(& ?a ?b)" => "(& ?b ?a)"),
         rewrite!("or-comm";  "(| ?a ?b)" => "(| ?b ?a)"),
         rewrite!("xor-comm"; "(^ ?a ?b)" => "(^ ?b ?a)"),
-
         // === MBA identities (the key deobfuscation rules) ===
         // (a + b) - 2*(a & b) = a ^ b
         rewrite!("mba-xor-1"; "(- (+ ?a ?b) (* 2 (& ?a ?b)))" => "(^ ?a ?b)"),
@@ -104,11 +100,9 @@ pub fn mba_rules() -> Vec<Rewrite<Mba, ()>> {
         rewrite!("mba-or-1"; "(+ (^ ?a ?b) (& ?a ?b))" => "(| ?a ?b)"),
         // (a & b) + (a | b) = a + b
         rewrite!("mba-add-3"; "(+ (& ?a ?b) (| ?a ?b))" => "(+ ?a ?b)"),
-
         // === Absorption ===
         rewrite!("absorb-and-or"; "(& ?a (| ?a ?b))" => "?a"),
         rewrite!("absorb-or-and"; "(| ?a (& ?a ?b))" => "?a"),
-
         // === Cancellation ===
         // a - (a - b) = b
         rewrite!("cancel-sub"; "(- ?a (- ?a ?b))" => "?b"),
@@ -119,13 +113,11 @@ pub fn mba_rules() -> Vec<Rewrite<Mba, ()>> {
         rewrite!("cancel-add-sub-l"; "(- (+ ?a ?b) ?a)" => "?b"),
         // (a - b) + b = a
         rewrite!("cancel-sub-add"; "(+ (- ?a ?b) ?b)" => "?a"),
-
         // === Distributivity ===
         // a * (b + c) = a*b + a*c
         rewrite!("dist-mul-add"; "(* ?a (+ ?b ?c))" => "(+ (* ?a ?b) (* ?a ?c))"),
         // Factor: a*b + a*c = a * (b + c)
         rewrite!("factor-mul-add"; "(+ (* ?a ?b) (* ?a ?c))" => "(* ?a (+ ?b ?c))"),
-
         // === Negation / complement ===
         // -a = ~a + 1  (two's complement)
         rewrite!("neg-as-not"; "(neg ?a)" => "(+ (~ ?a) 1)"),
@@ -133,14 +125,12 @@ pub fn mba_rules() -> Vec<Rewrite<Mba, ()>> {
         rewrite!("add-neg"; "(+ ?a (neg ?b))" => "(- ?a ?b)"),
         // -1 * a = neg a
         rewrite!("mul-neg1"; "(* -1 ?a)" => "(neg ?a)"),
-
         // === De Morgan's laws ===
         rewrite!("demorgan-and"; "(~ (& ?a ?b))" => "(| (~ ?a) (~ ?b))"),
         rewrite!("demorgan-or"; "(~ (| ?a ?b))" => "(& (~ ?a) (~ ?b))"),
         // Reverse De Morgan (prefer AND/OR over NOT-of-NOT)
         rewrite!("demorgan-and-rev"; "(| (~ ?a) (~ ?b))" => "(~ (& ?a ?b))"),
         rewrite!("demorgan-or-rev"; "(& (~ ?a) (~ ?b))" => "(~ (| ?a ?b))"),
-
         // === Shift identities ===
         rewrite!("shl-0"; "(<< ?a 0)" => "?a"),
         rewrite!("shr-0"; "(>> ?a 0)" => "?a"),
@@ -159,29 +149,44 @@ pub fn ssa_to_egg(
     vars: &[crate::ir::VarDef],
     max_depth: usize,
 ) -> Option<(RecExpr<Mba>, Vec<crate::ir::VarId>)> {
-    use crate::ir::{Expr, BinOpKind, UnaryOpKind, VarId};
+    use crate::ir::{BinOpKind, Expr, UnaryOpKind, VarId};
 
     let mut expr = RecExpr::default();
     let mut var_map: Vec<VarId> = Vec::new(); // egg var index → SSA VarId
 
     fn convert(
-        v: usize, vars: &[crate::ir::VarDef], expr: &mut RecExpr<Mba>,
-        var_map: &mut Vec<VarId>, depth: usize, max_depth: usize,
+        v: usize,
+        vars: &[crate::ir::VarDef],
+        expr: &mut RecExpr<Mba>,
+        var_map: &mut Vec<VarId>,
+        depth: usize,
+        max_depth: usize,
     ) -> Option<Id> {
-        if depth > max_depth { return None; }
-        if v >= vars.len() { return None; }
+        if depth > max_depth {
+            return None;
+        }
+        if v >= vars.len() {
+            return None;
+        }
 
         let vdef = &vars[v];
         match &vdef.expr {
             Expr::Const(val, _) => Some(expr.add(Mba::Num(*val as i64))),
-            Expr::Unknown | Expr::Load(_) | Expr::Phi(_) | Expr::FieldAccess(_, _) | Expr::Ternary(_, _, _) | Expr::UserOp { .. } => {
+            Expr::Unknown
+            | Expr::Load(_)
+            | Expr::Phi(_)
+            | Expr::FieldAccess(_, _)
+            | Expr::Ternary(_, _, _)
+            | Expr::UserOp { .. } => {
                 // Base variable — assign an index
                 let idx = var_map.len();
                 var_map.push(VarId(v as u32));
                 let idx_id = expr.add(Mba::Num(idx as i64));
                 Some(expr.add(Mba::Var(idx_id)))
             }
-            Expr::Var(inner) => convert(inner.0 as usize, vars, expr, var_map, depth + 1, max_depth),
+            Expr::Var(inner) => {
+                convert(inner.0 as usize, vars, expr, var_map, depth + 1, max_depth)
+            }
             Expr::BinOp(kind, left, right) => {
                 let l = convert(left.0 as usize, vars, expr, var_map, depth + 1, max_depth)?;
                 let r = convert(right.0 as usize, vars, expr, var_map, depth + 1, max_depth)?;
@@ -221,11 +226,14 @@ pub fn egg_to_ssa(
     vars: &mut Vec<crate::ir::VarDef>,
     sz: u32,
 ) -> Option<crate::ir::Expr> {
-    use crate::ir::{Expr, BinOpKind, UnaryOpKind, VarId};
+    use crate::ir::{BinOpKind, Expr, UnaryOpKind, VarId};
 
     fn convert(
-        id: Id, best: &RecExpr<Mba>, var_map: &[VarId],
-        vars: &mut Vec<crate::ir::VarDef>, sz: u32,
+        id: Id,
+        best: &RecExpr<Mba>,
+        var_map: &[VarId],
+        vars: &mut Vec<crate::ir::VarDef>,
+        sz: u32,
     ) -> Option<Expr> {
         let node = &best[id];
         match node {
@@ -294,26 +302,49 @@ pub fn egg_to_ssa(
 
 /// Helper: create a BinOp by allocating intermediate SSA vars if needed.
 fn make_binop(
-    kind: crate::ir::BinOpKind, left: crate::ir::Expr, right: crate::ir::Expr,
-    vars: &mut Vec<crate::ir::VarDef>, sz: u32,
+    kind: crate::ir::BinOpKind,
+    left: crate::ir::Expr,
+    right: crate::ir::Expr,
+    vars: &mut Vec<crate::ir::VarDef>,
+    sz: u32,
 ) -> crate::ir::Expr {
     let left_id = match left {
         crate::ir::Expr::Var(id) => id,
         crate::ir::Expr::Const(_, _) => {
             let id = crate::ir::VarId(vars.len() as u32);
             vars.push(crate::ir::VarDef {
-                id, varnode: pcode_ir::Varnode { space: pcode_ir::AddressSpaceId::Unique, offset: 0xE000_0000 + id.0 as u64, size: sz },
-                expr: left, size: sz, use_count: 1, param_name: None, call_return: false,
-                inferred_type: crate::ir::InferredType::Unknown, display_type: None,
+                id,
+                varnode: pcode_ir::Varnode {
+                    space: pcode_ir::AddressSpaceId::Unique,
+                    offset: 0xE000_0000 + id.0 as u64,
+                    size: sz,
+                },
+                expr: left,
+                size: sz,
+                use_count: 1,
+                param_name: None,
+                call_return: false,
+                inferred_type: crate::ir::InferredType::Unknown,
+                display_type: None,
             });
             id
         }
         other => {
             let id = crate::ir::VarId(vars.len() as u32);
             vars.push(crate::ir::VarDef {
-                id, varnode: pcode_ir::Varnode { space: pcode_ir::AddressSpaceId::Unique, offset: 0xE000_0000 + id.0 as u64, size: sz },
-                expr: other, size: sz, use_count: 1, param_name: None, call_return: false,
-                inferred_type: crate::ir::InferredType::Unknown, display_type: None,
+                id,
+                varnode: pcode_ir::Varnode {
+                    space: pcode_ir::AddressSpaceId::Unique,
+                    offset: 0xE000_0000 + id.0 as u64,
+                    size: sz,
+                },
+                expr: other,
+                size: sz,
+                use_count: 1,
+                param_name: None,
+                call_return: false,
+                inferred_type: crate::ir::InferredType::Unknown,
+                display_type: None,
             });
             id
         }
@@ -323,18 +354,38 @@ fn make_binop(
         crate::ir::Expr::Const(_, _) => {
             let id = crate::ir::VarId(vars.len() as u32);
             vars.push(crate::ir::VarDef {
-                id, varnode: pcode_ir::Varnode { space: pcode_ir::AddressSpaceId::Unique, offset: 0xE000_0000 + id.0 as u64, size: sz },
-                expr: right, size: sz, use_count: 1, param_name: None, call_return: false,
-                inferred_type: crate::ir::InferredType::Unknown, display_type: None,
+                id,
+                varnode: pcode_ir::Varnode {
+                    space: pcode_ir::AddressSpaceId::Unique,
+                    offset: 0xE000_0000 + id.0 as u64,
+                    size: sz,
+                },
+                expr: right,
+                size: sz,
+                use_count: 1,
+                param_name: None,
+                call_return: false,
+                inferred_type: crate::ir::InferredType::Unknown,
+                display_type: None,
             });
             id
         }
         other => {
             let id = crate::ir::VarId(vars.len() as u32);
             vars.push(crate::ir::VarDef {
-                id, varnode: pcode_ir::Varnode { space: pcode_ir::AddressSpaceId::Unique, offset: 0xE000_0000 + id.0 as u64, size: sz },
-                expr: other, size: sz, use_count: 1, param_name: None, call_return: false,
-                inferred_type: crate::ir::InferredType::Unknown, display_type: None,
+                id,
+                varnode: pcode_ir::Varnode {
+                    space: pcode_ir::AddressSpaceId::Unique,
+                    offset: 0xE000_0000 + id.0 as u64,
+                    size: sz,
+                },
+                expr: other,
+                size: sz,
+                use_count: 1,
+                param_name: None,
+                call_return: false,
+                inferred_type: crate::ir::InferredType::Unknown,
+                display_type: None,
             });
             id
         }
@@ -343,17 +394,29 @@ fn make_binop(
 }
 
 fn make_unaryop(
-    kind: crate::ir::UnaryOpKind, inner: crate::ir::Expr,
-    vars: &mut Vec<crate::ir::VarDef>, sz: u32,
+    kind: crate::ir::UnaryOpKind,
+    inner: crate::ir::Expr,
+    vars: &mut Vec<crate::ir::VarDef>,
+    sz: u32,
 ) -> crate::ir::Expr {
     let inner_id = match inner {
         crate::ir::Expr::Var(id) => id,
         other => {
             let id = crate::ir::VarId(vars.len() as u32);
             vars.push(crate::ir::VarDef {
-                id, varnode: pcode_ir::Varnode { space: pcode_ir::AddressSpaceId::Unique, offset: 0xE000_0000 + id.0 as u64, size: sz },
-                expr: other, size: sz, use_count: 1, param_name: None, call_return: false,
-                inferred_type: crate::ir::InferredType::Unknown, display_type: None,
+                id,
+                varnode: pcode_ir::Varnode {
+                    space: pcode_ir::AddressSpaceId::Unique,
+                    offset: 0xE000_0000 + id.0 as u64,
+                    size: sz,
+                },
+                expr: other,
+                size: sz,
+                use_count: 1,
+                param_name: None,
+                call_return: false,
+                inferred_type: crate::ir::InferredType::Unknown,
+                display_type: None,
             });
             id
         }
@@ -363,10 +426,7 @@ fn make_unaryop(
 
 /// Run equality saturation on a single expression and return the simplified form.
 /// Returns None if the expression can't be simplified or conversion fails.
-pub fn simplify_expr(
-    var_idx: usize,
-    vars: &mut Vec<crate::ir::VarDef>,
-) -> Option<crate::ir::Expr> {
+pub fn simplify_expr(var_idx: usize, vars: &mut Vec<crate::ir::VarDef>) -> Option<crate::ir::Expr> {
     let sz = vars[var_idx].size;
 
     // Convert SSA → egg (max depth 15 to avoid huge expressions)
@@ -375,11 +435,15 @@ pub fn simplify_expr(
     let expr_len = egg_expr.as_ref().len();
 
     // Skip tiny expressions (not worth the overhead)
-    if expr_len < 5 { return None; }
+    if expr_len < 5 {
+        return None;
+    }
 
     // Skip very large expressions — egg's union-find can panic on pathological
     // inputs with deep expression trees and commutativity rules
-    if expr_len > 500 { return None; }
+    if expr_len > 500 {
+        return None;
+    }
 
     let original_cost = {
         let root = Id::from(expr_len - 1);
@@ -392,8 +456,8 @@ pub fn simplify_expr(
     let rules = mba_rules();
     let runner = Runner::<Mba, (), ()>::default()
         .with_expr(&egg_expr)
-        .with_iter_limit(20)       // limit iterations (reduced from 30)
-        .with_node_limit(5_000)    // limit e-graph size (reduced from 10K)
+        .with_iter_limit(20) // limit iterations (reduced from 30)
+        .with_node_limit(5_000) // limit e-graph size (reduced from 10K)
         .with_time_limit(std::time::Duration::from_millis(50))
         .run(&rules);
 
@@ -403,8 +467,12 @@ pub fn simplify_expr(
     let (best_cost, best_expr) = extractor.find_best(root);
 
     // Only accept if it's actually simpler
-    if best_cost >= original_cost { return None; }
-    if best_expr.as_ref().len() >= expr_len { return None; }
+    if best_cost >= original_cost {
+        return None;
+    }
+    if best_expr.as_ref().len() >= expr_len {
+        return None;
+    }
 
     // Convert egg → SSA
     egg_to_ssa(&best_expr, &var_map, vars, sz)

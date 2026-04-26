@@ -19,10 +19,15 @@ fn decode_x64(bytes: &[u8], base: u64) -> Vec<(u64, Instruction)> {
         match dec.decode(&bytes[off..], addr) {
             Ok(inst) => {
                 let l = inst.len as usize;
-                let is_ret = inst.ops.iter().any(|op| matches!(op, PcodeOp::Return { .. }));
+                let is_ret = inst
+                    .ops
+                    .iter()
+                    .any(|op| matches!(op, PcodeOp::Return { .. }));
                 insts.push((addr, inst));
                 off += l;
-                if is_ret { break; }
+                if is_ret {
+                    break;
+                }
             }
             Err(_) => break,
         }
@@ -150,7 +155,9 @@ fn check2_has_no_chained_rsp_arithmetic() {
             let has_chain = out.lines().any(|l| {
                 if let Some(idx) = l.find("RSP - ") {
                     let rest = &l[idx + 6..];
-                    rest.chars().next().map_or(false, |c| c.is_ascii_hexdigit() || c.is_ascii_digit())
+                    rest.chars()
+                        .next()
+                        .map_or(false, |c| c.is_ascii_hexdigit() || c.is_ascii_digit())
                         && rest.contains(" -")
                 } else {
                     false
@@ -159,7 +166,10 @@ fn check2_has_no_chained_rsp_arithmetic() {
             assert!(
                 !has_chain,
                 "check2 output still contains chained RSP arithmetic.\nLines with RSP:\n{}",
-                out.lines().filter(|l| l.contains("RSP")).collect::<Vec<_>>().join("\n")
+                out.lines()
+                    .filter(|l| l.contains("RSP"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
             );
 
             assert!(
@@ -190,13 +200,13 @@ fn decompile_rsp_relative_access_uses_local_name() {
         .stack_size(32 * 1024 * 1024)
         .spawn(|| {
             let bytes: &[u8] = &[
-                0x48, 0x83, 0xEC, 0x28,               // sub rsp, 0x28
-                0x48, 0x89, 0x7C, 0x24, 0x20,         // mov [rsp+0x20], rdi
-                0x48, 0x89, 0x74, 0x24, 0x18,         // mov [rsp+0x18], rsi
-                0x48, 0x8B, 0x44, 0x24, 0x20,         // mov rax, [rsp+0x20]
-                0x48, 0x0F, 0xAF, 0x44, 0x24, 0x18,   // imul rax, [rsp+0x18]
-                0x48, 0x83, 0xC4, 0x28,               // add rsp, 0x28
-                0xC3,                                 // ret
+                0x48, 0x83, 0xEC, 0x28, // sub rsp, 0x28
+                0x48, 0x89, 0x7C, 0x24, 0x20, // mov [rsp+0x20], rdi
+                0x48, 0x89, 0x74, 0x24, 0x18, // mov [rsp+0x18], rsi
+                0x48, 0x8B, 0x44, 0x24, 0x20, // mov rax, [rsp+0x20]
+                0x48, 0x0F, 0xAF, 0x44, 0x24, 0x18, // imul rax, [rsp+0x18]
+                0x48, 0x83, 0xC4, 0x28, // add rsp, 0x28
+                0xC3, // ret
             ];
             let insts = decode_x64(bytes, 0x1000);
             let out = decompile_with_binary(Architecture::X86_64, &insts, None, None);

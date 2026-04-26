@@ -4,7 +4,7 @@
 //! pipeline. Instead, this module directly parses WASM bytecode and reconstructs
 //! expressions by simulating the value stack.
 
-use wasmparser::{Parser, Payload, Operator, ValType, BlockType};
+use wasmparser::{BlockType, Operator, Parser, Payload, ValType};
 
 /// A discovered WASM function with its name, type, and body offset.
 pub struct WasmFunc {
@@ -66,7 +66,10 @@ pub fn parse_wasm(data: &[u8]) -> Vec<WasmFunc> {
             }
             Payload::CodeSectionEntry(body) => {
                 let func_idx = import_count + code_idx;
-                let type_idx = func_type_indices.get(code_idx as usize).copied().unwrap_or(0) as usize;
+                let type_idx = func_type_indices
+                    .get(code_idx as usize)
+                    .copied()
+                    .unwrap_or(0) as usize;
                 let (params, results) = func_types.get(type_idx).cloned().unwrap_or_default();
 
                 let mut locals = Vec::new();
@@ -80,7 +83,8 @@ pub fn parse_wasm(data: &[u8]) -> Vec<WasmFunc> {
                     }
                 }
 
-                let name = export_names.get(&func_idx)
+                let name = export_names
+                    .get(&func_idx)
                     .cloned()
                     .unwrap_or_else(|| format!("func_{}", func_idx));
 
@@ -117,12 +121,24 @@ pub fn decompile_wasm_func(data: &[u8], func: &WasmFunc, all_funcs: &[WasmFunc])
     let mut out = String::new();
 
     // Function signature
-    let ret_type = func.results.first().map(|t| valtype_to_c(*t)).unwrap_or("void");
-    let params_str: Vec<String> = func.params.iter().enumerate()
+    let ret_type = func
+        .results
+        .first()
+        .map(|t| valtype_to_c(*t))
+        .unwrap_or("void");
+    let params_str: Vec<String> = func
+        .params
+        .iter()
+        .enumerate()
         .map(|(i, t)| format!("{} param_{}", valtype_to_c(*t), i))
         .collect();
     out.push_str(&format!("// {}\n", func.name));
-    out.push_str(&format!("{} {}({}) {{\n", ret_type, func.name, params_str.join(", ")));
+    out.push_str(&format!(
+        "{} {}({}) {{\n",
+        ret_type,
+        func.name,
+        params_str.join(", ")
+    ));
 
     // Local declarations
     let param_count = func.params.len();
@@ -148,7 +164,9 @@ pub fn decompile_wasm_func(data: &[u8], func: &WasmFunc, all_funcs: &[WasmFunc])
     for payload in parser.parse_all(&data[..body_end]) {
         let Ok(payload) = payload else { continue };
         if let Payload::CodeSectionEntry(body) = payload {
-            let Ok(ops_reader) = body.get_operators_reader() else { continue };
+            let Ok(ops_reader) = body.get_operators_reader() else {
+                continue;
+            };
             for op in ops_reader {
                 let Ok(op) = op else { continue };
                 let pad = "    ".repeat(indent);
@@ -179,15 +197,21 @@ pub fn decompile_wasm_func(data: &[u8], func: &WasmFunc, all_funcs: &[WasmFunc])
                         };
                         out.push_str(&format!("{}{} = {};\n", pad, name, val));
                     }
-                    Operator::GlobalGet { global_index } => stack.push(format!("global_{}", global_index)),
+                    Operator::GlobalGet { global_index } => {
+                        stack.push(format!("global_{}", global_index))
+                    }
                     Operator::GlobalSet { global_index } => {
                         let val = stack.pop().unwrap_or("?".into());
                         out.push_str(&format!("{}global_{} = {};\n", pad, global_index, val));
                     }
                     Operator::I32Const { value } => stack.push(format!("{}", value)),
                     Operator::I64Const { value } => stack.push(format!("{}L", value)),
-                    Operator::F32Const { value } => stack.push(format!("{}f", f32::from_bits(value.bits()))),
-                    Operator::F64Const { value } => stack.push(format!("{}", f64::from_bits(value.bits()))),
+                    Operator::F32Const { value } => {
+                        stack.push(format!("{}f", f32::from_bits(value.bits())))
+                    }
+                    Operator::F64Const { value } => {
+                        stack.push(format!("{}", f64::from_bits(value.bits())))
+                    }
                     // Arithmetic
                     Operator::I32Add | Operator::I64Add => binop(&mut stack, "+"),
                     Operator::I32Sub | Operator::I64Sub => binop(&mut stack, "-"),
@@ -244,7 +268,10 @@ pub fn decompile_wasm_func(data: &[u8], func: &WasmFunc, all_funcs: &[WasmFunc])
                         let val = stack.pop().unwrap_or("?".into());
                         let addr = stack.pop().unwrap_or("?".into());
                         if memarg.offset > 0 {
-                            out.push_str(&format!("{}*(int*)({} + {}) = {};\n", pad, addr, memarg.offset, val));
+                            out.push_str(&format!(
+                                "{}*(int*)({} + {}) = {};\n",
+                                pad, addr, memarg.offset, val
+                            ));
                         } else {
                             out.push_str(&format!("{}*(int*)({}) = {};\n", pad, addr, val));
                         }
@@ -253,34 +280,61 @@ pub fn decompile_wasm_func(data: &[u8], func: &WasmFunc, all_funcs: &[WasmFunc])
                         let val = stack.pop().unwrap_or("?".into());
                         let addr = stack.pop().unwrap_or("?".into());
                         if memarg.offset > 0 {
-                            out.push_str(&format!("{}*(long*)({} + {}) = {};\n", pad, addr, memarg.offset, val));
+                            out.push_str(&format!(
+                                "{}*(long*)({} + {}) = {};\n",
+                                pad, addr, memarg.offset, val
+                            ));
                         } else {
                             out.push_str(&format!("{}*(long*)({}) = {};\n", pad, addr, val));
                         }
                     }
                     Operator::I32Load8S { memarg } | Operator::I32Load8U { memarg } => {
                         let addr = stack.pop().unwrap_or("?".into());
-                        let expr = if memarg.offset > 0 { format!("*(byte*)({} + {})", addr, memarg.offset) }
-                                   else { format!("*(byte*)({})", addr) };
+                        let expr = if memarg.offset > 0 {
+                            format!("*(byte*)({} + {})", addr, memarg.offset)
+                        } else {
+                            format!("*(byte*)({})", addr)
+                        };
                         stack.push(expr);
                     }
                     Operator::I32Load16S { memarg } | Operator::I32Load16U { memarg } => {
                         let addr = stack.pop().unwrap_or("?".into());
-                        let expr = if memarg.offset > 0 { format!("*(short*)({} + {})", addr, memarg.offset) }
-                                   else { format!("*(short*)({})", addr) };
+                        let expr = if memarg.offset > 0 {
+                            format!("*(short*)({} + {})", addr, memarg.offset)
+                        } else {
+                            format!("*(short*)({})", addr)
+                        };
                         stack.push(expr);
                     }
                     Operator::I32Store8 { memarg } => {
                         let val = stack.pop().unwrap_or("?".into());
                         let addr = stack.pop().unwrap_or("?".into());
-                        out.push_str(&format!("{}*(byte*)({}{}) = {};\n", pad, addr,
-                            if memarg.offset > 0 { format!(" + {}", memarg.offset) } else { String::new() }, val));
+                        out.push_str(&format!(
+                            "{}*(byte*)({}{}) = {};\n",
+                            pad,
+                            addr,
+                            if memarg.offset > 0 {
+                                format!(" + {}", memarg.offset)
+                            } else {
+                                String::new()
+                            },
+                            val
+                        ));
                     }
                     Operator::I32Store16 { memarg } => {
                         let val = stack.pop().unwrap_or("?".into());
                         let addr = stack.pop().unwrap_or("?".into());
-                        out.push_str(&format!("{}*(short*)({}{}) = {};\n", pad, addr,
-                            if memarg.offset > 0 { format!(" + {}", memarg.offset) } else { String::new() }, val));
+                        out.push_str(&format!(
+                            "{}*(short*)({}{}) = {};\n",
+                            pad,
+                            addr,
+                            if memarg.offset > 0 {
+                                format!(" + {}", memarg.offset)
+                            } else {
+                                String::new()
+                            },
+                            val
+                        ));
                     }
                     // Control flow
                     Operator::Block { blockty } => {
@@ -297,13 +351,17 @@ pub fn decompile_wasm_func(data: &[u8], func: &WasmFunc, all_funcs: &[WasmFunc])
                         indent += 1;
                     }
                     Operator::Else => {
-                        if indent > 1 { indent -= 1; }
+                        if indent > 1 {
+                            indent -= 1;
+                        }
                         let pad = "    ".repeat(indent);
                         out.push_str(&format!("{}}} else {{\n", pad));
                         indent += 1;
                     }
                     Operator::End => {
-                        if indent > 1 { indent -= 1; }
+                        if indent > 1 {
+                            indent -= 1;
+                        }
                         let pad = "    ".repeat(indent);
                         // Don't emit closing brace for the function body end
                         if indent >= 1 {
@@ -315,7 +373,10 @@ pub fn decompile_wasm_func(data: &[u8], func: &WasmFunc, all_funcs: &[WasmFunc])
                     }
                     Operator::BrIf { relative_depth } => {
                         let cond = stack.pop().unwrap_or("?".into());
-                        out.push_str(&format!("{}if ({}) break; // br_if {}\n", pad, cond, relative_depth));
+                        out.push_str(&format!(
+                            "{}if ({}) break; // br_if {}\n",
+                            pad, cond, relative_depth
+                        ));
                     }
                     Operator::Return => {
                         let val = stack.pop();
@@ -326,12 +387,14 @@ pub fn decompile_wasm_func(data: &[u8], func: &WasmFunc, all_funcs: &[WasmFunc])
                         }
                     }
                     Operator::Call { function_index } => {
-                        let callee = all_funcs.iter()
+                        let callee = all_funcs
+                            .iter()
                             .find(|f| f.index == function_index)
                             .map(|f| f.name.as_str())
                             .unwrap_or("?");
                         // Get callee's param count from type info
-                        let callee_params = all_funcs.iter()
+                        let callee_params = all_funcs
+                            .iter()
                             .find(|f| f.index == function_index)
                             .map(|f| f.params.len())
                             .unwrap_or(0);
@@ -340,7 +403,8 @@ pub fn decompile_wasm_func(data: &[u8], func: &WasmFunc, all_funcs: &[WasmFunc])
                             args.push(stack.pop().unwrap_or("?".into()));
                         }
                         args.reverse();
-                        let callee_has_result = all_funcs.iter()
+                        let callee_has_result = all_funcs
+                            .iter()
                             .find(|f| f.index == function_index)
                             .map(|f| !f.results.is_empty())
                             .unwrap_or(false);
@@ -351,7 +415,9 @@ pub fn decompile_wasm_func(data: &[u8], func: &WasmFunc, all_funcs: &[WasmFunc])
                             out.push_str(&format!("{}{};\n", pad, call_expr));
                         }
                     }
-                    Operator::Drop => { stack.pop(); }
+                    Operator::Drop => {
+                        stack.pop();
+                    }
                     Operator::Select => {
                         let cond = stack.pop().unwrap_or("?".into());
                         let b = stack.pop().unwrap_or("?".into());

@@ -81,10 +81,7 @@ fn classify_hash_step(code: &[u8], off: usize) -> Option<(HashVariant, usize)> {
     }
     // IMUL r, r, imm8 — `6B <modrm> 21` for *33. With REX prefix
     // `48 6B <modrm> 21` (4 bytes) or non-REX `6B <modrm> 21` (3 bytes).
-    if off + 4 <= code.len()
-        && code[off] == 0x48
-        && code[off + 1] == 0x6b
-        && code[off + 3] == 0x21
+    if off + 4 <= code.len() && code[off] == 0x48 && code[off + 1] == 0x6b && code[off + 3] == 0x21
     {
         return Some((HashVariant::Djb2, 4));
     }
@@ -94,27 +91,14 @@ fn classify_hash_step(code: &[u8], off: usize) -> Option<(HashVariant, usize)> {
     }
     // IMUL r, r, imm32 — `69 <modrm> imm32` for *0x1000193 etc.
     // REX form: `48 69 <modrm> 93 01 00 01`
-    if off + 7 <= code.len()
-        && code[off] == 0x48
-        && code[off + 1] == 0x69
-    {
-        let imm = u32::from_le_bytes([
-            code[off + 3],
-            code[off + 4],
-            code[off + 5],
-            code[off + 6],
-        ]);
+    if off + 7 <= code.len() && code[off] == 0x48 && code[off + 1] == 0x69 {
+        let imm = u32::from_le_bytes([code[off + 3], code[off + 4], code[off + 5], code[off + 6]]);
         if imm == 0x0100_0193 || imm == 0x0100_01b3 {
             return Some((HashVariant::Fnv1, 7));
         }
     }
     if off + 6 <= code.len() && code[off] == 0x69 {
-        let imm = u32::from_le_bytes([
-            code[off + 2],
-            code[off + 3],
-            code[off + 4],
-            code[off + 5],
-        ]);
+        let imm = u32::from_le_bytes([code[off + 2], code[off + 3], code[off + 4], code[off + 5]]);
         if imm == 0x0100_0193 {
             return Some((HashVariant::Fnv1, 6));
         }
@@ -129,9 +113,7 @@ fn classify_hash_step(code: &[u8], off: usize) -> Option<(HashVariant, usize)> {
     {
         // Look for ADD in next 4 bytes.
         for k in 3..=4 {
-            if off + k + 2 <= code.len()
-                && (code[off + k] == 0x01 || code[off + k] == 0x03)
-            {
+            if off + k + 2 <= code.len() && (code[off + k] == 0x01 || code[off + k] == 0x03) {
                 return Some((HashVariant::Djb2ShiftAdd, 3));
             }
         }
@@ -150,12 +132,7 @@ pub fn scan_region(code: &[u8], base_va: u64) -> Vec<ResolverHit> {
     let mut k = 0;
     while k + 9 <= code.len() {
         if code[k..k + 5] == [0x65, 0x48, 0x8b, 0x04, 0x25] {
-            let disp = u32::from_le_bytes([
-                code[k + 5],
-                code[k + 6],
-                code[k + 7],
-                code[k + 8],
-            ]);
+            let disp = u32::from_le_bytes([code[k + 5], code[k + 6], code[k + 7], code[k + 8]]);
             if disp == 0x60 {
                 peb_offs.push(k);
                 k += 9;
@@ -201,8 +178,7 @@ pub fn scan(obj: &Object<'_>, data: &[u8]) -> Vec<ResolverHit> {
                 if raddr + rsize > data.len() {
                     continue;
                 }
-                let base_va =
-                    pe.image_base as u64 + sec.virtual_address as u64;
+                let base_va = pe.image_base as u64 + sec.virtual_address as u64;
                 hits.extend(scan_region(&data[raddr..raddr + rsize], base_va));
             }
             hits
@@ -255,9 +231,7 @@ mod tests {
     fn detects_fnv1() {
         // PEB fetch + IMUL r64, r64, 0x01000193.
         let mut code = vec![0x65, 0x48, 0x8b, 0x04, 0x25, 0x60, 0, 0, 0];
-        code.extend_from_slice(&[
-            0x48, 0x69, 0xc0, 0x93, 0x01, 0x00, 0x01,
-        ]);
+        code.extend_from_slice(&[0x48, 0x69, 0xc0, 0x93, 0x01, 0x00, 0x01]);
         let hits = scan_region(&code, 0x3000);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].variant, HashVariant::Fnv1);

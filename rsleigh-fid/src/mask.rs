@@ -35,9 +35,10 @@ fn mask_x86(inst: &Instruction, raw: &[u8]) -> Vec<u8> {
     let mut i = 0;
     while i < out.len() {
         match out[i] {
-            0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65 | 0x66 | 0x67
-            | 0xF0 | 0xF2 | 0xF3 => i += 1,
-            0x40..=0x4F => { i += 1; } // REX
+            0x26 | 0x2E | 0x36 | 0x3E | 0x64 | 0x65 | 0x66 | 0x67 | 0xF0 | 0xF2 | 0xF3 => i += 1,
+            0x40..=0x4F => {
+                i += 1;
+            } // REX
             _ => break,
         }
     }
@@ -117,10 +118,10 @@ fn mask_riscv(raw: &[u8]) -> Vec<u8> {
         let w = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
         let opcode = w & 0x7F;
         let m = match opcode {
-            0x33 | 0x3B => 0xFE00_707F, // OP / OP-32: opcode + funct3 + funct7
-            0x13 | 0x1B => 0x0000_707F, // OP-IMM / OP-IMM-32: opcode + funct3
+            0x33 | 0x3B => 0xFE00_707F,        // OP / OP-32: opcode + funct3 + funct7
+            0x13 | 0x1B => 0x0000_707F,        // OP-IMM / OP-IMM-32: opcode + funct3
             0x03 | 0x23 | 0x67 => 0x0000_707F, // LOAD / STORE / JALR
-            0x63 => 0x0000_707F, // BRANCH
+            0x63 => 0x0000_707F,               // BRANCH
             _ => 0x0000_007F,
         };
         (w & m).to_le_bytes().to_vec()

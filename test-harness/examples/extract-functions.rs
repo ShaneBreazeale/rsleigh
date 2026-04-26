@@ -55,8 +55,7 @@ fn main() {
 
     // Sort by address
     functions.sort_by_key(|f| {
-        u64::from_str_radix(f["addr"].as_str().unwrap().trim_start_matches("0x"), 16)
-            .unwrap_or(0)
+        u64::from_str_radix(f["addr"].as_str().unwrap().trim_start_matches("0x"), 16).unwrap_or(0)
     });
 
     // Pick 5-10 diverse functions: first, middle, complex ones by size

@@ -31,8 +31,12 @@ pub fn compute_dominators(cfg: &Cfg) -> Vec<BlockId> {
 
     let intersect = |idom: &[usize], rpo_num: &[usize], mut b1: usize, mut b2: usize| -> usize {
         while b1 != b2 {
-            while rpo_num[b1] > rpo_num[b2] { b1 = idom[b1]; }
-            while rpo_num[b2] > rpo_num[b1] { b2 = idom[b2]; }
+            while rpo_num[b1] > rpo_num[b2] {
+                b1 = idom[b1];
+            }
+            while rpo_num[b2] > rpo_num[b1] {
+                b2 = idom[b2];
+            }
         }
         b1
     };
@@ -41,10 +45,14 @@ pub fn compute_dominators(cfg: &Cfg) -> Vec<BlockId> {
     while changed {
         changed = false;
         for &b in &rpo {
-            if b == entry { continue; }
+            if b == entry {
+                continue;
+            }
             let mut new_idom = undef;
             for &p in &preds[b] {
-                if idom[p] == undef { continue; }
+                if idom[p] == undef {
+                    continue;
+                }
                 if new_idom == undef {
                     new_idom = p;
                 } else {
@@ -58,7 +66,9 @@ pub fn compute_dominators(cfg: &Cfg) -> Vec<BlockId> {
         }
     }
 
-    idom.into_iter().map(|i| BlockId(if i == undef { entry } else { i })).collect()
+    idom.into_iter()
+        .map(|i| BlockId(if i == undef { entry } else { i }))
+        .collect()
 }
 
 /// Compute post-dominators by running dominators on the reverse CFG.
@@ -69,7 +79,9 @@ pub fn compute_post_dominators(cfg: &Cfg) -> Vec<BlockId> {
     }
 
     // Find exit blocks
-    let exits: Vec<usize> = cfg.blocks.iter()
+    let exits: Vec<usize> = cfg
+        .blocks
+        .iter()
         .filter(|b| matches!(b.terminator, Terminator::Return))
         .map(|b| b.id.0)
         .collect();
@@ -103,8 +115,12 @@ pub fn compute_post_dominators(cfg: &Cfg) -> Vec<BlockId> {
 
     let intersect = |pdom: &[usize], rpo_num: &[usize], mut b1: usize, mut b2: usize| -> usize {
         while b1 != b2 {
-            while rpo_num[b1] > rpo_num[b2] { b1 = pdom[b1]; }
-            while rpo_num[b2] > rpo_num[b1] { b2 = pdom[b2]; }
+            while rpo_num[b1] > rpo_num[b2] {
+                b1 = pdom[b1];
+            }
+            while rpo_num[b2] > rpo_num[b1] {
+                b2 = pdom[b2];
+            }
         }
         b1
     };
@@ -113,12 +129,16 @@ pub fn compute_post_dominators(cfg: &Cfg) -> Vec<BlockId> {
     while changed {
         changed = false;
         for &b in &rpo {
-            if b == exit_node { continue; }
+            if b == exit_node {
+                continue;
+            }
             // In reverse graph, successors of b = forward successors
             let mut new_pdom = undef;
             for succ in cfg.successors(BlockId(b)) {
                 let s = succ.0;
-                if s >= n || pdom[s] == undef { continue; }
+                if s >= n || pdom[s] == undef {
+                    continue;
+                }
                 if new_pdom == undef {
                     new_pdom = s;
                 } else {
@@ -132,11 +152,15 @@ pub fn compute_post_dominators(cfg: &Cfg) -> Vec<BlockId> {
         }
     }
 
-    pdom.into_iter().map(|i| BlockId(if i == undef { exit_node } else { i })).collect()
+    pdom.into_iter()
+        .map(|i| BlockId(if i == undef { exit_node } else { i }))
+        .collect()
 }
 
 fn dfs_collect(node: usize, adj: &[Vec<usize>], visited: &mut Vec<bool>, out: &mut Vec<usize>) {
-    if node >= visited.len() || visited[node] { return; }
+    if node >= visited.len() || visited[node] {
+        return;
+    }
     visited[node] = true;
     for &next in &adj[node] {
         dfs_collect(next, adj, visited, out);
@@ -150,7 +174,9 @@ fn reverse_postorder(cfg: &Cfg) -> Vec<usize> {
     let mut rpo = Vec::new();
 
     fn dfs(node: usize, cfg: &Cfg, visited: &mut Vec<bool>, rpo: &mut Vec<usize>) {
-        if node >= cfg.blocks.len() || visited[node] { return; }
+        if node >= cfg.blocks.len() || visited[node] {
+            return;
+        }
         visited[node] = true;
         for succ in cfg.successors(BlockId(node)) {
             dfs(succ.0, cfg, visited, rpo);

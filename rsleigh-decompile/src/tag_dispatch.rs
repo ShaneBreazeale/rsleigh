@@ -61,34 +61,31 @@ pub fn scan_region(code: &[u8], base_va: u64) -> Vec<TagCase> {
     let mut k = 0;
     while k + 4 <= code.len() {
         // Find a CMP r8, imm8 candidate.
-        let (tag, cmp_len) = if code[k] == 0x80
-            && (code[k + 1] & 0xf8) == 0xf8
-            && k + 3 <= code.len()
-        {
-            // 80 F8..FF imm8 = CMP AL/CL/DL/BL/AH/CH/DH/BH, imm8
-            (code[k + 2], 3)
-        } else if code[k] == 0x3c {
-            // CMP AL, imm8
-            (code[k + 1], 2)
-        } else if code[k] == 0x41 && code[k + 1] == 0x80
-            && (code[k + 2] & 0xf8) == 0xf8
-            && k + 4 <= code.len()
-        {
-            // REX.B + CMP r8, imm8 (covers R8B..R15B)
-            (code[k + 3], 4)
-        } else {
-            k += 1;
-            continue;
-        };
+        let (tag, cmp_len) =
+            if code[k] == 0x80 && (code[k + 1] & 0xf8) == 0xf8 && k + 3 <= code.len() {
+                // 80 F8..FF imm8 = CMP AL/CL/DL/BL/AH/CH/DH/BH, imm8
+                (code[k + 2], 3)
+            } else if code[k] == 0x3c {
+                // CMP AL, imm8
+                (code[k + 1], 2)
+            } else if code[k] == 0x41
+                && code[k + 1] == 0x80
+                && (code[k + 2] & 0xf8) == 0xf8
+                && k + 4 <= code.len()
+            {
+                // REX.B + CMP r8, imm8 (covers R8B..R15B)
+                (code[k + 3], 4)
+            } else {
+                k += 1;
+                continue;
+            };
         // Expect JZ immediately after.
         let jz_off = k + cmp_len;
         if jz_off >= code.len() {
             break;
         }
         // JZ rel8 (74) or JNZ rel8 (75) — 2 bytes
-        if jz_off + 2 <= code.len()
-            && (code[jz_off] == 0x74 || code[jz_off] == 0x75)
-        {
+        if jz_off + 2 <= code.len() && (code[jz_off] == 0x74 || code[jz_off] == 0x75) {
             let rel = code[jz_off + 1] as i8 as i64;
             let target = (base_va + (jz_off + 2) as u64).wrapping_add(rel as u64);
             let dir = if code[jz_off] == 0x74 {
@@ -139,11 +136,7 @@ pub fn scan_region(code: &[u8], base_va: u64) -> Vec<TagCase> {
 
 /// Extract dispatch chain starting at a function VA. Reads up to 0x600
 /// bytes of code and looks for consecutive CMP+JZ pairs.
-pub fn scan_function(
-    obj: &Object<'_>,
-    data: &[u8],
-    func_va: u64,
-) -> Vec<TagCase> {
+pub fn scan_function(obj: &Object<'_>, data: &[u8], func_va: u64) -> Vec<TagCase> {
     if let Object::PE(pe) = obj {
         for sec in &pe.sections {
             let svaddr = pe.image_base as u64 + sec.virtual_address as u64;

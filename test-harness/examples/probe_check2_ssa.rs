@@ -9,12 +9,12 @@
 //! Run: cargo run -p test-harness --example probe_check2_ssa --release
 
 use goblin::pe::PE;
+use pcode_ir::{AddressSpaceId, Instruction, PcodeOp};
 use rsleigh_api::{Architecture, Decoder};
 use rsleigh_decompile::cfg::build_cfg;
+use rsleigh_decompile::fold::{fold_with_cc, CallingConv};
 use rsleigh_decompile::ir::{Expr, Stmt, VarDef};
 use rsleigh_decompile::ssa::build_ssa;
-use rsleigh_decompile::fold::{fold_with_cc, CallingConv};
-use pcode_ir::{AddressSpaceId, Instruction, PcodeOp};
 
 const BIN_PATH: &str = "/Users/shane/Downloads/test_bin/cb_baristas_secret_x64.exe";
 // Override via env RSLEIGH_PROBE_ADDR=0xVVVVVVVV
@@ -55,10 +55,15 @@ fn main() {
         match dec.decode(&bytes[off..], addr) {
             Ok(inst) => {
                 let l = inst.len as usize;
-                let is_ret = inst.ops.iter().any(|op| matches!(op, PcodeOp::Return { .. }));
+                let is_ret = inst
+                    .ops
+                    .iter()
+                    .any(|op| matches!(op, PcodeOp::Return { .. }));
                 insts.push((addr, inst));
                 off += l;
-                if is_ret { break; }
+                if is_ret {
+                    break;
+                }
             }
             Err(e) => {
                 eprintln!("decode error at 0x{:x}: {:?}", addr, e);
@@ -82,7 +87,12 @@ fn main() {
 
     // Dump every block's stmts and var defs used within.
     for (bi, b) in ssa.blocks.iter().enumerate() {
-        println!("\n=== block {} (addr 0x{:x}, {} stmts) ===", bi, b.addr, b.stmts.len());
+        println!(
+            "\n=== block {} (addr 0x{:x}, {} stmts) ===",
+            bi,
+            b.addr,
+            b.stmts.len()
+        );
         for stmt in &b.stmts {
             dump_stmt(stmt, &ssa.vars);
         }
@@ -122,11 +132,7 @@ fn main() {
         if let Expr::Var(target) = v.expr {
             println!(
                 "  v{} (vn={:?}/{}/{}) = Var(v{})  // possibly a forwarded Load",
-                v.id.0,
-                v.varnode.space,
-                v.varnode.offset,
-                v.varnode.size,
-                target.0
+                v.id.0, v.varnode.space, v.varnode.offset, v.varnode.size, target.0
             );
         }
     }
@@ -183,10 +189,19 @@ fn terminator_tag(t: &rsleigh_decompile::ir::SsaTerminator) -> String {
     match t {
         Fallthrough(b) => format!("Fallthrough(b{})", b.0),
         Branch(b) => format!("Branch(b{})", b.0),
-        CBranch { cond, taken, fallthrough } => {
+        CBranch {
+            cond,
+            taken,
+            fallthrough,
+        } => {
             format!("CBranch(v{} -> b{} / b{})", cond.0, taken.0, fallthrough.0)
         }
-        Call { target, args, fallthrough, .. } => {
+        Call {
+            target,
+            args,
+            fallthrough,
+            ..
+        } => {
             format!(
                 "Call({:?}, args={:?}, fall=b{})",
                 target,

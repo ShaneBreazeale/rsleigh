@@ -72,7 +72,12 @@ fn partial_register_low_byte_write_preserves_high_bytes() {
                 0xc3, // ret
             ];
             let insts = decode_x64(bytes, 0x1000);
-            assert_eq!(insts.len(), 3, "decode produced {} instructions", insts.len());
+            assert_eq!(
+                insts.len(),
+                3,
+                "decode produced {} instructions",
+                insts.len()
+            );
 
             let cfg = build_cfg(&insts);
             let mut ssa = build_ssa_with_cc(&cfg, CallingConv::SysV);

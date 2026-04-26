@@ -34,11 +34,11 @@ fn sub_cond_becomes_comparison() {
         .stack_size(32 * 1024 * 1024)
         .spawn(|| {
             let bytes: &[u8] = &[
-                0x48, 0x89, 0xC8,       // mov rax, rcx
+                0x48, 0x89, 0xC8, // mov rax, rcx
                 0x48, 0x83, 0xE8, 0x01, // sub rax, 1
-                0x75, 0x03,             // jnz +3
-                0x48, 0x31, 0xC0,       // xor rax, rax
-                0xC3,                   // ret
+                0x75, 0x03, // jnz +3
+                0x48, 0x31, 0xC0, // xor rax, rax
+                0xC3, // ret
             ];
             let insts = decode_x64(bytes, 0x1000);
             let cfg = build_cfg(&insts);
@@ -122,11 +122,16 @@ fn sub_cond_gone_in_output() {
             while io < bytes.len() {
                 match dec.decode(&bytes[io..], func_va + io as u64) {
                     Ok(inst) => {
-                        let is_ret = inst.ops.iter().any(|op| matches!(op, PcodeOp::Return { .. }));
+                        let is_ret = inst
+                            .ops
+                            .iter()
+                            .any(|op| matches!(op, PcodeOp::Return { .. }));
                         let l = inst.len as usize;
                         insts.push((func_va + io as u64, inst));
                         io += l;
-                        if is_ret { break; }
+                        if is_ret {
+                            break;
+                        }
                     }
                     Err(_) => break,
                 }
@@ -139,12 +144,15 @@ fn sub_cond_gone_in_output() {
                 Some(std::path::Path::new(path)),
             );
 
-            let bad_lines: Vec<&str> = out.lines()
+            let bad_lines: Vec<&str> = out
+                .lines()
                 .filter(|l| {
                     let trimmed = l.trim();
                     (trimmed.starts_with("if (") || trimmed.starts_with("while ("))
-                        && (trimmed.contains(" - 1)") || trimmed.contains(" - 2)")
-                            || trimmed.contains(" - 1))") || trimmed.contains(" - 2))"))
+                        && (trimmed.contains(" - 1)")
+                            || trimmed.contains(" - 2)")
+                            || trimmed.contains(" - 1))")
+                            || trimmed.contains(" - 2))"))
                 })
                 .collect();
 

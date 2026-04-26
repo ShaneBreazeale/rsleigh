@@ -96,7 +96,10 @@ pub fn scan_region(code: &[u8], base_va: u64) -> Vec<Trampoline> {
             // Need at least one INT3 or NOP padding byte to qualify.
             let after = code.get(i + 2).copied().unwrap_or(0);
             if after == 0xCC || after == 0x90 {
-                hits.push(Trampoline { addr: base_va + i as u64, reg });
+                hits.push(Trampoline {
+                    addr: base_va + i as u64,
+                    reg,
+                });
                 // Skip past the gadget + at least one padding byte.
                 i += 3;
                 continue;
@@ -107,7 +110,10 @@ pub fn scan_region(code: &[u8], base_va: u64) -> Vec<Trampoline> {
             if let Some(reg) = classify_jmp_reg(&code[i..i + 3]) {
                 let after = code.get(i + 3).copied().unwrap_or(0);
                 if after == 0xCC || after == 0x90 {
-                    hits.push(Trampoline { addr: base_va + i as u64, reg });
+                    hits.push(Trampoline {
+                        addr: base_va + i as u64,
+                        reg,
+                    });
                     i += 4;
                     continue;
                 }
@@ -134,8 +140,7 @@ pub fn scan(obj: &Object<'_>, data: &[u8]) -> Vec<Trampoline> {
                 if raddr + rsize > data.len() {
                     continue;
                 }
-                let base_va =
-                    pe.image_base as u64 + sec.virtual_address as u64;
+                let base_va = pe.image_base as u64 + sec.virtual_address as u64;
                 let region_hits = scan_region(&data[raddr..raddr + rsize], base_va);
                 hits.extend(region_hits);
             }

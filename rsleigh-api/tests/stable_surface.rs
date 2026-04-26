@@ -42,7 +42,9 @@ fn _pcode_re_exports() {
 #[test]
 fn stable_surface_smoke() {
     let mut dec = Decoder::new(Architecture::X86_64);
-    let inst = dec.decode(&[0x48, 0x89, 0xd8], 0x1000).expect("MOV RAX,RBX");
+    let inst = dec
+        .decode(&[0x48, 0x89, 0xd8], 0x1000)
+        .expect("MOV RAX,RBX");
     assert_eq!(inst.len, 3);
     assert!(inst.disassembly.contains("MOV"));
 

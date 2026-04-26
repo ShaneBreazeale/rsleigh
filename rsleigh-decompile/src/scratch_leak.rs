@@ -97,12 +97,7 @@ pub fn check_function(
     while k + 6 <= body.len() {
         // CALL [RIP+disp32]  →  ff 15 d32 (6 bytes)
         if body[k] == 0xff && body[k + 1] == 0x15 {
-            let d32 = i32::from_le_bytes([
-                body[k + 2],
-                body[k + 3],
-                body[k + 4],
-                body[k + 5],
-            ]);
+            let d32 = i32::from_le_bytes([body[k + 2], body[k + 3], body[k + 4], body[k + 5]]);
             let next_rip = func_va.wrapping_add((k + 6) as u64);
             let target = next_rip.wrapping_add(d32 as i64 as u64);
             if let Some(name) = iat.get(&target) {
@@ -114,17 +109,8 @@ pub fn check_function(
             continue;
         }
         // MOV RAX, qword ptr [RIP+disp32]  →  48 8B 05 d32 (7 bytes)
-        if k + 7 <= body.len()
-            && body[k] == 0x48
-            && body[k + 1] == 0x8b
-            && body[k + 2] == 0x05
-        {
-            let d32 = i32::from_le_bytes([
-                body[k + 3],
-                body[k + 4],
-                body[k + 5],
-                body[k + 6],
-            ]);
+        if k + 7 <= body.len() && body[k] == 0x48 && body[k + 1] == 0x8b && body[k + 2] == 0x05 {
+            let d32 = i32::from_le_bytes([body[k + 3], body[k + 4], body[k + 5], body[k + 6]]);
             let next_rip = func_va.wrapping_add((k + 7) as u64);
             let target = next_rip.wrapping_add(d32 as i64 as u64);
             if let Some(name) = iat.get(&target) {

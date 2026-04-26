@@ -19,7 +19,9 @@ const NANO: &str = "/tmp/nano/nano";
 const RSLEIGH_BIN: &str = env!("CARGO_BIN_EXE_rsleigh");
 
 fn nano_available() -> bool {
-    if Path::new(NANO).exists() { return true; }
+    if Path::new(NANO).exists() {
+        return true;
+    }
     if std::env::var_os("RSLEIGH_REQUIRE_NANO_FIXTURE").is_some() {
         panic!("nano fixture missing at {NANO}");
     }
@@ -29,7 +31,9 @@ fn nano_available() -> bool {
 
 #[test]
 fn format_var_depth_does_not_blow_stack() {
-    if !nano_available() { return; }
+    if !nano_available() {
+        return;
+    }
     let out = Command::new(RSLEIGH_BIN)
         .args([NANO, "0x4d108"])
         .output()

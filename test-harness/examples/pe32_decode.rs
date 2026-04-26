@@ -33,13 +33,16 @@ fn run() {
     let data = std::fs::read(path).unwrap();
     let obj = goblin::Object::parse(&data).unwrap();
     let goblin::Object::PE(pe) = &obj else {
-        eprintln!("Not a PE file"); return;
+        eprintln!("Not a PE file");
+        return;
     };
 
     let image_base = pe.image_base as u64;
     let entry = image_base + pe.entry as u64;
 
-    let text_sec = pe.sections.iter()
+    let text_sec = pe
+        .sections
+        .iter()
         .find(|s| s.characteristics & 0x20000000 != 0)
         .unwrap();
     let text_va = image_base + text_sec.virtual_address as u64;
@@ -83,7 +86,10 @@ fn run() {
     for i in 0..text_bytes.len().saturating_sub(5) {
         if text_bytes[i] == 0xE8 {
             let rel = i32::from_le_bytes([
-                text_bytes[i+1], text_bytes[i+2], text_bytes[i+3], text_bytes[i+4]
+                text_bytes[i + 1],
+                text_bytes[i + 2],
+                text_bytes[i + 3],
+                text_bytes[i + 4],
             ]);
             let call_site = text_va + i as u64;
             let target = (call_site as i64 + 5 + rel as i64) as u64;
@@ -131,20 +137,30 @@ fn decode_func(
     let mut addr = start;
     let mut count = 0;
     while addr < end && count < 200 {
-        let Some(file_off) = va_to_off(addr) else { break; };
-        if file_off >= data.len() { break; }
+        let Some(file_off) = va_to_off(addr) else {
+            break;
+        };
+        if file_off >= data.len() {
+            break;
+        }
         let remaining = &data[file_off..data.len().min(file_off + 16)];
-        if remaining.is_empty() { break; }
+        if remaining.is_empty() {
+            break;
+        }
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            dec.decode(remaining, addr)
-        }));
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dec.decode(remaining, addr)));
 
         match result {
             Ok(Ok(inst)) => {
-                if inst.len == 0 { break; }
-                let hex: String = remaining[..inst.len as usize].iter()
-                    .map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+                if inst.len == 0 {
+                    break;
+                }
+                let hex: String = remaining[..inst.len as usize]
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 println!("  0x{:08x}: {:24} {}", addr, hex, inst.disassembly);
                 if show_pcode {
                     for (j, op) in inst.ops.iter().enumerate() {
@@ -183,18 +199,25 @@ fn decompile_func(
     let mut insts = Vec::new();
 
     loop {
-        let Some(file_off) = va_to_off(addr) else { break; };
-        if file_off >= data.len() { break; }
+        let Some(file_off) = va_to_off(addr) else {
+            break;
+        };
+        if file_off >= data.len() {
+            break;
+        }
         let remaining = &data[file_off..data.len().min(file_off + 16)];
-        if remaining.is_empty() { break; }
+        if remaining.is_empty() {
+            break;
+        }
 
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            dec.decode(remaining, addr)
-        }));
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dec.decode(remaining, addr)));
 
         match result {
             Ok(Ok(inst)) => {
-                if inst.len == 0 { break; }
+                if inst.len == 0 {
+                    break;
+                }
                 let dis = inst.disassembly.to_uppercase();
                 let l = inst.len;
                 insts.push((addr, inst));
@@ -205,7 +228,9 @@ fn decompile_func(
             }
             _ => break,
         }
-        if insts.len() > 500 { break; }
+        if insts.len() > 500 {
+            break;
+        }
     }
 
     if insts.is_empty() {

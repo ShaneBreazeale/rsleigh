@@ -36,7 +36,9 @@ pub struct TryRegion {
 /// Parse `.eh_frame` + LSDAs and return a map from FDE initial_address → try regions.
 pub fn parse_eh_frame(binary: &[u8]) -> HashMap<u64, Vec<TryRegion>> {
     let mut out: HashMap<u64, Vec<TryRegion>> = HashMap::new();
-    let Ok(obj) = goblin::Object::parse(binary) else { return out; };
+    let Ok(obj) = goblin::Object::parse(binary) else {
+        return out;
+    };
     let elf = match obj {
         goblin::Object::Elf(e) => e,
         _ => return out,
@@ -57,11 +59,15 @@ pub fn parse_eh_frame(binary: &[u8]) -> HashMap<u64, Vec<TryRegion>> {
                     eh_frame_addr = sh.sh_addr;
                 }
             }
-            ".text" => { text_addr = sh.sh_addr; }
+            ".text" => {
+                text_addr = sh.sh_addr;
+            }
             _ => {}
         }
     }
-    let Some(data) = eh_frame_data else { return out; };
+    let Some(data) = eh_frame_data else {
+        return out;
+    };
 
     let bases = BaseAddresses::default()
         .set_eh_frame(eh_frame_addr)
@@ -78,14 +84,20 @@ pub fn parse_eh_frame(binary: &[u8]) -> HashMap<u64, Vec<TryRegion>> {
             },
         };
         let func_start = fde.initial_address();
-        let Some(lsda_ptr) = fde.lsda() else { continue; };
+        let Some(lsda_ptr) = fde.lsda() else {
+            continue;
+        };
         let lsda_addr = match lsda_ptr {
             gimli::Pointer::Direct(a) => a,
             gimli::Pointer::Indirect(a) => a,
         };
         // Find LSDA file offset from its virtual address (search via section headers)
-        let Some(lsda_off) = va_to_file_offset(&elf, lsda_addr) else { continue; };
-        if lsda_off >= binary.len() { continue; }
+        let Some(lsda_off) = va_to_file_offset(&elf, lsda_addr) else {
+            continue;
+        };
+        if lsda_off >= binary.len() {
+            continue;
+        }
         let regions = parse_lsda(&binary[lsda_off..], func_start);
         if !regions.is_empty() {
             out.insert(func_start, regions);
@@ -109,10 +121,13 @@ fn va_to_file_offset(elf: &goblin::elf::Elf, va: u64) -> Option<usize> {
 fn parse_lsda(data: &[u8], func_start: u64) -> Vec<TryRegion> {
     let mut out = Vec::new();
     let mut p = 0usize;
-    if p >= data.len() { return out; }
+    if p >= data.len() {
+        return out;
+    }
 
     // LPStart encoding byte
-    let lp_enc = data[p]; p += 1;
+    let lp_enc = data[p];
+    p += 1;
     let lp_start = if lp_enc == DW_EH_PE_OMIT {
         func_start
     } else {
@@ -123,29 +138,59 @@ fn parse_lsda(data: &[u8], func_start: u64) -> Vec<TryRegion> {
     };
 
     // TType encoding + offset
-    if p >= data.len() { return out; }
-    let ttype_enc = data[p]; p += 1;
+    if p >= data.len() {
+        return out;
+    }
+    let ttype_enc = data[p];
+    p += 1;
     if ttype_enc != DW_EH_PE_OMIT {
-        let _ttype_off = match read_uleb(data, &mut p) { Some(v) => v, None => return out };
+        let _ttype_off = match read_uleb(data, &mut p) {
+            Some(v) => v,
+            None => return out,
+        };
     }
 
     // Call-site table encoding + length
-    if p >= data.len() { return out; }
-    let cs_enc = data[p]; p += 1;
-    let cs_len = match read_uleb(data, &mut p) { Some(v) => v, None => return out };
+    if p >= data.len() {
+        return out;
+    }
+    let cs_enc = data[p];
+    p += 1;
+    let cs_len = match read_uleb(data, &mut p) {
+        Some(v) => v,
+        None => return out,
+    };
     let cs_end = p + cs_len as usize;
-    if cs_end > data.len() { return out; }
+    if cs_end > data.len() {
+        return out;
+    }
 
     while p < cs_end {
         // For Itanium C++ ABI the four fields are encoded per cs_enc. Typically
         // DW_EH_PE_uleb128 for all four. Handle the common cases.
-        let start_off = match read_encoded(data, &mut p, cs_enc, 0) { Some(v) => v, None => break };
-        let length = match read_encoded(data, &mut p, cs_enc, 0) { Some(v) => v, None => break };
-        let lp_off = match read_encoded(data, &mut p, cs_enc, 0) { Some(v) => v, None => break };
-        let _action = match read_uleb(data, &mut p) { Some(v) => v, None => break };
+        let start_off = match read_encoded(data, &mut p, cs_enc, 0) {
+            Some(v) => v,
+            None => break,
+        };
+        let length = match read_encoded(data, &mut p, cs_enc, 0) {
+            Some(v) => v,
+            None => break,
+        };
+        let lp_off = match read_encoded(data, &mut p, cs_enc, 0) {
+            Some(v) => v,
+            None => break,
+        };
+        let _action = match read_uleb(data, &mut p) {
+            Some(v) => v,
+            None => break,
+        };
 
-        if length == 0 { continue; }
-        if lp_off == 0 { continue; } // cleanup-only or no handler — skip
+        if length == 0 {
+            continue;
+        }
+        if lp_off == 0 {
+            continue;
+        } // cleanup-only or no handler — skip
 
         out.push(TryRegion {
             start: func_start.wrapping_add(start_off),
@@ -176,44 +221,65 @@ fn read_encoded(data: &[u8], p: &mut usize, enc: u8, pc_rel_base: u64) -> Option
         DW_EH_PE_ABSPTR => {
             // Default: pointer-sized, i.e. u64 on 64-bit, u32 on 32-bit.
             // Assume 64-bit for AArch64/x86-64 (caller ensures this).
-            if *p + 8 > data.len() { return None; }
-            let v = u64::from_le_bytes(data[*p..*p+8].try_into().ok()?);
-            *p += 8; v
+            if *p + 8 > data.len() {
+                return None;
+            }
+            let v = u64::from_le_bytes(data[*p..*p + 8].try_into().ok()?);
+            *p += 8;
+            v
         }
         DW_EH_PE_ULEB128 => read_uleb(data, p)?,
         DW_EH_PE_UDATA2 => {
-            if *p + 2 > data.len() { return None; }
-            let v = u16::from_le_bytes(data[*p..*p+2].try_into().ok()?) as u64;
-            *p += 2; v
+            if *p + 2 > data.len() {
+                return None;
+            }
+            let v = u16::from_le_bytes(data[*p..*p + 2].try_into().ok()?) as u64;
+            *p += 2;
+            v
         }
         DW_EH_PE_UDATA4 => {
-            if *p + 4 > data.len() { return None; }
-            let v = u32::from_le_bytes(data[*p..*p+4].try_into().ok()?) as u64;
-            *p += 4; v
+            if *p + 4 > data.len() {
+                return None;
+            }
+            let v = u32::from_le_bytes(data[*p..*p + 4].try_into().ok()?) as u64;
+            *p += 4;
+            v
         }
         DW_EH_PE_UDATA8 => {
-            if *p + 8 > data.len() { return None; }
-            let v = u64::from_le_bytes(data[*p..*p+8].try_into().ok()?);
-            *p += 8; v
+            if *p + 8 > data.len() {
+                return None;
+            }
+            let v = u64::from_le_bytes(data[*p..*p + 8].try_into().ok()?);
+            *p += 8;
+            v
         }
         DW_EH_PE_SLEB128 => {
             let sv = read_sleb(data, p)?;
             sv as u64
         }
         DW_EH_PE_SDATA2 => {
-            if *p + 2 > data.len() { return None; }
-            let v = i16::from_le_bytes(data[*p..*p+2].try_into().ok()?) as i64 as u64;
-            *p += 2; v
+            if *p + 2 > data.len() {
+                return None;
+            }
+            let v = i16::from_le_bytes(data[*p..*p + 2].try_into().ok()?) as i64 as u64;
+            *p += 2;
+            v
         }
         DW_EH_PE_SDATA4 => {
-            if *p + 4 > data.len() { return None; }
-            let v = i32::from_le_bytes(data[*p..*p+4].try_into().ok()?) as i64 as u64;
-            *p += 4; v
+            if *p + 4 > data.len() {
+                return None;
+            }
+            let v = i32::from_le_bytes(data[*p..*p + 4].try_into().ok()?) as i64 as u64;
+            *p += 4;
+            v
         }
         DW_EH_PE_SDATA8 => {
-            if *p + 8 > data.len() { return None; }
-            let v = i64::from_le_bytes(data[*p..*p+8].try_into().ok()?) as u64;
-            *p += 8; v
+            if *p + 8 > data.len() {
+                return None;
+            }
+            let v = i64::from_le_bytes(data[*p..*p + 8].try_into().ok()?) as u64;
+            *p += 8;
+            v
         }
         _ => return None,
     };
@@ -232,12 +298,19 @@ fn read_uleb(data: &[u8], p: &mut usize) -> Option<u64> {
     let mut result: u64 = 0;
     let mut shift = 0;
     loop {
-        if *p >= data.len() { return None; }
-        let b = data[*p]; *p += 1;
+        if *p >= data.len() {
+            return None;
+        }
+        let b = data[*p];
+        *p += 1;
         result |= ((b & 0x7F) as u64) << shift;
-        if b & 0x80 == 0 { return Some(result); }
+        if b & 0x80 == 0 {
+            return Some(result);
+        }
         shift += 7;
-        if shift >= 64 { return None; }
+        if shift >= 64 {
+            return None;
+        }
     }
 }
 
@@ -246,12 +319,19 @@ fn read_sleb(data: &[u8], p: &mut usize) -> Option<i64> {
     let mut shift = 0;
     let mut byte = 0;
     loop {
-        if *p >= data.len() { return None; }
-        byte = data[*p]; *p += 1;
+        if *p >= data.len() {
+            return None;
+        }
+        byte = data[*p];
+        *p += 1;
         result |= ((byte & 0x7F) as i64) << shift;
         shift += 7;
-        if byte & 0x80 == 0 { break; }
-        if shift >= 64 { return None; }
+        if byte & 0x80 == 0 {
+            break;
+        }
+        if shift >= 64 {
+            return None;
+        }
     }
     // Sign-extend if shift < 64 and sign bit of last byte is set
     if shift < 64 && (byte & 0x40) != 0 {

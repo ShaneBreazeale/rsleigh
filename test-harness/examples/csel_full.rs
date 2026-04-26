@@ -1,4 +1,4 @@
-use rsleigh_api::{Decoder, Architecture};
+use rsleigh_api::{Architecture, Decoder};
 fn main() {
     let mut dec = Decoder::new(Architecture::AArch64);
     // CSEL w0, w1, w2, lt = 1a82b020

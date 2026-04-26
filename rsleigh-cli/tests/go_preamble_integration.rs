@@ -34,7 +34,11 @@ fn run(args: &[&str]) -> String {
         .args(args)
         .output()
         .expect("rsleigh CLI invocation");
-    assert!(out.status.success(), "rsleigh failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "rsleigh failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8(out.stdout).expect("rsleigh output is UTF-8")
 }
 
@@ -45,7 +49,9 @@ fn run(args: &[&str]) -> String {
 /// back to a single value.
 #[test]
 fn go_preamble_stackguard_variant_0x10_extends_decode_range() {
-    if !fixture_available() { return; }
+    if !fixture_available() {
+        return;
+    }
     // FUN_004af120 os_Remove has the 0x10 shape. It's a thin thunk but
     // the decode sweep must still pass the preamble.
     let out = run(&[BED_FIXTURE, "--disasm", "0x4af120"]);
@@ -60,7 +66,9 @@ fn go_preamble_stackguard_variant_0x10_extends_decode_range() {
 /// preemption functions. Must decode body past the preamble.
 #[test]
 fn go_preamble_preempt_variant_0x18_extends_decode_range() {
-    if !fixture_available() { return; }
+    if !fixture_available() {
+        return;
+    }
     // FUN_00426780 runtime_mheap_allocMSpanLocked uses the preempt
     // variant. Before commit 758d283 this truncated to a 5-line stub.
     let out = run(&[BED_FIXTURE, "0x426780"]);

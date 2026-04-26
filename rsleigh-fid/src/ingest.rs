@@ -6,8 +6,8 @@
 //!   3. Mask operand bytes, concatenate, hash.
 //!   4. Collect direct call targets (PcodeOp::CallInd skipped) for specific hash.
 
-use rsleigh_api::{Architecture, Decoder};
 use pcode_ir::PcodeOp;
+use rsleigh_api::{Architecture, Decoder};
 
 use crate::hash::FidHashQuad;
 use crate::mask::mask_instruction;

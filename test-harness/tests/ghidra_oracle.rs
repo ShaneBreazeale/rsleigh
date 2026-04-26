@@ -381,9 +381,7 @@ fn drop_dead_const_unique_inits(ops: &mut Vec<NormOp>) {
         // Read by any subsequent op in this instruction?
         let read = ops[i + 1..].iter().any(|later| {
             later.inputs.iter().any(|v| {
-                v.space == AddressSpaceId::Unique
-                    && v.offset == out.offset
-                    && v.size == out.size
+                v.space == AddressSpaceId::Unique && v.offset == out.offset && v.size == out.size
             })
         });
         if !read {
@@ -460,14 +458,12 @@ fn parse_hex(s: &str) -> Vec<u8> {
 /// Listed by basename of the .ghidra.json file. Entries here are reported
 /// as `divergence` instead of `fail`; the test panics if a listed fixture
 /// unexpectedly *passes* so the list cannot rot in the green direction.
-const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
-    (
-        "arm32/bx_lr.ghidra.json",
-        "ARM32 lifter omits the BX-LR thumb-mode state switch ops \
+const KNOWN_DIVERGENCES: &[(&str, &str)] = &[(
+    "arm32/bx_lr.ghidra.json",
+    "ARM32 lifter omits the BX-LR thumb-mode state switch ops \
          (INT_AND/INT_NOTEQUAL/COPY into TB/ISAModeSwitch + CALLOTHER \
          pcodeop) that Ghidra emits; rsleigh produces 5 ops vs Ghidra 6.",
-    ),
-];
+)];
 
 fn known_divergence_for(path: &Path) -> Option<&'static str> {
     let needle = path.to_string_lossy().replace('\\', "/");

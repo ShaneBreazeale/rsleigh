@@ -17,7 +17,9 @@ const CLANG_AR: &str = "/tmp/clang-ar/clang-apply-replacements.exe";
 const RSLEIGH_BIN: &str = env!("CARGO_BIN_EXE_rsleigh");
 
 fn fixture_available() -> bool {
-    if Path::new(CLANG_AR).exists() { return true; }
+    if Path::new(CLANG_AR).exists() {
+        return true;
+    }
     if std::env::var_os("RSLEIGH_REQUIRE_CLANG_AR_FIXTURE").is_some() {
         panic!("clang-apply-replacements fixture missing at {CLANG_AR}");
     }
@@ -27,16 +29,21 @@ fn fixture_available() -> bool {
 
 #[test]
 fn trailing_cbranch_does_not_panic() {
-    if !fixture_available() { return; }
+    if !fixture_available() {
+        return;
+    }
     let out = Command::new(RSLEIGH_BIN)
         .args([CLANG_AR, "0x14002d718"])
         .output()
         .expect("rsleigh invocation");
-    assert!(out.status.success(), "rsleigh crashed:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "rsleigh crashed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let text = String::from_utf8(out.stdout).expect("UTF-8");
     assert!(
-        !text.contains("decompilation failed (stack overflow)")
-            && !text.contains("panicked"),
+        !text.contains("decompilation failed (stack overflow)") && !text.contains("panicked"),
         "rsleigh reported failure in output:\n{text}"
     );
     // Body must have more than the comment + `}` — the Ghidra counterpart

@@ -40,12 +40,12 @@ fn double_negation_eq_zero_eliminated() {
             // sete cl          — cl = (al == 0) ? 1 : 0
             // ret
             let bytes: &[u8] = &[
-                0x48, 0x31, 0xC0,       // xor rax, rax
+                0x48, 0x31, 0xC0, // xor rax, rax
                 0x48, 0x83, 0xF8, 0x00, // cmp rax, 0
-                0x0F, 0x94, 0xC0,       // sete al
-                0x80, 0xF8, 0x00,       // cmp al, 0
-                0x0F, 0x94, 0xC1,       // sete cl
-                0xC3,                   // ret
+                0x0F, 0x94, 0xC0, // sete al
+                0x80, 0xF8, 0x00, // cmp al, 0
+                0x0F, 0x94, 0xC1, // sete cl
+                0xC3, // ret
             ];
             let insts = decode_x64(bytes, 0x1000);
             let cfg = build_cfg(&insts);
@@ -59,9 +59,10 @@ fn double_negation_eq_zero_eliminated() {
                         // inner must NOT itself be a comparison (Eq or NotEq)
                         let inner_expr = &ssa.vars[inner_id.0 as usize].expr;
                         assert!(
-                            !matches!(inner_expr,
+                            !matches!(
+                                inner_expr,
                                 Expr::BinOp(BinOpKind::Eq, _, _)
-                                | Expr::BinOp(BinOpKind::NotEq, _, _)
+                                    | Expr::BinOp(BinOpKind::NotEq, _, _)
                             ),
                             "double-negation NOT eliminated: BinOp(Eq, {:?}, Const(0)) remains",
                             inner_expr
@@ -128,11 +129,16 @@ fn main_func_no_double_negation_in_output() {
             while io < bytes.len() {
                 match dec.decode(&bytes[io..], func_va + io as u64) {
                     Ok(inst) => {
-                        let is_ret = inst.ops.iter().any(|op| matches!(op, PcodeOp::Return { .. }));
+                        let is_ret = inst
+                            .ops
+                            .iter()
+                            .any(|op| matches!(op, PcodeOp::Return { .. }));
                         let l = inst.len as usize;
                         insts.push((func_va + io as u64, inst));
                         io += l;
-                        if is_ret { break; }
+                        if is_ret {
+                            break;
+                        }
                     }
                     Err(_) => break,
                 }
@@ -146,8 +152,10 @@ fn main_func_no_double_negation_in_output() {
             );
 
             assert!(
-                !out.contains("== 0) == 0") && !out.contains("!= 0) == 0")
-                    && !out.contains("== 0 == 0") && !out.contains("!= 0 == 0"),
+                !out.contains("== 0) == 0")
+                    && !out.contains("!= 0) == 0")
+                    && !out.contains("== 0 == 0")
+                    && !out.contains("!= 0 == 0"),
                 "double-negation still present in main output:\n{}",
                 out.lines()
                     .filter(|l| l.contains("== 0"))

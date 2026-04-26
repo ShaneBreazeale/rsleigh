@@ -1,4 +1,4 @@
-use rsleigh_api::{Decoder, Architecture};
+use rsleigh_api::{Architecture, Decoder};
 fn main() {
     let mut dec = Decoder::new(Architecture::X86_64);
     // XOR EDX, EDX = 31 D2

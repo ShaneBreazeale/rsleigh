@@ -86,15 +86,8 @@ fn x_times_one_folds_away_the_mult() {
     let ssa = run_fold(vars, 2);
     // After fold + constant propagation the multiply must collapse —
     // either to Var(0) (identity) or further to Const(42, _).
-    let ok = matches!(
-        ssa.vars[2].expr,
-        Expr::Var(VarId(0)) | Expr::Const(42, _)
-    );
-    assert!(
-        ok,
-        "x*1 must collapse; got {:?}",
-        ssa.vars[2].expr
-    );
+    let ok = matches!(ssa.vars[2].expr, Expr::Var(VarId(0)) | Expr::Const(42, _));
+    assert!(ok, "x*1 must collapse; got {:?}", ssa.vars[2].expr);
 }
 
 #[test]
@@ -179,10 +172,7 @@ fn x_div_one_folds_away_the_div() {
     ];
     let ssa = run_fold(vars, 2);
     // x/1 must collapse — either to Var(0) or to a folded Const(42).
-    let ok = matches!(
-        ssa.vars[2].expr,
-        Expr::Var(VarId(0)) | Expr::Const(42, _)
-    );
+    let ok = matches!(ssa.vars[2].expr, Expr::Var(VarId(0)) | Expr::Const(42, _));
     assert!(ok, "x/1 must collapse; got {:?}", ssa.vars[2].expr);
 }
 
@@ -409,7 +399,11 @@ fn bool_and_x_x_folds_to_x() {
         vd(0, Expr::Unknown, 1),
         vd(
             1,
-            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::BoolAnd, VarId(0), VarId(0)),
+            Expr::BinOp(
+                rsleigh_decompile::ir::BinOpKind::BoolAnd,
+                VarId(0),
+                VarId(0),
+            ),
             1,
         ),
     ];
@@ -452,7 +446,11 @@ fn bool_xor_x_x_folds_to_zero() {
         vd(0, Expr::Unknown, 1),
         vd(
             1,
-            Expr::BinOp(rsleigh_decompile::ir::BinOpKind::BoolXor, VarId(0), VarId(0)),
+            Expr::BinOp(
+                rsleigh_decompile::ir::BinOpKind::BoolXor,
+                VarId(0),
+                VarId(0),
+            ),
             1,
         ),
     ];

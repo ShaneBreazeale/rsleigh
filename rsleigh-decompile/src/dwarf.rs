@@ -1,6 +1,6 @@
+use object::{Object, ObjectSection};
 use std::collections::HashMap;
 use std::path::Path;
-use object::{Object, ObjectSection};
 
 /// Information extracted from DWARF debug info for a function.
 #[derive(Debug, Clone, Default)]
@@ -50,7 +50,9 @@ pub fn parse_dwarf_from_path(binary_path: &Path) -> HashMap<u64, FunctionDebugIn
 /// Extract DWARF debug info for functions from raw binary bytes.
 pub fn parse_dwarf(binary: &[u8]) -> HashMap<u64, FunctionDebugInfo> {
     let mut result = HashMap::new();
-    let Ok(obj) = object::File::parse(binary) else { return result };
+    let Ok(obj) = object::File::parse(binary) else {
+        return result;
+    };
 
     let endian = if obj.endianness() == object::Endianness::Little {
         gimli::RunTimeEndian::Little
@@ -72,7 +74,9 @@ pub fn parse_dwarf(binary: &[u8]) -> HashMap<u64, FunctionDebugInfo> {
 
     let mut units = dwarf.units();
     while let Ok(Some(header)) = units.next() {
-        let Ok(unit) = dwarf.unit(header) else { continue };
+        let Ok(unit) = dwarf.unit(header) else {
+            continue;
+        };
         let mut entries = unit.entries();
 
         let mut current_func: Option<(u64, FunctionDebugInfo)> = None;
@@ -121,22 +125,25 @@ pub fn parse_dwarf(binary: &[u8]) -> HashMap<u64, FunctionDebugInfo> {
 
 type DwarfSlice<'a> = gimli::Dwarf<gimli::EndianSlice<'a, gimli::RunTimeEndian>>;
 type UnitSlice<'a> = gimli::Unit<gimli::EndianSlice<'a, gimli::RunTimeEndian>, usize>;
-type EntrySlice<'a> = gimli::DebuggingInformationEntry<'a, 'a, gimli::EndianSlice<'a, gimli::RunTimeEndian>, usize>;
+type EntrySlice<'a> =
+    gimli::DebuggingInformationEntry<'a, 'a, gimli::EndianSlice<'a, gimli::RunTimeEndian>, usize>;
 
 /// Get the low_pc address, handling both DWARF4 (Addr) and DWARF5 (DebugAddrIndex).
 fn get_low_pc(dwarf: &DwarfSlice<'_>, unit: &UnitSlice<'_>, entry: &EntrySlice<'_>) -> Option<u64> {
     let attr = entry.attr_value(gimli::DW_AT_low_pc).ok()??;
     match attr {
         gimli::AttributeValue::Addr(a) => Some(a),
-        gimli::AttributeValue::DebugAddrIndex(idx) => {
-            dwarf.address(unit, idx).ok()
-        }
+        gimli::AttributeValue::DebugAddrIndex(idx) => dwarf.address(unit, idx).ok(),
         _ => None,
     }
 }
 
 /// Get the DW_AT_name, handling String, DebugStrRef (DWARF4), and DebugStrOffsetsIndex (DWARF5).
-fn get_die_name(dwarf: &DwarfSlice<'_>, unit: &UnitSlice<'_>, entry: &EntrySlice<'_>) -> Option<String> {
+fn get_die_name(
+    dwarf: &DwarfSlice<'_>,
+    unit: &UnitSlice<'_>,
+    entry: &EntrySlice<'_>,
+) -> Option<String> {
     let attr = entry.attr(gimli::DW_AT_name).ok()??;
     let s = dwarf.attr_string(unit, attr.value()).ok()?;
     std::str::from_utf8(s.slice()).ok().map(|s| s.to_string())
@@ -180,7 +187,9 @@ fn get_member_offset(unit: &UnitSlice<'_>, entry: &EntrySlice<'_>) -> Option<u64
 /// field_byte_offset → field_name across all structs in the binary.
 pub fn parse_struct_fields(binary: &[u8]) -> StructFieldMap {
     let mut fields = HashMap::new();
-    let Ok(obj) = object::File::parse(binary) else { return fields };
+    let Ok(obj) = object::File::parse(binary) else {
+        return fields;
+    };
 
     let endian = if obj.endianness() == object::Endianness::Little {
         gimli::RunTimeEndian::Little
@@ -202,7 +211,9 @@ pub fn parse_struct_fields(binary: &[u8]) -> StructFieldMap {
 
     let mut units = dwarf.units();
     while let Ok(Some(header)) = units.next() {
-        let Ok(unit) = dwarf.unit(header) else { continue };
+        let Ok(unit) = dwarf.unit(header) else {
+            continue;
+        };
         let mut entries = unit.entries();
 
         let mut in_struct = false;
@@ -212,8 +223,12 @@ pub fn parse_struct_fields(binary: &[u8]) -> StructFieldMap {
 
         while let Ok(Some((depth, entry))) = entries.next_dfs() {
             if depth < prev_depth {
-                for _ in 0..(prev_depth - depth) { parent_offsets.pop(); }
-                if parent_offsets.is_empty() { in_struct = false; }
+                for _ in 0..(prev_depth - depth) {
+                    parent_offsets.pop();
+                }
+                if parent_offsets.is_empty() {
+                    in_struct = false;
+                }
             }
             prev_depth = depth;
 
@@ -252,14 +267,19 @@ pub fn parse_struct_fields(binary: &[u8]) -> StructFieldMap {
 pub fn parse_struct_fields_from_path(binary_path: &Path) -> StructFieldMap {
     if let Ok(data) = std::fs::read(binary_path) {
         let result = parse_struct_fields(&data);
-        if !result.is_empty() { return result; }
+        if !result.is_empty() {
+            return result;
+        }
     }
     // Try dSYM
     if let Some(file_name) = binary_path.file_name() {
         let mut dsym_path = binary_path.as_os_str().to_os_string();
         dsym_path.push(".dSYM");
         let dsym_dwarf = Path::new(&dsym_path)
-            .join("Contents").join("Resources").join("DWARF").join(file_name);
+            .join("Contents")
+            .join("Resources")
+            .join("DWARF")
+            .join(file_name);
         if let Ok(data) = std::fs::read(&dsym_dwarf) {
             return parse_struct_fields(&data);
         }

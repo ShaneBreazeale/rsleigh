@@ -800,8 +800,7 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                     if pred_values.iter().any(|v| v.is_none()) {
                         continue;
                     }
-                    let values: Vec<VarId> =
-                        pred_values.into_iter().map(|v| v.unwrap()).collect();
+                    let values: Vec<VarId> = pred_values.into_iter().map(|v| v.unwrap()).collect();
                     if values.iter().all(|v| *v == values[0]) {
                         new_entry.insert(*key, values[0]);
                     } else {

@@ -64,11 +64,7 @@ fn va_to_file_offset(obj: &Object<'_>, va: u64) -> Option<usize> {
 ///
 ///   - `LEA r64, [r64 + disp8]` → PC-advance candidate.
 ///     Encoding: `48 8D modRM disp8` (4 bytes).
-pub fn classify_handler(
-    obj: &Object<'_>,
-    data: &[u8],
-    addr: u64,
-) -> Option<HandlerEncoding> {
+pub fn classify_handler(obj: &Object<'_>, data: &[u8], addr: u64) -> Option<HandlerEncoding> {
     let off = va_to_file_offset(obj, addr)?;
     let scan_len = 0x100.min(data.len() - off);
     let body = &data[off..off + scan_len];
@@ -85,18 +81,20 @@ pub fn classify_handler(
         //   0F B6 mod=01 r/m=??? disp8           (4 bytes, no SIB)
         //   48 0F B6 ... (REX prefix; +1 byte)
         //   44 0F B6 ... (REX.R for R8..R15)
-        let rex = if (body[k] == 0x48 || body[k] == 0x44 || body[k] == 0x4c
-                || body[k] == 0x4d || body[k] == 0x41 || body[k] == 0x45)
-                && k + 1 < body.len() && body[k + 1] == 0x0f
+        let rex = if (body[k] == 0x48
+            || body[k] == 0x44
+            || body[k] == 0x4c
+            || body[k] == 0x4d
+            || body[k] == 0x41
+            || body[k] == 0x45)
+            && k + 1 < body.len()
+            && body[k + 1] == 0x0f
         {
             1
         } else {
             0
         };
-        if k + rex + 3 < body.len()
-            && body[k + rex] == 0x0f
-            && body[k + rex + 1] == 0xb6
-        {
+        if k + rex + 3 < body.len() && body[k + rex] == 0x0f && body[k + rex + 1] == 0xb6 {
             let modrm = body[k + rex + 2];
             let mod_field = modrm >> 6;
             let rm = modrm & 0x07;
@@ -193,11 +191,7 @@ pub fn classify_handler(
 }
 
 /// Batch classify a list of handlers.
-pub fn classify_all(
-    obj: &Object<'_>,
-    data: &[u8],
-    addrs: &[u64],
-) -> Vec<HandlerEncoding> {
+pub fn classify_all(obj: &Object<'_>, data: &[u8], addrs: &[u64]) -> Vec<HandlerEncoding> {
     addrs
         .iter()
         .filter_map(|a| classify_handler(obj, data, *a))

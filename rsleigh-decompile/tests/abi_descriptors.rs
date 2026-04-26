@@ -138,10 +138,6 @@ fn varargs_only_flagged_for_conventions_that_allow_it() {
         CallingConv::Fastcall32,
         CallingConv::GoAmd64,
     ] {
-        assert!(
-            !abi(cc).allows_varargs,
-            "{:?} should not allow varargs",
-            cc
-        );
+        assert!(!abi(cc).allows_varargs, "{:?} should not allow varargs", cc);
     }
 }

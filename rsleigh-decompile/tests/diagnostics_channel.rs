@@ -69,7 +69,19 @@ fn unresolved_indirect_call_emits_diagnostic() {
     };
     let insts = vec![
         (0x1000, inst(2, vec![PcodeOp::CallInd { dest }])),
-        (0x1002, inst(1, vec![PcodeOp::Return { dest: Varnode { space: AddressSpaceId::Ram, offset: 0, size: 8 } }])),
+        (
+            0x1002,
+            inst(
+                1,
+                vec![PcodeOp::Return {
+                    dest: Varnode {
+                        space: AddressSpaceId::Ram,
+                        offset: 0,
+                        size: 8,
+                    },
+                }],
+            ),
+        ),
     ];
     let cfg = build_cfg(&insts);
 

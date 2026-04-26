@@ -18,7 +18,9 @@ const BED_FIXTURE: &str = "/tmp/bed/bed_v0.2.8_linux_amd64/bed";
 const RSLEIGH_BIN: &str = env!("CARGO_BIN_EXE_rsleigh");
 
 fn fixture_available() -> bool {
-    if Path::new(BED_FIXTURE).exists() { return true; }
+    if Path::new(BED_FIXTURE).exists() {
+        return true;
+    }
     if std::env::var_os("RSLEIGH_REQUIRE_BED_FIXTURE").is_some() {
         panic!("bed fixture missing at {BED_FIXTURE}");
     }
@@ -31,13 +33,19 @@ fn decompile(addr: &str) -> String {
         .args([BED_FIXTURE, addr])
         .output()
         .expect("rsleigh invocation");
-    assert!(out.status.success(), "rsleigh failed:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "rsleigh failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     String::from_utf8(out.stdout).expect("UTF-8")
 }
 
 #[test]
 fn sub_expression_of_sf_not_leaked_in_compound_cond() {
-    if !fixture_available() { return; }
+    if !fixture_available() {
+        return;
+    }
     let out = decompile("0x42d620");
     assert!(
         !out.contains("OF != SF") && !out.contains("OF == SF"),
@@ -47,14 +55,18 @@ fn sub_expression_of_sf_not_leaked_in_compound_cond() {
 
 #[test]
 fn sub_expression_of_sf_not_leaked_in_any_subexpr() {
-    if !fixture_available() { return; }
+    if !fixture_available() {
+        return;
+    }
     // Scan several other funcs that historically have flag-pattern
     // CBranches; the fix must generalize.
     for addr in ["0x42d620", "0x455b60", "0x46b020"] {
         let out = decompile(addr);
         assert!(
-            !out.contains("OF != SF") && !out.contains("OF == SF")
-                && !out.contains("OV != NG") && !out.contains("OV == NG"),
+            !out.contains("OF != SF")
+                && !out.contains("OF == SF")
+                && !out.contains("OV != NG")
+                && !out.contains("OV == NG"),
             "{addr}: raw flag pair leaked\n{out}"
         );
     }

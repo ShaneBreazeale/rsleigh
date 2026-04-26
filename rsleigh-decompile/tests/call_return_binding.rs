@@ -45,10 +45,10 @@ fn mid_block_call_out_is_set() {
         .stack_size(32 * 1024 * 1024)
         .spawn(|| {
             let bytes: [u8; 13] = [
-                0x48, 0x89, 0xF9,             // mov rcx, rdi
+                0x48, 0x89, 0xF9, // mov rcx, rdi
                 0xE8, 0x10, 0x00, 0x00, 0x00, // call rel32 +0x10
-                0x48, 0x89, 0x45, 0xF8,       // mov [rbp-8], rax
-                0xC3,                         // ret
+                0x48, 0x89, 0x45, 0xF8, // mov [rbp-8], rax
+                0xC3, // ret
             ];
             let insts = decode_x64(&bytes, 0x1000);
             assert!(
@@ -62,7 +62,12 @@ fn mid_block_call_out_is_set() {
             fold_with_cc(&mut ssa, CallingConv::Win64);
 
             // Find any Stmt::Call in any block.
-            let call_stmts: Vec<_> = ssa.blocks.iter().flat_map(|b| &b.stmts).filter(|s| matches!(s, Stmt::Call { .. })).collect();
+            let call_stmts: Vec<_> = ssa
+                .blocks
+                .iter()
+                .flat_map(|b| &b.stmts)
+                .filter(|s| matches!(s, Stmt::Call { .. }))
+                .collect();
 
             // There may or may not be a mid-block Call depending on how the CFG splits.
             // If one exists, it MUST have out = Some(_) because RAX is read after it.
@@ -84,7 +89,10 @@ fn mid_block_call_out_is_set() {
                         rsleigh_decompile::ir::SsaTerminator::Call { .. }
                     )
                 });
-            assert!(has_any_call, "no Call found in SSA after decoding a CALL instruction");
+            assert!(
+                has_any_call,
+                "no Call found in SSA after decoding a CALL instruction"
+            );
         })
         .expect("thread spawn failed");
     handle.join().expect("test thread panicked");
@@ -147,8 +155,10 @@ fn strcspn_return_is_named() {
             while io < bytes.len() {
                 match dec.decode(&bytes[io..], func_va + io as u64) {
                     Ok(inst) => {
-                        let is_ret =
-                            inst.ops.iter().any(|op| matches!(op, PcodeOp::Return { .. }));
+                        let is_ret = inst
+                            .ops
+                            .iter()
+                            .any(|op| matches!(op, PcodeOp::Return { .. }));
                         let l = inst.len as usize;
                         insts.push((func_va + io as u64, inst));
                         io += l;
@@ -172,9 +182,9 @@ fn strcspn_return_is_named() {
             // The strcspn call result must be bound to a named local, not discarded.
             // Accept either: `= strcspn(` (named binding) or a named var containing
             // the return in an expression like `sVar1 = strcspn(`.
-            let has_named_binding = out.lines().any(|line| {
-                line.contains("= strcspn(") || line.contains("=strcspn(")
-            });
+            let has_named_binding = out
+                .lines()
+                .any(|line| line.contains("= strcspn(") || line.contains("=strcspn("));
             assert!(
                 has_named_binding,
                 "strcspn return value not bound to a named variable; output:\n{}",

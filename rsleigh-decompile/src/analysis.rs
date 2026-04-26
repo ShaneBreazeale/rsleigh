@@ -487,4 +487,3 @@ pub fn validate_returns_against_callsites(
     }
     demoted
 }
-
