@@ -1,0 +1,17 @@
+name: rsleigh CodeQL config
+
+# rsleigh is a defensive reverse-engineering / triage tool. Several flags
+# (--ioc, --sigcheck, --resources) intentionally extract and print
+# strings, signer metadata, and resource bytes from the *binary being
+# analyzed*. CodeQL's Rust cleartext-logging query (CWE-312/532) treats
+# any println! of strings carrying credential-shaped substrings as
+# sensitive-data leakage, but for this tool that *is* the feature —
+# same shape as truffleHog / gitleaks / git-secrets surfacing
+# candidate secrets to the analyst.
+#
+# Disable rust/cleartext-logging globally to stop the recurring false
+# positives. None of rsleigh's own runtime data carries user
+# credentials; everything printed comes from the file under analysis.
+query-filters:
+  - exclude:
+      id: rust/cleartext-logging
