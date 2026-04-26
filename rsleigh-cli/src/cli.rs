@@ -2626,10 +2626,9 @@ fn run_xrefs(binary_path: &str, data: &[u8], target_name: &str) {
             // Extract function calls
             if t.contains('(') && !t.starts_with("//") {
                 if let Some(paren) = t.find('(') {
-                    let before = if let Some(eq) = t.find(" = ") {
-                        &t[eq + 3..paren]
-                    } else {
-                        &t[..paren]
+                    let before = match t.find(" = ") {
+                        Some(eq) if eq + 3 <= paren => &t[eq + 3..paren],
+                        _ => &t[..paren],
                     };
                     let callee = before.trim().trim_start_matches("return ");
                     if !callee.is_empty()
