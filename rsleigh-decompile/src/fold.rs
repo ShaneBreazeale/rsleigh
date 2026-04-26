@@ -4131,6 +4131,17 @@ fn collect_stack_args_from_block(
             }
             Stmt::Assign(v) => {
                 let vdef = &vars[v.0 as usize];
+                // Skip the SSA's pre-allocated call-return slot. Each Call
+                // is preceded by an `Assign(EAX)` placeholder that names the
+                // VarId the call's return value will land in; that slot is
+                // not a real instruction and must not stop the backward
+                // walk for stack arguments. Without this skip, x86-32
+                // cdecl PUSH-based calls (ubiquitous in PE32 binaries)
+                // recover zero arguments because the EAX placeholder is
+                // the very first stmt the walk inspects.
+                if vdef.call_return {
+                    continue;
+                }
                 // Skip (and mark for removal) ESP writes (IntSub ESP, 4) — PUSH boilerplate
                 if vdef.varnode.space == AddressSpaceId::Register
                     && vdef.varnode.offset == ESP_OFFSET
