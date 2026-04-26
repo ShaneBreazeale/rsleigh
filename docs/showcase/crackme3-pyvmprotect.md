@@ -57,4 +57,17 @@ Reusable for similar PyVMProtect samples (v3-class):
 
 A 53-opcode custom VM + multi-layer PCG + zlib + per-entry VARINT pipeline came out as readable pseudocode + classifier metadata in one tool — without a Ghidra JVM, IDA license, or live debugger. rsleigh's strongest path is exactly this: dump everything to text, annotate the crypto, classify the handlers, then finish in Python.
 
-> **Same author shipped a v5 ("The Wall") using DJB2a instead of ROR13.** rsleigh's `peb_walk.rs` now ships `djb2a()` and resolves 25/36 init-time hashes — work in progress.
+## Follow-up: v5 ("The Wall")
+
+Same author shipped a v5 on 2026-04-25 — README literally says *"Version 4 was breached. Version 5 will make you suffer."* Key differences:
+
+- **Hash algorithm:** DJB2a (XOR variant of DJB2, seed 5381) instead of v3's ROR13. NUL terminator is loop-exit only, not folded into the hash. Wired into `peb_walk.rs::djb2a()` so any sample using it auto-annotates.
+- **No SEH-driven SMC.** v5 abandoned the `.pdata`/UNWIND_INFO patch trick — all API resolution moves to PE init.
+- **Init chain tripled.** 303 polymorphic handlers (v3 had 117), `0x180001310..0x18001285x`, chained `EAX → ECX`.
+- **Anti-timing:** RDPMC pair around a 256-cycle add loop at `0x1800212ac`.
+- **SSE2 sbox fill** at `0x180021385` — packed-byte increment + mask tables in `.rdata`.
+- **Two encrypted blobs** (`0x180056960`, 447 B and `0x180056490`, 242 B) decrypted via the same dual-PCG family as v3 with new XOR-twiddle constants.
+
+**Hash resolution status:** 33/36 init-time DJB2a hashes resolved as of 2026-04-26. tlhelp32 process/thread enum (`CreateToolhelp32Snapshot`, `Process32First/Next`, `Thread32First/Next`, `Module32First/Next`), raw `NtReadFile`/`NtOpenFile`, `GetModuleHandleExA`, and the v3-overlap APIs are all wired into `peb_walk.rs::API_SEEDS`. 3 hashes (`0x33bfa5f6`, `0x3ef073da`, `0x4d9faf9f`) still unresolved — likely require symbolic extraction from the resolver call site at `0x180013760` or a dynamic breakpoint.
+
+Solving v5 is in progress — see `docs/showcase/crackme5-pyvmprotect.md` once finished.
