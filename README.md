@@ -93,7 +93,7 @@ costs, especially for x86 and AArch64.
 From crates.io (CLI only):
 
 ```bash
-cargo install rsleigh-cli           # installs `rsleigh` binary
+cargo install rsleigh               # installs `rsleigh` binary
 ```
 
 The `rsleigh-api` and `pcode-ir` crates are published for library use:

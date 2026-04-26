@@ -22,7 +22,11 @@ cargo test -p test-harness          # compile + run all tests
 
 Rust 2021 stable, make.
 
-## CLI (`rsleigh-cli`)
+## CLI (`rsleigh-cli` lib + `rsleigh` bin)
+
+Install: `cargo install rsleigh` (root crate's bin re-exports `rsleigh_cli::entrypoint`).
+Workspace also keeps `cargo install --path rsleigh-cli` working — same binary name `rsleigh`.
+
 
 ```bash
 rsleigh <binary>                       # list functions
@@ -61,12 +65,12 @@ rsleigh --raw <arch> <binary>          # raw firmware blob
 ## Layout
 
 ```
-src/                  parser + SLEIGH codegen
+src/                  parser + SLEIGH codegen (root `rsleigh` crate; also re-exposes CLI bin via src/bin/rsleigh.rs → rsleigh_cli::entrypoint)
 pcode-ir/             P-code types + peephole (no_std)
 rsleigh-api/          Decoder API + reg name resolution
 rsleigh-decompile/    5-pass decompiler (cfg → ssa → fold → structure → print)
 rsleigh-fid/          Function ID: body fingerprinting + bundled .fidb
-rsleigh-cli/          CLI
+rsleigh-cli/          CLI — split into lib.rs (pub mod cli, wasm; pub use cli::entrypoint) + thin main.rs shim
 rsleigh-generate/     slaspec → generated crate source
 generated/            output crates (/out/ gitignored)
 test-harness/         golden + stress + fuzz + differential
