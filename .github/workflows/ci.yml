@@ -30,13 +30,16 @@ jobs:
       - name: Build all crates
         run: cargo build --workspace
 
-      # Run golden P-code tests (~6000 assertions)
+      # Run golden P-code + decompiler validation tests.
+      # --release sidesteps a pre-existing stack overflow in the
+      # ghidra_oracle_parity test under debug builds on Linux (recursive
+      # SLEIGH lift hits the 8 MiB default thread stack only when unoptimised).
       - name: Test — golden P-code + decompiler validation
-        run: cargo test -p test-harness
+        run: cargo test --release -p test-harness
 
       # Run decompiler unit tests (signature DB, type system)
       - name: Test — decompiler unit tests
-        run: cargo test -p rsleigh-decompile
+        run: cargo test --release -p rsleigh-decompile --lib
 
       # Build CLI in release mode (catches optimization-only issues)
       - name: Build CLI (release)
