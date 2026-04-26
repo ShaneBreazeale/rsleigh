@@ -57,6 +57,17 @@ publish() {
       attempt=$((attempt + 1))
       continue
     fi
+    if echo "$out" | grep -qiE "got 50[0-9]|HTTP/2 50[0-9]|503|502|504|gateway|service unavailable"; then
+      if (( attempt >= max_attempts )); then
+        echo "  5xx retries exhausted for $crate — aborting"
+        exit 1
+      fi
+      local short_backoff=60
+      echo "  registry 5xx; sleeping ${short_backoff}s before retry"
+      sleep "$short_backoff"
+      attempt=$((attempt + 1))
+      continue
+    fi
     exit 1
   done
   if [[ -z "$DRY_RUN" ]]; then
