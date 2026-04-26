@@ -561,6 +561,18 @@ fn check_oracle(path: &Path) {
 
 #[test]
 fn ghidra_oracle_parity() {
+    // Recursive SLEIGH lift can blow the default 8 MiB thread stack under
+    // unoptimised debug builds. Run on a 32 MiB thread so debug + release
+    // behave identically.
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(ghidra_oracle_parity_inner)
+        .expect("spawn ghidra_oracle_parity worker")
+        .join()
+        .expect("ghidra_oracle_parity worker panicked");
+}
+
+fn ghidra_oracle_parity_inner() {
     let oracles = discover_oracles();
     if oracles.is_empty() {
         eprintln!(
