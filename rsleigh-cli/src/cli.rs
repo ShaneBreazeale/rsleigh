@@ -129,6 +129,7 @@ pub fn entrypoint() {
         eprintln!("  rsleigh <binary> --vulnscan          Scan for vulnerability patterns");
         eprintln!("  rsleigh <binary> --ioc [--json]      Extract IOCs (URLs, IPs, paths, registry keys)");
         eprintln!("  rsleigh <binary> --sigcheck [--json] Parse Authenticode signature (signer, timestamp, chain)");
+        eprintln!("  rsleigh <binary> --resources [--dump DIR] [--json]  Walk PE resource directory; --dump extracts blobs");
         eprintln!(
             "  rsleigh <binary> --all --compact     Token-efficient output (no decls/blanks)"
         );
@@ -157,6 +158,7 @@ pub fn entrypoint() {
     let vulnscan_mode = args.iter().any(|a| a == "--vulnscan");
     let ioc_mode = args.iter().any(|a| a == "--ioc");
     let sigcheck_mode = args.iter().any(|a| a == "--sigcheck");
+    let resources_mode = args.iter().any(|a| a == "--resources");
     let classes_mode = args.iter().any(|a| a == "--classes");
     let compact_mode = args.iter().any(|a| a == "--compact");
     let brief_mode = args.iter().any(|a| a == "--brief");
@@ -543,7 +545,7 @@ pub fn entrypoint() {
     }
 
     // Summary/Xrefs/Search/Vulnscan/Callgraph modes
-    if summary_mode || xrefs_mode || search_mode || vulnscan_mode || callgraph_mode || ioc_mode || sigcheck_mode {
+    if summary_mode || xrefs_mode || search_mode || vulnscan_mode || callgraph_mode || ioc_mode || sigcheck_mode || resources_mode {
         let data = match std::fs::read(binary_path) {
             Ok(d) => d,
             Err(e) => {
@@ -574,6 +576,14 @@ pub fn entrypoint() {
                 } else if sigcheck_mode {
                     let json = args_clone.iter().any(|a| a == "--json");
                     run_sigcheck(&bp, &data, json);
+                } else if resources_mode {
+                    let json = args_clone.iter().any(|a| a == "--json");
+                    let dump_dir = args_clone
+                        .iter()
+                        .position(|a| a == "--dump")
+                        .and_then(|i| args_clone.get(i + 1))
+                        .cloned();
+                    run_resources(&bp, &data, json, dump_dir.as_deref());
                 } else if callgraph_mode {
                     run_callgraph(&bp, &data);
                 } else {
@@ -4464,6 +4474,404 @@ fn sigcheck_parse(data: &[u8]) -> Option<SigInfo> {
         timestamp_signer_cn,
         all_cns,
     })
+}
+
+/// Walk the PE resource directory tree and surface a triage-friendly
+/// listing of every embedded resource. Optionally dump each resource's
+/// raw bytes to disk for downstream analysis (icon extraction, MSI
+/// peeking, embedded-payload recovery).
+///
+/// Three-level tree as documented in the PE/COFF spec: TYPE → NAME/ID →
+/// LANGUAGE → IMAGE_RESOURCE_DATA_ENTRY. This function walks each level
+/// using only the spec-defined offsets — it does not depend on goblin's
+/// resource parser, which only exposes the raw section.
+fn run_resources(binary_path: &str, data: &[u8], json: bool, dump_dir: Option<&str>) {
+    let entries = match resources_parse(data) {
+        Some(e) => e,
+        None => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "binary": binary_path,
+                        "has_resources": false,
+                    })).unwrap()
+                );
+            } else {
+                println!(
+                    "=== Resources for {} ===\n\n(no resource directory; PE has no .rsrc, or directory was empty)",
+                    binary_path
+                );
+            }
+            return;
+        }
+    };
+
+    if let Some(dir) = dump_dir {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("error: cannot create dump dir {}: {}", dir, e);
+            return;
+        }
+        for r in &entries {
+            let fname = format!(
+                "{}/{}_{}_{}.bin",
+                dir.trim_end_matches('/'),
+                r.type_name(),
+                r.id_label(),
+                r.lang
+            );
+            if let Some(blob) = data.get(r.file_offset..r.file_offset + r.size) {
+                if let Err(e) = std::fs::write(&fname, blob) {
+                    eprintln!("warn: write {}: {}", fname, e);
+                }
+            }
+        }
+    }
+
+    if json {
+        let arr: Vec<_> = entries
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "type": r.type_name(),
+                    "type_id": r.type_id,
+                    "id": r.id_label(),
+                    "id_raw": r.id_raw,
+                    "lang": r.lang,
+                    "rva": format!("0x{:x}", r.rva),
+                    "file_offset": format!("0x{:x}", r.file_offset),
+                    "size": r.size,
+                    "preview": r.preview(data),
+                })
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "binary": binary_path,
+            "has_resources": true,
+            "count": entries.len(),
+            "entries": arr,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+        return;
+    }
+
+    println!("=== Resources for {} ===", binary_path);
+    println!("\n{} entries\n", entries.len());
+    println!(
+        "{:<14} {:<24} {:<6} {:>8}  preview",
+        "type", "id", "lang", "size"
+    );
+    println!("{}", "-".repeat(78));
+    for r in &entries {
+        println!(
+            "{:<14} {:<24} {:<6} {:>8}  {}",
+            r.type_name(),
+            r.id_label(),
+            r.lang,
+            r.size,
+            r.preview(data),
+        );
+    }
+    if let Some(dir) = dump_dir {
+        println!("\nResources dumped to {}/", dir);
+    }
+}
+
+#[derive(Debug)]
+struct ResEntry {
+    type_id: u32,
+    type_name_str: Option<String>,
+    id_raw: u32,
+    id_name: Option<String>,
+    lang: u32,
+    rva: u32,
+    file_offset: usize,
+    size: usize,
+}
+
+impl ResEntry {
+    fn type_name(&self) -> String {
+        if let Some(n) = &self.type_name_str {
+            return n.clone();
+        }
+        match self.type_id {
+            1 => "CURSOR",
+            2 => "BITMAP",
+            3 => "ICON",
+            4 => "MENU",
+            5 => "DIALOG",
+            6 => "STRING",
+            7 => "FONTDIR",
+            8 => "FONT",
+            9 => "ACCELERATOR",
+            10 => "RCDATA",
+            11 => "MESSAGETABLE",
+            12 => "GROUP_CURSOR",
+            14 => "GROUP_ICON",
+            16 => "VERSION",
+            17 => "DLGINCLUDE",
+            19 => "PLUGPLAY",
+            20 => "VXD",
+            21 => "ANICURSOR",
+            22 => "ANIICON",
+            23 => "HTML",
+            24 => "MANIFEST",
+            _ => return format!("TYPE_{}", self.type_id),
+        }
+        .to_string()
+    }
+    fn id_label(&self) -> String {
+        match &self.id_name {
+            Some(n) => n.clone(),
+            None => format!("#{}", self.id_raw),
+        }
+    }
+    fn preview(&self, data: &[u8]) -> String {
+        let blob = match data.get(self.file_offset..self.file_offset + self.size.min(96)) {
+            Some(b) => b,
+            None => return String::new(),
+        };
+        // PE / MZ embedded payload — high signal, surface immediately.
+        if blob.len() >= 2 && &blob[..2] == b"MZ" {
+            return format!("[embedded PE/EXE, {} bytes]", self.size);
+        }
+        // MSI / OLE compound document.
+        if blob.len() >= 8 && blob[..8] == [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1] {
+            return format!("[OLE compound (likely MSI), {} bytes]", self.size);
+        }
+        // CAB.
+        if blob.len() >= 4 && &blob[..4] == b"MSCF" {
+            return format!("[CAB archive, {} bytes]", self.size);
+        }
+        // PNG / JPG / GIF.
+        if blob.len() >= 8 && &blob[..8] == &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A] {
+            return format!("[PNG image, {} bytes]", self.size);
+        }
+        if blob.len() >= 3 && &blob[..3] == b"\xff\xd8\xff" {
+            return format!("[JPEG image, {} bytes]", self.size);
+        }
+        // Manifest / XML — UTF-8 text.
+        if matches!(self.type_id, 24) {
+            let text = String::from_utf8_lossy(blob);
+            let cleaned: String = text
+                .chars()
+                .filter(|c| !c.is_control() || *c == ' ')
+                .take(80)
+                .collect();
+            return cleaned;
+        }
+        // VS_VERSIONINFO — UTF-16LE keyed structure starting with len/value-len.
+        if self.type_id == 16 && blob.len() >= 6 {
+            // Decode UTF-16LE printable-ish run as a hint.
+            let mut out = String::new();
+            let mut i = 6;
+            while i + 1 < blob.len() && out.len() < 60 {
+                let lo = blob[i];
+                let hi = blob[i + 1];
+                if hi == 0 && (0x20..0x7f).contains(&lo) {
+                    out.push(lo as char);
+                } else if lo == 0 && hi == 0 {
+                    if !out.is_empty() && !out.ends_with(' ') {
+                        out.push(' ');
+                    }
+                }
+                i += 2;
+            }
+            return out.trim().to_string();
+        }
+        // Generic preview: first 32 bytes hex + ascii.
+        let n = blob.len().min(32);
+        let hex: String = blob[..n].iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join("");
+        let ascii: String = blob[..n]
+            .iter()
+            .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
+            .collect();
+        format!("{}  |{}|", hex, ascii)
+    }
+}
+
+fn resources_parse(data: &[u8]) -> Option<Vec<ResEntry>> {
+    if data.len() < 0x40 || &data[..2] != b"MZ" {
+        return None;
+    }
+    let e_lfanew = u32::from_le_bytes(data[0x3C..0x40].try_into().ok()?) as usize;
+    if e_lfanew + 24 > data.len() || &data[e_lfanew..e_lfanew + 4] != b"PE\0\0" {
+        return None;
+    }
+    let opt_off = e_lfanew + 24;
+    let magic = u16::from_le_bytes(data[opt_off..opt_off + 2].try_into().ok()?);
+    let dir_off = match magic {
+        0x10b => opt_off + 0x70 + 2 * 8, // PE32: data dirs start at +0x60, entry 2 = resources
+        0x20b => opt_off + 0x70 + 2 * 8 + 16, // PE32+: shifted +16
+        _ => return None,
+    };
+    // Recompute properly: data dirs start at opt_off + (0x60 PE32 / 0x70 PE32+), resources is index 2.
+    let data_dir_base = match magic {
+        0x10b => opt_off + 0x60,
+        0x20b => opt_off + 0x70,
+        _ => return None,
+    };
+    let res_dir_entry = data_dir_base + 2 * 8;
+    if res_dir_entry + 8 > data.len() {
+        return None;
+    }
+    let res_rva =
+        u32::from_le_bytes(data[res_dir_entry..res_dir_entry + 4].try_into().ok()?) as u64;
+    let res_size =
+        u32::from_le_bytes(data[res_dir_entry + 4..res_dir_entry + 8].try_into().ok()?) as usize;
+    if res_rva == 0 || res_size == 0 {
+        return None;
+    }
+    let _ = dir_off;
+
+    // Walk section table to map RVA → file offset and locate the .rsrc base.
+    let n_sec = u16::from_le_bytes(data[e_lfanew + 6..e_lfanew + 8].try_into().ok()?) as usize;
+    let opt_size = u16::from_le_bytes(data[e_lfanew + 20..e_lfanew + 22].try_into().ok()?) as usize;
+    let sec_off = opt_off + opt_size;
+    if sec_off + n_sec * 40 > data.len() {
+        return None;
+    }
+    let mut sections: Vec<(u64, u64, u64)> = Vec::new(); // (va, vsz, fo)
+    for i in 0..n_sec {
+        let off = sec_off + i * 40;
+        let vsz = u32::from_le_bytes(data[off + 8..off + 12].try_into().ok()?) as u64;
+        let va = u32::from_le_bytes(data[off + 12..off + 16].try_into().ok()?) as u64;
+        let fo = u32::from_le_bytes(data[off + 20..off + 24].try_into().ok()?) as u64;
+        sections.push((va, vsz, fo));
+    }
+    let rva_to_fo = |rva: u64| -> Option<usize> {
+        for (va, vsz, fo) in &sections {
+            if rva >= *va && rva < va + vsz {
+                return Some((fo + (rva - va)) as usize);
+            }
+        }
+        None
+    };
+    let res_base_fo = rva_to_fo(res_rva)?;
+    let res_blob_end = res_base_fo + res_size;
+    if res_blob_end > data.len() {
+        return None;
+    }
+    let rsrc = &data[res_base_fo..res_blob_end];
+
+    // Read a UTF-16LE pascal-style name (length-prefixed) from the
+    // resource section. Used for named resources.
+    let read_name = |offset: usize| -> Option<String> {
+        if offset + 2 > rsrc.len() {
+            return None;
+        }
+        let n = u16::from_le_bytes(rsrc[offset..offset + 2].try_into().ok()?) as usize;
+        let start = offset + 2;
+        if start + n * 2 > rsrc.len() {
+            return None;
+        }
+        let mut u16s: Vec<u16> = Vec::with_capacity(n);
+        for chunk in rsrc[start..start + n * 2].chunks_exact(2) {
+            u16s.push(u16::from_le_bytes([chunk[0], chunk[1]]));
+        }
+        String::from_utf16(&u16s).ok()
+    };
+
+    // Walk a directory at `dir_off` (relative to rsrc base). Returns
+    // a list of (id_or_name, child_offset, is_dir). Limit recursion to
+    // depth 3 (TYPE → NAME → LANG → DATA).
+    fn walk_dir(rsrc: &[u8], dir_off: usize) -> Option<Vec<(u32, Option<String>, u32, bool)>> {
+        if dir_off + 16 > rsrc.len() {
+            return None;
+        }
+        let n_named = u16::from_le_bytes(rsrc[dir_off + 12..dir_off + 14].try_into().ok()?);
+        let n_id = u16::from_le_bytes(rsrc[dir_off + 14..dir_off + 16].try_into().ok()?);
+        let total = n_named as usize + n_id as usize;
+        let entries_off = dir_off + 16;
+        if entries_off + total * 8 > rsrc.len() {
+            return None;
+        }
+        let mut out = Vec::with_capacity(total);
+        for i in 0..total {
+            let e = entries_off + i * 8;
+            let name_or_id = u32::from_le_bytes(rsrc[e..e + 4].try_into().ok()?);
+            let off = u32::from_le_bytes(rsrc[e + 4..e + 8].try_into().ok()?);
+            let is_dir = (off & 0x8000_0000) != 0;
+            let child_off = (off & 0x7fff_ffff) as u32;
+            out.push((name_or_id, None, child_off, is_dir));
+            // Caller will translate Name pointer (high bit set on
+            // name_or_id) into a string separately to keep this fn
+            // borrow-free.
+            let _ = name_or_id;
+        }
+        Some(out)
+    }
+
+    let mut entries: Vec<ResEntry> = Vec::new();
+
+    // Level 1: TYPE
+    let level1 = walk_dir(rsrc, 0)?;
+    for &(type_raw, _, type_child_off, type_is_dir) in &level1 {
+        if !type_is_dir {
+            continue;
+        }
+        let type_name_str = if (type_raw & 0x8000_0000) != 0 {
+            read_name((type_raw & 0x7fff_ffff) as usize)
+        } else {
+            None
+        };
+        let type_id = type_raw & 0x7fff_ffff;
+        let level2 = match walk_dir(rsrc, type_child_off as usize) {
+            Some(v) => v,
+            None => continue,
+        };
+        // Level 2: NAME / ID
+        for &(id_raw, _, id_child_off, id_is_dir) in &level2 {
+            if !id_is_dir {
+                continue;
+            }
+            let id_name = if (id_raw & 0x8000_0000) != 0 {
+                read_name((id_raw & 0x7fff_ffff) as usize)
+            } else {
+                None
+            };
+            let id_val = id_raw & 0x7fff_ffff;
+            let level3 = match walk_dir(rsrc, id_child_off as usize) {
+                Some(v) => v,
+                None => continue,
+            };
+            // Level 3: LANGUAGE → DATA_ENTRY
+            for &(lang_raw, _, lang_child_off, lang_is_dir) in &level3 {
+                if lang_is_dir {
+                    continue;
+                }
+                let lang = lang_raw & 0x7fff_ffff;
+                // IMAGE_RESOURCE_DATA_ENTRY = { OffsetToData(rva), Size, CodePage, Reserved }
+                let de = lang_child_off as usize;
+                if de + 16 > rsrc.len() {
+                    continue;
+                }
+                let data_rva = match u32::from_le_bytes(rsrc[de..de + 4].try_into().ok()?) {
+                    v => v as u64,
+                };
+                let data_sz = u32::from_le_bytes(rsrc[de + 4..de + 8].try_into().ok()?) as usize;
+                let Some(fo) = rva_to_fo(data_rva) else { continue };
+                if fo + data_sz > data.len() {
+                    continue;
+                }
+                entries.push(ResEntry {
+                    type_id,
+                    type_name_str: type_name_str.clone(),
+                    id_raw: id_val,
+                    id_name: id_name.clone(),
+                    lang,
+                    rva: data_rva as u32,
+                    file_offset: fo,
+                    size: data_sz,
+                });
+            }
+        }
+    }
+
+    if entries.is_empty() {
+        return None;
+    }
+    Some(entries)
 }
 
 /// Export full call graph as JSON.
