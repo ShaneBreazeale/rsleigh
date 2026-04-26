@@ -128,6 +128,7 @@ pub fn entrypoint() {
         eprintln!("  rsleigh <binary> --seh-fixpoint      Apply SEH-driven SMC patches until fixpoint, report new functions");
         eprintln!("  rsleigh <binary> --vulnscan          Scan for vulnerability patterns");
         eprintln!("  rsleigh <binary> --ioc [--json]      Extract IOCs (URLs, IPs, paths, registry keys)");
+        eprintln!("  rsleigh <binary> --sigcheck [--json] Parse Authenticode signature (signer, timestamp, chain)");
         eprintln!(
             "  rsleigh <binary> --all --compact     Token-efficient output (no decls/blanks)"
         );
@@ -155,6 +156,7 @@ pub fn entrypoint() {
     let search_mode = args.iter().any(|a| a == "--search");
     let vulnscan_mode = args.iter().any(|a| a == "--vulnscan");
     let ioc_mode = args.iter().any(|a| a == "--ioc");
+    let sigcheck_mode = args.iter().any(|a| a == "--sigcheck");
     let classes_mode = args.iter().any(|a| a == "--classes");
     let compact_mode = args.iter().any(|a| a == "--compact");
     let brief_mode = args.iter().any(|a| a == "--brief");
@@ -541,7 +543,7 @@ pub fn entrypoint() {
     }
 
     // Summary/Xrefs/Search/Vulnscan/Callgraph modes
-    if summary_mode || xrefs_mode || search_mode || vulnscan_mode || callgraph_mode || ioc_mode {
+    if summary_mode || xrefs_mode || search_mode || vulnscan_mode || callgraph_mode || ioc_mode || sigcheck_mode {
         let data = match std::fs::read(binary_path) {
             Ok(d) => d,
             Err(e) => {
@@ -569,6 +571,9 @@ pub fn entrypoint() {
                 } else if ioc_mode {
                     let json = args_clone.iter().any(|a| a == "--json");
                     run_ioc(&bp, &data, json);
+                } else if sigcheck_mode {
+                    let json = args_clone.iter().any(|a| a == "--json");
+                    run_sigcheck(&bp, &data, json);
                 } else if callgraph_mode {
                     run_callgraph(&bp, &data);
                 } else {
@@ -4110,6 +4115,355 @@ fn run_ioc(binary_path: &str, data: &[u8], json: bool) {
     } else {
         println!("\nTotal: {} indicators", total);
     }
+}
+
+/// Parse the PE Authenticode signature embedded in the Security data
+/// directory and surface the parts a triage analyst actually wants.
+///
+/// Authenticode signatures live in a WIN_CERTIFICATE structure pointed to
+/// by the optional header's data directory entry #4. The certificate
+/// itself is a PKCS#7 SignedData blob (BER-encoded). Rather than pull in
+/// a full ASN.1 / CMS crate, we walk the bytes and pattern-match three
+/// well-known OID prefixes:
+///
+///   * 2.5.4.3 commonName  (06 03 55 04 03 ...) — every Subject/Issuer CN
+///   * 1.2.840.113549.1.9.5 signingTime (06 09 2A 86 48 86 F7 0D 01 09 05)
+///   * 1.2.840.113549.1.7.2 signedData (validates the blob shape)
+///
+/// The leaf signer is the FIRST commonName encountered after the
+/// signedData OID — the certificates list is ordered leaf-first in
+/// practice for code-signing use, with the rest of the chain following.
+fn run_sigcheck(binary_path: &str, data: &[u8], json: bool) {
+    let result = sigcheck_parse(data);
+
+    if json {
+        let signed = result.is_some();
+        let payload = match &result {
+            Some(r) => serde_json::json!({
+                "binary": binary_path,
+                "signed": signed,
+                "signer_cn": r.signer_cn.clone(),
+                "issuer_cn": r.issuer_cn.clone(),
+                "signing_time": r.signing_time.clone(),
+                "timestamp_signer_cn": r.timestamp_signer_cn.clone(),
+                "all_cns": r.all_cns.clone(),
+                "cert_blob_size": r.cert_blob_size,
+                "win_cert_revision": format!("0x{:04x}", r.revision),
+                "win_cert_type": format!("0x{:04x}", r.cert_type),
+            }),
+            None => serde_json::json!({
+                "binary": binary_path,
+                "signed": false,
+                "reason": "no PE Security directory entry, or directory was empty",
+            }),
+        };
+        println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+        return;
+    }
+
+    println!("=== Authenticode signature for {} ===", binary_path);
+    let Some(r) = result else {
+        println!("\nUNSIGNED — no PE Security directory entry, or directory was empty.");
+        return;
+    };
+    println!(
+        "\n  Cert blob size:  {} bytes  (revision 0x{:04x}, type 0x{:04x})",
+        r.cert_blob_size, r.revision, r.cert_type
+    );
+    if let Some(cn) = &r.signer_cn {
+        println!("  Signer CN:       {}", cn);
+    } else {
+        println!("  Signer CN:       (not extracted)");
+    }
+    if let Some(cn) = &r.issuer_cn {
+        println!("  Issuer CN:       {}", cn);
+    }
+    if let Some(t) = &r.signing_time {
+        println!("  Signing time:    {}", t);
+    }
+    if let Some(cn) = &r.timestamp_signer_cn {
+        println!("  Timestamp by:    {}", cn);
+    }
+    if !r.all_cns.is_empty() {
+        println!("\n  Cert chain CNs ({}):", r.all_cns.len());
+        for (i, cn) in r.all_cns.iter().enumerate() {
+            println!("    [{}] {}", i, cn);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SigInfo {
+    cert_blob_size: usize,
+    revision: u16,
+    cert_type: u16,
+    signer_cn: Option<String>,
+    issuer_cn: Option<String>,
+    signing_time: Option<String>,
+    timestamp_signer_cn: Option<String>,
+    all_cns: Vec<String>,
+}
+
+fn sigcheck_parse(data: &[u8]) -> Option<SigInfo> {
+    // PE32 / PE32+ both put the Security data directory at the same
+    // offset relative to the optional header start (data dir entry 4 ×
+    // 8 bytes per entry past the magic-dependent fixed-size area).
+    if data.len() < 0x40 || &data[..2] != b"MZ" {
+        return None;
+    }
+    let e_lfanew =
+        u32::from_le_bytes(data[0x3C..0x40].try_into().ok()?) as usize;
+    if e_lfanew + 24 > data.len() {
+        return None;
+    }
+    if &data[e_lfanew..e_lfanew + 4] != b"PE\0\0" {
+        return None;
+    }
+    let opt_off = e_lfanew + 24;
+    let magic = u16::from_le_bytes(data[opt_off..opt_off + 2].try_into().ok()?);
+    // Security data directory is RVA 4 in the data directories array.
+    // Offsets are 0x80 (PE32) / 0x90 (PE32+) past opt_off — Microsoft
+    // PE/COFF spec 6.4.2.
+    let sec_dir_off = match magic {
+        0x10b => opt_off + 0x80, // PE32
+        0x20b => opt_off + 0x90, // PE32+
+        _ => return None,
+    };
+    if sec_dir_off + 8 > data.len() {
+        return None;
+    }
+    // The Security directory's Address is a FILE OFFSET, not an RVA —
+    // documented quirk of PE format. dwLength is byte length.
+    let cert_off =
+        u32::from_le_bytes(data[sec_dir_off..sec_dir_off + 4].try_into().ok()?) as usize;
+    let cert_size =
+        u32::from_le_bytes(data[sec_dir_off + 4..sec_dir_off + 8].try_into().ok()?) as usize;
+    if cert_off == 0 || cert_size == 0 || cert_off + cert_size > data.len() {
+        return None;
+    }
+    let cert_blob = &data[cert_off..cert_off + cert_size];
+    if cert_blob.len() < 8 {
+        return None;
+    }
+    // WIN_CERTIFICATE = { dwLength, wRevision, wCertificateType, bCertificate[] }
+    let dw_length = u32::from_le_bytes(cert_blob[0..4].try_into().ok()?) as usize;
+    let revision = u16::from_le_bytes(cert_blob[4..6].try_into().ok()?);
+    let cert_type = u16::from_le_bytes(cert_blob[6..8].try_into().ok()?);
+    if dw_length < 8 || dw_length > cert_blob.len() {
+        return None;
+    }
+    let pkcs7 = &cert_blob[8..dw_length];
+
+    // OIDs we care about (as DER-encoded prefixes including the 0x06 tag):
+    //   2.5.4.3   commonName        06 03 55 04 03
+    //   1.2.840.113549.1.9.5  signingTime
+    //                                06 09 2A 86 48 86 F7 0D 01 09 05
+    //   1.2.840.113549.1.9.6  counterSignature
+    //                                06 09 2A 86 48 86 F7 0D 01 09 06
+    //   1.2.840.113549.1.7.2  signedData
+    //                                06 09 2A 86 48 86 F7 0D 01 07 02
+    const CN_OID: &[u8] = &[0x06, 0x03, 0x55, 0x04, 0x03];
+    const SIGNING_TIME_OID: &[u8] = &[
+        0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x05,
+    ];
+    const COUNTER_SIG_OID: &[u8] = &[
+        0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x06,
+    ];
+
+    // Parse a DER length starting at `i`; returns (length, header_size).
+    fn der_len(buf: &[u8], i: usize) -> Option<(usize, usize)> {
+        if i >= buf.len() {
+            return None;
+        }
+        let b0 = buf[i];
+        if b0 < 0x80 {
+            return Some((b0 as usize, 1));
+        }
+        let n = (b0 & 0x7f) as usize;
+        if n == 0 || n > 4 || i + 1 + n > buf.len() {
+            return None;
+        }
+        let mut len = 0usize;
+        for k in 0..n {
+            len = (len << 8) | buf[i + 1 + k] as usize;
+        }
+        Some((len, 1 + n))
+    }
+
+    // Extract a DER string after the OID's value tag. Tag bytes that
+    // hold human-readable text in this context: 0x13 PrintableString,
+    // 0x0C UTF8String, 0x16 IA5String, 0x14 T61String, 0x1E BMPString
+    // (UTF-16BE). Returns the decoded string + bytes consumed.
+    fn read_der_string(buf: &[u8], i: usize) -> Option<(String, usize)> {
+        if i >= buf.len() {
+            return None;
+        }
+        let tag = buf[i];
+        let (len, hdr) = der_len(buf, i + 1)?;
+        let start = i + 1 + hdr;
+        if start + len > buf.len() {
+            return None;
+        }
+        let body = &buf[start..start + len];
+        let s = match tag {
+            0x13 | 0x0c | 0x16 | 0x14 => {
+                std::str::from_utf8(body).ok().map(|s| s.to_string())
+            }
+            0x1e => {
+                // BMPString = UTF-16BE
+                if body.len() % 2 != 0 {
+                    return None;
+                }
+                let mut u16s: Vec<u16> = Vec::with_capacity(body.len() / 2);
+                for chunk in body.chunks_exact(2) {
+                    u16s.push(u16::from_be_bytes([chunk[0], chunk[1]]));
+                }
+                String::from_utf16(&u16s).ok()
+            }
+            _ => None,
+        }?;
+        Some((s, 1 + hdr + len))
+    }
+
+    fn read_der_time(buf: &[u8], i: usize) -> Option<String> {
+        if i >= buf.len() {
+            return None;
+        }
+        let tag = buf[i];
+        let (len, hdr) = der_len(buf, i + 1)?;
+        let start = i + 1 + hdr;
+        if start + len > buf.len() {
+            return None;
+        }
+        let body = std::str::from_utf8(&buf[start..start + len]).ok()?;
+        match tag {
+            0x17 => {
+                // UTCTime: YYMMDDHHMMSSZ — render as 20YY-MM-DD HH:MM:SS UTC
+                if body.len() < 11 {
+                    return None;
+                }
+                let yy: u32 = body[0..2].parse().ok()?;
+                let yyyy = if yy < 50 { 2000 + yy } else { 1900 + yy };
+                Some(format!(
+                    "{:04}-{}-{} {}:{}:{}{}UTC",
+                    yyyy,
+                    &body[2..4],
+                    &body[4..6],
+                    &body[6..8],
+                    &body[8..10],
+                    &body[10..body.len().saturating_sub(1).min(12)],
+                    if body.len() >= 13 { " " } else { "" }
+                ))
+            }
+            0x18 => {
+                // GeneralizedTime: YYYYMMDDHHMMSSZ
+                if body.len() < 14 {
+                    return None;
+                }
+                Some(format!(
+                    "{}-{}-{} {}:{}:{} UTC",
+                    &body[0..4],
+                    &body[4..6],
+                    &body[6..8],
+                    &body[8..10],
+                    &body[10..12],
+                    &body[12..14],
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    let mut all_cns: Vec<String> = Vec::new();
+    let mut signing_time: Option<String> = None;
+    let mut after_counter_sig = false;
+    let mut timestamp_signer_cn: Option<String> = None;
+
+    let mut i = 0usize;
+    while i + 5 <= pkcs7.len() {
+        if pkcs7[i..].starts_with(CN_OID) {
+            // CN OID is followed by one of: tag 0x13/0x0c/0x16/0x14/0x1e
+            // wrapped in either 0x30 SET or directly. The byte right
+            // after the OID is the value tag for the CN body in the
+            // RDN SET in practice.
+            let after_oid = i + CN_OID.len();
+            if let Some((cn, _)) = read_der_string(pkcs7, after_oid) {
+                let trimmed = cn.trim().to_string();
+                if !trimmed.is_empty() && trimmed.len() <= 200 {
+                    if after_counter_sig && timestamp_signer_cn.is_none() {
+                        timestamp_signer_cn = Some(trimmed.clone());
+                    }
+                    if !all_cns.contains(&trimmed) {
+                        all_cns.push(trimmed);
+                    }
+                }
+            }
+            i += CN_OID.len();
+            continue;
+        }
+        if signing_time.is_none() && pkcs7[i..].starts_with(SIGNING_TIME_OID) {
+            // signingTime OID is followed by SET { UTCTime | GeneralizedTime }.
+            // Skip the SET tag + length to land on the time tag.
+            let mut j = i + SIGNING_TIME_OID.len();
+            // Optional SET (0x31) wrapper.
+            if j < pkcs7.len() && pkcs7[j] == 0x31 {
+                if let Some((_, hdr)) = der_len(pkcs7, j + 1) {
+                    j += 1 + hdr;
+                }
+            }
+            if let Some(t) = read_der_time(pkcs7, j) {
+                signing_time = Some(t);
+            }
+            i += SIGNING_TIME_OID.len();
+            continue;
+        }
+        if pkcs7[i..].starts_with(COUNTER_SIG_OID) {
+            after_counter_sig = true;
+            i += COUNTER_SIG_OID.len();
+            continue;
+        }
+        i += 1;
+    }
+
+    // Heuristic: leaf signer = first CN that is NOT a known intermediate
+    // CA name. Code-signing leaf certs almost always carry the publisher
+    // name; intermediates carry "... CA" / "... Code Signing" / "... Root".
+    let is_ca_like = |cn: &str| {
+        let l = cn.to_ascii_lowercase();
+        l.contains(" ca ")
+            || l.ends_with(" ca")
+            || l.contains("code signing")
+            || l.contains("root")
+            || l.contains("timestamping")
+            || l.contains("time stamping")
+    };
+    let signer_cn = all_cns.iter().find(|c| !is_ca_like(c)).cloned();
+    // Issuer = the CA-like CN immediately preceding the signer in the
+    // chain. Authenticode certificate sequences typically appear in
+    // root → intermediate → leaf order, so the entry just before the
+    // signer is the direct issuer.
+    let issuer_cn = if let Some(s) = &signer_cn {
+        let pos = all_cns.iter().position(|c| c == s).unwrap_or(0);
+        all_cns
+            .iter()
+            .take(pos)
+            .rev()
+            .find(|c| is_ca_like(c))
+            .cloned()
+    } else {
+        None
+    };
+
+    Some(SigInfo {
+        cert_blob_size: dw_length,
+        revision,
+        cert_type,
+        signer_cn,
+        issuer_cn,
+        signing_time,
+        timestamp_signer_cn,
+        all_cns,
+    })
 }
 
 /// Export full call graph as JSON.
