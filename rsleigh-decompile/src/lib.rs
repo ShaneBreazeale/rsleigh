@@ -21,6 +21,7 @@ pub mod handler_summary;
 pub mod imports;
 pub mod ir;
 pub mod jmp_rax_trampoline;
+pub mod opaque_pred;
 pub mod pdb_info;
 pub mod peb_walk;
 pub mod peb_walk_detect;
