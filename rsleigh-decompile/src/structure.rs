@@ -925,14 +925,14 @@ fn same_test_var(a: VarId, b: VarId, ssa: &SsaCfg) -> bool {
     }
     let va = ssa.var(a);
     let vb = ssa.var(b);
-    // Same register
-    if va.varnode.space == pcode_ir::AddressSpaceId::Register
-        && vb.varnode.space == pcode_ir::AddressSpaceId::Register
-        && va.varnode.offset == vb.varnode.offset
-        && va.varnode.size == vb.varnode.size
-    {
-        return true;
-    }
+    // NOTE: do NOT treat two SSA vars as "same" merely because they share a
+    // register slot. Calls clobber EAX/RAX, so `eax_after_call1 == 0` and
+    // `eax_after_call2 == 0` are tests on *different* runtime values even
+    // though both varnodes point at register EAX. Treating them as the same
+    // var causes collapse_if_else_to_switch to swallow long sequences of
+    // return-checks into a fake `switch (eax) { case 0: ... }`, dropping
+    // most of the function body in the process. Distinct SSA VarIds with
+    // the same register slot must be treated as distinct.
     // Both are Var() pointing to the same source
     if let (Expr::Var(sa), Expr::Var(sb)) = (&va.expr, &vb.expr) {
         if sa == sb {

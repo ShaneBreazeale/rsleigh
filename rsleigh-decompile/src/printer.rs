@@ -4035,11 +4035,44 @@ fn post_process(
             {
                 // Check if an identical line exists later at the same indent
                 // but only remove if there are >2 lines between (non-adjacent)
+                // Track whether any control-flow keyword has appeared between
+                // lines[i] and lines[j]. A repeated call separated by an
+                // intervening if/while/return/etc. is almost always a real
+                // retry or error-checked re-invocation (e.g. malware
+                // downloaders that call URLDownloadToFileW N times against a
+                // C2 host) — collapsing those into one call destroys the
+                // function's actual behavior.
+                let mut seen_control_flow = false;
+                let is_control = |s: &str| {
+                    s.starts_with("if ")
+                        || s.starts_with("if(")
+                        || s.starts_with("} else")
+                        || s.starts_with("else ")
+                        || s.starts_with("while ")
+                        || s.starts_with("while(")
+                        || s.starts_with("for ")
+                        || s.starts_with("for(")
+                        || s.starts_with("switch ")
+                        || s.starts_with("switch(")
+                        || s.starts_with("case ")
+                        || s.starts_with("default:")
+                        || s.starts_with("goto ")
+                        || s.starts_with("return")
+                        || s == "break;"
+                        || s == "continue;"
+                };
                 let mut j = i + 1;
                 while j < lines.len() {
                     let jt = lines[j].trim();
                     let j_indent = lines[j].len() - lines[j].trim_start().len();
-                    if j_indent == indent && jt == lt && (j - i) > 2 {
+                    if is_control(jt) {
+                        seen_control_flow = true;
+                    }
+                    if j_indent == indent
+                        && jt == lt
+                        && (j - i) > 2
+                        && !seen_control_flow
+                    {
                         lines.remove(j);
                         continue;
                     }
