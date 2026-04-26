@@ -4042,36 +4042,34 @@ fn post_process(
                 // downloaders that call URLDownloadToFileW N times against a
                 // C2 host) — collapsing those into one call destroys the
                 // function's actual behavior.
-                let mut seen_control_flow = false;
-                let is_control = |s: &str| {
-                    s.starts_with("if ")
-                        || s.starts_with("if(")
-                        || s.starts_with("} else")
-                        || s.starts_with("else ")
-                        || s.starts_with("while ")
-                        || s.starts_with("while(")
-                        || s.starts_with("for ")
-                        || s.starts_with("for(")
-                        || s.starts_with("switch ")
-                        || s.starts_with("switch(")
-                        || s.starts_with("case ")
-                        || s.starts_with("default:")
-                        || s.starts_with("goto ")
-                        || s.starts_with("return")
-                        || s == "break;"
-                        || s == "continue;"
-                };
+                // Soundness: only treat the gap between lines[i] and lines[j]
+                // as "the same nested-unwind artifact" when nothing real
+                // happens in between. Two same-text call lines separated by
+                // any non-empty line — control flow, an ESP-relative store
+                // (cdecl arg push), an assignment — are almost certainly
+                // distinct calls with different argument state. Two call
+                // lines may print identically (e.g. nine `func_4010a8();`
+                // lines for nine different `MOV [ESP], <urlptr>; CALL` pairs
+                // in an x86-32 downloader) when arg recovery is incomplete;
+                // collapsing them silently destroys the function's behavior.
+                //
+                // Rule: remove lines[j] only when every line strictly
+                // between i and j is empty/whitespace AND no control-flow
+                // keyword has appeared. This preserves the original intent
+                // of catching pure unwind-duplicate artifacts while not
+                // eating real sequential distinct-arg calls.
+                let mut all_blank_between = true;
                 let mut j = i + 1;
                 while j < lines.len() {
                     let jt = lines[j].trim();
                     let j_indent = lines[j].len() - lines[j].trim_start().len();
-                    if is_control(jt) {
-                        seen_control_flow = true;
+                    if j > i + 1 && !jt.is_empty() {
+                        all_blank_between = false;
                     }
                     if j_indent == indent
                         && jt == lt
                         && (j - i) > 2
-                        && !seen_control_flow
+                        && all_blank_between
                     {
                         lines.remove(j);
                         continue;
