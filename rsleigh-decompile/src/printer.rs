@@ -17005,6 +17005,17 @@ fn format_const(val: u64, size: u32) -> String {
                 return format!("{} /* {}(\"{}\") */", s, variant, api);
             }
         }
+        // Crypto / hash magic-number annotation. Catches PCG / FNV /
+        // Knuth / SHA-256 round constants etc. inline so that an
+        // IMUL / XOR site reading
+        //   `EAX *= 0x9e3779b9 /* Knuth golden ratio multiplier */`
+        // calls the algorithm out without forcing the reader to grep
+        // the constant.
+        if crate::crypto_constants::worth_checking(v32) {
+            if let Some(ann) = crate::crypto_constants::resolve(v32) {
+                return format!("{} /* {} {} */", s, ann.algorithm, ann.role);
+            }
+        }
     }
     s
 }
