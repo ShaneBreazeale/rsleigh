@@ -94,7 +94,7 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                 // on iteration 1 so that early Phi nodes can be created for loop accumulators.
                 // Without this, the skip condition prevents the block from ever seeing its
                 // own back-edge exit vars.
-                let is_self_loop = block_preds.iter().any(|pred| pred.0 == block.id.0);
+                let _is_self_loop = block_preds.iter().any(|pred| pred.0 == block.id.0);
                 let has_back_edge = block_preds.iter().any(|pred| pred.0 >= block.id.0);
                 if !any_pred_changed && !any_new_keys && !(has_back_edge && iteration == 1) {
                     continue;
@@ -324,7 +324,7 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                             continue;
                         }
                         // Skip ops we already handled as deferred Zext
-                        if let PcodeOp::IntZext { out, input } = op {
+                        if let PcodeOp::IntZext { out, input: _ } = op {
                             if deferred_zext.iter().any(|(vn, _)| vn == out) {
                                 continue;
                             }
@@ -461,7 +461,7 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
             let mut relink: HashMap<VarId, VarId> = HashMap::new();
             for stmt in &phi_stmts {
                 if let Stmt::Assign(phi_vid) = stmt {
-                    if let Expr::Phi(inputs) = &ssa.vars[phi_vid.0 as usize].expr {
+                    if let Expr::Phi(_inputs) = &ssa.vars[phi_vid.0 as usize].expr {
                         // The first input is typically the forward-predecessor value.
                         // Find which inputs come from forward preds (pred.0 < bid).
                         let phi_vn = ssa.vars[phi_vid.0 as usize].varnode;
@@ -482,7 +482,7 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
             let mut back_relink: HashMap<VarId, VarId> = HashMap::new();
             for stmt in &phi_stmts {
                 if let Stmt::Assign(phi_vid) = stmt {
-                    if let Expr::Phi(inputs) = &ssa.vars[phi_vid.0 as usize].expr {
+                    if let Expr::Phi(_inputs) = &ssa.vars[phi_vid.0 as usize].expr {
                         let phi_vn = ssa.vars[phi_vid.0 as usize].varnode;
                         for &pred_id in block_preds {
                             if pred_id.0 >= bid {

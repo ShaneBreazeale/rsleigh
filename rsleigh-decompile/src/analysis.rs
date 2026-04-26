@@ -3,9 +3,7 @@
 //! Provides structured analysis results without requiring CLI invocation.
 //! All functions return serializable data structures.
 
-use pcode_ir::Instruction;
-use rsleigh_api::Architecture;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 /// Metadata for a single decompiled function.
 #[derive(Debug, Clone, serde::Serialize)]

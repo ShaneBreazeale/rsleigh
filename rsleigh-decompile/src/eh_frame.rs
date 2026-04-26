@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 
-use gimli::{BaseAddresses, CieOrFde, EhFrame, EndianSlice, LittleEndian, UnwindSection};
+use gimli::{BaseAddresses, CieOrFde, EhFrame, LittleEndian, UnwindSection};
 
 #[derive(Debug, Clone)]
 pub struct TryRegion {

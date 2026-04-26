@@ -7256,7 +7256,7 @@ fn post_process(
 
         // Phase 3: Check if tainted variables reach sinks
         if !tainted_vars.is_empty() {
-            for (i, line) in lines.iter_mut().enumerate() {
+            for (_i, line) in lines.iter_mut().enumerate() {
                 if line.contains("//") {
                     continue;
                 }
@@ -9563,7 +9563,7 @@ fn post_process(
             if let Some((var_name, first_val)) = extract_if_eq_const(&t) {
                 let indent = lines[i].len() - lines[i].trim_start().len();
                 let pad = " ".repeat(indent);
-                let else_if_pad = format!("{}}} else if (", pad);
+                let _else_if_pad = format!("{}}} else if (", pad);
 
                 // Collect cases from the chain
                 let mut cases: Vec<(String, Vec<String>)> = Vec::new(); // (value, body_lines)
@@ -9702,7 +9702,7 @@ fn post_process(
                 }
                 if has_return {
                     // Find the matching closing }
-                    let indent = lines[i].len() - lines[i].trim_start().len();
+                    let _indent = lines[i].len() - lines[i].trim_start().len();
                     let mut depth = 1i32;
                     let mut end = i + 1;
                     while end < lines.len() {
@@ -12967,7 +12967,7 @@ fn post_process(
                     let mut all_uninit = true;
                     let mut any_ident = false;
                     let mut buf = String::new();
-                    let mut push = |buf: &mut String, any: &mut bool, all: &mut bool| {
+                    let push = |buf: &mut String, any: &mut bool, all: &mut bool| {
                         let tok = std::mem::take(buf);
                         if is_identish(&tok) {
                             *any = true;
@@ -14546,9 +14546,9 @@ fn print_stmt_tracked(
             else_body,
         } => {
             let cv = ssa.var(*cond);
-            if let Expr::BinOp(k, l, r) = &cv.expr {
-                let lv = ssa.var(*l);
-                let rv = ssa.var(*r);
+            if let Expr::BinOp(_k, l, r) = &cv.expr {
+                let _lv = ssa.var(*l);
+                let _rv = ssa.var(*r);
             }
             let cond_expr = format_condition_tracked(*cond, ssa, ctx, tracker);
             let then_filtered = filter_boilerplate(then_body, ssa);

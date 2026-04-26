@@ -192,7 +192,7 @@ pub fn parse_pe64_seh(image_data: &[u8]) -> Vec<SehRecord> {
             }
             let handler_rva =
                 u32::from_le_bytes(image[trailer_fo..trailer_fo + 4].try_into().ok()?);
-            let scope_rva = (trailer_fo + 4) as u32; // file offset; we convert below
+            let _scope_rva = (trailer_fo + 4) as u32; // file offset; we convert below
             return Some(UnwindSummary {
                 version,
                 flags,
