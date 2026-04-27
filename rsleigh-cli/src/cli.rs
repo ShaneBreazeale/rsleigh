@@ -7141,11 +7141,11 @@ fn discover_elf_functions(
 
             if matches!(arch, rsleigh_api::Architecture::MIPS32) {
                 // MIPS JAL (Jump And Link): opcode 000011 imm26
-                // Big-endian: (word >> 26) == 3
                 // Target: (PC & 0xF0000000) | (imm26 << 2)
+                // Endianness comes from the ELF header — both BE (mips)
+                // and LE (mipsel) are common in IoT samples.
                 for i in (0..text_bytes.len().saturating_sub(3)).step_by(4) {
-                    let word =
-                        u32::from_be_bytes(text_bytes[i..i + 4].try_into().unwrap_or([0; 4]));
+                    let word = read_u32_elf(&text_bytes[i..i + 4]);
                     if (word >> 26) == 3 {
                         // JAL opcode
                         let imm26 = word & 0x03FFFFFF;
@@ -7156,12 +7156,9 @@ fn discover_elf_functions(
                     }
                 }
 
-                // Also scan for BAL (Branch And Link): opcode=000001 rs=00000 rt=10001 imm16
-                // Big-endian: 0x0411xxxx
-                // And BGEZAL: opcode=000001 rt=10001 — same encoding
+                // BAL (Branch And Link) / BGEZAL: opcode=000001 rt=10001 imm16
                 for i in (0..text_bytes.len().saturating_sub(3)).step_by(4) {
-                    let word =
-                        u32::from_be_bytes(text_bytes[i..i + 4].try_into().unwrap_or([0; 4]));
+                    let word = read_u32_elf(&text_bytes[i..i + 4]);
                     let opcode = word >> 26;
                     let rt = (word >> 16) & 0x1F;
                     if opcode == 1 && rt == 17 {
@@ -7609,10 +7606,8 @@ fn discover_elf_functions(
                             // MIPS: validate with prologue check
                             let target_idx = (ptr - text_addr) as usize;
                             if text_fo + target_idx + 4 < data.len() {
-                                let word = u32::from_be_bytes(
-                                    data[text_fo + target_idx..text_fo + target_idx + 4]
-                                        .try_into()
-                                        .unwrap_or([0; 4]),
+                                let word = read_u32_elf(
+                                    &data[text_fo + target_idx..text_fo + target_idx + 4],
                                 );
                                 let strong = (word & 0xFFFF0000) == 0x27BD0000  // addiu sp, sp, -N
                                     || (word & 0xFFFF0000) == 0x3C1C0000         // lui gp, N
@@ -7806,34 +7801,29 @@ fn discover_elf_functions(
 
                 // MIPS function boundary detection: JR RA (0x03E00008) or
                 // JR RA in delay slot pair (JR RA + NOP = 03E00008 00000000)
+                // Word reads use ELF endianness so mipsel works too.
                 let is_mips_boundary = |i: usize| -> bool {
                     if i == 0 {
                         return true;
                     }
-                    // Check if previous instruction is JR RA (return)
                     if i >= 8 {
-                        // JR RA = 0x03E00008, typically followed by NOP (delay slot)
-                        let prev2 = u32::from_be_bytes(
-                            text_bytes[i - 8..i - 4].try_into().unwrap_or([0; 4]),
-                        );
-                        let prev1 =
-                            u32::from_be_bytes(text_bytes[i - 4..i].try_into().unwrap_or([0; 4]));
+                        let prev2 = read_u32_elf(&text_bytes[i - 8..i - 4]);
+                        let prev1 = read_u32_elf(&text_bytes[i - 4..i]);
                         if prev2 == 0x03E00008 {
                             return true;
-                        } // JR RA (prev was delay slot)
+                        }
                         if prev1 == 0x03E00008 {
                             return true;
-                        } // JR RA right before
+                        }
                     }
                     if i >= 4 {
-                        let prev =
-                            u32::from_be_bytes(text_bytes[i - 4..i].try_into().unwrap_or([0; 4]));
+                        let prev = read_u32_elf(&text_bytes[i - 4..i]);
                         if prev == 0x00000000 {
                             return true;
-                        } // NOP padding
+                        }
                         if prev == 0x03E00008 {
                             return true;
-                        } // JR RA
+                        }
                     }
                     false
                 };
@@ -7844,10 +7834,8 @@ fn discover_elf_functions(
                         continue;
                     }
 
-                    let word =
-                        u32::from_be_bytes(text_bytes[i..i + 4].try_into().unwrap_or([0; 4]));
-                    let next_word =
-                        u32::from_be_bytes(text_bytes[i + 4..i + 8].try_into().unwrap_or([0; 4]));
+                    let word = read_u32_elf(&text_bytes[i..i + 4]);
+                    let next_word = read_u32_elf(&text_bytes[i + 4..i + 8]);
 
                     // Pattern 1: addiu sp, sp, -N (0x27BDxxxx where xxxx is negative = high bit set)
                     // This is the most common MIPS function prologue
@@ -8009,19 +7997,17 @@ fn discover_elf_functions(
                         continue;
                     }
 
-                    // Scan for JR RA (0x03E00008) + delay slot, then prologue
+                    // Scan for JR RA (0x03E00008) + delay slot, then prologue.
+                    // ELF endianness drives word reads (BE 'mips' vs LE 'mipsel').
                     let mut i = start_idx;
                     while i + 12 <= end_idx {
-                        let word =
-                            u32::from_be_bytes(text_bytes[i..i + 4].try_into().unwrap_or([0; 4]));
+                        let word = read_u32_elf(&text_bytes[i..i + 4]);
                         if word == 0x03E00008 {
                             // JR RA
                             // Skip delay slot + any NOP padding
                             let mut j = i + 8; // past JR RA + delay slot
                             while j + 4 <= end_idx {
-                                let w = u32::from_be_bytes(
-                                    text_bytes[j..j + 4].try_into().unwrap_or([0; 4]),
-                                );
+                                let w = read_u32_elf(&text_bytes[j..j + 4]);
                                 if w == 0x00000000 {
                                     j += 4;
                                 } else {
@@ -8029,9 +8015,7 @@ fn discover_elf_functions(
                                 }
                             }
                             if j + 8 <= end_idx && j % 4 == 0 {
-                                let candidate_word = u32::from_be_bytes(
-                                    text_bytes[j..j + 4].try_into().unwrap_or([0; 4]),
-                                );
+                                let candidate_word = read_u32_elf(&text_bytes[j..j + 4]);
                                 let is_prologue = (candidate_word & 0xFFFF0000) == 0x27BD0000
                                     && (candidate_word & 0x8000) != 0
                                     || (candidate_word & 0xFFFF0000) == 0x3C1C0000;
