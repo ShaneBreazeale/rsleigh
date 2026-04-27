@@ -200,6 +200,90 @@ mod tests {
     }
 
     #[test]
+    fn skips_non_x86_elf() {
+        // Build a minimal ELF32 MIPS header containing executable
+        // bytes that include `FF E7 CC ...` — which would match x86
+        // `JMP RDI + INT3`. scan() must arch-gate on e_machine and
+        // return zero hits for MIPS.
+        // Real fixture used by integration: a MIPS Mirai-class sample
+        // surfaced spurious "JMP RBP / JMP RDI" trampolines purely
+        // from incidental byte sequences. Unit-test against the
+        // structural cause: build a parseable ELF and check `scan`.
+        use goblin::Object;
+        // Hand-assemble a tiny ELF32 LSB MIPS file with one .text
+        // section whose payload is `FF E7 CC CC` (x86 JMP RDI;INT3).
+        // 52-byte ehdr + 1 phdr (32) + 1 shstrtab + 1 sec hdr (40)
+        // is heavier than we need; cheaper: construct via builder.
+        // Instead, emit a minimal hand-made image.
+        #[rustfmt::skip]
+        let elf: Vec<u8> = {
+            let mut v: Vec<u8> = vec![
+                0x7f, b'E', b'L', b'F', 1, 1, 1, 0, // ei_*
+                0, 0, 0, 0, 0, 0, 0, 0,
+                2, 0,                                // e_type = ET_EXEC
+                8, 0,                                // e_machine = EM_MIPS (8)
+                1, 0, 0, 0,                          // e_version
+                0, 0, 0, 0,                          // e_entry
+                0, 0, 0, 0,                          // e_phoff
+                0x34, 0, 0, 0,                       // e_shoff = 0x34
+                0, 0, 0, 0,                          // e_flags
+                0x34, 0,                             // e_ehsize = 52
+                0, 0,                                // e_phentsize
+                0, 0,                                // e_phnum
+                0x28, 0,                             // e_shentsize = 40
+                3, 0,                                // e_shnum = 3
+                2, 0,                                // e_shstrndx = 2
+            ];
+            // shdr[0]: NULL
+            v.extend(std::iter::repeat(0).take(40));
+            // shdr[1]: .text  name=1, type=PROGBITS(1), flags=AX(6),
+            //   addr=0x1000, offset=0xC0, size=4
+            let text_off: u32 = 0xC0;
+            let text_size: u32 = 4;
+            v.extend_from_slice(&1u32.to_le_bytes());
+            v.extend_from_slice(&1u32.to_le_bytes());
+            v.extend_from_slice(&6u32.to_le_bytes());
+            v.extend_from_slice(&0x1000u32.to_le_bytes());
+            v.extend_from_slice(&text_off.to_le_bytes());
+            v.extend_from_slice(&text_size.to_le_bytes());
+            v.extend_from_slice(&0u32.to_le_bytes()); // link
+            v.extend_from_slice(&0u32.to_le_bytes()); // info
+            v.extend_from_slice(&4u32.to_le_bytes()); // align
+            v.extend_from_slice(&0u32.to_le_bytes()); // entsize
+            // shdr[2]: .shstrtab  name=7, type=STRTAB(3), flags=0,
+            //   addr=0, offset=0xAC (172), size=0x11 (17)
+            let str_off: u32 = 0xAC;
+            let str_size: u32 = 0x11;
+            v.extend_from_slice(&7u32.to_le_bytes());
+            v.extend_from_slice(&3u32.to_le_bytes());
+            v.extend_from_slice(&0u32.to_le_bytes());
+            v.extend_from_slice(&0u32.to_le_bytes());
+            v.extend_from_slice(&str_off.to_le_bytes());
+            v.extend_from_slice(&str_size.to_le_bytes());
+            v.extend_from_slice(&0u32.to_le_bytes());
+            v.extend_from_slice(&0u32.to_le_bytes());
+            v.extend_from_slice(&1u32.to_le_bytes());
+            v.extend_from_slice(&0u32.to_le_bytes());
+            // .shstrtab payload at 0xAC: "\0.text\0.shstrtab\0" (17 bytes)
+            assert_eq!(v.len(), 0xAC);
+            v.extend_from_slice(b"\0.text\0.shstrtab\0");
+            // pad to 0xC0 (3 bytes) for .text alignment
+            v.extend_from_slice(&[0u8; 3]);
+            // .text payload at 0xC0: x86-style JMP RDI + INT3 + NOP
+            assert_eq!(v.len(), 0xC0);
+            v.extend_from_slice(b"\xff\xe7\xcc\x90");
+            v
+        };
+        let obj = Object::parse(&elf).expect("parseable MIPS ELF");
+        let hits = scan(&obj, &elf);
+        assert!(
+            hits.is_empty(),
+            "scan emitted {} bogus trampoline(s) on MIPS ELF",
+            hits.len()
+        );
+    }
+
+    #[test]
     fn finds_multiple_in_region() {
         // Two trampolines with INT3 between them.
         let code = b"\xff\xe0\xcc\xcc\x41\xff\xe2\xcc\xcc";
