@@ -22,8 +22,6 @@ pub mod imports;
 pub mod ir;
 pub mod jmp_rax_trampoline;
 pub mod opaque_pred;
-pub mod smt_verify;
-pub mod vm_handler_cluster;
 pub mod pdb_info;
 pub mod peb_walk;
 pub mod peb_walk_detect;
@@ -40,6 +38,7 @@ mod signatures_libc;
 mod signatures_msvcrt;
 mod signatures_python;
 mod signatures_win32;
+pub mod smt_verify;
 pub mod ssa;
 pub mod structure;
 pub mod syscall_table;
@@ -48,6 +47,7 @@ pub mod vm_bytecode_disasm;
 pub mod vm_dispatch_extract;
 pub mod vm_fingerprint;
 pub mod vm_handler_classify;
+pub mod vm_handler_cluster;
 pub mod xor_vtable; // used by printer
 
 use pcode_ir::Instruction;
@@ -213,15 +213,23 @@ pub fn decompile_with_binary(
                     let positive = (-offset) as u64;
                     let var_name = format!("var_{:x}", positive);
                     local_var_names.insert(var_name, name.clone());
+                    let local_name = format!("local_{:x}", positive);
+                    local_var_names.insert(local_name, name.clone());
                     // Also try with 8-byte adjustment (CFA vs RBP frame base mismatch)
                     let adjusted = positive + 8;
                     let adj_name = format!("var_{:x}", adjusted);
                     local_var_names
                         .entry(adj_name)
                         .or_insert_with(|| name.clone());
+                    let adj_local_name = format!("local_{:x}", adjusted);
+                    local_var_names
+                        .entry(adj_local_name)
+                        .or_insert_with(|| name.clone());
                 } else if *offset > 0 {
                     let var_name = format!("var_{:x}", *offset as u64);
                     local_var_names.insert(var_name, name.clone());
+                    let local_name = format!("local_{:x}", *offset as u64);
+                    local_var_names.insert(local_name, name.clone());
                 }
             }
         }

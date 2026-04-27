@@ -3411,6 +3411,13 @@ fn classify_jcc_condition(cond_id: VarId, ssa: &SsaCfg) -> Option<(BinOpKind, bo
             || is_flag_ref(id, 261, ssa)
             || is_flag_ref(id, 98, ssa)
     };
+    let is_x86_cf = |id: VarId| is_flag_ref(id, 512, ssa);
+    let is_arm_cy = |id: VarId| {
+        is_flag_ref(id, 258, ssa)
+            || is_flag_ref(id, 261, ssa)
+            || is_flag_ref(id, 98, ssa)
+            || is_flag_ref(id, 102, ssa)
+    };
     // Helper: check OF (x86=523), OV (ARM64=259,tmpOV=262), OV (ARM32=99)
     let is_of = |id: VarId| {
         is_flag_ref(id, 523, ssa)
@@ -3435,11 +3442,20 @@ fn classify_jcc_condition(cond_id: VarId, ssa: &SsaCfg) -> Option<(BinOpKind, bo
             Some((BinOpKind::NotEq, false))
         }
 
-        // CF/CY directly → JB/BLO → a < b (unsigned)
-        _ if is_cf(cond_id) => Some((BinOpKind::Less, false)),
+        // AArch64/ARM CY directly → BHS/BCS: carry set means no unsigned borrow,
+        // i.e. a >= b. Render as b <= a.
+        _ if is_arm_cy(cond_id) => Some((BinOpKind::LessEq, true)),
 
-        // BoolNot(CF/CY) → JAE/BHS → a >= b (unsigned) = b <= a
-        Expr::UnaryOp(UnaryOpKind::BoolNot, inner) if is_cf(*inner) => {
+        // x86 CF directly → JB → a < b (unsigned)
+        _ if is_x86_cf(cond_id) => Some((BinOpKind::Less, false)),
+
+        // AArch64/ARM !CY → BLO/BCC: carry clear means unsigned borrow, a < b.
+        Expr::UnaryOp(UnaryOpKind::BoolNot, inner) if is_arm_cy(*inner) => {
+            Some((BinOpKind::Less, false))
+        }
+
+        // x86 !CF → JAE: a >= b (unsigned) = b <= a
+        Expr::UnaryOp(UnaryOpKind::BoolNot, inner) if is_x86_cf(*inner) => {
             Some((BinOpKind::LessEq, true))
         }
 

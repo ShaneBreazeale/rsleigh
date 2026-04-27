@@ -34,6 +34,8 @@ cd ../spectra/src-tauri && cargo test
 
 # benchmarks
 python3 scripts/benchmark.py                 # function count vs Ghidra baselines
+make decomp-bench                            # local pseudocode quality gate
+python3 scripts/decomp-regress.py --binary ./some.bin --sample 12
 ```
 
 ---
@@ -172,6 +174,22 @@ These test the exact code paths Spectra uses when `analysis_backend = rsleigh`:
 ---
 
 ## Layer 7: Benchmarks
+
+`scripts/decomp-regress.py` is the fast pseudocode regression bench for normal
+decompiler iteration. It compiles `test-harness/fixtures/bench/pseudocode_core.c`
+at `-O0` and `-O2`, runs `rsleigh` over representative functions, scores empty
+bodies, unresolved temporary/name leaks, line volume, return coverage, and
+control-flow surface, then compares against the checked-in baseline:
+
+```bash
+make decomp-bench
+python3 scripts/decomp-regress.py --update-baseline   # intentional baseline refresh
+python3 scripts/decomp-regress.py --binary ./some.bin --sample 12
+```
+
+Reports are written under ignored `results/decomp-bench/`. Use the `--binary`
+mode for quick exploratory runs against real samples; baseline comparison is
+only applied to the deterministic source-built fixture.
 
 `scripts/benchmark.py` runs rsleigh on all binaries in the test corpus and compares function discovery counts against Ghidra baselines:
 

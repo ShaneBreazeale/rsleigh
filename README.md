@@ -318,13 +318,17 @@ There is also a benchmark harness that compares rsleigh output against cached or
 fresh Ghidra output:
 
 ```bash
+make decomp-bench
+python3 scripts/decomp-regress.py --binary ./some.bin --sample 12
 scripts/bench-compare.sh <binary> [--sample N]
 scripts/bench-score.py --binary X --rsleigh target/release/rsleigh --ghidra cached.json --out DIR
 ```
 
-The score is a coarse regression signal, not a scientific ranking. It combines
-function discovery, control-flow similarity, leakage of unresolved temporary
-names, rough line-count parity, and empty-output rate. Small movements are
+`decomp-regress.py` is the fast local gate: it compiles deterministic C fixtures
+at `-O0` and `-O2`, decompiles selected functions, and fails if output quality
+drops against `test-harness/fixtures/bench/pseudocode_baseline.json`. The Ghidra
+bench is the heavier reference comparison for periodic runs. These scores are
+coarse regression signals, not scientific rankings. Small movements are
 expected; repeated and larger drops matter more than single-run noise.
 
 See `docs/TESTING.md` for the current test philosophy and gaps.

@@ -131,19 +131,53 @@ def body_is_empty(text):
     return stmts <= 1
 
 
+CONTROL_PATTERNS = {
+    "if":     re.compile(r'\bif\s*\('),
+    "while":  re.compile(r'\bwhile\s*\('),
+    "for":    re.compile(r'\bfor\s*\('),
+    "do":     re.compile(r'\bdo\s*\{'),
+    "switch": re.compile(r'\bswitch\s*\('),
+}
+
+
+def normalize_control_text(text):
+    """Normalize formatter noise before counting structural constructs.
+
+    Ghidra commonly prints `while(` / `for(` while rsleigh prints
+    `while (` / `for (`. Ghidra also keeps compiler stack-canary failure
+    guards that rsleigh intentionally hides as prologue/epilogue noise.
+    """
+    lines = text.splitlines()
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.lstrip().startswith("if") and (
+            "__stack_chk_guard" in line or "stack_chk_guard" in line
+        ):
+            depth = line.count("{") - line.count("}")
+            i += 1
+            while i < len(lines) and depth > 0:
+                depth += lines[i].count("{") - lines[i].count("}")
+                i += 1
+            continue
+        if "__stack_chk_fail" in line or "stack_chk_guard" in line:
+            i += 1
+            continue
+        out.append(line)
+        i += 1
+    return "\n".join(out)
+
+
 def has_control_flow(text):
-    return any(kw in text for kw in ("while ", "for (", "if (", "do {", "switch "))
+    norm = normalize_control_text(text)
+    return any(p.search(norm) for p in CONTROL_PATTERNS.values())
 
 
 def control_flow_counts(text):
     """Count occurrences of each control-flow construct."""
-    return {
-        "if":     text.count("if ("),
-        "while":  text.count("while ("),
-        "for":    text.count("for ("),
-        "do":     text.count("do {"),
-        "switch": text.count("switch "),
-    }
+    norm = normalize_control_text(text)
+    return {label: len(pattern.findall(norm)) for label, pattern in CONTROL_PATTERNS.items()}
 
 
 def control_similarity(rs_text, gh_text):
@@ -206,6 +240,8 @@ def main():
         empty = body_is_empty(rs_src)
         missing = rs_src.strip() == "" or "no instructions" in rs_src
         control_match = has_control_flow(rs_src) == has_control_flow(gh_src)
+        rs_cflow = control_flow_counts(rs_src)
+        gh_cflow = control_flow_counts(gh_src)
 
         rs_total_lines += rs_lines
         gh_total_lines += gh_lines
@@ -227,6 +263,8 @@ def main():
             "empty": empty,
             "missing": missing,
             "control_match": control_match,
+            "rs_cflow": rs_cflow,
+            "gh_cflow": gh_cflow,
         })
 
     n = len(picks) or 1

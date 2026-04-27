@@ -218,7 +218,7 @@ fn collect_store_aliases(
         }
 
         if let StructuredStmt::Store { addr, val } = stmt {
-            if let Some(stack_name) = try_stack_var_name(*addr, ssa) {
+            if let Some(stack_name) = try_stack_var_name_ctx(*addr, ssa, ctx.arch) {
                 let val_vdef = ssa.var(*val);
                 // For prologue stores, detect parameter registers and use param names.
                 // The SSA may have contaminated param register VarIds with loop values
@@ -812,8 +812,11 @@ fn post_process(
                     .map_or(false, |c| c.is_ascii_lowercase())
                     && alias.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
                     && !alias.chars().all(|c| c.is_ascii_digit() || c == 'x'));
-            if var_name.starts_with("var_") && alias != var_name && alias_is_name {
-                // Replace whole-word occurrences of var_N with param_M
+            if (var_name.starts_with("var_") || var_name.starts_with("local_"))
+                && alias != var_name
+                && alias_is_name
+            {
+                // Replace whole-word occurrences of stack temps with param/debug names.
                 let pattern = var_name.as_str();
                 let mut result = String::new();
                 let mut rest = line.as_str();
@@ -4066,11 +4069,7 @@ fn post_process(
                     if j > i + 1 && !jt.is_empty() {
                         all_blank_between = false;
                     }
-                    if j_indent == indent
-                        && jt == lt
-                        && (j - i) > 2
-                        && all_blank_between
-                    {
+                    if j_indent == indent && jt == lt && (j - i) > 2 && all_blank_between {
                         lines.remove(j);
                         continue;
                     }
@@ -7440,6 +7439,8 @@ fn post_process(
             i += 1;
         }
     }
+
+    collapse_frame_base_fields(&mut lines);
 
     // #STRUCT_RECOVERY: Detect field access patterns, match known structs, emit definitions.
     {
@@ -11083,6 +11084,44 @@ fn post_process(
         }
     }
 
+    // A stack-slot read printed as `*(local_N)` means "load local_N", not
+    // "treat local_N as a pointer". Collapse it before generic pointer-field
+    // cleanup can infer fake structs from loop counters.
+    for line in lines.iter_mut() {
+        let mut search_from = 0usize;
+        while let Some(rel) = line[search_from..].find("*(local_") {
+            let star = search_from + rel;
+            let name_start = star + 2;
+            let name_end = {
+                let rest = &line[name_start..];
+                let hex_start_len = "local_".len();
+                if !rest.starts_with("local_") {
+                    search_from = star + 2;
+                    continue;
+                }
+                let hex_len = rest[hex_start_len..]
+                    .find(|c: char| !c.is_ascii_hexdigit())
+                    .unwrap_or(rest.len() - hex_start_len);
+                if hex_len == 0 {
+                    search_from = star + 2;
+                    continue;
+                }
+                name_start + hex_start_len + hex_len
+            };
+            if line.as_bytes().get(name_end).copied() != Some(b')') {
+                search_from = star + 2;
+                continue;
+            }
+            *line = format!(
+                "{}{}{}",
+                &line[..star],
+                &line[name_start..name_end],
+                &line[name_end + 1..]
+            );
+            search_from = star + (name_end - name_start);
+        }
+    }
+
     // Drop gratuitous parens around bare `local_<hex>` identifiers left over
     // from earlier sp-rewrites that inherited outer parens from the original
     // expression (e.g. `(sp + 200)` → `(local_200)`). A single identifier
@@ -11600,6 +11639,22 @@ fn post_process(
         // beyond the assignment itself. A trailing `)` signals a call, which
         // we preserve on strip-LHS instead of deleting.
         let rhs_is_pure = |rhs: &str| -> bool { !rhs.contains('(') && !rhs.contains(')') };
+        let rhs_is_call_like = |rhs: &str| -> bool {
+            if !rhs.ends_with(')') {
+                return false;
+            }
+            let Some(open) = rhs.find('(') else {
+                return false;
+            };
+            let callee = rhs[..open].trim();
+            if callee.is_empty() || callee.starts_with('*') || callee.ends_with('*') {
+                return false;
+            }
+            callee.starts_with("operator ")
+                || callee
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':' || c == '.')
+        };
         let mut i = 0;
         while i < lines.len() {
             let (leading, t) = {
@@ -11692,7 +11747,7 @@ fn post_process(
                 if rhs_is_pure(rhs) {
                     lines.remove(i);
                     continue; // don't advance — recheck new i
-                } else if rhs.ends_with(')') {
+                } else if rhs_is_call_like(rhs) {
                     // Don't strip the LHS of allocation-style calls — the
                     // return value is almost certainly used as a pointer later,
                     // and our forward scan can miss uses hidden inside the
@@ -13254,6 +13309,12 @@ fn post_process(
         }
     }
 
+    // Late stack-name pass: several cleanup stages can create new `local_N`
+    // spellings after the early alias pass has already run.
+    apply_named_stack_aliases(&mut lines, aliases);
+    collapse_frame_base_fields(&mut lines);
+    collapse_stack_local_derefs(&mut lines);
+
     // First: materialize `result` from `lines` (blank-line dedup preserved).
     for line in &lines {
         let is_blank = line.trim().is_empty();
@@ -13404,6 +13465,140 @@ fn post_process(
     *out = result;
 }
 
+fn apply_named_stack_aliases(
+    lines: &mut [String],
+    aliases: &std::collections::HashMap<String, String>,
+) {
+    for line in lines {
+        for (var_name, alias) in aliases {
+            let alias_is_name = alias.starts_with("param_")
+                || (alias
+                    .chars()
+                    .next()
+                    .map_or(false, |c| c.is_ascii_lowercase())
+                    && alias.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    && !alias.chars().all(|c| c.is_ascii_digit() || c == 'x'));
+            if !(var_name.starts_with("var_") || var_name.starts_with("local_"))
+                || alias == var_name
+                || !alias_is_name
+            {
+                continue;
+            }
+
+            let pattern = var_name.as_str();
+            let mut result = String::new();
+            let mut rest = line.as_str();
+            while let Some(pos) = rest.find(pattern) {
+                result.push_str(&rest[..pos]);
+                let before_ok = pos == 0
+                    || (!rest.as_bytes()[pos - 1].is_ascii_alphanumeric()
+                        && rest.as_bytes()[pos - 1] != b'_');
+                let after = pos + pattern.len();
+                let after_ok = after >= rest.len()
+                    || (!rest.as_bytes()[after].is_ascii_alphanumeric()
+                        && rest.as_bytes()[after] != b'_');
+                if before_ok && after_ok {
+                    result.push_str(alias);
+                } else {
+                    result.push_str(pattern);
+                }
+                rest = &rest[after..];
+            }
+            result.push_str(rest);
+            *line = result;
+        }
+    }
+}
+
+fn collapse_stack_local_derefs(lines: &mut [String]) {
+    for line in lines.iter_mut() {
+        let mut search_from = 0usize;
+        while let Some(rel) = line[search_from..].find("*(local_") {
+            let star = search_from + rel;
+            let name_start = star + 2;
+            let rest = &line[name_start..];
+            if !rest.starts_with("local_") {
+                search_from = star + 2;
+                continue;
+            }
+            let hex_start_len = "local_".len();
+            let hex_len = rest[hex_start_len..]
+                .find(|c: char| !c.is_ascii_hexdigit())
+                .unwrap_or(rest.len() - hex_start_len);
+            if hex_len == 0 {
+                search_from = star + 2;
+                continue;
+            }
+            let name_end = name_start + hex_start_len + hex_len;
+            if line.as_bytes().get(name_end).copied() != Some(b')') {
+                search_from = star + 2;
+                continue;
+            }
+            *line = format!(
+                "{}{}{}",
+                &line[..star],
+                &line[name_start..name_end],
+                &line[name_end + 1..]
+            );
+            search_from = star + (name_end - name_start);
+        }
+        search_from = 0;
+        while let Some(rel) = line[search_from..].find("*local_") {
+            let star = search_from + rel;
+            let prev_ok = star == 0 || !line.as_bytes()[star - 1].is_ascii_alphanumeric();
+            if !prev_ok {
+                search_from = star + 1;
+                continue;
+            }
+            let name_start = star + 1;
+            let rest = &line[name_start..];
+            let hex_start_len = "local_".len();
+            let hex_len = rest[hex_start_len..]
+                .find(|c: char| !c.is_ascii_hexdigit())
+                .unwrap_or(rest.len() - hex_start_len);
+            if hex_len == 0 {
+                search_from = star + 1;
+                continue;
+            }
+            let name_end = name_start + hex_start_len + hex_len;
+            *line = format!(
+                "{}{}{}",
+                &line[..star],
+                &line[name_start..name_end],
+                &line[name_end..]
+            );
+            search_from = star + (name_end - name_start);
+        }
+    }
+}
+
+fn collapse_frame_base_fields(lines: &mut [String]) {
+    for line in lines.iter_mut() {
+        let mut search_from = 0usize;
+        while let Some(pos) = line[search_from..].find("local_0->field_") {
+            let abs = search_from + pos;
+            let after_start = abs + "local_0->field_".len();
+            let rest = &line[after_start..];
+            let hex_len = rest
+                .find(|c: char| !c.is_ascii_hexdigit())
+                .unwrap_or(rest.len());
+            if hex_len == 0 {
+                search_from = after_start;
+                continue;
+            }
+            let off = &rest[..hex_len];
+            let replacement = format!("local_{}", off);
+            *line = format!(
+                "{}{}{}",
+                &line[..abs],
+                replacement,
+                &line[after_start + hex_len..]
+            );
+            search_from = abs + replacement.len();
+        }
+    }
+}
+
 struct PrintCtx<'a> {
     arch: Architecture,
     binary: Option<&'a [u8]>,
@@ -13460,13 +13655,19 @@ fn generate_function_signature(out: &mut String, ssa: &SsaCfg, func_name: &str) 
     // Collect parameters — variables with param_name set
     // Exclude loop Phi variable names (e.g., "iVar1") which use param_name
     // for printer elision but are not function parameters.
-    let mut params: Vec<(String, u32, InferredType, Option<&str>)> = Vec::new();
+    let mut params: Vec<(String, u32, InferredType, Option<&str>, u64)> = Vec::new();
     for v in &ssa.vars {
         if let Some(ref name) = v.param_name {
             if matches!(&v.expr, Expr::Phi(_)) && !name.starts_with("param_") {
                 continue;
             }
-            params.push((name.clone(), v.size, v.inferred_type, v.display_type));
+            params.push((
+                name.clone(),
+                v.size,
+                v.inferred_type,
+                v.display_type,
+                v.varnode.offset,
+            ));
         }
     }
     // Deduplicate by name (SSA may have multiple defs of the same param)
@@ -13499,8 +13700,34 @@ fn generate_function_signature(out: &mut String, ssa: &SsaCfg, func_name: &str) 
         999
     };
     params.sort_by(|a, b| {
-        let idx_a = param_slot(&a.0);
-        let idx_b = param_slot(&b.0);
+        let abi_slot = |off: u64| -> u32 {
+            match off {
+                // AArch64 x0-x7
+                16384 => 0,
+                16392 => 1,
+                16400 => 2,
+                16408 => 3,
+                16416 => 4,
+                16424 => 5,
+                16432 => 6,
+                16440 => 7,
+                // SysV x86-64
+                56 => 0,
+                48 => 1,
+                16 => 2,
+                8 => 3,
+                128 => 4,
+                136 => 5,
+                // ARM32 r0-r3
+                32 => 0,
+                36 => 1,
+                40 => 2,
+                44 => 3,
+                _ => 999,
+            }
+        };
+        let idx_a = param_slot(&a.0).min(abi_slot(a.4));
+        let idx_b = param_slot(&b.0).min(abi_slot(b.4));
         let is_float_a = a.0.starts_with("fparam_");
         let is_float_b = b.0.starts_with("fparam_");
         is_float_a
@@ -13531,7 +13758,7 @@ fn generate_function_signature(out: &mut String, ssa: &SsaCfg, func_name: &str) 
     let param_strs: Vec<String> = params
         .iter()
         .enumerate()
-        .map(|(i, (name, size, ty, disp))| {
+        .map(|(i, (name, size, ty, disp, _offset))| {
             let type_name = if let Some(d) = disp {
                 // display_type set by signature propagation (e.g., "HANDLE", "DWORD")
                 *d
@@ -14050,7 +14277,7 @@ fn print_stmt_tracked(
                                 {
                                     // The Store captures this register's value
                                     // Check the Store is to a stack variable
-                                    if try_stack_var_name(*addr, ssa).is_some() {
+                                    if try_stack_var_name_ctx(*addr, ssa, ctx.arch).is_some() {
                                         return; // Elide: Store will display the value
                                     }
                                 }
@@ -14248,7 +14475,7 @@ fn print_stmt_tracked(
             let size = vdef.size;
             let type_name = typed_name(size, vdef.inferred_type);
 
-            if let Some(stack_name) = try_stack_var_name(*addr, ssa) {
+            if let Some(stack_name) = try_stack_var_name_ctx(*addr, ssa, ctx.arch) {
                 // Track this stack variable's value for later resolution.
                 // But don't overwrite prologue param aliases — the pre-scan set these
                 // correctly and the runtime tracker may have contaminated values.
@@ -14486,7 +14713,7 @@ fn print_stmt_tracked(
                         let vdef = ssa.var(*val);
                         vdef.varnode.space == AddressSpaceId::Register
                             && vdef.varnode.offset == 0 // RAX/EAX
-                            && try_stack_var_name(*addr, ssa).is_some()
+                            && try_stack_var_name_ctx(*addr, ssa, ctx.arch).is_some()
                     } else {
                         false
                     }
@@ -15529,7 +15756,7 @@ fn print_stmt(
             let type_name = typed_name(size, vdef.inferred_type);
 
             // Use stack variable name if this is a stack store
-            if let Some(stack_name) = try_stack_var_name(*addr, ssa) {
+            if let Some(stack_name) = try_stack_var_name_ctx(*addr, ssa, ctx.arch) {
                 out.push_str(&format!("{}{} = {};\n", pad, stack_name, val_expr));
             } else {
                 out.push_str(&format!(
@@ -15860,8 +16087,7 @@ fn format_cond_operand(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTra
     }
     // If the expression is a Load, resolve to stack var name or pointer deref
     if let Expr::Load(ptr) = &vdef.expr {
-        if let Some(offset) = get_rbp_offset(*ptr, ssa) {
-            let name = format!("var_{:x}", offset);
+        if let Some(name) = try_stack_var_name_ctx(*ptr, ssa, ctx.arch) {
             let resolved = resolve_stack_alias(&name, tracker);
             let is_good_name = resolved.starts_with("param_")
                 || (resolved != name
@@ -15895,8 +16121,7 @@ fn format_cond_operand(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTra
         }
         // Follow through Load (register loaded from memory)
         if let Expr::Load(ptr) = &vdef.expr {
-            if let Some(offset) = get_rbp_offset(*ptr, ssa) {
-                let name = format!("var_{:x}", offset);
+            if let Some(name) = try_stack_var_name_ctx(*ptr, ssa, ctx.arch) {
                 return resolve_stack_alias(&name, tracker);
             }
             // x86-32: positive EBP offset → parameter
@@ -15927,6 +16152,18 @@ fn format_cond_operand(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTra
         let ls = format_cond_operand(*l, ssa, ctx, tracker);
         let rs = format_cond_operand(*r, ssa, ctx, tracker);
         return format!("{} {} {}", ls, binop_str(*kind), rs);
+    }
+    if let Expr::FieldAccess(base, offset) = &vdef.expr {
+        if matches!(ctx.arch, Architecture::AArch64) {
+            if let Some(base_off) = get_aarch64_sp_local_offset(*base, ssa) {
+                return resolve_stack_alias(&format!("local_{:x}", base_off + *offset), tracker);
+            }
+        }
+        let base_str = format_cond_operand(*base, ssa, ctx, tracker);
+        if needs_paren_for_arrow(&base_str) {
+            return format!("({})->field_{:x}", base_str, offset);
+        }
+        return format!("{}->field_{:x}", base_str, offset);
     }
     if let Expr::UnaryOp(kind, inner) = &vdef.expr {
         let is = format_cond_operand(*inner, ssa, ctx, tracker);
@@ -16156,7 +16393,8 @@ fn find_matching_paren(s: &str, pos: usize) -> Option<usize> {
 }
 
 /// Negate a condition string for while loop display.
-/// "a <= b" → "a > b", "a == b" → "a != b", etc.
+/// Prefer canonical operand order for inequalities: `!(a <= b)` renders
+/// as `b < a`, which reads like the original loop-continuation condition.
 fn negate_condition(cond: &str) -> String {
     // Simplify double negation: !(!x) → x, !(!(x)) → x
     if let Some(inner) = cond.strip_prefix("!(") {
@@ -16167,17 +16405,21 @@ fn negate_condition(cond: &str) -> String {
     if let Some(inner) = cond.strip_prefix('!') {
         return inner.to_string();
     }
-    // Try to find and flip the operator
-    for (op, neg) in [
-        (" <= ", " > "),
-        (" >= ", " < "),
-        (" < ", " >= "),
-        (" > ", " <= "),
-        (" == ", " != "),
-        (" != ", " == "),
+    for (op, neg, swap) in [
+        (" <= ", " < ", true),
+        (" >= ", " > ", true),
+        (" < ", " <= ", true),
+        (" > ", " >= ", true),
+        (" == ", " != ", false),
+        (" != ", " == ", false),
     ] {
         if let Some(pos) = cond.find(op) {
-            return format!("{}{}{}", &cond[..pos], neg, &cond[pos + op.len()..]);
+            let left = cond[..pos].trim();
+            let right = cond[pos + op.len()..].trim();
+            if swap {
+                return format!("{}{}{}", right, neg, left);
+            }
+            return format!("{}{}{}", left, neg, right);
         }
     }
     format!("!({})", cond)
@@ -16201,6 +16443,15 @@ fn swap_comparison_str(kind: BinOpKind) -> Option<&'static str> {
 
 /// Try to produce a stack variable name like "var_8" or "param_0" for frame-pointer-relative accesses.
 fn try_stack_var_name(addr_id: VarId, ssa: &SsaCfg) -> Option<String> {
+    try_stack_var_name_ctx(addr_id, ssa, Architecture::X86_64)
+}
+
+fn try_stack_var_name_ctx(addr_id: VarId, ssa: &SsaCfg, arch: Architecture) -> Option<String> {
+    if matches!(arch, Architecture::AArch64) {
+        if let Some(offset) = get_aarch64_sp_local_offset(addr_id, ssa) {
+            return Some(format!("local_{:x}", offset));
+        }
+    }
     if let Some(offset) = get_rbp_offset(addr_id, ssa) {
         return Some(format!("var_{:x}", offset));
     }
@@ -16215,6 +16466,47 @@ fn try_stack_var_name(addr_id: VarId, ssa: &SsaCfg) -> Option<String> {
         }
     }
     None
+}
+
+/// AArch64 SLEIGH models SP at a different register offset from x86 RSP.
+/// After a prologue like `sub sp, sp, #frame`, locals are addressed as
+/// `(sp - frame) + offset`. Return that post-prologue frame offset.
+fn get_aarch64_sp_local_offset(id: VarId, ssa: &SsaCfg) -> Option<u64> {
+    const AARCH64_SP_OFFSET: u64 = 8;
+
+    fn is_entry_sp(id: VarId, ssa: &SsaCfg) -> bool {
+        let v = ssa.var(id);
+        v.varnode.space == AddressSpaceId::Register
+            && v.varnode.offset == AARCH64_SP_OFFSET
+            && matches!(v.expr, Expr::Unknown)
+    }
+
+    fn is_allocated_sp(id: VarId, ssa: &SsaCfg) -> bool {
+        let expr = resolve_through_vars(id, ssa);
+        if let Expr::BinOp(BinOpKind::Sub, base, frame) = expr {
+            return is_entry_sp(base, ssa) && get_const_val(frame, ssa).is_some();
+        }
+        false
+    }
+
+    let expr = resolve_through_vars(id, ssa);
+    match expr {
+        Expr::BinOp(BinOpKind::Sub, base, frame) => {
+            if is_entry_sp(base, ssa) && get_const_val(frame, ssa).is_some() {
+                Some(0)
+            } else {
+                None
+            }
+        }
+        Expr::BinOp(BinOpKind::Add, base, off) => {
+            if is_allocated_sp(base, ssa) {
+                get_const_val(off, ssa)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Detect x86-32 cdecl parameters from positive EBP offsets.
@@ -16517,6 +16809,7 @@ fn format_var(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
 /// has stale aliases. Resolves EAX→Load(var_c)→len, RAX→Load(var_8)→s, etc.
 fn format_store_val(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> String {
     match expr {
+        Expr::Var(id) => format_store_operand(*id, ssa, ctx, tracker),
         Expr::BinOp(kind, left, right) => {
             let l = format_store_operand(*left, ssa, ctx, tracker);
             let r = format_store_operand(*right, ssa, ctx, tracker);
@@ -16532,8 +16825,7 @@ fn format_store_val(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTrac
             }
         }
         Expr::Load(ptr) => {
-            if let Some(offset) = get_rbp_offset(*ptr, ssa) {
-                let name = format!("var_{:x}", offset);
+            if let Some(name) = try_stack_var_name_ctx(*ptr, ssa, ctx.arch) {
                 return resolve_stack_alias(&name, tracker);
             }
             format_expr(expr, ssa, ctx)
@@ -16558,8 +16850,7 @@ fn format_store_operand(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTr
     // If loaded from a non-stack address (array element), show the load expression
     if vdef.varnode.space == AddressSpaceId::Register {
         if let Expr::Load(ptr) = &vdef.expr {
-            if let Some(offset) = get_rbp_offset(*ptr, ssa) {
-                let name = format!("var_{:x}", offset);
+            if let Some(name) = try_stack_var_name_ctx(*ptr, ssa, ctx.arch) {
                 return resolve_stack_alias(&name, tracker);
             }
             // Non-stack load (array element, struct field, etc.)
@@ -16574,8 +16865,7 @@ fn format_store_operand(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTr
         if let Expr::Var(inner) = &vdef.expr {
             let iv = ssa.var(*inner);
             if let Expr::Load(ptr) = &iv.expr {
-                if let Some(offset) = get_rbp_offset(*ptr, ssa) {
-                    let name = format!("var_{:x}", offset);
+                if let Some(name) = try_stack_var_name_ctx(*ptr, ssa, ctx.arch) {
                     return resolve_stack_alias(&name, tracker);
                 }
             }
@@ -17553,7 +17843,9 @@ fn try_xor_decrypt_multi(va: u64, ctx: &PrintCtx) -> Option<(String, Vec<u8>)> {
                         .collect();
                     let vowels = letters
                         .iter()
-                        .filter(|b| matches!(b.to_ascii_lowercase(), b'a' | b'e' | b'i' | b'o' | b'u'))
+                        .filter(|b| {
+                            matches!(b.to_ascii_lowercase(), b'a' | b'e' | b'i' | b'o' | b'u')
+                        })
                         .count();
                     let vowel_ok = !letters.is_empty()
                         && vowels * 4 >= letters.len()      // >= 25%

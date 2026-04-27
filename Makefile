@@ -1,4 +1,4 @@
-.PHONY: generate build test test-all run clean check benchmark
+.PHONY: generate build test test-all run clean check benchmark decomp-bench
 
 # Generate code from slaspec (~30s)
 generate:
@@ -29,6 +29,10 @@ release:
 # Run benchmark suite (requires test_bin directory)
 benchmark: release
 	python3 scripts/benchmark.py
+
+# Fast pseudocode quality regression bench (source-built local fixtures)
+decomp-bench: release
+	python3 scripts/decomp-regress.py --no-build
 
 # Run the test-harness binary (prints P-code)
 run: build

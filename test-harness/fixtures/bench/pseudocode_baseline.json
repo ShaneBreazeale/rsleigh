@@ -1,0 +1,580 @@
+{
+  "schema": 1,
+  "mode": "source",
+  "host": "Darwin-arm64",
+  "cases": [
+    {
+      "name": "pseudocode_core_O0",
+      "binary": "target/decomp-bench/pseudocode_core_O0",
+      "source": "test-harness/fixtures/bench/pseudocode_core.c",
+      "flags": [
+        "-O0",
+        "-g",
+        "-fno-inline",
+        "-fno-omit-frame-pointer"
+      ],
+      "functions": {
+        "add_mix": {
+          "found": true,
+          "timeout": false,
+          "empty": false,
+          "lines": 3,
+          "bytes": 82,
+          "leaks": {
+            "FUN": 0,
+            "func": 0,
+            "DAT": 0,
+            "lVar": 0,
+            "iVar": 0,
+            "uVar": 0,
+            "tmp": 0,
+            "local": 2,
+            "field": 0,
+            "unknown": 0
+          },
+          "leak_total": 2,
+          "controls": {
+            "if": 1,
+            "for": 0,
+            "while": 0,
+            "switch": 0
+          },
+          "returns": 1,
+          "calls": 2,
+          "score": 96.0,
+          "target": "add_mix"
+        },
+        "factorial_iter": {
+          "found": true,
+          "timeout": false,
+          "empty": false,
+          "lines": 6,
+          "bytes": 135,
+          "leaks": {
+            "FUN": 0,
+            "func": 0,
+            "DAT": 0,
+            "lVar": 0,
+            "iVar": 0,
+            "uVar": 0,
+            "tmp": 0,
+            "local": 0,
+            "field": 0,
+            "unknown": 0
+          },
+          "leak_total": 0,
+          "controls": {
+            "if": 0,
+            "for": 1,
+            "while": 0,
+            "switch": 0
+          },
+          "returns": 1,
+          "calls": 2,
+          "score": 100.0,
+          "target": "factorial_iter"
+        },
+        "classify_score": {
+          "found": true,
+          "timeout": false,
+          "empty": false,
+          "lines": 5,
+          "bytes": 157,
+          "leaks": {
+            "FUN": 0,
+            "func": 0,
+            "DAT": 0,
+            "lVar": 0,
+            "iVar": 0,
+            "uVar": 0,
+            "tmp": 0,
+            "local": 1,
+            "field": 0,
+            "unknown": 0
+          },
+          "leak_total": 1,
+          "controls": {
+            "if": 3,
+            "for": 0,
+            "while": 0,
+            "switch": 0
+          },
+          "returns": 1,
+          "calls": 4,
+          "score": 98.0,
+          "target": "classify_score"
+        },
+        "sum_until_zero": {
+          "found": true,
+          "timeout": false,
+          "empty": false,
+          "lines": 13,
+          "bytes": 292,
+          "leaks": {
+            "FUN": 0,
+            "func": 0,
+            "DAT": 0,
+            "lVar": 3,
+            "iVar": 0,
+            "uVar": 0,
+            "tmp": 0,
+            "local": 2,
+            "field": 0,
+            "unknown": 0
+          },
+          "leak_total": 5,
+          "controls": {
+            "if": 1,
+            "for": 0,
+            "while": 1,
+            "switch": 0
+          },
+          "returns": 1,
+          "calls": 3,
+          "score": 90.0,
+          "target": "sum_until_zero"
+        },
+        "copy_trim": {
+          "found": true,
+          "timeout": false,
+          "empty": false,
+          "lines": 17,
+          "bytes": 394,
+          "leaks": {
+            "FUN": 0,
+            "func": 0,
+            "DAT": 0,
+            "lVar": 1,
+            "iVar": 0,
+            "uVar": 0,
+            "tmp": 0,
+            "local": 3,
+            "field": 2,
+            "unknown": 0
+          },
+          "leak_total": 6,
+          "controls": {
+            "if": 2,
+            "for": 0,
+            "while": 1,
+            "switch": 0
+          },
+          "returns": 1,
+          "calls": 4,
+          "score": 88.0,
+          "target": "copy_trim"
+        },
+        "dispatch_op": {
+          "found": true,
+          "timeout": false,
+          "empty": false,
+          "lines": 13,
+          "bytes": 276,
+          "leaks": {
+            "FUN": 0,
+            "func": 0,
+            "DAT": 0,
+            "lVar": 0,
+            "iVar": 0,
+            "uVar": 0,
+            "tmp": 0,
+            "local": 2,
+            "field": 0,
+            "unknown": 0
+          },
+          "leak_total": 2,
+          "controls": {
+            "if": 2,
+            "for": 0,
+            "while": 0,
+            "switch": 1
+          },
+          "returns": 1,
+          "calls": 3,
+          "score": 96.0,
+          "target": "dispatch_op"
+        },
+        "fib_rec": {
+          "found": true,
+          "timeout": false,
+          "empty": false,
+          "lines": 7,
+          "bytes": 192,
+          "leaks": {
+            "FUN": 0,
+            "func": 0,
+            "DAT": 0,
+            "lVar": 3,
+            "iVar": 0,
+            "uVar": 0,
+            "tmp": 0,
+            "local": 0,
+            "field": 0,
+            "unknown": 0
+          },
+          "leak_total": 3,
+          "controls": {
+            "if": 1,
+            "for": 0,
+            "while": 0,
+            "switch": 0
+          },
+          "returns": 1,
+          "calls": 5,
+          "score": 94.0,
+          "target": "fib_rec"
+        },
+        "struct_accum": {
+          "found": true,
+          "timeout": false,
+          "empty": false,
+          "lines": 9,
+          "bytes": 253,
+          "leaks": {
+            "FUN": 0,
+            "func": 0,
+            "DAT": 0,
+            "lVar": 2,
+            "iVar": 0,
+            "uVar": 0,
+            "tmp": 0,
+            "local": 4,
+            "field": 0,
+            "unknown": 0
+          },
+          "leak_total": 6,
+          "controls": {
+            "if": 0,
+            "for": 1,
+            "while": 0,
+            "switch": 0
+          },
+          "returns": 1,
+          "calls": 2,
+          "score": 88.0,
+          "target": "struct_accum"
+        },
+        "main": {
+          "found": true,
+          "timeout": false,
+          "empty": false,
+          "lines": 41,
+          "bytes": 1319,
+          "leaks": {
+            "FUN": 0,
+            "func": 0,
+            "DAT": 10,
+            "lVar": 3,
+            "iVar": 0,
+            "uVar": 0,
+            "tmp": 0,
+            "local": 6,
+            "field": 10,
+            "unknown": 0
+          },
+          "leak_total": 29,
+          "controls": {
+            "if": 1,
+            "for": 0,
+            "while": 0,
+            "switch": 0
+          },
+          "returns": 1,
+          "calls": 10,
+          "score": 42.0,
+          "target": "main"
+        }
+      }
+    },
+    {
+      "name": "pseudocode_core_O2",
+      "binary": "target/decomp-bench/pseudocode_core_O2",
+      "source": "test-harness/fixtures/bench/pseudocode_core.c",
+      "flags": [
+        "-O2",
+        "-g",
+        "-fno-inline",
+        "-fno-omit-frame-pointer"
+      ],
+      "functions": {
+        "add_mix": {
+          "found": true,
+          "timeout": false,
+          "empty": false,
+          "lines": 4,
+          "bytes": 122,
+          "leaks": {
+            "FUN": 0,
+            "func": 0,
+            "DAT": 0,
+            "lVar": 4,
+            "iVar": 0,
+            "uVar": 0,
+            "tmp": 0,
+            "local": 0,
+            "field": 0,
+            "unknown": 1
+          },
+          "leak_total": 5,
+          "controls": {
+            "if": 0,
+            "for": 0,
+            "while": 0,
+            "switch": 0
+          },
+          "returns": 1,
+          "calls": 2,
+          "score": 90.0,
+          "target": "add_mix"
+        },
+        "factorial_iter": {
+          "found": true,
+          "timeout": false,
+          "empty": false,
+          "lines": 37,
+          "bytes": 1348,
+          "leaks": {
+            "FUN": 0,
+            "func": 0,
+            "DAT": 2,
+            "lVar": 42,
+            "iVar": 0,
+            "uVar": 0,
+            "tmp": 0,
+            "local": 0,
+            "field": 0,
+            "unknown": 0
+          },
+          "leak_total": 44,
+          "controls": {
+            "if": 5,
+            "for": 0,
+            "while": 3,
+            "switch": 0
+          },
+          "returns": 2,
+          "calls": 9,
+          "score": 12.0,
+          "target": "factorial_iter"
+        },
+        "classify_score": {
+          "found": true,
+          "timeout": false,
+          "empty": false,
+          "lines": 2,
+          "bytes": 170,
+          "leaks": {
+            "FUN": 0,
+            "func": 0,
+            "DAT": 0,
+            "lVar": 0,
+            "iVar": 0,
+            "uVar": 0,
+            "tmp": 0,
+            "local": 0,
+            "field": 0,
+            "unknown": 3
+          },
+          "leak_total": 3,
+          "controls": {
+            "if": 0,
+            "for": 0,
+            "while": 0,
+            "switch": 0
+          },
+          "returns": 1,
+          "calls": 2,
+          "score": 94.0,
+          "target": "classify_score"
+        },
+        "sum_until_zero": {
+          "found": true,
+          "timeout": false,
+          "empty": false,
+          "lines": 11,
+          "bytes": 269,
+          "leaks": {
+            "FUN": 0,
+            "func": 0,
+            "DAT": 0,
+            "lVar": 7,
+            "iVar": 0,
+            "uVar": 0,
+            "tmp": 0,
+            "local": 0,
+            "field": 2,
+            "unknown": 0
+          },
+          "leak_total": 9,
+          "controls": {
+            "if": 1,
+            "for": 0,
+            "while": 1,
+            "switch": 0
+          },
+          "returns": 1,
+          "calls": 3,
+          "score": 82.0,
+          "target": "sum_until_zero"
+        },
+        "copy_trim": {
+          "found": true,
+          "timeout": false,
+          "empty": false,
+          "lines": 16,
+          "bytes": 393,
+          "leaks": {
+            "FUN": 0,
+            "func": 0,
+            "DAT": 0,
+            "lVar": 10,
+            "iVar": 0,
+            "uVar": 0,
+            "tmp": 0,
+            "local": 0,
+            "field": 1,
+            "unknown": 0
+          },
+          "leak_total": 11,
+          "controls": {
+            "if": 2,
+            "for": 0,
+            "while": 1,
+            "switch": 0
+          },
+          "returns": 2,
+          "calls": 6,
+          "score": 78.0,
+          "target": "copy_trim"
+        },
+        "dispatch_op": {
+          "found": true,
+          "timeout": false,
+          "empty": false,
+          "lines": 12,
+          "bytes": 428,
+          "leaks": {
+            "FUN": 0,
+            "func": 0,
+            "DAT": 0,
+            "lVar": 0,
+            "iVar": 0,
+            "uVar": 0,
+            "tmp": 0,
+            "local": 0,
+            "field": 0,
+            "unknown": 5
+          },
+          "leak_total": 5,
+          "controls": {
+            "if": 4,
+            "for": 0,
+            "while": 0,
+            "switch": 0
+          },
+          "returns": 4,
+          "calls": 6,
+          "score": 90.0,
+          "target": "dispatch_op"
+        },
+        "fib_rec": {
+          "found": true,
+          "timeout": false,
+          "empty": false,
+          "lines": 19,
+          "bytes": 502,
+          "leaks": {
+            "FUN": 0,
+            "func": 0,
+            "DAT": 0,
+            "lVar": 16,
+            "iVar": 0,
+            "uVar": 0,
+            "tmp": 0,
+            "local": 2,
+            "field": 0,
+            "unknown": 4
+          },
+          "leak_total": 22,
+          "controls": {
+            "if": 1,
+            "for": 0,
+            "while": 1,
+            "switch": 0
+          },
+          "returns": 1,
+          "calls": 6,
+          "score": 56.0,
+          "target": "fib_rec"
+        },
+        "struct_accum": {
+          "found": true,
+          "timeout": false,
+          "empty": false,
+          "lines": 46,
+          "bytes": 1740,
+          "leaks": {
+            "FUN": 0,
+            "func": 0,
+            "DAT": 0,
+            "lVar": 30,
+            "iVar": 0,
+            "uVar": 0,
+            "tmp": 0,
+            "local": 0,
+            "field": 6,
+            "unknown": 0
+          },
+          "leak_total": 36,
+          "controls": {
+            "if": 5,
+            "for": 0,
+            "while": 3,
+            "switch": 0
+          },
+          "returns": 2,
+          "calls": 9,
+          "score": 28.0,
+          "target": "struct_accum"
+        },
+        "main": {
+          "found": true,
+          "timeout": false,
+          "empty": false,
+          "lines": 38,
+          "bytes": 1312,
+          "leaks": {
+            "FUN": 0,
+            "func": 0,
+            "DAT": 28,
+            "lVar": 3,
+            "iVar": 0,
+            "uVar": 0,
+            "tmp": 0,
+            "local": 2,
+            "field": 13,
+            "unknown": 0
+          },
+          "leak_total": 46,
+          "controls": {
+            "if": 1,
+            "for": 0,
+            "while": 0,
+            "switch": 0
+          },
+          "returns": 1,
+          "calls": 10,
+          "score": 8.0,
+          "target": "main"
+        }
+      }
+    }
+  ],
+  "aggregate": {
+    "functions": 18,
+    "found": 18,
+    "empty": 0,
+    "leak_total": 235,
+    "avg_score": 73.9
+  }
+}
