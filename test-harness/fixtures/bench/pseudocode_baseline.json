@@ -18,8 +18,8 @@
           "found": true,
           "timeout": false,
           "empty": false,
-          "lines": 3,
-          "bytes": 82,
+          "lines": 4,
+          "bytes": 112,
           "leaks": {
             "FUN": 0,
             "func": 0,
@@ -28,20 +28,20 @@
             "iVar": 0,
             "uVar": 0,
             "tmp": 0,
-            "local": 2,
+            "local": 3,
             "field": 0,
             "unknown": 0
           },
-          "leak_total": 2,
+          "leak_total": 3,
           "controls": {
             "if": 1,
             "for": 0,
             "while": 0,
             "switch": 0
           },
-          "returns": 1,
+          "returns": 2,
           "calls": 2,
-          "score": 96.0,
+          "score": 94.0,
           "target": "add_mix"
         },
         "factorial_iter": {
@@ -228,17 +228,17 @@
           "found": true,
           "timeout": false,
           "empty": false,
-          "lines": 9,
-          "bytes": 253,
+          "lines": 6,
+          "bytes": 219,
           "leaks": {
             "FUN": 0,
             "func": 0,
             "DAT": 0,
-            "lVar": 2,
+            "lVar": 0,
             "iVar": 0,
             "uVar": 0,
             "tmp": 0,
-            "local": 4,
+            "local": 6,
             "field": 0,
             "unknown": 0
           },
@@ -331,13 +331,13 @@
           "found": true,
           "timeout": false,
           "empty": false,
-          "lines": 37,
-          "bytes": 1348,
+          "lines": 36,
+          "bytes": 1301,
           "leaks": {
             "FUN": 0,
             "func": 0,
             "DAT": 2,
-            "lVar": 42,
+            "lVar": 40,
             "iVar": 0,
             "uVar": 0,
             "tmp": 0,
@@ -345,7 +345,7 @@
             "field": 0,
             "unknown": 0
           },
-          "leak_total": 44,
+          "leak_total": 42,
           "controls": {
             "if": 5,
             "for": 0,
@@ -354,7 +354,7 @@
           },
           "returns": 2,
           "calls": 9,
-          "score": 12.0,
+          "score": 16.0,
           "target": "factorial_iter"
         },
         "classify_score": {
@@ -574,7 +574,7 @@
     "functions": 18,
     "found": 18,
     "empty": 0,
-    "leak_total": 235,
-    "avg_score": 73.9
+    "leak_total": 234,
+    "avg_score": 74.0
   }
 }

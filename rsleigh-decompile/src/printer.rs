@@ -303,6 +303,8 @@ fn post_process(
 ) {
     let mut lines: Vec<String> = out.lines().map(|l| l.to_string()).collect();
 
+    fold_if_else_assignment_returns(&mut lines);
+
     let mut i = 0;
     while i < lines.len() {
         // #4: Hide stack canary boilerplate
@@ -11415,6 +11417,8 @@ fn post_process(
         true
     });
 
+    recover_counted_loop_body_exprs(&mut lines);
+
     // Return-type/sig consistency fix. If a function is declared
     // `long/int func_X(...)` but every return in the body is a bare `return;`,
     // rewrite the signature return type to `void`. The inverse (`void func_X`
@@ -13383,6 +13387,7 @@ fn post_process(
     apply_named_stack_aliases(&mut lines, aliases);
     collapse_frame_base_fields(&mut lines);
     collapse_stack_local_derefs(&mut lines);
+    fold_counted_loop_accumulators(&mut lines);
 
     // First: materialize `result` from `lines` (blank-line dedup preserved).
     for line in &lines {
@@ -16459,6 +16464,460 @@ fn find_matching_paren(s: &str, pos: usize) -> Option<usize> {
         }
     }
     None
+}
+
+fn is_c_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let bytes = haystack.as_bytes();
+    let needle_bytes = needle.as_bytes();
+    let mut i = 0usize;
+    while i + needle_bytes.len() <= bytes.len() {
+        if &bytes[i..i + needle_bytes.len()] == needle_bytes {
+            let before = if i > 0 { bytes[i - 1] } else { b' ' };
+            let after_idx = i + needle_bytes.len();
+            let after = bytes.get(after_idx).copied().unwrap_or(b' ');
+            let word = !before.is_ascii_alphanumeric()
+                && before != b'_'
+                && !after.is_ascii_alphanumeric()
+                && after != b'_';
+            if word {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn parse_plain_assignment(line: &str) -> Option<(&str, &str)> {
+    let core = line.trim().strip_suffix(';')?;
+    let (lhs, rhs) = core.split_once(" = ")?;
+    let lhs = lhs.trim();
+    let rhs = rhs.trim();
+    if is_c_ident(lhs) {
+        Some((lhs, rhs))
+    } else {
+        None
+    }
+}
+
+fn parse_counted_for_induction(line: &str) -> Option<String> {
+    let t = line.trim();
+    let inner = t.strip_prefix("for (")?.strip_suffix(") {")?;
+    let mut parts = inner.split(';').map(str::trim);
+    let init = parts.next()?;
+    let cond = parts.next()?;
+    let step = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let (lhs, init_rhs) = init.split_once(" = ")?;
+    let lhs = lhs.trim();
+    if !is_c_ident(lhs) || init_rhs.trim() != "0" {
+        return None;
+    }
+    let step_ok = step == format!("{}++", lhs)
+        || step == format!("++{}", lhs)
+        || step == format!("{} = {} + 1", lhs, lhs)
+        || step == format!("{} = 1 + {}", lhs, lhs);
+    if !step_ok || !contains_word(cond, lhs) {
+        return None;
+    }
+    Some(lhs.to_string())
+}
+
+fn find_line_block_end(lines: &[String], start: usize) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut saw_open = false;
+    for (idx, line) in lines.iter().enumerate().skip(start) {
+        for ch in line.chars() {
+            match ch {
+                '{' => {
+                    depth += 1;
+                    saw_open = true;
+                }
+                '}' => {
+                    depth -= 1;
+                    if saw_open && depth == 0 {
+                        return Some(idx);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+fn return_matches_assigned_var(line: &str, var: &str) -> bool {
+    let t = line.trim();
+    if t == format!("return {};", var) {
+        return true;
+    }
+    if let Some(rest) = var.strip_prefix("local_") {
+        if rest.chars().all(|c| c.is_ascii_hexdigit()) {
+            return t == format!("return sp->field_{};", rest)
+                || t == format!("return (sp - 16)->field_{};", rest)
+                || t == format!("return (sp)->field_{};", rest);
+        }
+    }
+    false
+}
+
+fn fold_if_else_assignment_returns(lines: &mut Vec<String>) {
+    let mut i = 0usize;
+    while i + 5 < lines.len() {
+        let header = lines[i].trim();
+        if !(header.starts_with("if (") && header.ends_with('{')) {
+            i += 1;
+            continue;
+        }
+        if lines.get(i + 2).map(|l| l.trim()) != Some("} else {")
+            || lines.get(i + 4).map(|l| l.trim()) != Some("}")
+        {
+            i += 1;
+            continue;
+        }
+        let Some((then_var, then_expr)) = parse_plain_assignment(&lines[i + 1]) else {
+            i += 1;
+            continue;
+        };
+        let Some((else_var, else_expr)) = parse_plain_assignment(&lines[i + 3]) else {
+            i += 1;
+            continue;
+        };
+        if then_var != else_var || !return_matches_assigned_var(&lines[i + 5], then_var) {
+            i += 1;
+            continue;
+        }
+        let if_indent = lines[i].len() - lines[i].trim_start().len();
+        let body_indent = lines[i + 1].len() - lines[i + 1].trim_start().len();
+        let if_pad = " ".repeat(if_indent);
+        let body_pad = " ".repeat(body_indent);
+        let header_trimmed = lines[i].trim().to_string();
+        let then_expr = then_expr.to_string();
+        let else_expr = else_expr.to_string();
+        lines.splice(
+            i..=i + 5,
+            vec![
+                format!("{}{}", if_pad, header_trimmed),
+                format!("{}return {};", body_pad, then_expr),
+                format!("{}}}", if_pad),
+                format!("{}return {};", if_pad, else_expr),
+            ],
+        );
+        i += 4;
+    }
+}
+
+fn is_loop_pointer_alias(alias: &str) -> bool {
+    (alias.starts_with("puVar") || alias.starts_with("lVar") || alias.starts_with("iVar"))
+        && alias.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn is_plausible_loop_base(base: &str) -> bool {
+    is_c_ident(base)
+        && (base.starts_with("param_")
+            || base.starts_with("local_")
+            || base.starts_with("DAT_")
+            || base.starts_with("ptr")
+            || base.starts_with("buf")
+            || base.starts_with("arr")
+            || base.len() > 3)
+}
+
+fn parse_scaled_pointer_inner(inner: &str) -> Option<(&str, &str, u64)> {
+    let (base, tail) = inner.trim().split_once(" + ")?;
+    let base = base.trim();
+    let tail = tail.trim();
+    if !is_c_ident(base) {
+        return None;
+    }
+    if let Some((idx, shift)) = tail.split_once(" << ") {
+        let idx = idx.trim();
+        let shift = shift.trim();
+        if !is_c_ident(idx) {
+            return None;
+        }
+        let shift = if let Some(hex) = shift.strip_prefix("0x") {
+            u32::from_str_radix(hex, 16).ok()?
+        } else {
+            shift.parse::<u32>().ok()?
+        };
+        if shift < 32 {
+            return Some((base, idx, 1u64 << shift));
+        }
+    }
+    if let Some((idx, scale)) = tail.split_once(" * ") {
+        let idx = idx.trim();
+        let scale = scale.trim();
+        if !is_c_ident(idx) {
+            return None;
+        }
+        let scale = if let Some(hex) = scale.strip_prefix("0x") {
+            u64::from_str_radix(hex, 16).ok()?
+        } else {
+            scale.parse::<u64>().ok()?
+        };
+        if scale > 0 {
+            return Some((base, idx, scale));
+        }
+    }
+    None
+}
+
+fn rewrite_scaled_loop_derefs(line: &mut String, aliases: &HashMap<String, String>, ind: &str) {
+    let mut search_from = 0usize;
+    while let Some(rel) = line[search_from..].find("*(") {
+        let star_pos = search_from + rel;
+        let open_pos = star_pos + 1;
+        let Some(close) = find_matching_paren(line, open_pos) else {
+            break;
+        };
+        let inner = &line[open_pos + 1..close];
+        let Some((base, idx, scale)) = parse_scaled_pointer_inner(inner) else {
+            search_from = close + 1;
+            continue;
+        };
+        let Some(replacement_base) = aliases.get(base).map(String::as_str).or_else(|| {
+            if aliases.values().any(|known| known == base) {
+                Some(base)
+            } else {
+                None
+            }
+        }) else {
+            search_from = close + 1;
+            continue;
+        };
+        if idx == ind || idx.starts_with("lVar") || idx.starts_with("iVar") || idx.starts_with("uVar") {
+            let replacement = format!("*({} + {} * {})", replacement_base, ind, scale);
+            *line = format!("{}{}{}", &line[..star_pos], replacement, &line[close + 1..]);
+            search_from = star_pos + replacement.len();
+        } else {
+            search_from = close + 1;
+        }
+    }
+}
+
+fn infer_loop_alias_strides(
+    lines: &[String],
+    start: usize,
+    end: usize,
+    aliases: &HashMap<String, String>,
+) -> HashMap<String, u64> {
+    let mut strides = HashMap::new();
+    for line in &lines[start..end] {
+        let mut search_from = 0usize;
+        while let Some(rel) = line[search_from..].find("*(") {
+            let star_pos = search_from + rel;
+            let open_pos = star_pos + 1;
+            let Some(close) = find_matching_paren(line, open_pos) else {
+                break;
+            };
+            let inner = &line[open_pos + 1..close];
+            if let Some((base, _idx, scale)) = parse_scaled_pointer_inner(inner) {
+                if aliases.contains_key(base) {
+                    strides.insert(base.to_string(), scale);
+                }
+            }
+            search_from = close + 1;
+        }
+    }
+    strides
+}
+
+fn rewrite_loop_alias_fields(
+    line: &mut String,
+    aliases: &HashMap<String, String>,
+    strides: &HashMap<String, u64>,
+    ind: &str,
+) {
+    for (alias, base) in aliases {
+        let Some(stride) = strides.get(alias).copied() else {
+            continue;
+        };
+        let pat = format!("{}->field_", alias);
+        let mut search_from = 0usize;
+        while let Some(rel) = line[search_from..].find(&pat) {
+            let pos = search_from + rel;
+            let field_start = pos + pat.len();
+            let mut field_end = field_start;
+            while field_end < line.len()
+                && line.as_bytes()[field_end].is_ascii_hexdigit()
+            {
+                field_end += 1;
+            }
+            if field_end == field_start {
+                search_from = field_start;
+                continue;
+            }
+            let offset_str = &line[field_start..field_end];
+            let Some(offset) = u64::from_str_radix(offset_str, 16).ok() else {
+                search_from = field_end;
+                continue;
+            };
+            let replacement = if offset == 0 {
+                format!("*({} + {} * {})", base, ind, stride)
+            } else {
+                format!("*({} + {} * {} + {})", base, ind, stride, offset)
+            };
+            *line = format!("{}{}{}", &line[..pos], replacement, &line[field_end..]);
+            search_from = pos + replacement.len();
+        }
+    }
+}
+
+fn alias_used_in_range(
+    lines: &[String],
+    start: usize,
+    end: usize,
+    skip: usize,
+    alias: &str,
+    base: &str,
+) -> bool {
+    lines[start..end].iter().enumerate().any(|(rel, line)| {
+        let idx = start + rel;
+        if idx == skip {
+            return false;
+        }
+        if let Some((lhs, rhs)) = parse_plain_assignment(line) {
+            if lhs == alias && rhs == base {
+                return false;
+            }
+        }
+        contains_word(line, alias)
+    })
+}
+
+fn parse_accumulator_update(line: &str) -> Option<(&str, char, &str)> {
+    let (lhs, rhs) = parse_plain_assignment(line)?;
+    for op in ['+', '-'] {
+        let prefix = format!("{} {} ", lhs, op);
+        if let Some(tail) = rhs.strip_prefix(&prefix) {
+            return Some((lhs, op, tail.trim()));
+        }
+    }
+    None
+}
+
+fn fold_loop_accumulator_updates(lines: &mut Vec<String>, start: usize, end: &mut usize) {
+    let mut i = start;
+    while i + 1 < *end {
+        let first = lines[i].trim().to_string();
+        let second = lines[i + 1].trim().to_string();
+        let Some((lhs1, op1, rhs1)) = parse_accumulator_update(&first) else {
+            i += 1;
+            continue;
+        };
+        let Some((lhs2, op2, rhs2)) = parse_accumulator_update(&second) else {
+            i += 1;
+            continue;
+        };
+        if lhs1 != lhs2 {
+            i += 1;
+            continue;
+        }
+        let indent = lines[i].len() - lines[i].trim_start().len();
+        let pad = " ".repeat(indent);
+        let op1 = if op1 == '+' { "+" } else { "-" };
+        let op2 = if op2 == '+' { "+" } else { "-" };
+        lines[i] = format!("{}{} = {} {} {} {} {};", pad, lhs1, lhs1, op1, rhs1, op2, rhs2);
+        lines.remove(i + 1);
+        *end -= 1;
+    }
+}
+
+fn recover_counted_loop_body_exprs(lines: &mut Vec<String>) {
+    let mut i = 0usize;
+    while i < lines.len() {
+        let Some(induction) = parse_counted_for_induction(&lines[i]) else {
+            i += 1;
+            continue;
+        };
+        let Some(mut end) = find_line_block_end(lines, i) else {
+            i += 1;
+            continue;
+        };
+        if end <= i + 1 {
+            i += 1;
+            continue;
+        }
+
+        let mut aliases = HashMap::new();
+        for line in &lines[i + 1..end] {
+            if let Some((lhs, rhs)) = parse_plain_assignment(line) {
+                if is_loop_pointer_alias(lhs) && is_plausible_loop_base(rhs) {
+                    aliases.insert(lhs.to_string(), rhs.to_string());
+                }
+            }
+        }
+        if aliases.is_empty() {
+            i = end + 1;
+            continue;
+        }
+
+        let strides = infer_loop_alias_strides(lines, i + 1, end, &aliases);
+        if strides.is_empty() {
+            i = end + 1;
+            continue;
+        }
+
+        for line in &mut lines[i + 1..end] {
+            rewrite_scaled_loop_derefs(line, &aliases, &induction);
+            rewrite_loop_alias_fields(line, &aliases, &strides, &induction);
+        }
+
+        let mut j = i + 1;
+        while j < end {
+            let remove = if let Some((lhs, rhs)) = parse_plain_assignment(&lines[j]) {
+                aliases
+                    .get(lhs)
+                    .map_or(false, |base| {
+                        base == rhs && !alias_used_in_range(lines, i + 1, end, j, lhs, base)
+                    })
+            } else {
+                false
+            };
+            if remove {
+                lines.remove(j);
+                end -= 1;
+            } else {
+                j += 1;
+            }
+        }
+
+        fold_loop_accumulator_updates(lines, i + 1, &mut end);
+        i = end + 1;
+    }
+}
+
+fn fold_counted_loop_accumulators(lines: &mut Vec<String>) {
+    let mut i = 0usize;
+    while i < lines.len() {
+        if parse_counted_for_induction(&lines[i]).is_none() {
+            i += 1;
+            continue;
+        }
+        let Some(mut end) = find_line_block_end(lines, i) else {
+            i += 1;
+            continue;
+        };
+        fold_loop_accumulator_updates(lines, i + 1, &mut end);
+        i = end + 1;
+    }
 }
 
 /// Negate a condition string for while loop display.
