@@ -11595,6 +11595,39 @@ fn post_process(
     //     the call for its side effect, strip the `LHS = ` prefix.
     //   - RHS references LHS itself (`x = x + 1`): never drop.
     {
+        // When sym is a stack local like `local_c`, return the alternate
+        // `sp->field_c` form that the printer may emit before the stack
+        // alias rename runs. The DCE pass below compares LHS/RHS
+        // textually, but stack-alias rename in post_process happens
+        // later — so two writes to the same slot can render with
+        // different tokens (one as `local_c`, the other as
+        // `sp->field_c` inside its RHS). Without this equivalence the
+        // DCE drops legitimate non-adjacent updates that read the
+        // slot through `sp->field_*`.
+        let stack_alias_for = |sym: &str| -> Option<String> {
+            let rest = sym.strip_prefix("local_")?;
+            if rest.is_empty() || !rest.chars().all(|c| c.is_ascii_hexdigit()) {
+                return None;
+            }
+            Some(format!("sp->field_{}", rest))
+        };
+        // Build reverse map of named-stack aliases. The `aliases` map is
+        // {raw_var_name (e.g. `local_c`, `var_8`) -> friendly_name (DWARF
+        // or heuristic, e.g. `total`)}. The DCE compares LHS/RHS
+        // textually; when DWARF rename produces `total = local_c - ...`,
+        // sym=`total` does not match the textual `local_c` in RHS even
+        // though both reference the same slot. Reverse-lookup gives the
+        // raw forms that count as reads of `sym`.
+        let mut reverse_aliases: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for (raw, friendly) in aliases.iter() {
+            if !raw.is_empty() && raw != friendly {
+                reverse_aliases
+                    .entry(friendly.clone())
+                    .or_default()
+                    .push(raw.clone());
+            }
+        }
         let reads_var_outside_lhs = |line: &str, sym: &str| -> bool {
             // `sym` appears as a word outside a leading `SYM = ` assignment.
             let trimmed = line.trim_start();
@@ -11608,6 +11641,8 @@ fn post_process(
             } else {
                 trimmed
             };
+            // Also detect aliased form for stack locals.
+            let alt = stack_alias_for(sym);
             let bytes = body.as_bytes();
             let mut i = 0;
             while i + sym.len() <= bytes.len() {
@@ -11624,6 +11659,40 @@ fn post_process(
                     }
                 }
                 i += 1;
+            }
+            // Repeat scan with the stack-alias alternate form if any.
+            let mut alts: Vec<String> = Vec::new();
+            if let Some(a) = alt {
+                alts.push(a);
+            }
+            // Add any DWARF/heuristic-renamed equivalents (e.g. `total` was
+            // applied to write sites but reads still spell as `local_c`).
+            if let Some(raws) = reverse_aliases.get(sym) {
+                for r in raws {
+                    alts.push(r.clone());
+                    if let Some(stack_form) = stack_alias_for(r) {
+                        alts.push(stack_form);
+                    }
+                }
+            }
+            for alt_sym in alts {
+                let asym = alt_sym.as_bytes();
+                let mut i = 0;
+                while i + asym.len() <= bytes.len() {
+                    if &bytes[i..i + asym.len()] == asym {
+                        let before = if i > 0 { bytes[i - 1] } else { b' ' };
+                        let after_idx = i + asym.len();
+                        let after = bytes.get(after_idx).copied().unwrap_or(b' ');
+                        let word = !before.is_ascii_alphanumeric()
+                            && before != b'_'
+                            && !after.is_ascii_alphanumeric()
+                            && after != b'_';
+                        if word {
+                            return true;
+                        }
+                    }
+                    i += 1;
+                }
             }
             false
         };
