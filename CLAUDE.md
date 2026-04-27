@@ -175,7 +175,7 @@ Fixture: `test-harness/fixtures/crackmev3.pyd` (PyVMProtect v4).
 - MBA: SiMBA handles 1-4 var linear; non-linear + 5+ var need synthesis (egg catches some)
 - Some loop conditions not recovered (`while (OF == SF)`)
 - x86-32 sequential TEST/JNZ sometimes nests wrong
-- Register-indirect calls (`CALL EDI` from earlier IAT load) not resolved
+- Register-indirect calls across non-trivial CFG (e.g. multi-path conv. through a phi merge) still not resolved; same-function linear cases including cross-block IAT-into-reg now handled (resolve_callind_via_all_ops)
 - ARM32 VFP/NEON: decode OK, FP reg values not fully traced through folding
 
 ## License
