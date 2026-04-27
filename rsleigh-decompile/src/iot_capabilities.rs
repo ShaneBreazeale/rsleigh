@@ -21,6 +21,34 @@ pub struct Capability {
     pub evidence: Vec<String>,
 }
 
+/// Convenience: extract printable ASCII runs at the given minimum
+/// length from raw bytes, then classify. Use when the caller has
+/// the binary data but no pre-extracted string corpus, or when the
+/// caller's extraction threshold is too high to catch short arch
+/// suffixes like `.mips`, `.sh4`, `.ppc`.
+pub fn classify_bytes(data: &[u8]) -> Vec<Capability> {
+    let mut texts: Vec<String> = Vec::new();
+    let mut run: Vec<u8> = Vec::with_capacity(64);
+    for &b in data {
+        if (0x20..0x7f).contains(&b) || b == b'\t' {
+            run.push(b);
+        } else {
+            if run.len() >= 4 {
+                if let Ok(s) = std::str::from_utf8(&run) {
+                    texts.push(s.to_string());
+                }
+            }
+            run.clear();
+        }
+    }
+    if run.len() >= 4 {
+        if let Ok(s) = std::str::from_utf8(&run) {
+            texts.push(s.to_string());
+        }
+    }
+    classify(&texts)
+}
+
 /// Classify the given string corpus into IoT-malware capabilities.
 /// Each capability fires when at least one of its rule's substrings
 /// matches, with a per-rule minimum-hit threshold for noisy buckets
@@ -88,9 +116,24 @@ pub fn classify(strings: &[String]) -> Vec<Capability> {
     // Multi-arch payload loader: lists of arch-suffix strings the
     // dropper feeds into a wget/curl URL template. Real samples carry
     // 5+; require at least 3 to fire.
-    // Dedupe arch families so e.g. ".armv7l" doesn't get counted
-    // twice via ".armv7" and ".armv7l" prefixes — the threshold is
-    // "3+ distinct architectures advertised", not "3+ catalog hits".
+    // Dedupe arch families. Word-boundary match: `.x86` must not
+    // count when only `.x86_64` is present (substring would otherwise
+    // double-count). Threshold is 3+ distinct architectures.
+    let token_present = |needle: &str| -> bool {
+        strings.iter().any(|s| {
+            let mut start = 0usize;
+            while let Some(pos) = s[start..].find(needle) {
+                let abs = start + pos;
+                let after = s[abs + needle.len()..].chars().next();
+                let bounded = after.map_or(true, |c| !c.is_ascii_alphanumeric() && c != '_');
+                if bounded {
+                    return true;
+                }
+                start = abs + 1;
+            }
+            false
+        })
+    };
     let arch_families: &[&[&str]] = &[
         &[".x86_64"], &[".x86"], &[".i686", ".i586", ".i486"],
         &[".armv7l", ".armv7"], &[".armv6l", ".armv6"],
@@ -103,7 +146,7 @@ pub fn classify(strings: &[String]) -> Vec<Capability> {
         .filter_map(|family| {
             family
                 .iter()
-                .find(|n| strings.iter().any(|s| s.contains(**n)))
+                .find(|n| token_present(n))
                 .map(|s| (*s).to_string())
         })
         .collect();
@@ -235,6 +278,30 @@ mod tests {
         assert!(ids.contains(&"downloader-fallback"));
         assert!(ids.contains(&"ld-preload-aware"));
         assert!(ids.contains(&"ddos-source-engine"));
+    }
+
+    #[test]
+    fn x86_64_does_not_double_count_as_x86() {
+        // Only `.x86_64` and `.aarch64` and `.mipsel` present —
+        // three distinct families. `.x86` MUST NOT also fire from
+        // the `.x86_64` substring.
+        let strings = s(&[".x86_64", ".aarch64", ".mipsel"]);
+        let caps = classify(&strings);
+        let arch = caps.iter().find(|c| c.id == "multi-arch-loader").unwrap();
+        assert_eq!(arch.evidence.len(), 3);
+        assert!(arch.evidence.contains(&".x86_64".to_string()));
+        assert!(!arch.evidence.contains(&".x86".to_string()));
+    }
+
+    #[test]
+    fn mips_word_boundary_blocks_mipsel_match() {
+        // `.mips` must require terminator after; `.mipsel` should
+        // match `.mipsel` family but not `.mips` family.
+        let strings = s(&[".mipsel", ".aarch64", ".armv7l"]);
+        let caps = classify(&strings);
+        let arch = caps.iter().find(|c| c.id == "multi-arch-loader").unwrap();
+        assert!(arch.evidence.contains(&".mipsel".to_string()));
+        assert!(!arch.evidence.contains(&".mips".to_string()));
     }
 
     #[test]

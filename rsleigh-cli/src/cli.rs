@@ -4095,7 +4095,7 @@ fn run_ioc(binary_path: &str, data: &[u8], json: bool) {
             "registry": registry.iter().collect::<Vec<_>>(),
             "mutexes":  mutexes.iter().collect::<Vec<_>>(),
             "secrets":  secrets.iter().collect::<Vec<_>>(),
-            "capabilities": rsleigh_decompile::iot_capabilities::classify(&texts)
+            "capabilities": rsleigh_decompile::iot_capabilities::classify_bytes(data)
                 .iter()
                 .map(|c| serde_json::json!({
                     "id": c.id,
@@ -4126,7 +4126,7 @@ fn run_ioc(binary_path: &str, data: &[u8], json: bool) {
     print_section("Mutexes/Named Objects", &mutexes);
     print_section("Secret-like strings", &secrets);
 
-    let caps = rsleigh_decompile::iot_capabilities::classify(&texts);
+    let caps = rsleigh_decompile::iot_capabilities::classify_bytes(data);
     if !caps.is_empty() {
         println!("\nCapabilities ({})", caps.len());
         for c in &caps {
