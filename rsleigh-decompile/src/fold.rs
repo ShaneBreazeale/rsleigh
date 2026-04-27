@@ -5688,7 +5688,20 @@ pub fn rewrite_conditional_phi_to_ternary(ssa: &mut SsaCfg, cfg: &Cfg) {
                     groups.push((input, vec![p]));
                 }
             }
-            if groups.len() != 2 {
+            if groups.len() < 2 {
+                continue;
+            }
+
+            // 3+ way merges: attempt nested-ternary build via recursive
+            // CBranch dispatch. Falls back to leaving the Phi alone if the
+            // merge isn't a clean dominator tree (e.g. irreducible / loop).
+            if groups.len() > 2 {
+                let phi_size = ssa.vars[phi_v.0 as usize].size;
+                if let Some(result_id) =
+                    build_nested_phi_ternary(&groups, &dom, ssa, phi_size)
+                {
+                    ssa.vars[phi_v.0 as usize].expr = Expr::Var(result_id);
+                }
                 continue;
             }
 
@@ -5748,6 +5761,77 @@ pub fn rewrite_conditional_phi_to_ternary(ssa: &mut SsaCfg, cfg: &Cfg) {
             }
         }
     }
+}
+
+/// Recursively build a nested ternary VarId for an N-way Phi merge.
+/// Each recursive level finds the nearest common-dominator CBranch, splits
+/// groups into then/else halves, and emits `(cond) ? then_chain : else_chain`.
+/// Returns None when the merge isn't a clean dominator tree (e.g. loop /
+/// irreducible / cross-arm edges) — caller leaves the Phi unrewritten.
+fn build_nested_phi_ternary(
+    groups: &[(VarId, Vec<BlockId>)],
+    dom: &[BlockId],
+    ssa: &mut SsaCfg,
+    size: u32,
+) -> Option<VarId> {
+    if groups.len() == 1 {
+        return Some(groups[0].0);
+    }
+    let all_preds: Vec<BlockId> =
+        groups.iter().flat_map(|(_, ps)| ps.iter().copied()).collect();
+    let common = phi_nearest_common_dom(dom, &all_preds)?;
+    if common.0 >= ssa.blocks.len() {
+        return None;
+    }
+    let (cond, taken, fallthrough) = match &ssa.blocks[common.0].terminator {
+        SsaTerminator::CBranch {
+            cond,
+            taken,
+            fallthrough,
+        } => (*cond, *taken, *fallthrough),
+        _ => return None,
+    };
+
+    let mut then_groups: Vec<(VarId, Vec<BlockId>)> = Vec::new();
+    let mut else_groups: Vec<(VarId, Vec<BlockId>)> = Vec::new();
+    for g in groups {
+        let in_then = g.1.iter().all(|p| phi_dom_dominates(dom, taken.0, p.0));
+        let in_else = g
+            .1
+            .iter()
+            .all(|p| phi_dom_dominates(dom, fallthrough.0, p.0));
+        if in_then && !in_else {
+            then_groups.push(g.clone());
+        } else if in_else && !in_then {
+            else_groups.push(g.clone());
+        } else {
+            return None;
+        }
+    }
+    if then_groups.is_empty() || else_groups.is_empty() {
+        return None;
+    }
+
+    let then_var = build_nested_phi_ternary(&then_groups, dom, ssa, size)?;
+    let else_var = build_nested_phi_ternary(&else_groups, dom, ssa, size)?;
+
+    let id = VarId(ssa.vars.len() as u32);
+    ssa.vars.push(VarDef {
+        id,
+        varnode: pcode_ir::Varnode {
+            space: AddressSpaceId::Unique,
+            offset: 0xE100_0000 + id.0 as u64,
+            size,
+        },
+        expr: Expr::Ternary(cond, then_var, else_var),
+        size,
+        use_count: 1,
+        param_name: None,
+        call_return: false,
+        inferred_type: InferredType::Unknown,
+        display_type: None,
+    });
+    Some(id)
 }
 
 fn phi_resolve_var_chain(id: VarId, vars: &[VarDef], depth: u32) -> VarId {
@@ -5825,4 +5909,207 @@ fn phi_common_dom_pair(dom: &[BlockId], a: BlockId, b: BlockId) -> Option<BlockI
         cur = d;
     }
     None
+}
+
+#[cfg(test)]
+mod nway_phi_tests {
+    use super::*;
+    use pcode_ir::{AddressSpaceId, Varnode};
+
+    fn unique_vn(off: u64, size: u32) -> Varnode {
+        Varnode {
+            space: AddressSpaceId::Unique,
+            offset: off,
+            size,
+        }
+    }
+
+    /// Build a 3-way merge:
+    ///
+    ///     B0 --CBranch(c0)--> B1 / B2
+    ///     B1 --CBranch(c1)--> B3 / B4
+    ///     B2 --Branch--> B5
+    ///     B3 --Branch--> B5
+    ///     B4 --Branch--> B5
+    ///     B5 has Phi(v_a [from B2], v_b [from B3], v_c [from B4]) -> Return
+    ///
+    /// Expected after `rewrite_conditional_phi_to_ternary`:
+    /// the Phi rewrites to `Var(Y)` where Y is a synthesized
+    /// `Ternary(c0, X, v_a)` and X is `Ternary(c1, v_b, v_c)`.
+    #[test]
+    fn three_way_phi_rewrites_to_nested_ternary() {
+        let mut ssa = SsaCfg {
+            blocks: Vec::new(),
+            vars: Vec::new(),
+            entry: BlockId(0),
+            diagnostics: Vec::new(),
+        };
+
+        // Allocate cond + value vars first.
+        let c0 = ssa.new_var(unique_vn(0x100, 1), Expr::Const(1, 1), 1);
+        let c1 = ssa.new_var(unique_vn(0x101, 1), Expr::Const(1, 1), 1);
+        let v_a = ssa.new_var(unique_vn(0x200, 4), Expr::Const(10, 4), 4);
+        let v_b = ssa.new_var(unique_vn(0x201, 4), Expr::Const(20, 4), 4);
+        let v_c = ssa.new_var(unique_vn(0x202, 4), Expr::Const(30, 4), 4);
+
+        let phi_v = ssa.new_var(
+            unique_vn(0x300, 4),
+            Expr::Phi(vec![v_a, v_b, v_c]),
+            4,
+        );
+
+        // SSA blocks 0..=5 mirroring CFG.
+        for i in 0..=5 {
+            ssa.blocks.push(SsaBlock {
+                id: BlockId(i),
+                addr: 0x1000 + 0x10 * i as u64,
+                stmts: Vec::new(),
+                terminator: SsaTerminator::Return(None),
+            });
+        }
+        ssa.blocks[0].terminator = SsaTerminator::CBranch {
+            cond: c0,
+            taken: BlockId(1),
+            fallthrough: BlockId(2),
+        };
+        ssa.blocks[1].terminator = SsaTerminator::CBranch {
+            cond: c1,
+            taken: BlockId(3),
+            fallthrough: BlockId(4),
+        };
+        ssa.blocks[2].terminator = SsaTerminator::Branch(BlockId(5));
+        ssa.blocks[3].terminator = SsaTerminator::Branch(BlockId(5));
+        ssa.blocks[4].terminator = SsaTerminator::Branch(BlockId(5));
+        ssa.blocks[5].stmts.push(Stmt::Assign(phi_v));
+        ssa.blocks[5].terminator = SsaTerminator::Return(Some(phi_v));
+
+        // Mirror Cfg structure (only terminator + blocks shape used by
+        // `predecessors` and `compute_dominators`).
+        let mut cfg_blocks: Vec<BasicBlock> = Vec::new();
+        for i in 0..=5usize {
+            cfg_blocks.push(BasicBlock {
+                id: BlockId(i),
+                addr: 0x1000 + 0x10 * i as u64,
+                ops: Vec::new(),
+                terminator: Terminator::Return,
+            });
+        }
+        let dummy_vn = unique_vn(0xfff0, 1);
+        cfg_blocks[0].terminator = Terminator::CBranch {
+            cond: dummy_vn,
+            taken: BlockId(1),
+            fallthrough: BlockId(2),
+        };
+        cfg_blocks[1].terminator = Terminator::CBranch {
+            cond: dummy_vn,
+            taken: BlockId(3),
+            fallthrough: BlockId(4),
+        };
+        cfg_blocks[2].terminator = Terminator::Branch(BlockId(5));
+        cfg_blocks[3].terminator = Terminator::Branch(BlockId(5));
+        cfg_blocks[4].terminator = Terminator::Branch(BlockId(5));
+        let cfg = Cfg {
+            blocks: cfg_blocks,
+            entry: BlockId(0),
+            diagnostics: Vec::new(),
+        };
+
+        rewrite_conditional_phi_to_ternary(&mut ssa, &cfg);
+
+        // Phi var should now be a Var pointing to the outer ternary.
+        let outer_id = match &ssa.vars[phi_v.0 as usize].expr {
+            Expr::Var(id) => *id,
+            other => panic!("phi not rewritten to Var(...): {:?}", other),
+        };
+        let (cond_outer, then_outer, else_outer) = match &ssa.vars[outer_id.0 as usize].expr
+        {
+            Expr::Ternary(c, t, e) => (*c, *t, *e),
+            other => panic!("outer not Ternary: {:?}", other),
+        };
+        assert_eq!(cond_outer, c0, "outer condition must be c0");
+        assert_eq!(else_outer, v_a, "B2-arm value must be v_a");
+
+        let (cond_inner, then_inner, else_inner) =
+            match &ssa.vars[then_outer.0 as usize].expr {
+                Expr::Ternary(c, t, e) => (*c, *t, *e),
+                other => panic!("inner not Ternary: {:?}", other),
+            };
+        assert_eq!(cond_inner, c1, "inner condition must be c1");
+        assert_eq!(then_inner, v_b, "B3-arm value must be v_b");
+        assert_eq!(else_inner, v_c, "B4-arm value must be v_c");
+    }
+
+    /// Loop-back-edge target: rewrite must skip back-targets so loop
+    /// carry Phis aren't destroyed.
+    #[test]
+    fn loop_carry_phi_left_alone() {
+        let mut ssa = SsaCfg {
+            blocks: Vec::new(),
+            vars: Vec::new(),
+            entry: BlockId(0),
+            diagnostics: Vec::new(),
+        };
+        let v_init = ssa.new_var(unique_vn(0x200, 4), Expr::Const(0, 4), 4);
+        let v_step = ssa.new_var(unique_vn(0x201, 4), Expr::Const(1, 4), 4);
+        let v_third = ssa.new_var(unique_vn(0x202, 4), Expr::Const(2, 4), 4);
+        let phi_v = ssa.new_var(
+            unique_vn(0x300, 4),
+            Expr::Phi(vec![v_init, v_step, v_third]),
+            4,
+        );
+        let cond = ssa.new_var(unique_vn(0x100, 1), Expr::Const(1, 1), 1);
+
+        // 3 preds: 0 (entry), 2, 3 — and B2,B3 both back-edge into B1.
+        for i in 0..=3 {
+            ssa.blocks.push(SsaBlock {
+                id: BlockId(i),
+                addr: 0x10 * i as u64,
+                stmts: Vec::new(),
+                terminator: SsaTerminator::Return(None),
+            });
+        }
+        ssa.blocks[0].terminator = SsaTerminator::Branch(BlockId(1));
+        ssa.blocks[1].stmts.push(Stmt::Assign(phi_v));
+        ssa.blocks[1].terminator = SsaTerminator::CBranch {
+            cond,
+            taken: BlockId(2),
+            fallthrough: BlockId(3),
+        };
+        ssa.blocks[2].terminator = SsaTerminator::Branch(BlockId(1));
+        ssa.blocks[3].terminator = SsaTerminator::Branch(BlockId(1));
+
+        let mut cfg_blocks: Vec<BasicBlock> = Vec::new();
+        for i in 0..=3usize {
+            cfg_blocks.push(BasicBlock {
+                id: BlockId(i),
+                addr: 0x10 * i as u64,
+                ops: Vec::new(),
+                terminator: Terminator::Return,
+            });
+        }
+        let dummy_vn = unique_vn(0xfff0, 1);
+        cfg_blocks[0].terminator = Terminator::Branch(BlockId(1));
+        cfg_blocks[1].terminator = Terminator::CBranch {
+            cond: dummy_vn,
+            taken: BlockId(2),
+            fallthrough: BlockId(3),
+        };
+        cfg_blocks[2].terminator = Terminator::Branch(BlockId(1));
+        cfg_blocks[3].terminator = Terminator::Branch(BlockId(1));
+        let cfg = Cfg {
+            blocks: cfg_blocks,
+            entry: BlockId(0),
+            diagnostics: Vec::new(),
+        };
+
+        rewrite_conditional_phi_to_ternary(&mut ssa, &cfg);
+
+        // Loop-header phi must remain a Phi.
+        match &ssa.vars[phi_v.0 as usize].expr {
+            Expr::Phi(inputs) => {
+                assert_eq!(inputs.len(), 3, "loop phi inputs preserved");
+            }
+            other => panic!("loop-carry phi was rewritten: {:?}", other),
+        }
+    }
 }

@@ -138,8 +138,11 @@ pub fn decompile_with_binary(
 
     // Phi → Ternary rewrite at conditional (non-loop) merges.
     // Runs AFTER fold + signature propagation so the Phi inputs are at
-    // their simplest form (Const/Var after DCE). Non-destructive when
-    // the Phi can't be classified as a 2-way merge.
+    // their simplest form (Const/Var after DCE). 2-way merges become
+    // `(c) ? a : b`; N-way (3+) merges build a nested-ternary chain
+    // when the predecessor groups partition cleanly across a CBranch
+    // dominator tree. Non-destructive when the merge isn't a clean
+    // dominator tree (loop / irreducible / cross-arm edges).
     fold::rewrite_conditional_phi_to_ternary(&mut ssa, &cfg);
 
     // Apply DWARF debug info if available: replace param_N with actual names
