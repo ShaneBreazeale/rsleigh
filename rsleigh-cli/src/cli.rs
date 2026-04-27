@@ -128,6 +128,7 @@ pub fn entrypoint() {
         eprintln!("  rsleigh <binary> --seh-fixpoint      Apply SEH-driven SMC patches until fixpoint, report new functions");
         eprintln!("  rsleigh <binary> --vulnscan          Scan for vulnerability patterns");
         eprintln!("  rsleigh <binary> --ioc [--json]      Extract IOCs (URLs, IPs, paths, registry keys)");
+        eprintln!("  rsleigh <binary> --xor-strings [--json]  Brute single-byte XOR string recovery");
         eprintln!("  rsleigh <binary> --sigcheck [--json] Parse Authenticode signature (signer, timestamp, chain)");
         eprintln!("  rsleigh <binary> --resources [--dump DIR] [--json]  Walk PE resource directory; --dump extracts blobs");
         eprintln!(
@@ -157,6 +158,7 @@ pub fn entrypoint() {
     let search_mode = args.iter().any(|a| a == "--search");
     let vulnscan_mode = args.iter().any(|a| a == "--vulnscan");
     let ioc_mode = args.iter().any(|a| a == "--ioc");
+    let xor_strings_mode = args.iter().any(|a| a == "--xor-strings");
     let sigcheck_mode = args.iter().any(|a| a == "--sigcheck");
     let resources_mode = args.iter().any(|a| a == "--resources");
     let classes_mode = args.iter().any(|a| a == "--classes");
@@ -545,7 +547,7 @@ pub fn entrypoint() {
     }
 
     // Summary/Xrefs/Search/Vulnscan/Callgraph modes
-    if summary_mode || xrefs_mode || search_mode || vulnscan_mode || callgraph_mode || ioc_mode || sigcheck_mode || resources_mode {
+    if summary_mode || xrefs_mode || search_mode || vulnscan_mode || callgraph_mode || ioc_mode || xor_strings_mode || sigcheck_mode || resources_mode {
         let data = match std::fs::read(binary_path) {
             Ok(d) => d,
             Err(e) => {
@@ -573,6 +575,9 @@ pub fn entrypoint() {
                 } else if ioc_mode {
                     let json = args_clone.iter().any(|a| a == "--json");
                     run_ioc(&bp, &data, json);
+                } else if xor_strings_mode {
+                    let json = args_clone.iter().any(|a| a == "--json");
+                    run_xor_strings(&bp, &data, json);
                 } else if sigcheck_mode {
                     let json = args_clone.iter().any(|a| a == "--json");
                     run_sigcheck(&bp, &data, json);
@@ -3698,6 +3703,60 @@ fn run_vulnscan(binary_path: &str, data: &[u8]) {
 /// The point is to give an analyst a one-pager of "where does this binary
 /// reach out to and what does it touch" without making them grep the strings
 /// dump by hand. Output is grouped by category, deduped, and sorted.
+/// Brute single-byte-XOR string recovery. Walks every key 1..=255,
+/// reports decoded runs of length >= 8 whose source bytes are
+/// mostly non-printable (so plaintext doesn't dominate output).
+fn run_xor_strings(binary_path: &str, data: &[u8], json: bool) {
+    let hits = rsleigh_decompile::xor_strings::brute_decode(data, 8);
+    if json {
+        let payload = serde_json::json!({
+            "binary": binary_path,
+            "decoded": hits.iter().map(|d| serde_json::json!({
+                "key":    format!("0x{:02x}", d.key),
+                "offset": format!("0x{:x}", d.offset),
+                "text":   d.text,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+        return;
+    }
+    println!("=== XOR-decoded strings from {} ===", binary_path);
+    if hits.is_empty() {
+        println!("\n(no decoded strings)");
+        return;
+    }
+    let mut by_key: std::collections::BTreeMap<u8, Vec<&rsleigh_decompile::xor_strings::Decoded>> =
+        std::collections::BTreeMap::new();
+    for h in &hits {
+        by_key.entry(h.key).or_default().push(h);
+    }
+
+    // Brute scan generates ten-thousand-plus hits on most binaries.
+    // For triage, surface the top-5 keys by hit-count (real obfuscated
+    // tables produce concentrated decode under one key) and cap
+    // per-key output at 30 lines.
+    let mut ranked: Vec<(u8, &Vec<&rsleigh_decompile::xor_strings::Decoded>)> =
+        by_key.iter().map(|(k, v)| (*k, v)).collect();
+    ranked.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    let top: Vec<_> = ranked.into_iter().take(5).collect();
+    let total_hits = hits.len();
+    let total_keys = by_key.len();
+
+    println!(
+        "\n{} run(s) across {} key(s); showing top 5 keys by hit-count, max 30/key.",
+        total_hits, total_keys
+    );
+    for (key, group) in top {
+        println!("\nKey 0x{:02x} ({} hit(s)):", key, group.len());
+        for d in group.iter().take(30) {
+            println!("  +{:08x}  {}", d.offset, d.text);
+        }
+        if group.len() > 30 {
+            println!("  ... and {} more", group.len() - 30);
+        }
+    }
+}
+
 fn run_ioc(binary_path: &str, data: &[u8], json: bool) {
     use std::collections::BTreeSet;
 

@@ -49,6 +49,7 @@ pub mod vm_dispatch_extract;
 pub mod vm_fingerprint;
 pub mod vm_handler_classify;
 pub mod vm_handler_cluster;
+pub mod xor_strings;
 pub mod xor_vtable; // used by printer
 
 use pcode_ir::Instruction;
