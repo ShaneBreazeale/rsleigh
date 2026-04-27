@@ -14,9 +14,16 @@
 #   3. rsleigh-api            (needs all 6 generated)
 #   4. rsleigh-decompile      (pcode-ir + rsleigh-api)
 #   5. rsleigh-fid            (pcode-ir + rsleigh-api)
-#   6. rsleigh                (root SLEIGH parser — standalone)
-#   7. rsleigh-generate       (rsleigh)
-#   8. rsleigh-cli            (everything)
+#   6. rsleigh-cli            (api + decompile + fid)
+#   7. rsleigh                (root: optional `cli` feature → rsleigh-cli)
+#   8. rsleigh-generate       (rsleigh)
+#
+# Cycle note: root `rsleigh` declares `rsleigh-cli` as an optional
+# dependency (the `cli` feature). cargo publish validates ALL declared
+# dep versions against the registry, even optional ones, so rsleigh-cli
+# must be on crates.io before rsleigh publishes. rsleigh-cli does NOT
+# depend back on root rsleigh, so the cycle is one-way and resolves by
+# publishing rsleigh-cli first.
 
 set -euo pipefail
 
@@ -84,12 +91,15 @@ for arch in x86 x86-32 aarch64 arm32 mips riscv; do
   publish "rsleigh-gen-${arch}"
 done
 
-# 3-8. main crates
+# 3-8. main crates. rsleigh-cli MUST publish before root rsleigh —
+# the root crate's optional `cli` feature declares a versioned dep
+# on rsleigh-cli, and cargo publish requires every declared version
+# to already exist on the registry.
 publish rsleigh-api
 publish rsleigh-decompile
 publish rsleigh-fid
+publish rsleigh-cli
 publish rsleigh
 publish rsleigh-generate
-publish rsleigh-cli
 
 echo "=== DONE ==="
