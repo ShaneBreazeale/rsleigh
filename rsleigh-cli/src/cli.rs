@@ -4164,6 +4164,13 @@ fn run_ioc(binary_path: &str, data: &[u8], json: bool) {
             "registry": registry.iter().collect::<Vec<_>>(),
             "mutexes":  mutexes.iter().collect::<Vec<_>>(),
             "secrets":  secrets.iter().collect::<Vec<_>>(),
+            "family": rsleigh_decompile::iot_family::classify_bytes(data)
+                .map(|f| serde_json::json!({
+                    "id": f.id,
+                    "label": f.label,
+                    "variant": f.variant,
+                    "evidence": f.evidence,
+                })),
             "capabilities": rsleigh_decompile::iot_capabilities::classify_bytes(data)
                 .iter()
                 .map(|c| serde_json::json!({
@@ -4194,6 +4201,18 @@ fn run_ioc(binary_path: &str, data: &[u8], json: bool) {
     print_section("Registry", &registry);
     print_section("Mutexes/Named Objects", &mutexes);
     print_section("Secret-like strings", &secrets);
+
+    if let Some(fam) = rsleigh_decompile::iot_family::classify_bytes(data) {
+        let variant = fam
+            .variant
+            .as_ref()
+            .map(|v| format!(" (variant: {})", v))
+            .unwrap_or_default();
+        println!("\nFamily: [{}] {}{}", fam.id, fam.label, variant);
+        for ev in &fam.evidence {
+            println!("  evidence: {}", ev);
+        }
+    }
 
     let caps = rsleigh_decompile::iot_capabilities::classify_bytes(data);
     if !caps.is_empty() {

@@ -20,6 +20,7 @@ pub mod go_pclntab;
 pub mod handler_summary;
 pub mod imports;
 pub mod iot_capabilities;
+pub mod iot_family;
 pub mod ir;
 pub mod jmp_rax_trampoline;
 pub mod opaque_pred;
