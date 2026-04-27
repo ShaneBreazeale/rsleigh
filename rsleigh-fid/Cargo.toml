@@ -14,8 +14,8 @@ name = "rsleigh-fid-gen"
 path = "src/bin/gen.rs"
 
 [dependencies]
-rsleigh-api = { path = "../rsleigh-api", version = "0.3.0" }
-pcode-ir = { path = "../pcode-ir", version = "0.3.0" }
+rsleigh-api = { path = "../rsleigh-api", version = "0.4.0" }
+pcode-ir = { path = "../pcode-ir", version = "0.4.0" }
 goblin = "0.9"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 flate2 = "1"

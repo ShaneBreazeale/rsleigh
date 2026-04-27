@@ -14,10 +14,10 @@ name = "rsleigh"
 path = "src/main.rs"
 
 [dependencies]
-pcode-ir = { path = "../pcode-ir", version = "0.3.0" }
-rsleigh-api = { path = "../rsleigh-api", version = "0.3.0" }
-rsleigh-decompile = { path = "../rsleigh-decompile", version = "0.3.0" }
-rsleigh-fid = { path = "../rsleigh-fid", version = "0.3.0" }
+pcode-ir = { path = "../pcode-ir", version = "0.4.0" }
+rsleigh-api = { path = "../rsleigh-api", version = "0.4.0" }
+rsleigh-decompile = { path = "../rsleigh-decompile", version = "0.4.0" }
+rsleigh-fid = { path = "../rsleigh-fid", version = "0.4.0" }
 goblin = "0.9"
 serde_json = "1"
 wasmparser = "0.225"
