@@ -25,58 +25,111 @@
 
 use std::collections::BTreeSet;
 
-/// One decoded string + the key that produced it.
+/// One decoded string + the key that produced it. Keys are stored
+/// as a `Vec<u8>` to support both single-byte and multi-byte
+/// (e.g. Mirai's 4-byte 0xDEDEFFBA) schemes.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Decoded {
-    pub key: u8,
+    /// XOR key bytes; length 1 for single-byte, 4 for Mirai-class.
+    pub key: Vec<u8>,
     pub offset: usize,
     pub text: String,
 }
+
+impl Decoded {
+    pub fn key_hex(&self) -> String {
+        self.key.iter().map(|b| format!("{:02x}", b)).collect()
+    }
+}
+
+/// Known multi-byte keys observed in IoT-botnet families. These
+/// are tried by `brute_decode` after single-byte exhaustion so
+/// classic Mirai/Gafgyt config tables decode without operator
+/// hints. Add new keys as new variants surface.
+pub const KNOWN_MULTI_BYTE_KEYS: &[&[u8]] = &[
+    // Mirai original (Anna-Senpai release, table.c).
+    &[0xDE, 0xAD, 0xBE, 0xEF],
+    &[0xDE, 0xDE, 0xFF, 0xBA],
+    // Gafgyt / Bashlite variants.
+    &[0xBA, 0xAD, 0xF0, 0x0D],
+    &[0x54, 0x76, 0x12, 0x9D],
+    // Mozi / Hajime occasional 4-byte schemes.
+    &[0x37, 0x37, 0x37, 0x37],
+    &[0x22, 0x22, 0x22, 0x22],
+];
 
 #[inline]
 fn is_printable(b: u8) -> bool {
     (0x20..0x7f).contains(&b) || b == b'\t'
 }
 
-/// Brute single-byte-XOR scan. Returns deduped decoded runs of at
-/// least `min_run` bytes that are not already plaintext.
+/// Brute single-byte-XOR scan plus known multi-byte keys.
+/// Returns deduped decoded runs of at least `min_run` bytes that
+/// are not already plaintext.
 pub fn brute_decode(data: &[u8], min_run: usize) -> Vec<Decoded> {
-    let mut hits: BTreeSet<(String, u8)> = BTreeSet::new();
+    let mut hits: BTreeSet<(String, Vec<u8>)> = BTreeSet::new();
     let mut out = Vec::new();
 
     for key in 1u8..=255 {
-        let mut run_start: Option<usize> = None;
-        let mut i = 0;
-        while i < data.len() {
-            let dec = data[i] ^ key;
-            if is_printable(dec) {
-                if run_start.is_none() {
-                    run_start = Some(i);
-                }
-            } else if let Some(start) = run_start.take() {
-                if i - start >= min_run {
-                    emit_run(data, start, i, key, &mut hits, &mut out);
-                }
-            }
-            i += 1;
-        }
-        if let Some(start) = run_start {
-            if data.len() - start >= min_run {
-                emit_run(data, start, data.len(), key, &mut hits, &mut out);
-            }
-        }
+        scan_with_key(data, &[key], min_run, &mut hits, &mut out);
+    }
+    for k in KNOWN_MULTI_BYTE_KEYS {
+        scan_with_key(data, k, min_run, &mut hits, &mut out);
     }
 
     out.sort();
     out
 }
 
+/// Decode `data` with an arbitrary repeating key. Used by
+/// `brute_decode` and exposed for callers that already know the
+/// key (e.g. extracted at runtime from a config-resolver routine).
+pub fn decode_with_key(data: &[u8], key: &[u8], min_run: usize) -> Vec<Decoded> {
+    let mut hits: BTreeSet<(String, Vec<u8>)> = BTreeSet::new();
+    let mut out = Vec::new();
+    scan_with_key(data, key, min_run, &mut hits, &mut out);
+    out.sort();
+    out
+}
+
+fn scan_with_key(
+    data: &[u8],
+    key: &[u8],
+    min_run: usize,
+    hits: &mut BTreeSet<(String, Vec<u8>)>,
+    out: &mut Vec<Decoded>,
+) {
+    if key.is_empty() {
+        return;
+    }
+    let mut run_start: Option<usize> = None;
+    let mut i = 0;
+    while i < data.len() {
+        let dec = data[i] ^ key[i % key.len()];
+        if is_printable(dec) {
+            if run_start.is_none() {
+                run_start = Some(i);
+            }
+        } else if let Some(start) = run_start.take() {
+            if i - start >= min_run {
+                emit_run(data, start, i, key, hits, out);
+            }
+        }
+        i += 1;
+    }
+    if let Some(start) = run_start {
+        if data.len() - start >= min_run {
+            emit_run(data, start, data.len(), key, hits, out);
+        }
+    }
+}
+
 fn emit_run(
     data: &[u8],
     start: usize,
     end: usize,
-    key: u8,
-    hits: &mut BTreeSet<(String, u8)>,
+    key: &[u8],
+    hits: &mut BTreeSet<(String, Vec<u8>)>,
     out: &mut Vec<Decoded>,
 ) {
     // Plaintext-source filter: if the source bytes are already
@@ -85,7 +138,11 @@ fn emit_run(
     if printable_src * 2 >= end - start {
         return;
     }
-    let decoded: Vec<u8> = data[start..end].iter().map(|b| b ^ key).collect();
+    let decoded: Vec<u8> = data[start..end]
+        .iter()
+        .enumerate()
+        .map(|(i, b)| b ^ key[(start + i) % key.len()])
+        .collect();
     // Quality filter:
     //   - >= 70% letters (no digits, no space) — pure-digit runs
     //     and tab/space-only runs are dominant noise sources.
@@ -111,10 +168,10 @@ fn emit_run(
         Ok(s) => s.to_string(),
         Err(_) => return,
     };
-    let dedupe_key = (s.clone(), key);
+    let dedupe_key = (s.clone(), key.to_vec());
     if hits.insert(dedupe_key) {
         out.push(Decoded {
-            key,
+            key: key.to_vec(),
             offset: start,
             text: s,
         });
@@ -142,7 +199,7 @@ mod tests {
         let hits = brute_decode(&encoded, 8);
         let found = hits
             .iter()
-            .any(|d| d.key == key && d.text.contains("google.com.suffix"));
+            .any(|d| d.key == vec![key] && d.text.contains("google.com.suffix"));
         assert!(found, "missed XOR=0x77 plaintext: {:?}", hits);
     }
 
@@ -190,8 +247,43 @@ mod tests {
         let hits = brute_decode(&buf, 8);
         let n = hits
             .iter()
-            .filter(|d| d.key == key && d.text.contains("command_handler_v1"))
+            .filter(|d| d.key == vec![key] && d.text.contains("command_handler_v1"))
             .count();
         assert_eq!(n, 1, "expected single dedupe entry, got {}: {:?}", n, hits);
+    }
+
+    #[test]
+    fn recovers_mirai_4byte_xor() {
+        // Plaintext padded to a multiple of 4 so the XOR roundtrip
+        // is byte-aligned to the key. Pick a realistic Mirai-class
+        // string under the canonical 0xDEDEFFBA key.
+        let plain = b"command_handler_attack_table_v1xxx";
+        let key = [0xDEu8, 0xDE, 0xFF, 0xBA];
+        let encoded: Vec<u8> = plain
+            .iter()
+            .enumerate()
+            .map(|(i, b)| b ^ key[i % 4])
+            .collect();
+        let hits = decode_with_key(&encoded, &key, 8);
+        let found = hits.iter().any(|d| d.text.contains("command_handler"));
+        assert!(found, "missed Mirai 4-byte decode: {:?}", hits);
+        assert_eq!(hits[0].key_hex(), "dedeffba");
+    }
+
+    #[test]
+    fn known_keys_in_brute_decode() {
+        // brute_decode should also try multi-byte known keys.
+        let plain = b"shell_command_killer_v2_payload";
+        let key = [0xBA, 0xAD, 0xF0, 0x0D];
+        let encoded: Vec<u8> = plain
+            .iter()
+            .enumerate()
+            .map(|(i, b)| b ^ key[i % 4])
+            .collect();
+        let hits = brute_decode(&encoded, 8);
+        let found = hits
+            .iter()
+            .any(|d| d.key == key.to_vec() && d.text.contains("shell_command"));
+        assert!(found, "brute_decode missed multi-byte key: {:?}", hits);
     }
 }

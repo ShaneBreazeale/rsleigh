@@ -3712,7 +3712,7 @@ fn run_xor_strings(binary_path: &str, data: &[u8], json: bool) {
         let payload = serde_json::json!({
             "binary": binary_path,
             "decoded": hits.iter().map(|d| serde_json::json!({
-                "key":    format!("0x{:02x}", d.key),
+                "key":    format!("0x{}", d.key_hex()),
                 "offset": format!("0x{:x}", d.offset),
                 "text":   d.text,
             })).collect::<Vec<_>>(),
@@ -3725,35 +3725,45 @@ fn run_xor_strings(binary_path: &str, data: &[u8], json: bool) {
         println!("\n(no decoded strings)");
         return;
     }
-    let mut by_key: std::collections::BTreeMap<u8, Vec<&rsleigh_decompile::xor_strings::Decoded>> =
-        std::collections::BTreeMap::new();
+    let mut by_key: std::collections::BTreeMap<
+        Vec<u8>,
+        Vec<&rsleigh_decompile::xor_strings::Decoded>,
+    > = std::collections::BTreeMap::new();
     for h in &hits {
-        by_key.entry(h.key).or_default().push(h);
+        by_key.entry(h.key.clone()).or_default().push(h);
     }
 
-    // Brute scan generates ten-thousand-plus hits on most binaries.
+    // Brute scan generates many qualifying runs on real binaries.
     // For triage, surface the top-5 keys by hit-count (real obfuscated
     // tables produce concentrated decode under one key) and cap
-    // per-key output at 30 lines.
-    let mut ranked: Vec<(u8, &Vec<&rsleigh_decompile::xor_strings::Decoded>)> =
-        by_key.iter().map(|(k, v)| (*k, v)).collect();
-    ranked.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
-    let top: Vec<_> = ranked.into_iter().take(5).collect();
+    // per-key output at 30 lines. Multi-byte keys (Mirai-class) ALWAYS
+    // print regardless of rank — they're rare hits and very high signal.
+    let multi_byte: Vec<_> = by_key.iter().filter(|(k, _)| k.len() > 1).collect();
+    let mut single_byte_ranked: Vec<_> = by_key.iter().filter(|(k, _)| k.len() == 1).collect();
+    single_byte_ranked.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    let top_single: Vec<_> = single_byte_ranked.into_iter().take(5).collect();
+
     let total_hits = hits.len();
     let total_keys = by_key.len();
-
     println!(
-        "\n{} run(s) across {} key(s); showing top 5 keys by hit-count, max 30/key.",
-        total_hits, total_keys
+        "\n{} run(s) across {} key(s); showing all {} multi-byte keys + top 5 single-byte by hit-count.",
+        total_hits, total_keys, multi_byte.len()
     );
-    for (key, group) in top {
-        println!("\nKey 0x{:02x} ({} hit(s)):", key, group.len());
+    let print_group = |key: &[u8], group: &[&rsleigh_decompile::xor_strings::Decoded]| {
+        let kh: String = key.iter().map(|b| format!("{:02x}", b)).collect();
+        println!("\nKey 0x{} ({} hit(s)):", kh, group.len());
         for d in group.iter().take(30) {
             println!("  +{:08x}  {}", d.offset, d.text);
         }
         if group.len() > 30 {
             println!("  ... and {} more", group.len() - 30);
         }
+    };
+    for (key, group) in &multi_byte {
+        print_group(key, group);
+    }
+    for (key, group) in &top_single {
+        print_group(key, group);
     }
 }
 
