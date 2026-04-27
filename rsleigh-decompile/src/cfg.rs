@@ -395,6 +395,99 @@ fn resolve_callind_target(
             }
         }
         if !found_producer {
+            // Block-local trace exhausted — fall back to function-wide
+            // scan for the IAT-into-reg loaded-in-earlier-block pattern.
+            return resolve_callind_via_all_ops(all_ops, dest, target_vn, adjustment);
+        }
+    }
+    CallTarget::Indirect(*dest)
+}
+
+/// Function-wide fallback for `resolve_callind_target` when the block-local
+/// trace exhausts. Scans `all_ops` in reverse from the (last) CallInd site,
+/// chasing the same Load/Copy/IntAdd/IntZext/IntSext chain. Bails as soon as
+/// any `Call` or `CallInd` op is crossed — those clobber caller-saved regs,
+/// so any reg-def reaching past them is unsafe to follow.
+fn resolve_callind_via_all_ops(
+    all_ops: &[(u64, PcodeOp)],
+    dest: &pcode_ir::Varnode,
+    initial_target: pcode_ir::Varnode,
+    initial_adjustment: i64,
+) -> CallTarget {
+    // Locate the CallInd we're resolving. It's the last CallInd in all_ops
+    // (resolver runs at terminator construction, which is the last block op).
+    let call_idx = match all_ops
+        .iter()
+        .rposition(|(_, op)| matches!(op, PcodeOp::CallInd { dest: d } if d == dest))
+    {
+        Some(i) => i,
+        None => return CallTarget::Indirect(*dest),
+    };
+
+    let mut target_vn = initial_target;
+    let mut adjustment = initial_adjustment;
+    for _depth in 0..8 {
+        let mut found_producer = false;
+        // Walk backward from just before the call site.
+        for i in (0..call_idx).rev() {
+            let op = &all_ops[i].1;
+            // Any intervening call clobbers caller-saved regs.
+            if matches!(op, PcodeOp::Call { .. } | PcodeOp::CallInd { .. }) {
+                return CallTarget::Indirect(*dest);
+            }
+            if let Some(out) = pcode_ir::get_output(op) {
+                if out.space == target_vn.space && out.offset == target_vn.offset {
+                    match op {
+                        PcodeOp::Load { ptr, .. } => {
+                            if ptr.space == AddressSpaceId::Const {
+                                let addr = (ptr.offset as i64 + adjustment) as u64;
+                                return CallTarget::Direct(addr);
+                            }
+                            return CallTarget::Indirect(*dest);
+                        }
+                        PcodeOp::IntAnd { left, right, .. } => {
+                            target_vn = if right.space == AddressSpaceId::Const {
+                                *left
+                            } else {
+                                *right
+                            };
+                            found_producer = true;
+                            break;
+                        }
+                        PcodeOp::IntAdd { left, right, .. } => {
+                            if right.space == AddressSpaceId::Const {
+                                adjustment += right.offset as i64;
+                                target_vn = *left;
+                                found_producer = true;
+                                break;
+                            } else if left.space == AddressSpaceId::Const {
+                                adjustment += left.offset as i64;
+                                target_vn = *right;
+                                found_producer = true;
+                                break;
+                            }
+                            return CallTarget::Indirect(*dest);
+                        }
+                        PcodeOp::IntSext { input, .. } | PcodeOp::IntZext { input, .. } => {
+                            target_vn = *input;
+                            found_producer = true;
+                            break;
+                        }
+                        PcodeOp::Copy { input, .. } => {
+                            if input.space == AddressSpaceId::Const {
+                                let addr = (input.offset as i64 + adjustment) as u64;
+                                return CallTarget::Direct(addr);
+                            }
+                            target_vn = *input;
+                            found_producer = true;
+                            break;
+                        }
+                        _ => return CallTarget::Indirect(*dest),
+                    }
+                }
+            }
+        }
+        if !found_producer {
             break;
         }
     }
