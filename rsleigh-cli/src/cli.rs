@@ -4095,6 +4095,14 @@ fn run_ioc(binary_path: &str, data: &[u8], json: bool) {
             "registry": registry.iter().collect::<Vec<_>>(),
             "mutexes":  mutexes.iter().collect::<Vec<_>>(),
             "secrets":  secrets.iter().collect::<Vec<_>>(),
+            "capabilities": rsleigh_decompile::iot_capabilities::classify(&texts)
+                .iter()
+                .map(|c| serde_json::json!({
+                    "id": c.id,
+                    "label": c.label,
+                    "evidence": c.evidence,
+                }))
+                .collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&payload).unwrap());
         return;
@@ -4118,12 +4126,23 @@ fn run_ioc(binary_path: &str, data: &[u8], json: bool) {
     print_section("Mutexes/Named Objects", &mutexes);
     print_section("Secret-like strings", &secrets);
 
+    let caps = rsleigh_decompile::iot_capabilities::classify(&texts);
+    if !caps.is_empty() {
+        println!("\nCapabilities ({})", caps.len());
+        for c in &caps {
+            println!("  [{}] {}", c.id, c.label);
+            for ev in &c.evidence {
+                println!("      - {}", ev);
+            }
+        }
+    }
+
     let total = urls.len() + ips.len() + domains.len() + paths.len()
         + registry.len() + mutexes.len() + secrets.len();
-    if total == 0 {
+    if total == 0 && caps.is_empty() {
         println!("\n(no IOCs found)");
     } else {
-        println!("\nTotal: {} indicators", total);
+        println!("\nTotal: {} indicators, {} capabilities", total, caps.len());
     }
 }
 
