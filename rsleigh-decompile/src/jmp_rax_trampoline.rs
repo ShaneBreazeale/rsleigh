@@ -126,9 +126,18 @@ pub fn scan_region(code: &[u8], base_va: u64) -> Vec<Trampoline> {
 
 /// Scan all executable sections of a parsed binary. Returns a vector
 /// of all trampolines found across the image.
+///
+/// Arch-gated to x86 / x86-64 — the `FF Ex` (and `41 FF Ex`) ModRM
+/// encoding is x86-specific, and incidental matches in MIPS / ARM /
+/// RISC-V code surface as bogus trampoline banners.
 pub fn scan(obj: &Object<'_>, data: &[u8]) -> Vec<Trampoline> {
     match obj {
         Object::PE(pe) => {
+            // PE COFF machine: 0x14c = i386, 0x8664 = x86-64.
+            let machine = pe.header.coff_header.machine;
+            if machine != 0x014c && machine != 0x8664 {
+                return Vec::new();
+            }
             let mut hits = Vec::new();
             const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
             for sec in &pe.sections {
@@ -147,6 +156,10 @@ pub fn scan(obj: &Object<'_>, data: &[u8]) -> Vec<Trampoline> {
             hits
         }
         Object::Elf(elf) => {
+            // ELF e_machine: EM_386 = 3, EM_X86_64 = 62.
+            if elf.header.e_machine != 3 && elf.header.e_machine != 62 {
+                return Vec::new();
+            }
             let mut hits = Vec::new();
             for sh in &elf.section_headers {
                 // SHF_EXECINSTR = 0x4
