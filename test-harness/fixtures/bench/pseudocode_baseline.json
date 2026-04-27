@@ -229,7 +229,7 @@
           "timeout": false,
           "empty": false,
           "lines": 6,
-          "bytes": 244,
+          "bytes": 219,
           "leaks": {
             "FUN": 0,
             "func": 0,
@@ -238,11 +238,11 @@
             "iVar": 0,
             "uVar": 0,
             "tmp": 0,
-            "local": 7,
+            "local": 6,
             "field": 0,
             "unknown": 0
           },
-          "leak_total": 7,
+          "leak_total": 6,
           "controls": {
             "if": 0,
             "for": 1,
@@ -251,7 +251,7 @@
           },
           "returns": 1,
           "calls": 2,
-          "score": 86.0,
+          "score": 88.0,
           "target": "struct_accum"
         },
         "main": {
@@ -574,7 +574,7 @@
     "functions": 18,
     "found": 18,
     "empty": 0,
-    "leak_total": 239,
-    "avg_score": 73.4
+    "leak_total": 238,
+    "avg_score": 73.6
   }
 }

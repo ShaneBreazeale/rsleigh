@@ -14667,7 +14667,14 @@ fn print_stmt_tracked(
                     return; // Tracked — will be resolved at use site
                 }
                 // Don't skip stores to stack variables that have computed values —
-                // these are real assignments that update loop state or function locals
+                // these are real assignments that update loop state or function locals.
+                // The expression has been emitted as a C statement, so subsequent reads
+                // of this slot must resolve to the symbolic name (the variable holds
+                // the value now), not the inlined RHS — otherwise the next store's
+                // val_expr will incorporate this RHS again, producing duplicate terms.
+                tracker
+                    .stack_alias
+                    .insert(stack_name.clone(), stack_name.clone());
                 out.push_str(&format!("{}{} = {};\n", pad, stack_name, val_expr));
             } else {
                 out.push_str(&format!(
