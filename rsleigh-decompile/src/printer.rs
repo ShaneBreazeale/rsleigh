@@ -13082,32 +13082,72 @@ fn post_process(
                                // Identifier token regex in RHS: strings of [A-Za-z0-9_]+ that
                                // don't start with a digit. For a token to be "initialized" it must
                                // be in `assigned`, be a param_N, or be a literal/keyword.
+        let signature_params: std::collections::HashSet<String> = lines
+            .iter()
+            .find_map(|line| {
+                let t = line.trim();
+                if !t.ends_with('{') || !t.contains('(') || !t.contains(')') {
+                    return None;
+                }
+                let open = t.find('(')?;
+                let close = t.rfind(')')?;
+                if close <= open {
+                    return None;
+                }
+                Some(
+                    t[open + 1..close]
+                        .split(',')
+                        .filter_map(|arg| {
+                            let arg = arg.trim();
+                            if arg.is_empty() || arg == "void" {
+                                return None;
+                            }
+                            let name = arg
+                                .split_whitespace()
+                                .last()?
+                                .trim_matches(|c: char| c == '*' || c == '&')
+                                .split('[')
+                                .next()?
+                                .trim();
+                            if name.is_empty()
+                                || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                            {
+                                return None;
+                            }
+                            Some(name.to_string())
+                        })
+                        .collect::<std::collections::HashSet<_>>(),
+                )
+            })
+            .unwrap_or_default();
         let is_identish = |tok: &str| -> bool {
             !tok.is_empty()
                 && tok.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
                 && !tok.chars().next().unwrap().is_ascii_digit()
         };
-        let is_safe_ident = |tok: &str, assigned: &std::collections::HashSet<String>| -> bool {
-            assigned.contains(tok)
-                || tok.starts_with("param_")
-                || tok.starts_with("fparam_")
-                || tok.starts_with("DAT_")
-                || tok.starts_with("PTR_")
-                || tok.starts_with("FUN_")
-                || tok.starts_with("func_")
-                || matches!(
-                    tok,
-                    "sp" | "lr"
-                        | "fp"
-                        | "pc"
-                        | "x29"
-                        | "x30"
-                        | "true"
-                        | "false"
-                        | "NULL"
-                        | "nullptr"
-                )
-        };
+        let is_safe_ident =
+            |tok: &str, assigned: &std::collections::HashSet<String>, lhs: &str| -> bool {
+                assigned.contains(tok)
+                    || (lhs.starts_with("local_") && signature_params.contains(tok))
+                    || tok.starts_with("param_")
+                    || tok.starts_with("fparam_")
+                    || tok.starts_with("DAT_")
+                    || tok.starts_with("PTR_")
+                    || tok.starts_with("FUN_")
+                    || tok.starts_with("func_")
+                    || matches!(
+                        tok,
+                        "sp" | "lr"
+                            | "fp"
+                            | "pc"
+                            | "x29"
+                            | "x30"
+                            | "true"
+                            | "false"
+                            | "NULL"
+                            | "nullptr"
+                    )
+            };
         let mut j = 0;
         while j < lines.len() {
             let line_owned = lines[j].clone();
@@ -13122,6 +13162,7 @@ fn post_process(
             let mut dropped = false;
             if is_target {
                 if let Some(eq) = t.find(" = ") {
+                    let lhs = t[..eq].trim();
                     let rhs = &t[eq + 3..t.len() - 1];
                     let mut all_uninit = true;
                     let mut any_ident = false;
@@ -13130,7 +13171,7 @@ fn post_process(
                         let tok = std::mem::take(buf);
                         if is_identish(&tok) {
                             *any = true;
-                            if is_safe_ident(&tok, &assigned) {
+                            if is_safe_ident(&tok, &assigned, lhs) {
                                 *all = false;
                             }
                         }
@@ -14541,7 +14582,14 @@ fn print_stmt_tracked(
             // Inside loop bodies (indent > 0), use SSA-based rendering that
             // resolves registers to their underlying stack variables, avoiding
             // stale tracker aliases.
-            let val_expr = if indent > 0 && vdef.varnode.space == AddressSpaceId::Register {
+            let val_expr = if vdef.varnode.space == AddressSpaceId::Register
+                && vdef.param_name.is_none()
+                && matches!(
+                    &vdef.expr,
+                    Expr::BinOp(_, _, _) | Expr::UnaryOp(_, _) | Expr::Const(_, _)
+                ) {
+                format_store_val(&vdef.expr, ssa, ctx, tracker)
+            } else if indent > 0 && vdef.varnode.space == AddressSpaceId::Register {
                 format_store_val(&vdef.expr, ssa, ctx, tracker)
             } else {
                 format_var_tracked(*val, ssa, ctx, tracker)
@@ -17357,6 +17405,22 @@ fn format_store_val(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTrac
                 return resolve_stack_alias(&name, tracker);
             }
             format_expr(expr, ssa, ctx)
+        }
+        Expr::FieldAccess(base, offset) => {
+            if matches!(ctx.arch, Architecture::AArch64) {
+                if let Some(base_off) = get_aarch64_sp_local_offset(*base, ssa) {
+                    return resolve_stack_alias(
+                        &format!("local_{:x}", base_off + *offset),
+                        tracker,
+                    );
+                }
+            }
+            let base_str = format_store_operand(*base, ssa, ctx, tracker);
+            if needs_paren_for_arrow(&base_str) {
+                format!("({})->field_{:x}", base_str, offset)
+            } else {
+                format!("{}->field_{:x}", base_str, offset)
+            }
         }
         _ => format_expr(expr, ssa, ctx),
     }

@@ -18,8 +18,8 @@
           "found": true,
           "timeout": false,
           "empty": false,
-          "lines": 4,
-          "bytes": 112,
+          "lines": 5,
+          "bytes": 137,
           "leaks": {
             "FUN": 0,
             "func": 0,
@@ -28,11 +28,11 @@
             "iVar": 0,
             "uVar": 0,
             "tmp": 0,
-            "local": 3,
+            "local": 4,
             "field": 0,
             "unknown": 0
           },
-          "leak_total": 3,
+          "leak_total": 4,
           "controls": {
             "if": 1,
             "for": 0,
@@ -41,7 +41,7 @@
           },
           "returns": 2,
           "calls": 2,
-          "score": 94.0,
+          "score": 92.0,
           "target": "add_mix"
         },
         "factorial_iter": {
@@ -229,7 +229,7 @@
           "timeout": false,
           "empty": false,
           "lines": 6,
-          "bytes": 219,
+          "bytes": 244,
           "leaks": {
             "FUN": 0,
             "func": 0,
@@ -238,11 +238,11 @@
             "iVar": 0,
             "uVar": 0,
             "tmp": 0,
-            "local": 6,
+            "local": 7,
             "field": 0,
             "unknown": 0
           },
-          "leak_total": 6,
+          "leak_total": 7,
           "controls": {
             "if": 0,
             "for": 1,
@@ -251,15 +251,15 @@
           },
           "returns": 1,
           "calls": 2,
-          "score": 88.0,
+          "score": 86.0,
           "target": "struct_accum"
         },
         "main": {
           "found": true,
           "timeout": false,
           "empty": false,
-          "lines": 41,
-          "bytes": 1319,
+          "lines": 43,
+          "bytes": 1295,
           "leaks": {
             "FUN": 0,
             "func": 0,
@@ -269,10 +269,10 @@
             "uVar": 0,
             "tmp": 0,
             "local": 6,
-            "field": 10,
+            "field": 11,
             "unknown": 0
           },
-          "leak_total": 29,
+          "leak_total": 30,
           "controls": {
             "if": 1,
             "for": 0,
@@ -281,7 +281,7 @@
           },
           "returns": 1,
           "calls": 10,
-          "score": 42.0,
+          "score": 40.0,
           "target": "main"
         }
       }
@@ -331,13 +331,13 @@
           "found": true,
           "timeout": false,
           "empty": false,
-          "lines": 36,
-          "bytes": 1301,
+          "lines": 37,
+          "bytes": 1348,
           "leaks": {
             "FUN": 0,
             "func": 0,
             "DAT": 2,
-            "lVar": 40,
+            "lVar": 42,
             "iVar": 0,
             "uVar": 0,
             "tmp": 0,
@@ -345,7 +345,7 @@
             "field": 0,
             "unknown": 0
           },
-          "leak_total": 42,
+          "leak_total": 44,
           "controls": {
             "if": 5,
             "for": 0,
@@ -354,7 +354,7 @@
           },
           "returns": 2,
           "calls": 9,
-          "score": 16.0,
+          "score": 12.0,
           "target": "factorial_iter"
         },
         "classify_score": {
@@ -542,7 +542,7 @@
           "timeout": false,
           "empty": false,
           "lines": 38,
-          "bytes": 1312,
+          "bytes": 1240,
           "leaks": {
             "FUN": 0,
             "func": 0,
@@ -574,7 +574,7 @@
     "functions": 18,
     "found": 18,
     "empty": 0,
-    "leak_total": 234,
-    "avg_score": 74.0
+    "leak_total": 239,
+    "avg_score": 73.4
   }
 }
