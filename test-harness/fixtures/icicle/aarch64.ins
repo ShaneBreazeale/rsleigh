@@ -1,0 +1,147 @@
+0x00402260 [1d 00 80 d2]  "mov x29, #0x0";
+0x0040226c [01 00 00 90]  "adrp x1, 0x402000";
+0x00402278 [01 00 00 14]  "b 0x40227c";
+0x0043120c [a0 1a 46 7a]  "ccmp w21, #0x6, #0x0, ne";
+0x0040d520 [43 06 00 54]  "b.cc 0x40d5e8";
+0x0040d51c [28 03 00 eb]  "subs x8,x25,x0";
+0x00000000 [a0 01 f8 36]  "tbz w0, #0x1f, 0x34";
+
+0x00000000 [a5 10 40 92]  "and x5, x5, #0x1f"
+    x5 = 0xffff_ffff_ffff_ffc9 => x5 = 0x9;
+
+0x00000000 [1f c0 01 f2]  "tst x0, #-0x7f7f7f7f7f7f7f80"
+    ZR = 1, x0 = 0x808080808080808080 => ZR = 0;
+
+0x00413d80 [20 ff ff b4]  "cbz x0,0x413d64"
+{
+    x0 = 0x1 => pc = 0x413d84;
+    x0 = 0x0 => pc = 0x413d64;
+}
+
+// Unicorn bugs
+0x002122ac [10 10 a0 52]  "mov w16, #0x800000";
+0x00212290 [91 00 00 d0]  "adrp x17, 0x224000";
+
+//
+// Atomics
+//
+
+0x0040e694 [7f fe 01 88]  "stlxr w1,wzr,[x19]"
+{
+    x1 = 0x1, x19 = 0x1000, mem[0x1000]:WRITE = [ff ff ff ff] =>
+    x1 = 0x0,               mem[0x1000]       = [00 00 00 00];
+}
+
+//
+// SIMD instructions
+//
+
+0x00000000 [01 3c 08 4e]  "mov x1,v0.D[0x0]"
+    d0 = 0x0100_0300_0500_0700 => x1 = 0x0100_0300_0500_0700;
+
+0x00000000 [20 0c 01 4e]  "dup v0.16B, w1"
+    w1 = 0xab, q0 = 0x0 => q0 = 0xabab_abab_abab_abab_abab_abab_abab_abab;
+
+0x00000000 [43 a8 31 6e]  "uminv b3,v2.16B"
+    b3 = 0x0, q2 = 0x0f0e0d0c_0b0a0908_07060504_03020199 => b3 = 0x01 ;
+0x00000000 [43 a8 31 4e]  "sminv b3,v2.16B"
+    b3 = 0x0, q2 = 0xff0e0d0c_0b0a0908_07060504_03020199 => b3 = 0x99 ;
+0x00000000 [43 a8 30 6e]  "umaxv b3,v2.16B"
+    b3 = 0x0, q2 = 0x0f0e0d0c_0b0a0908_07060504_03020199 => b3 = 0x99 ;
+0x00000000 [43 a8 30 4e]  "smaxv b3,v2.16B"
+    b3 = 0x0, q2 = 0xff0e0d0c_0b0a0908_07060504_03020199 => b3 = 0x0e ;
+
+0x00000000 [00 00 80 3d]  "str q0,[x0]"
+{
+    x0 = 0x10000, q0 = 0xabab_abab_abab_abab_abab_abab_abab_abab,
+        mem[0x10000]:WRITE = [0f 0e 0d 0c 0b 0a 09 08 07 06 05 04 03 02 01 00] =>
+        mem[0x10000]       = [ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab ab];
+}
+
+0x00000000 [20 c8 e2 3c] "ldr q0, [x1, w2, sxtw]";
+
+
+//
+// Unicorn testing
+//
+
+// Unicorn thinks these instructions are valid:
+0x00012000 [fb 83 6f eb]  "invalid_instruction";
+
+
+
+//
+// Float operations involving non 32/64 bit floats.
+//
+
+@skip // SLEIGH bug: Performs a float cast f32->f32 but should be a f32->bfloat16 conversion
+0x08000000 [00 68 a1 4e] "bfcvtn2 v0.4S, v0.8H";
+
+@skip // SLEIGH bug: Should be a f32->bfloat16 conversion.
+0x08000000 [00 68 a1 0e] "bfcvtn v0.4S, v0.4H";
+
+@skip // SLEIGH bug: Performs a float cast f32->f16, but should be a f32->bfloat16 conversion.
+0x08000000 [00 40 63 1e] "bfcvt h0, s0"
+{
+    // s0 = 1234.0
+    s0 = 0x449a4000 => h0 = 0x449a;
+    // s0 = -1234.0
+    s0 = 0xc49a4000 => h0 = 0xc49a;
+}
+
+// Unsigned fixed-point Convert to Floating-point (scalar).
+// For some of these operations, SLEIGH uses 9-byte int-to-float casts to emulate unsigned cases.
+0x08000000 [e0 03 23 9e] "ucvtf s0, xzr"
+    s0 = 0xaaaa_aaaaa => s0 = 0;
+0x08000000 [00 00 23 9e] "ucvtf s0, x0"
+{
+    s0 = 0xaaaa_aaaaa, x0 = 0x1234_5678_0000_0000 => s0 = 0x5d91a2b4;
+    s0 = 0xaaaa_aaaaa, x0 = 0xffff_ffff_ffff_ffff => s0 = 0x5f800000;
+}
+0x08000000 [e0 03 63 9e] "ucvtf d0, xzr"
+    d0 = 0xaaaa_aaaaa_aaaa_aaaaa => d0 = 0;
+0x08000000 [e0 03 e3 1e] "ucvtf h0, wzr"
+    h0 = 0xaaaa => h0 = 0;
+0x08000000 [00 00 e3 1e] "ucvtf h0, w0"
+{
+    s0 = 0xaaaa, x0 = 1234   => h0 = 0x64d2;
+    s0 = 0xaaaa, x0 = 0xf000 => h0 = 0x7b80;
+}
+
+@skip // shift operation handled differently for GHIDRA vs Icicle (Not clear what the correct behavor should be).
+0x08000000 [00 00 03 9e] "ucvtf s0, x0, #0x40"
+    s0 = 0xaaaa_aaaaa, x0 = 0x1234_5678_0000_0000 => s0 = 0x5d91a2b4;
+
+0x08000000 [00 38 e0 1e] "fsub h0, h0, h0"
+    h0 = 0x64d2 => h0 = 0x0;
+0x08000000 [ff c3 e1 1e] "fsqrt h31, h31"
+{
+    // h31 = 1234.0 => h31 = 35.125
+    h31 = 0x64d2 => h31 = 0x5064;
+}
+
+0x08000000 [00 c0 e5 1e] "frintz h0, h0"
+    h0 = 0x64d2 => h0 = 1234;
+
+0x08000000 [00 00 e7 9e] "fmov h0, x0"
+    x0 = 0x4093480000000000 => h0 = 0x64d2;
+
+//
+// Other
+//
+
+
+0x08000000 [ff fb 7f d9] "stzg sp, [sp, #-0x10]"
+{
+    sp = 0x0, mem[0xfffffffffffffff0]:WRITE = [aa aa aa aa  aa aa aa aa  aa aa aa aa  aa aa aa aa] =>
+              mem[0xfffffffffffffff0]       = [00 00 00 00  00 00 00 00  00 00 00 00  00 00 00 00];
+}
+0x08000000 [ff 0b 5f d6] "retaa";
+
+0x00000000 [a0 03 00 90] "adrp x0,0x74000"
+    x0 = 0 => x0 = 0x74000;
+
+0x00000000 [00 dc 78 d3] "lsl x0,x0,#0x8"
+    x0 = 0xaaaa_aaaaa_aaaa_aaaaa => x0 = 0xaaaa_aaaaa_aaaa_aa00;
+
+0x00000000 [e0 ef ff 4d] "ld4r {v0.2D, v1.2D, v2.2D, v3.2D}, [sp], #0x20";

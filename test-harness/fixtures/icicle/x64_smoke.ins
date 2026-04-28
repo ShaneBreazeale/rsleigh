@@ -1,0 +1,12 @@
+// Local seed fixture for the Icicle `.ins` parser/runner.
+// The format is compatible with icicle-test instruction cases; semantics
+// execution is intentionally deferred in rsleigh's first-pass harness.
+
+0x1000 [48 89 d8] "MOV RAX,RBX";
+
+0x1003 {
+  [90] "NOP"
+  [c3] "RET"
+};
+
+@skip 0x2000 [0f 0b] "UD2";
