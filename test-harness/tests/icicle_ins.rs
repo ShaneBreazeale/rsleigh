@@ -113,3 +113,27 @@ fn decodes_icicle_aarch64_corpus() {
     let input = include_str!("../fixtures/icicle/aarch64.ins");
     corpus_report("aarch64", Architecture::AArch64, input);
 }
+
+#[test]
+fn decodes_icicle_arm_corpus() {
+    let input = include_str!("../fixtures/icicle/arm.ins");
+    corpus_report("arm", Architecture::ARM32, input);
+}
+
+#[test]
+fn decodes_icicle_riscv64_corpus() {
+    let input = include_str!("../fixtures/icicle/riscv64gc.ins");
+    corpus_report("riscv64", Architecture::RiscV64, input);
+}
+
+#[test]
+fn decodes_icicle_x86_corpus() {
+    let input = include_str!("../fixtures/icicle/x86.ins");
+    corpus_report("x86", Architecture::X86_32, input);
+}
+
+#[test]
+fn decodes_icicle_mipsel_corpus() {
+    let input = include_str!("../fixtures/icicle/mipsel.ins");
+    corpus_report("mipsel", Architecture::MIPS32, input);
+}
