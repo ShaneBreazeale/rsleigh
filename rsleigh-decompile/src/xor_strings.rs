@@ -63,6 +63,70 @@ fn is_printable(b: u8) -> bool {
     (0x20..0x7f).contains(&b) || b == b'\t'
 }
 
+/// Tiny seed dictionary of tokens that appear with very high
+/// frequency in IoT-botnet config tables, syscall name lists, and
+/// command/credential blobs. The brute decoder retains a candidate
+/// run only when at least one of these substrings appears in the
+/// case-insensitive decoded text. Bias is conservative: we'd rather
+/// miss exotic obfuscated strings than flood the operator with
+/// thousands of noise hits.
+const SEED_WORDS: &[&str] = &[
+    // Filesystem path tokens
+    "/bin", "/etc", "/proc", "/tmp", "/usr", "/var", "/dev", "/sys",
+    "/lib", "/run", "/home", "/mnt", "/opt", "/sbin",
+    // Syscall + libc surface
+    "open", "read", "write", "fork", "exec", "kill", "connect",
+    "socket", "send", "recv", "fcntl", "ioctl", "ptrace", "getpid",
+    // Mirai/Gafgyt vocabulary
+    "shell", "telnet", "scan", "attack", "flood", "kworker",
+    "ksoftirqd", "ngrok", "router", "bot", "cnc", "loader", "crypt",
+    // Protocol / network tokens
+    "http", "https", "ftp", "tcp", "udp", "irc", "smtp", "ssh",
+    "tor", "onion", "dns",
+    // Credential / account tokens
+    "admin", "root", "pass", "user", "login", "guest", "default",
+    // System artefacts often referenced
+    "init", "systemd", "rc.d", "cron", "reboot", "shutdown",
+    "iptables", "busybox", "wget", "curl", "tftp",
+    // Words that show up in shell command strings
+    "echo", "cat", "rm ", "ls ", "cp ", "mv ", "chmod", "chattr",
+];
+
+fn contains_seed_word(decoded: &[u8]) -> bool {
+    let lower: Vec<u8> = decoded.iter().map(|b| b.to_ascii_lowercase()).collect();
+    SEED_WORDS
+        .iter()
+        .any(|word| word_boundary_search(&lower, word.as_bytes()))
+}
+
+/// Substring search with word-boundary discipline: short seeds like
+/// `ssh` would otherwise match `SSSH` triple-S patterns in any
+/// binary's constant pool. Require the byte before/after the match
+/// to NOT be ASCII alphabetic.
+fn word_boundary_search(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return false;
+    }
+    let first_alpha = needle[0].is_ascii_alphabetic();
+    let last_alpha = needle[needle.len() - 1].is_ascii_alphabetic();
+    haystack
+        .windows(needle.len())
+        .enumerate()
+        .any(|(i, w)| {
+            if w != needle {
+                return false;
+            }
+            let before_ok = !first_alpha
+                || i == 0
+                || !haystack[i - 1].is_ascii_alphabetic();
+            let after_idx = i + needle.len();
+            let after_ok = !last_alpha
+                || after_idx >= haystack.len()
+                || !haystack[after_idx].is_ascii_alphabetic();
+            before_ok && after_ok
+        })
+}
+
 /// Brute single-byte-XOR scan plus known multi-byte keys.
 /// Returns deduped decoded runs of at least `min_run` bytes that
 /// are not already plaintext.
@@ -164,6 +228,14 @@ fn emit_run(
     if seen.iter().filter(|x| **x).count() < 5 {
         return;
     }
+    // Dictionary check: require at least one IoT-malware seed word
+    // (path component, syscall name, or protocol token) to appear in
+    // the decoded run. Brute output without this filter is dominated
+    // by noise that happens to pass length + letter-density checks
+    // but contains no recognisable English/PATH structure.
+    if !contains_seed_word(&decoded) {
+        return;
+    }
     let s = match std::str::from_utf8(&decoded) {
         Ok(s) => s.to_string(),
         Err(_) => return,
@@ -193,13 +265,13 @@ mod tests {
         // run containing the plaintext under the right key. Exact
         // run boundaries depend on the surrounding bytes' XOR
         // image — assert substring containment, not equality.
-        let plain = b"google.com.suffix";
+        let plain = b"/usr/bin/wget http_payload";
         let key = 0x77u8;
         let encoded: Vec<u8> = plain.iter().map(|b| b ^ key).collect();
         let hits = brute_decode(&encoded, 8);
         let found = hits
             .iter()
-            .any(|d| d.key == vec![key] && d.text.contains("google.com.suffix"));
+            .any(|d| d.key == vec![key] && d.text.contains("/usr/bin/wget"));
         assert!(found, "missed XOR=0x77 plaintext: {:?}", hits);
     }
 
@@ -233,7 +305,7 @@ mod tests {
     fn dedupe_avoids_duplicate_emit_per_key() {
         // Same encoded run twice in the buffer separated by a
         // byte guaranteed non-printable for the chosen key.
-        let plain = b"command_handler_v1";
+        let plain = b"shell_attack_handler_v1";
         // 0xAA flips bit 7 on every printable byte, so encoded
         // bytes pass the source-non-printable filter.
         let key = 0xAAu8;
@@ -247,7 +319,7 @@ mod tests {
         let hits = brute_decode(&buf, 8);
         let n = hits
             .iter()
-            .filter(|d| d.key == vec![key] && d.text.contains("command_handler_v1"))
+            .filter(|d| d.key == vec![key] && d.text.contains("shell_attack_handler_v1"))
             .count();
         assert_eq!(n, 1, "expected single dedupe entry, got {}: {:?}", n, hits);
     }
@@ -268,6 +340,21 @@ mod tests {
         let found = hits.iter().any(|d| d.text.contains("command_handler"));
         assert!(found, "missed Mirai 4-byte decode: {:?}", hits);
         assert_eq!(hits[0].key_hex(), "dedeffba");
+    }
+
+    #[test]
+    fn dictionary_filter_rejects_random_letters() {
+        // High-entropy bytes that pass length + letter-density +
+        // distinct-letter checks but contain no IoT-malware seed
+        // word should be rejected.
+        let plain = b"abcdefghijklmnopqrstuvwxyz"; // 26 distinct letters, ~100% letters
+        let key = 0xAAu8;
+        let encoded: Vec<u8> = plain.iter().map(|b| b ^ key).collect();
+        let hits = brute_decode(&encoded, 8);
+        let leaked = hits.iter().any(|d| {
+            d.text.contains("abcdefghij")
+        });
+        assert!(!leaked, "dictionary filter passed noise: {:?}", hits);
     }
 
     #[test]
