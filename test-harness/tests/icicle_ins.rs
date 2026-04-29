@@ -59,13 +59,14 @@ fn corpus_report(name: &str, arch: Architecture, fixture: &str) {
     let report = check_cases_decode_report(&cases, arch);
 
     eprintln!(
-        "[{name}] cases={} attempted={} passed={} ({:.1}%) failed={} skipped={} semantics={}",
+        "[{name}] cases={} attempted={} passed={} ({:.1}%) failed={} skipped={} isa_skip={} semantics={}",
         report.cases,
         report.instructions_attempted,
         report.instructions_passed,
         report.pass_rate() * 100.0,
         report.instructions_failed(),
         report.skipped,
+        report.unsupported_isa_mode,
         report.semantics_unsupported,
     );
 
