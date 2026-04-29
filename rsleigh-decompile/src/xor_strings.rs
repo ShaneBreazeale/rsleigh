@@ -42,11 +42,11 @@ impl Decoded {
     }
 }
 
-/// Known multi-byte keys observed in IoT-botnet families. These
-/// are tried by `brute_decode` after single-byte exhaustion so
-/// classic Mirai/Gafgyt config tables decode without operator
-/// hints. Add new keys as new variants surface.
-pub const KNOWN_MULTI_BYTE_KEYS: &[&[u8]] = &[
+/// Known multi-byte keys observed in IoT-botnet families. Tried by
+/// `brute_decode` after single-byte exhaustion so classic
+/// Mirai/Gafgyt config tables decode without operator hints. Add
+/// new keys as new variants surface.
+const KNOWN_MULTI_BYTE_KEYS: &[&[u8]] = &[
     // Mirai original (Anna-Senpai release, table.c).
     &[0xDE, 0xAD, 0xBE, 0xEF],
     &[0xDE, 0xDE, 0xFF, 0xBA],

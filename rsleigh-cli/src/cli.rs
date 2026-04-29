@@ -3770,28 +3770,12 @@ fn run_xor_strings(binary_path: &str, data: &[u8], json: bool) {
 fn run_ioc(binary_path: &str, data: &[u8], json: bool) {
     use std::collections::BTreeSet;
 
-    // Pull strings: ASCII (>=6 chars) + UTF-16LE (>=4 chars). Window size is
-    // generous because installer binaries embed long config blobs. Caps
-    // prevent pathological hits in compressed/encrypted regions.
-    let mut texts: Vec<String> = Vec::new();
-    let mut run = Vec::with_capacity(64);
-    for &b in data.iter() {
-        if (0x20..0x7f).contains(&b) || b == b'\t' {
-            run.push(b);
-        } else {
-            if run.len() >= 6 {
-                if let Ok(s) = std::str::from_utf8(&run) {
-                    texts.push(s.to_string());
-                }
-            }
-            run.clear();
-        }
-    }
-    if run.len() >= 6 {
-        if let Ok(s) = std::str::from_utf8(&run) {
-            texts.push(s.to_string());
-        }
-    }
+    // ASCII pass: extract once at min len 4 (to catch short arch
+    // tokens like `.mips`, `.sh4`), then re-use for both the IOC
+    // categorizer (filtered to >=6 chars below) and the
+    // capability/family classifiers. UTF-16LE pass appended after.
+    let mut texts =
+        rsleigh_decompile::iot_capabilities::extract_printable_runs(data, 4);
     // UTF-16LE pass: read pairs (b, 0x00) of printable bytes.
     let mut wide_run: Vec<u8> = Vec::with_capacity(64);
     let mut i = 0usize;

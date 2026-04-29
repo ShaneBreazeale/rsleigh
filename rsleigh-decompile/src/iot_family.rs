@@ -112,25 +112,33 @@ const RULES: &[Rule] = &[
 
 /// Classify the input string corpus into a single best-fit family.
 /// Returns `None` if no rule matches.
+/// Walks every marker in `rule`, returning the matching evidence
+/// strings if (and only if) ALL markers are present. `None` means
+/// rule did not fire.
+fn rule_hits(rule: &Rule, strings: &[String]) -> Option<Vec<String>> {
+    let mut hits = Vec::with_capacity(rule.markers.len());
+    for marker in rule.markers {
+        let s = strings.iter().find(|s| s.contains(marker))?;
+        hits.push(s.clone());
+    }
+    Some(hits)
+}
+
+fn rule_specificity(rule: &Rule) -> usize {
+    rule.markers.iter().map(|m| m.len()).sum()
+}
+
 pub fn classify(strings: &[String]) -> Option<FamilyHint> {
     let mut best: Option<(&Rule, Vec<String>)> = None;
 
     for rule in RULES {
-        let mut hits = Vec::new();
-        for marker in rule.markers {
-            if let Some(s) = strings.iter().find(|s| s.contains(marker)) {
-                hits.push(s.clone());
-            }
-        }
-        if hits.len() == rule.markers.len() {
-            // All markers present. Prefer the rule with the most
-            // specific markers (longest combined marker length).
-            let score: usize = rule.markers.iter().map(|m| m.len()).sum();
-            let best_score = best
-                .as_ref()
-                .map(|(r, _)| r.markers.iter().map(|m| m.len()).sum::<usize>())
-                .unwrap_or(0);
-            if score >= best_score {
+        if let Some(hits) = rule_hits(rule, strings) {
+            // Most specific rule wins (longest combined marker length).
+            // Strict `>` so deterministic — first-declared rule of the
+            // same specificity is kept.
+            let score = rule_specificity(rule);
+            let best_score = best.as_ref().map(|(r, _)| rule_specificity(r)).unwrap_or(0);
+            if score > best_score {
                 best = Some((rule, hits));
             }
         }
@@ -178,28 +186,10 @@ fn extract_variant(strings: &[String], template: &str) -> Option<String> {
     None
 }
 
-/// Convenience wrapper: extract printable runs from raw bytes
-/// at the given minimum length, then classify.
+/// Convenience wrapper: extract printable runs from raw bytes,
+/// then classify. Shares the extractor with `iot_capabilities`.
 pub fn classify_bytes(data: &[u8]) -> Option<FamilyHint> {
-    let mut texts: Vec<String> = Vec::new();
-    let mut run: Vec<u8> = Vec::with_capacity(64);
-    for &b in data {
-        if (0x20..0x7f).contains(&b) || b == b'\t' {
-            run.push(b);
-        } else {
-            if run.len() >= 4 {
-                if let Ok(s) = std::str::from_utf8(&run) {
-                    texts.push(s.to_string());
-                }
-            }
-            run.clear();
-        }
-    }
-    if run.len() >= 4 {
-        if let Ok(s) = std::str::from_utf8(&run) {
-            texts.push(s.to_string());
-        }
-    }
+    let texts = crate::iot_capabilities::extract_printable_runs(data, 4);
     classify(&texts)
 }
 
@@ -209,13 +199,10 @@ pub fn classify_bytes(data: &[u8]) -> Option<FamilyHint> {
 pub fn classify_all(strings: &[String]) -> BTreeMap<&'static str, FamilyHint> {
     let mut out = BTreeMap::new();
     for rule in RULES {
-        let mut hits = Vec::new();
-        for marker in rule.markers {
-            if let Some(s) = strings.iter().find(|s| s.contains(marker)) {
-                hits.push(s.clone());
-            }
+        if out.contains_key(rule.id) {
+            continue;
         }
-        if hits.len() == rule.markers.len() && !out.contains_key(rule.id) {
+        if let Some(hits) = rule_hits(rule, strings) {
             let variant = rule
                 .variant_template
                 .and_then(|tpl| extract_variant(strings, tpl));

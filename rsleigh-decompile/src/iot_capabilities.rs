@@ -21,19 +21,18 @@ pub struct Capability {
     pub evidence: Vec<String>,
 }
 
-/// Convenience: extract printable ASCII runs at the given minimum
-/// length from raw bytes, then classify. Use when the caller has
-/// the binary data but no pre-extracted string corpus, or when the
-/// caller's extraction threshold is too high to catch short arch
-/// suffixes like `.mips`, `.sh4`, `.ppc`.
-pub fn classify_bytes(data: &[u8]) -> Vec<Capability> {
+/// Extract printable ASCII runs from raw bytes at the given minimum
+/// length. Shared with `iot_family::classify_bytes` and the `--ioc`
+/// CLI entry point. Catches short arch suffixes like `.mips`,
+/// `.sh4`, `.ppc` when called with `min_len = 4`.
+pub fn extract_printable_runs(data: &[u8], min_len: usize) -> Vec<String> {
     let mut texts: Vec<String> = Vec::new();
     let mut run: Vec<u8> = Vec::with_capacity(64);
     for &b in data {
         if (0x20..0x7f).contains(&b) || b == b'\t' {
             run.push(b);
         } else {
-            if run.len() >= 4 {
+            if run.len() >= min_len {
                 if let Ok(s) = std::str::from_utf8(&run) {
                     texts.push(s.to_string());
                 }
@@ -41,12 +40,18 @@ pub fn classify_bytes(data: &[u8]) -> Vec<Capability> {
             run.clear();
         }
     }
-    if run.len() >= 4 {
+    if run.len() >= min_len {
         if let Ok(s) = std::str::from_utf8(&run) {
             texts.push(s.to_string());
         }
     }
-    classify(&texts)
+    texts
+}
+
+/// Convenience: extract printable runs at len 4 then classify. Use
+/// when the caller has raw bytes but no pre-extracted corpus.
+pub fn classify_bytes(data: &[u8]) -> Vec<Capability> {
+    classify(&extract_printable_runs(data, 4))
 }
 
 /// Classify the given string corpus into IoT-malware capabilities.
