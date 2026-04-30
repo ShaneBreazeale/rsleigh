@@ -8,7 +8,8 @@ rsleigh is a Rust workspace for decoding machine code with Ghidra SLEIGH
 specifications, lifting instructions to P-code, and experimenting with C-like
 decompilation and binary triage workflows.
 
-> **Showcase:** [crackme3 PyVMProtect white paper](https://github.com/ShaneBreazeale/pyvmprotect-static-lift/blob/main/WHITEPAPER.md)
+> **Showcase:** [crackme3 PyVMProtect white paper v3](https://github.com/ShaneBreazeale/pyvmprotect-static-lift/blob/main/WHITEPAPER.md)
+> [crackme3 PyVMProtect white paper v5]ttps://github.com/ShaneBreazeale/crackme-pyvmprotect-v5#11-tooling--rsleigh-recon-suite
 
 The short version:
 
