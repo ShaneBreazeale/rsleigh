@@ -91,7 +91,7 @@ is "the cone contains an Expr variant the lowering cannot handle"
 
 Spec lives in `.opt/campaigns/smt-backend.md` (local, not VCS-tracked).
 
-- **M0 — scaffold (done)**: feature flag, z3 dep, Expr lowering for
+- **M0 — scaffold**: feature flag, z3 dep, Expr lowering for
   Const/Var/BinOp/UnaryOp/Load/Store/FieldAccess. Branch-condition
   verifier wired.
 - **M1 — taint-flow CVE finder (in progress)**: source/sink spec,
