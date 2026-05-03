@@ -155,6 +155,22 @@ fn normalise_name(raw: &str) -> &str {
         .trim_start_matches('_')
 }
 
+/// SAT-as-CVE-proof outcome for one `TaintPath`. Produced by
+/// `solve` (gated on `smt` feature).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SmtFinding {
+    /// Z3 found a symbolic input that drives the sink's watched arg
+    /// into a CVE-class state. The model is exposed as
+    /// `(input_byte_offset, value)` pairs.
+    Reachable { input_bytes: Vec<(usize, u8)> },
+    /// Solver proved no input drives the violation under the path's
+    /// constraints — false-positive cull.
+    NotReachable,
+    /// Lineage check or sink-kind modelling is out of v0 scope. The
+    /// reason string is shown to the analyst so the gap is auditable.
+    Unsupported(&'static str),
+}
+
 /// Reasons the v0 path collector rejected an SSA function.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathRejection {
@@ -358,6 +374,138 @@ fn classify_call<'a>(
         }
     };
     Ok(TaintEvent { stmt_index, kind })
+}
+
+/// True if `a`'s VarDef chain (following `Expr::Var(inner)`)
+/// terminates at `b`, or `a == b` directly. v0 lineage check.
+fn varid_lineage_eq(a: VarId, b: VarId, vars: &[crate::ir::VarDef]) -> bool {
+    if a == b {
+        return true;
+    }
+    let mut current = a;
+    for _ in 0..32 {
+        let Some(def) = vars.get(current.0 as usize) else {
+            break;
+        };
+        match &def.expr {
+            crate::ir::Expr::Var(inner) => {
+                if *inner == b {
+                    return true;
+                }
+                current = *inner;
+            }
+            _ => break,
+        }
+    }
+    false
+}
+
+/// v0 SAT prover: takes a `TaintPath` produced by `collect_paths`,
+/// confirms the sink's watched VarId lineage descends from the
+/// source's tainted slot, and asks Z3 whether a symbolic input can
+/// satisfy the per-`SinkKind` violation constraint.
+///
+/// v0 simplifications (locked):
+///   - 32-byte fresh symbolic input array; no flat memory model yet.
+///   - No Load/Store/FieldAccess lowering inside the SSA cone.
+///   - LengthArg sinks return `Unsupported` (modelling deferred).
+///   - Lineage check is `Expr::Var` chain only — no BinOp/Phi taint.
+#[cfg(feature = "smt")]
+pub fn solve(path: &TaintPath, ssa: &crate::ir::SsaCfg) -> SmtFinding {
+    use z3::ast::{Ast, BV};
+
+    let source_event = &path.events[path.source_event];
+    let sink_event = &path.events[path.sink_event];
+
+    let source_var = match (&source_event.kind, path.source.tainted) {
+        (TaintEventKind::SourceCall { args, .. }, AbiSlot::Arg(n)) => {
+            args.get(n as usize).copied()
+        }
+        (TaintEventKind::SourceCall { out, .. }, AbiSlot::Ret) => *out,
+        _ => None,
+    };
+    let sink_var = match (&sink_event.kind, path.sink.watched) {
+        (TaintEventKind::SinkCall { args, .. }, AbiSlot::Arg(n)) => {
+            args.get(n as usize).copied()
+        }
+        (TaintEventKind::SinkCall { out, .. }, AbiSlot::Ret) => *out,
+        _ => None,
+    };
+
+    let (Some(src), Some(snk)) = (source_var, sink_var) else {
+        return SmtFinding::Unsupported("source/sink slot missing");
+    };
+    if !varid_lineage_eq(snk, src, &ssa.vars) {
+        return SmtFinding::NotReachable;
+    }
+
+    let z3_cfg = z3::Config::new();
+    let ctx = z3::Context::new(&z3_cfg);
+    let solver = z3::Solver::new(&ctx);
+
+    const INPUT_LEN: usize = 32;
+    let bytes: Vec<BV> = (0..INPUT_LEN)
+        .map(|i| BV::new_const(&ctx, format!("in_{i}"), 8))
+        .collect();
+
+    match path.sink.kind {
+        SinkKind::Command => {
+            let mut acc = z3::ast::Bool::from_bool(&ctx, false);
+            for b in &bytes {
+                let semi = b._eq(&BV::from_u64(&ctx, b';' as u64, 8));
+                let amp  = b._eq(&BV::from_u64(&ctx, b'&' as u64, 8));
+                let pipe = b._eq(&BV::from_u64(&ctx, b'|' as u64, 8));
+                let any = z3::ast::Bool::or(&ctx, &[&semi, &amp, &pipe]);
+                acc = z3::ast::Bool::or(&ctx, &[&acc, &any]);
+            }
+            solver.assert(&acc);
+        }
+        SinkKind::FormatArg => {
+            let mut acc = z3::ast::Bool::from_bool(&ctx, false);
+            for b in &bytes {
+                let pct = b._eq(&BV::from_u64(&ctx, b'%' as u64, 8));
+                acc = z3::ast::Bool::or(&ctx, &[&acc, &pct]);
+            }
+            solver.assert(&acc);
+        }
+        SinkKind::StackBuffer => {
+            for b in &bytes {
+                let nz = b._eq(&BV::from_u64(&ctx, 0, 8)).not();
+                solver.assert(&nz);
+            }
+        }
+        SinkKind::LengthArg => {
+            return SmtFinding::Unsupported("LengthArg sink not modeled in v0");
+        }
+    }
+
+    match solver.check() {
+        z3::SatResult::Sat => {
+            let m = match solver.get_model() {
+                Some(m) => m,
+                None => return SmtFinding::Unsupported("SAT but no model returned"),
+            };
+            let mut input_bytes = Vec::new();
+            for (i, b) in bytes.iter().enumerate() {
+                let evaluated = z3::Model::eval(&m, b, true);
+                if let Some(v_bv) = evaluated {
+                    if let Some(v) = v_bv.as_u64() {
+                        input_bytes.push((i, v as u8));
+                    }
+                }
+            }
+            SmtFinding::Reachable { input_bytes }
+        }
+        z3::SatResult::Unsat => SmtFinding::NotReachable,
+        z3::SatResult::Unknown => SmtFinding::Unsupported("solver Unknown / timeout"),
+    }
+}
+
+/// Stub for default builds. Callers can emit a "rebuild with
+/// --features smt" hint when they see this.
+#[cfg(not(feature = "smt"))]
+pub fn solve(_path: &TaintPath, _ssa: &crate::ir::SsaCfg) -> SmtFinding {
+    SmtFinding::Unsupported("smt feature not enabled at build time")
 }
 
 #[cfg(test)]
@@ -641,6 +789,146 @@ mod tests {
         let imports = imports_with(&[(0x1000, "recv"), (0x2000, "strcpy")]);
 
         assert_eq!(collect_paths(&ssa, &imports).unwrap_err(), PathRejection::NoSinkFound);
+    }
+
+    // ---- v0 SAT prover (gated on `smt` feature) ----
+
+    #[cfg(feature = "smt")]
+    fn one_call_pair_cfg(
+        source_addr: u64, source_args: Vec<VarId>,
+        sink_addr:   u64, sink_args:   Vec<VarId>,
+        vars: Vec<VarDef>,
+    ) -> SsaCfg {
+        let stmts = vec![
+            Stmt::Call {
+                target: CallTarget::Direct(source_addr),
+                args: source_args,
+                out: None,
+            },
+            Stmt::Call {
+                target: CallTarget::Direct(sink_addr),
+                args: sink_args,
+                out: None,
+            },
+        ];
+        cfg(vars, block_with_term(stmts, SsaTerminator::Return(None)))
+    }
+
+    #[cfg(feature = "smt")]
+    #[test]
+    fn sat_recv_to_strcpy_is_reachable() {
+        let vars = vec![
+            mk_var(0, Expr::Const(0, 8)),       // sock fd
+            mk_var(1, Expr::Const(0x4000, 8)),  // buf  (shared between recv arg1 and strcpy arg1)
+            mk_var(2, Expr::Const(0x100, 8)),
+            mk_var(3, Expr::Const(0, 8)),
+            mk_var(4, Expr::Const(0x5000, 8)),  // dst
+        ];
+        let ssa = one_call_pair_cfg(
+            0x1000, vec![VarId(0), VarId(1), VarId(2), VarId(3)],
+            0x2000, vec![VarId(4), VarId(1)],
+            vars,
+        );
+        let imports = imports_with(&[(0x1000, "recv"), (0x2000, "strcpy")]);
+        let paths = collect_paths(&ssa, &imports).expect("v0 path collection");
+        match solve(&paths[0], &ssa) {
+            SmtFinding::Reachable { input_bytes } => {
+                assert_eq!(input_bytes.len(), 32);
+                assert!(input_bytes.iter().all(|(_, b)| *b != 0));
+            }
+            other => panic!("expected Reachable, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "smt")]
+    #[test]
+    fn sat_recv_to_printf_is_reachable() {
+        let vars = vec![
+            mk_var(0, Expr::Const(0, 8)),
+            mk_var(1, Expr::Const(0x4000, 8)),
+            mk_var(2, Expr::Const(0x100, 8)),
+            mk_var(3, Expr::Const(0, 8)),
+        ];
+        let ssa = one_call_pair_cfg(
+            0x1000, vec![VarId(0), VarId(1), VarId(2), VarId(3)],
+            0x2000, vec![VarId(1)],
+            vars,
+        );
+        let imports = imports_with(&[(0x1000, "recv"), (0x2000, "printf")]);
+        let paths = collect_paths(&ssa, &imports).expect("v0 path collection");
+        match solve(&paths[0], &ssa) {
+            SmtFinding::Reachable { input_bytes } => {
+                assert!(input_bytes.iter().any(|(_, b)| *b == b'%'));
+            }
+            other => panic!("expected Reachable with `%`, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "smt")]
+    #[test]
+    fn sat_argv_to_system_is_reachable() {
+        let vars = vec![
+            mk_var(0, Expr::Const(0, 8)),       // argc
+            mk_var(1, Expr::Const(0x4000, 8)),  // argv (becomes argv[*] approx)
+        ];
+        let ssa = one_call_pair_cfg(
+            0x1000, vec![VarId(0), VarId(1)],
+            0x2000, vec![VarId(1)],
+            vars,
+        );
+        let imports = imports_with(&[(0x1000, "argv"), (0x2000, "system")]);
+        let paths = collect_paths(&ssa, &imports).expect("v0 path collection");
+        match solve(&paths[0], &ssa) {
+            SmtFinding::Reachable { input_bytes } => {
+                assert!(input_bytes
+                    .iter()
+                    .any(|(_, b)| matches!(*b, b';' | b'&' | b'|')));
+            }
+            other => panic!("expected Reachable with shell metachar, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "smt")]
+    #[test]
+    fn unsat_recv_into_unrelated_strcpy_dst() {
+        // recv fills buf (VarId 1), strcpy copies UNRELATED VarId 9
+        // — no taint lineage. Must NotReachable.
+        let vars = vec![
+            mk_var(0, Expr::Const(0, 8)),
+            mk_var(1, Expr::Const(0x4000, 8)),
+            mk_var(2, Expr::Const(0x100, 8)),
+            mk_var(3, Expr::Const(0, 8)),
+            mk_var(4, Expr::Const(0x5000, 8)),
+            mk_var(5, Expr::Const(0, 8)),
+            mk_var(6, Expr::Const(0, 8)),
+            mk_var(7, Expr::Const(0, 8)),
+            mk_var(8, Expr::Const(0, 8)),
+            mk_var(9, Expr::Const(0x6000, 8)),  // unrelated buffer
+        ];
+        let ssa = one_call_pair_cfg(
+            0x1000, vec![VarId(0), VarId(1), VarId(2), VarId(3)],
+            0x2000, vec![VarId(4), VarId(9)],
+            vars,
+        );
+        let imports = imports_with(&[(0x1000, "recv"), (0x2000, "strcpy")]);
+        let paths = collect_paths(&ssa, &imports).expect("v0 path collection");
+        assert_eq!(solve(&paths[0], &ssa), SmtFinding::NotReachable);
+    }
+
+    #[cfg(feature = "smt")]
+    #[test]
+    fn lineage_eq_follows_var_chain() {
+        // VarId 5 -> Var(4) -> Var(3) -> Var(2). lineage_eq(5, 2) = true.
+        let vars = vec![
+            mk_var(0, Expr::Const(0, 8)),
+            mk_var(1, Expr::Const(0, 8)),
+            mk_var(2, Expr::Const(0x4000, 8)),
+            mk_var(3, Expr::Var(VarId(2))),
+            mk_var(4, Expr::Var(VarId(3))),
+            mk_var(5, Expr::Var(VarId(4))),
+        ];
+        assert!(varid_lineage_eq(VarId(5), VarId(2), &vars));
+        assert!(!varid_lineage_eq(VarId(5), VarId(0), &vars));
     }
 
     #[test]
