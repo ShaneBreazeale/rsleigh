@@ -56,44 +56,86 @@ RUSTFLAGS="-L $(brew --prefix z3)/lib" \
 cargo test -p rsleigh-decompile --release --features smt --lib smt_verify
 ```
 
-Two tests live today:
-- `z3_proves_themida_identity` — `x*x - x*(x-1) - x == 0` SAT-verified.
-- `z3_rejects_real_branch` — actual branch condition rejected as
-  not provably constant.
+Five tests live today:
+- `z3_proves_themida_identity` — `x*x - x*(x-1) - x == 0`
+  SAT-verified as a tautology.
+- `z3_rejects_real_branch` — actual branch condition correctly
+  classified as `Satisfiable`.
+- `strict_policy_rejects_unknown` — `Expr::Unknown` under
+  `LowerPolicy::RejectUnsupported` returns `None`, never silently
+  becomes a free BV.
+- `symbolic_policy_passes_unknown` — same `Expr::Unknown` under
+  `LowerPolicy::Symbolic` lowers to a fresh BV (the legacy
+  ∀-quantified semantic the verifier needs).
+- `strict_policy_rejects_load` — pins the M0 boundary: `Expr::Load`
+  is unsupported today, must surface as `None` under strict policy.
 
-Both green at the time of writing.
+All green at the time of writing.
 
 ## Public API
 
 ```rust
-pub use rsleigh_decompile::smt_verify::{verify_branch, SmtVerdict};
+pub use rsleigh_decompile::smt_verify::{
+    verify_branch, lower, LowerPolicy, SmtVerdict,
+};
 ```
 
 `verify_branch(cond: VarId, vars: &[VarDef]) -> SmtVerdict` — lifts
 the cone of definitions reachable from `cond` into Z3 bitvectors,
-asks `forall vars . cond`, returns:
+asks `forall vars . cond != 0`, returns:
 
 ```rust
 pub enum SmtVerdict {
-    AlwaysTrue,
-    AlwaysFalse,
-    NotConstant,
-    Unsupported,
+    Tautology,        // ∀ vars . cond != 0 — branch always taken
+    Contradiction,    // ∀ vars . cond == 0 — branch never taken
+    Satisfiable,      // both directions reachable, or solver Unknown
+                      //   under timeout
+    Unsupported,      // lowering hit an Expr variant it cannot translate
+    Unknown,          // reserved for future use
 }
 ```
 
-`AlwaysTrue` and `AlwaysFalse` are SMT-proven and safe to fold.
-`NotConstant` is "the solver found a counterexample". `Unsupported`
-is "the cone contains an Expr variant the lowering cannot handle"
-(currently UserOp, ExprNew, Phi, ExprCPool).
+`Tautology` and `Contradiction` are SMT-proven and safe to fold.
+
+`lower(ctx, v, vars, env, policy) -> Option<BV>` — public lowering
+entry point reused by `smt_explore` (M1). The `policy` parameter
+selects between two semantics for `Expr` variants the translator
+does not directly handle:
+
+- **`Symbolic`** — uncovered variant becomes a fresh BV. Sound for
+  the verifier's `∀ vars . cond` query, where the unknown variable
+  is exactly the universally-quantified attacker input.
+- **`RejectUnsupported`** — uncovered variant fails the lift
+  (`None`). Required for SAT-as-CVE-proof so the SAT model is
+  never satisfied by a free variable nobody constrained.
+
+### Currently lowered Expr variants
+
+The translator handles:
+
+- `Const`, `Var`
+- `BinOp`: Add, Sub, Mult, And, Or, Xor, Lsl, Lsr, Asr, Div, SDiv,
+  Rem, SRem, Eq, NotEq, Less, LessEq, SLess, SLessEq
+- `UnaryOp`: Neg, Not, BoolNot, Zext, Sext, Trunc
+
+Everything else (`Phi`, `Load`, `Store`, `FieldAccess`, `Ternary`,
+`UserOp`, `ExprNew`, `ExprCPool`, `Unknown`, etc.) is **unsupported
+in M0**. Under `Symbolic` the variant falls through to a fresh BV;
+under `RejectUnsupported` it returns `None`.
+
+M1 (taint-flow) will add `Load`/`Store`/`FieldAccess` lowering
+against a flat byte-array memory model.
 
 ## Roadmap (campaign: `feat/smt-backend`)
 
 Spec lives in `.opt/campaigns/smt-backend.md` (local, not VCS-tracked).
+Step-by-step implementation plan in
+`.opt/campaigns/smt-backend-implementation-plan.md`.
 
-- **M0 — scaffold**: feature flag, z3 dep, Expr lowering for
-  Const/Var/BinOp/UnaryOp/Load/Store/FieldAccess. Branch-condition
-  verifier wired.
+- **M0 — scaffold (done)**: feature flag, z3 dep, Expr lowering for
+  Const/Var/BinOp/UnaryOp. Branch-condition verifier wired.
+  `LowerPolicy` parameter splits ∀-quantified verifier from strict
+  CVE-proof lowering.
 - **M1 — taint-flow CVE finder (in progress)**: source/sink spec,
   straight-line path collector, SAT+model emit on
   attacker-controlled flow to dangerous sinks (strcpy/sprintf/
