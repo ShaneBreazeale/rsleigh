@@ -171,7 +171,32 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                 }
                 PcodeOp::Call { dest } => {
                     let target = if dest.space == AddressSpaceId::Ram {
-                        CallTarget::Direct(dest.offset)
+                        // ARM32-generated Pcode emits Call dest varnodes
+                        // with an extra 0x04000000 set in the offset (the
+                        // codegen-side bug puts a 1 into bit 26 of every
+                        // ram-space address). Disasm rendering happens to
+                        // strip it; the SSA Call target keeps it, so the
+                        // imports-map lookup fails on every PLT call. Mask
+                        // to 28 bits — a no-op for legitimate <28-bit code
+                        // addresses, recovers the right target for the
+                        // ARM32 case. Filed for proper codegen-layer fix.
+                        // ARM32 generated codegen ORs a spurious 0x04000000
+                        // (bit 26) into every Ram-space Call dest offset.
+                        // Disasm rendering happens to strip it; SSA keeps
+                        // it, so the imports-map lookup misses every PLT
+                        // call and downstream --search/--xrefs/--smt-
+                        // explore can't recognise libc sources or sinks.
+                        // Strip the tag only when the resulting address
+                        // would still fit in a realistic text segment
+                        // (raw < 0x10000000) — leaves legitimate >64MB
+                        // text addresses untouched.
+                        let raw = dest.offset;
+                        let masked = if raw & 0x0400_0000 != 0 && raw & 0xF000_0000 == 0 {
+                            raw & !0x0400_0000
+                        } else {
+                            raw
+                        };
+                        CallTarget::Direct(masked)
                     } else {
                         CallTarget::Indirect(dest)
                     };
