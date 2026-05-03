@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod callgraph;
 pub mod cfg;
 // Heuristic-heavy modules whose shape may shift across patch versions.
 // `experimental` is the only fully-isolated feature today: gating cpp_class
