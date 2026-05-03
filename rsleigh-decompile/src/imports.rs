@@ -499,6 +499,69 @@ fn resolve_elf(elf: &goblin::elf::Elf, binary: &[u8], map: &mut HashMap<u64, Str
         }
     }
 
+    // ARM32 PLT stub decoder. Each entry (12 bytes typically):
+    //   add r12, pc, #0, #12         ; e28fc600  (immediate ROR 12 = 0)
+    //   add r12, r12, #imm           ; e28cca??  (page-relative GOT base)
+    //   ldr pc, [r12, #N]!           ; e5bcf0??  (final GOT offset)
+    // GOT slot loaded = (stub_addr + 8) + add_imm + ldr_imm.
+    // Source format documented in arm-eabi PLT spec; observed in glibc-
+    // linked ARM32 ELF (e.g. TP-Link AX6000 tdpServer).
+    if elf.header.e_machine == 0x28 /* EM_ARM */ {
+        for sh in &elf.section_headers {
+            let name = elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("");
+            if name != ".plt" {
+                continue;
+            }
+            // Skip the .plt header (typically 20 bytes of resolver
+            // bootstrap before the per-import 12-byte entries).
+            let plt_start = sh.sh_addr;
+            let file_off = sh.sh_offset as usize;
+            let plt_size = sh.sh_size as usize;
+            // ARM PLT header is 20 bytes: 5 instructions:
+            //   str lr, [sp,#-4]!
+            //   ldr lr, [pc,#4]
+            //   add lr, pc, lr
+            //   ldr pc, [lr,#8]!
+            //   <got base word>
+            let header_size: u64 = 20;
+            let entry_size: u64 = 12;
+            if plt_size as u64 <= header_size {
+                continue;
+            }
+            let n_entries = (plt_size as u64 - header_size) / entry_size;
+            for i in 0..n_entries.min(20000) {
+                let stub_addr = plt_start + header_size + i * entry_size;
+                let off = file_off + (header_size + i * entry_size) as usize;
+                if off + 12 > binary.len() {
+                    break;
+                }
+                let w0 = u32::from_le_bytes(binary[off..off + 4].try_into().unwrap_or([0; 4]));
+                let w1 = u32::from_le_bytes(binary[off + 4..off + 8].try_into().unwrap_or([0; 4]));
+                let w2 = u32::from_le_bytes(binary[off + 8..off + 12].try_into().unwrap_or([0; 4]));
+                // First insn fixed: e28fc600 (add r12, pc, #0, #12 — operand2 = 0)
+                if w0 != 0xe28fc600 {
+                    continue;
+                }
+                // Second insn: add r12, r12, #imm — top 12 bits 0xe28cc, immediate is rotated
+                if (w1 & 0xffff_f000) != 0xe28c_c000 {
+                    continue;
+                }
+                let imm12_a = w1 & 0xfff;
+                let add_imm = arm_decode_modified_imm(imm12_a);
+                // Third insn: ldr pc, [r12, #imm]! — top 16 bits 0xe5bcf, low 12 = unsigned imm
+                if (w2 & 0xfff0_f000) != 0xe5b0_f000 || ((w2 >> 16) & 0xf) != 0xc {
+                    continue;
+                }
+                let ldr_imm = w2 & 0xfff;
+                // PC at the `add r12, pc, #0, #12` instruction = stub_addr + 8
+                let got_entry = stub_addr.wrapping_add(8) + add_imm as u64 + ldr_imm as u64;
+                if let Some(name) = got_to_name.get(&got_entry) {
+                    map.insert(stub_addr, name.clone());
+                }
+            }
+        }
+    }
+
     // Find .plt section and map PLT stub addresses to names
     // Each PLT entry is typically 16 bytes (x86-64): jmp [GOT]; push idx; jmp resolver
     for sh in &elf.section_headers {
@@ -1471,4 +1534,13 @@ fn resolve_pe_manual(binary: &[u8], map: &mut HashMap<u64, String>) {
             off += 1;
         }
     }
+}
+
+/// Decode an ARM32 "modified immediate" (8-bit value rotated by an
+/// even count from a 4-bit field). Used by the PLT stub decoder to
+/// recover the page-base offset in `add r12, r12, #imm`.
+fn arm_decode_modified_imm(imm12: u32) -> u32 {
+    let val = imm12 & 0xff;
+    let rot = ((imm12 >> 8) & 0xf) * 2;
+    val.rotate_right(rot)
 }

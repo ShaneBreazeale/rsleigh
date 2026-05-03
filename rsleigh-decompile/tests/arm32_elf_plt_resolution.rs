@@ -38,16 +38,16 @@ fn tdpserver_arm32_plt_resolves_recvfrom() {
 
     // Expected: recvfrom PLT stub at 0x125d8 (computed from
     // R_ARM_JUMP_SLOT @ 0x3f218 / GOT entry index 131).
-    let recvfrom_addr = map
-        .iter()
-        .find(|(_, name)| name.as_str() == "recvfrom")
-        .map(|(addr, _)| *addr);
-
+    // The reloc-driven leg of resolve_elf already inserts
+    // map[GOT_slot] = name (here 0x3f218 = "recvfrom"), so use a
+    // direct lookup on the PLT stub address — the lookup we
+    // actually need for callsite name resolution.
     assert_eq!(
-        recvfrom_addr,
-        Some(0x125d8),
-        "recvfrom@plt should resolve to 0x125d8; map has: {:?}",
-        recvfrom_addr,
+        map.get(&0x125d8).map(String::as_str),
+        Some("recvfrom"),
+        "recvfrom@plt at 0x125d8 should be in the import map; \
+         all recvfrom entries: {:?}",
+        map.iter().filter(|(_, n)| n.as_str() == "recvfrom").collect::<Vec<_>>(),
     );
 }
 
