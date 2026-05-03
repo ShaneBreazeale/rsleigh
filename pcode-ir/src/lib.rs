@@ -159,9 +159,10 @@ pub fn offset_unique_varnodes(op: &mut PcodeOp, offset: u64) {
 }
 
 /// Peephole-optimize a P-code op sequence:
-/// - Remove identity `Subpiece { lsb: 0 }` where input.size == out.size
+/// - Fold small constant integer/logical expressions.
+/// - Remove identity `Subpiece { lsb: 0 }` where input.size == out.size.
 /// - Forward-substitute `Copy` chains (A=B, C=A → C=B) when the
-///   intermediate is a unique varnode used only once after its definition
+///   intermediate is a unique varnode used only once after its definition.
 pub fn optimize(ops: &mut Vec<PcodeOp>) {
     // Run passes until fixpoint (later passes create opportunities for earlier ones)
     for _round in 0..4 {
@@ -174,27 +175,31 @@ pub fn optimize(ops: &mut Vec<PcodeOp>) {
 }
 
 fn optimize_once(ops: &mut Vec<PcodeOp>) {
-    // Pass 0: constant folding — IntZext/IntSext of constants
+    // Pass 0: constant folding. Keep this intentionally small: P-code constants
+    // are u64-backed, so only fold values whose input/output widths fit.
     for op in ops.iter_mut() {
+        if let Some((out, value)) = const_fold_op(op) {
+            *op = PcodeOp::Copy {
+                out,
+                input: Varnode::constant(value, out.size),
+            };
+            continue;
+        }
+
         match op {
             PcodeOp::IntZext { out, input } if input.space == AddressSpaceId::Const => {
                 *op = PcodeOp::Copy {
                     out: *out,
-                    input: Varnode::constant(input.offset, out.size),
+                    input: Varnode::constant(mask_to_size(input.offset, out.size), out.size),
                 };
             }
             PcodeOp::IntSext { out, input } if input.space == AddressSpaceId::Const => {
-                // Sign-extend: if the high bit of input is set, fill upper bits
-                let val = input.offset;
-                let in_bits = (input.size as u64) * 8;
-                let extended = if in_bits < 64 && (val >> (in_bits - 1)) & 1 != 0 {
-                    val | (!0u64 << in_bits)
-                } else {
-                    val
-                };
                 *op = PcodeOp::Copy {
                     out: *out,
-                    input: Varnode::constant(extended, out.size),
+                    input: Varnode::constant(
+                        sign_extend_to_size(input.offset, input.size, out.size),
+                        out.size,
+                    ),
                 };
             }
             // Shift by zero → Copy
@@ -444,6 +449,252 @@ fn all_ones_mask(size_bytes: u32) -> u64 {
     } else {
         u64::MAX >> (64 - bits)
     }
+}
+
+fn mask_to_size(value: u64, size_bytes: u32) -> u64 {
+    value & all_ones_mask(size_bytes)
+}
+
+fn bits_for_size(size_bytes: u32) -> u32 {
+    size_bytes.saturating_mul(8)
+}
+
+fn foldable_width(size_bytes: u32) -> bool {
+    (1..=8).contains(&size_bytes)
+}
+
+fn signed_value(value: u64, size_bytes: u32) -> i64 {
+    let bits = bits_for_size(size_bytes);
+    if bits >= 64 {
+        value as i64
+    } else {
+        let shift = 64 - bits;
+        ((value << shift) as i64) >> shift
+    }
+}
+
+fn sign_extend_to_size(value: u64, input_size: u32, output_size: u32) -> u64 {
+    if !foldable_width(input_size) || !foldable_width(output_size) {
+        return value;
+    }
+    mask_to_size(signed_value(value, input_size) as u64, output_size)
+}
+
+fn const_fold_op(op: &PcodeOp) -> Option<(Varnode, u64)> {
+    match *op {
+        PcodeOp::IntZext { out, input } if input.space == AddressSpaceId::Const => {
+            fold_unary_const(out, input, |value, _| value)
+        }
+        PcodeOp::IntSext { out, input } if input.space == AddressSpaceId::Const => {
+            if foldable_width(input.size) && foldable_width(out.size) {
+                Some((out, sign_extend_to_size(input.offset, input.size, out.size)))
+            } else {
+                None
+            }
+        }
+        PcodeOp::IntNeg { out, input } if input.space == AddressSpaceId::Const => {
+            fold_unary_const(out, input, |value, size| {
+                value.wrapping_neg() & all_ones_mask(size)
+            })
+        }
+        PcodeOp::IntNot { out, input } if input.space == AddressSpaceId::Const => {
+            fold_unary_const(out, input, |value, size| !value & all_ones_mask(size))
+        }
+        PcodeOp::BoolNot { out, input } if input.space == AddressSpaceId::Const => {
+            fold_unary_const(out, input, |value, _| u64::from(value == 0))
+        }
+        PcodeOp::IntAdd { out, left, right }
+            if left.space == AddressSpaceId::Const && right.space == AddressSpaceId::Const =>
+        {
+            fold_binary_const(out, left, right, |a, b, size| {
+                a.wrapping_add(b) & all_ones_mask(size)
+            })
+        }
+        PcodeOp::IntSub { out, left, right }
+            if left.space == AddressSpaceId::Const && right.space == AddressSpaceId::Const =>
+        {
+            fold_binary_const(out, left, right, |a, b, size| {
+                a.wrapping_sub(b) & all_ones_mask(size)
+            })
+        }
+        PcodeOp::IntMult { out, left, right }
+            if left.space == AddressSpaceId::Const && right.space == AddressSpaceId::Const =>
+        {
+            fold_binary_const(out, left, right, |a, b, size| {
+                a.wrapping_mul(b) & all_ones_mask(size)
+            })
+        }
+        PcodeOp::IntAnd { out, left, right }
+            if left.space == AddressSpaceId::Const && right.space == AddressSpaceId::Const =>
+        {
+            fold_binary_const(out, left, right, |a, b, size| (a & b) & all_ones_mask(size))
+        }
+        PcodeOp::IntOr { out, left, right }
+            if left.space == AddressSpaceId::Const && right.space == AddressSpaceId::Const =>
+        {
+            fold_binary_const(out, left, right, |a, b, size| (a | b) & all_ones_mask(size))
+        }
+        PcodeOp::IntXor { out, left, right }
+            if left.space == AddressSpaceId::Const && right.space == AddressSpaceId::Const =>
+        {
+            fold_binary_const(out, left, right, |a, b, size| (a ^ b) & all_ones_mask(size))
+        }
+        PcodeOp::IntLsl { out, left, right }
+            if left.space == AddressSpaceId::Const && right.space == AddressSpaceId::Const =>
+        {
+            fold_shift_const(out, left, right, |value, shift, size| {
+                if shift >= bits_for_size(size) {
+                    0
+                } else {
+                    (value << shift) & all_ones_mask(size)
+                }
+            })
+        }
+        PcodeOp::IntLsr { out, left, right }
+            if left.space == AddressSpaceId::Const && right.space == AddressSpaceId::Const =>
+        {
+            fold_shift_const(out, left, right, |value, shift, size| {
+                if shift >= bits_for_size(size) {
+                    0
+                } else {
+                    (value >> shift) & all_ones_mask(size)
+                }
+            })
+        }
+        PcodeOp::IntAsr { out, left, right }
+            if left.space == AddressSpaceId::Const && right.space == AddressSpaceId::Const =>
+        {
+            fold_shift_const(out, left, right, |value, shift, size| {
+                if shift >= bits_for_size(size) {
+                    u64::from(signed_value(value, size) < 0) * all_ones_mask(size)
+                } else {
+                    mask_to_size((signed_value(value, size) >> shift) as u64, size)
+                }
+            })
+        }
+        PcodeOp::IntEq { out, left, right }
+            if left.space == AddressSpaceId::Const && right.space == AddressSpaceId::Const =>
+        {
+            fold_compare_const(out, left, right, |a, b, _| a == b)
+        }
+        PcodeOp::IntNotEq { out, left, right }
+            if left.space == AddressSpaceId::Const && right.space == AddressSpaceId::Const =>
+        {
+            fold_compare_const(out, left, right, |a, b, _| a != b)
+        }
+        PcodeOp::IntLess { out, left, right }
+            if left.space == AddressSpaceId::Const && right.space == AddressSpaceId::Const =>
+        {
+            fold_compare_const(out, left, right, |a, b, _| a < b)
+        }
+        PcodeOp::IntLessEq { out, left, right }
+            if left.space == AddressSpaceId::Const && right.space == AddressSpaceId::Const =>
+        {
+            fold_compare_const(out, left, right, |a, b, _| a <= b)
+        }
+        PcodeOp::IntSLess { out, left, right }
+            if left.space == AddressSpaceId::Const && right.space == AddressSpaceId::Const =>
+        {
+            fold_compare_const(out, left, right, |a, b, size| {
+                signed_value(a, size) < signed_value(b, size)
+            })
+        }
+        PcodeOp::IntSLessEq { out, left, right }
+            if left.space == AddressSpaceId::Const && right.space == AddressSpaceId::Const =>
+        {
+            fold_compare_const(out, left, right, |a, b, size| {
+                signed_value(a, size) <= signed_value(b, size)
+            })
+        }
+        PcodeOp::BoolAnd { out, left, right }
+            if left.space == AddressSpaceId::Const && right.space == AddressSpaceId::Const =>
+        {
+            fold_binary_const(out, left, right, |a, b, _| u64::from(a != 0 && b != 0))
+        }
+        PcodeOp::BoolOr { out, left, right }
+            if left.space == AddressSpaceId::Const && right.space == AddressSpaceId::Const =>
+        {
+            fold_binary_const(out, left, right, |a, b, _| u64::from(a != 0 || b != 0))
+        }
+        PcodeOp::BoolXor { out, left, right }
+            if left.space == AddressSpaceId::Const && right.space == AddressSpaceId::Const =>
+        {
+            fold_binary_const(out, left, right, |a, b, _| u64::from((a != 0) ^ (b != 0)))
+        }
+        _ => None,
+    }
+}
+
+fn fold_unary_const(
+    out: Varnode,
+    input: Varnode,
+    f: impl FnOnce(u64, u32) -> u64,
+) -> Option<(Varnode, u64)> {
+    if !foldable_width(out.size) || !foldable_width(input.size) {
+        return None;
+    }
+    Some((
+        out,
+        mask_to_size(
+            f(mask_to_size(input.offset, input.size), input.size),
+            out.size,
+        ),
+    ))
+}
+
+fn fold_binary_const(
+    out: Varnode,
+    left: Varnode,
+    right: Varnode,
+    f: impl FnOnce(u64, u64, u32) -> u64,
+) -> Option<(Varnode, u64)> {
+    if !foldable_width(out.size) || !foldable_width(left.size) || !foldable_width(right.size) {
+        return None;
+    }
+    let size = left.size.max(right.size);
+    let value = f(
+        mask_to_size(left.offset, left.size),
+        mask_to_size(right.offset, right.size),
+        size,
+    );
+    Some((out, mask_to_size(value, out.size)))
+}
+
+fn fold_shift_const(
+    out: Varnode,
+    left: Varnode,
+    right: Varnode,
+    f: impl FnOnce(u64, u32, u32) -> u64,
+) -> Option<(Varnode, u64)> {
+    if !foldable_width(out.size) || !foldable_width(left.size) || !foldable_width(right.size) {
+        return None;
+    }
+    let shift = right.offset.min(u32::MAX as u64) as u32;
+    Some((
+        out,
+        mask_to_size(
+            f(mask_to_size(left.offset, left.size), shift, left.size),
+            out.size,
+        ),
+    ))
+}
+
+fn fold_compare_const(
+    out: Varnode,
+    left: Varnode,
+    right: Varnode,
+    f: impl FnOnce(u64, u64, u32) -> bool,
+) -> Option<(Varnode, u64)> {
+    if !foldable_width(out.size) || !foldable_width(left.size) || !foldable_width(right.size) {
+        return None;
+    }
+    let size = left.size.max(right.size);
+    let result = f(
+        mask_to_size(left.offset, left.size),
+        mask_to_size(right.offset, right.size),
+        size,
+    );
+    Some((out, u64::from(result)))
 }
 
 #[derive(Clone, Copy)]
@@ -1223,5 +1474,113 @@ mod tests {
                 if *out == Varnode::register(16, 16)
                     && *input == Varnode::register(0, 16)
         ));
+    }
+
+    #[test]
+    fn optimize_folds_constant_integer_ops() {
+        let mut ops = vec![
+            PcodeOp::IntAdd {
+                out: Varnode::unique(0, 4),
+                left: Varnode::constant(0xffff_ffff, 4),
+                right: Varnode::constant(2, 4),
+            },
+            PcodeOp::IntXor {
+                out: Varnode::unique(8, 4),
+                left: Varnode::unique(0, 4),
+                right: Varnode::constant(0x10, 4),
+            },
+            PcodeOp::Copy {
+                out: Varnode::register(0, 4),
+                input: Varnode::unique(8, 4),
+            },
+        ];
+
+        optimize(&mut ops);
+
+        assert_eq!(
+            ops,
+            vec![PcodeOp::Copy {
+                out: Varnode::register(0, 4),
+                input: Varnode::constant(0x11, 4),
+            }]
+        );
+    }
+
+    #[test]
+    fn optimize_folds_constant_comparisons_and_bool_ops() {
+        let mut ops = vec![
+            PcodeOp::IntSLess {
+                out: Varnode::unique(0, 1),
+                left: Varnode::constant(0xff, 1),
+                right: Varnode::constant(1, 1),
+            },
+            PcodeOp::BoolNot {
+                out: Varnode::unique(1, 1),
+                input: Varnode::unique(0, 1),
+            },
+            PcodeOp::Copy {
+                out: Varnode::register(0, 1),
+                input: Varnode::unique(1, 1),
+            },
+        ];
+
+        optimize(&mut ops);
+
+        assert_eq!(
+            ops,
+            vec![PcodeOp::Copy {
+                out: Varnode::register(0, 1),
+                input: Varnode::constant(0, 1),
+            }]
+        );
+    }
+
+    #[test]
+    fn optimize_folds_constant_shifts() {
+        let mut ops = vec![
+            PcodeOp::IntAsr {
+                out: Varnode::unique(0, 1),
+                left: Varnode::constant(0x80, 1),
+                right: Varnode::constant(4, 1),
+            },
+            PcodeOp::Copy {
+                out: Varnode::register(0, 1),
+                input: Varnode::unique(0, 1),
+            },
+        ];
+
+        optimize(&mut ops);
+
+        assert_eq!(
+            ops,
+            vec![PcodeOp::Copy {
+                out: Varnode::register(0, 1),
+                input: Varnode::constant(0xf8, 1),
+            }]
+        );
+    }
+
+    #[test]
+    fn optimize_sign_extend_constant_masks_to_output_size() {
+        let mut ops = vec![
+            PcodeOp::IntSext {
+                out: Varnode::unique(0, 2),
+                input: Varnode::constant(0x80, 1),
+            },
+            PcodeOp::Copy {
+                out: Varnode::register(0, 2),
+                input: Varnode::unique(0, 2),
+            },
+        ];
+
+        optimize(&mut ops);
+
+        assert_eq!(
+            ops,
+            vec![PcodeOp::Copy {
+                out: Varnode::register(0, 2),
+                input: Varnode::constant(0xff80, 2),
+            }]
+        );
     }
 }
