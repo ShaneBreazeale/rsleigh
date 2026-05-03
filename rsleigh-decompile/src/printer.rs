@@ -2290,6 +2290,12 @@ fn post_process(
     // param_48[RSP] → local_30 (decimal 48 = hex 0x30)
     // param_96[RSP - 8 - 8 - 304 - 8] → local_60
     for line in &mut lines {
+        // Same O(N²) hazard as the post-rewrite re-run pass below:
+        // skip lines without `[RSP` to avoid quadratic param_-scanning
+        // on crypto-style decompiled megalines.
+        if !line.contains("[RSP") {
+            continue;
+        }
         // Scan for all param_NNN[RSP...] patterns in the line
         let mut search_from = 0usize;
         loop {
@@ -9926,6 +9932,14 @@ fn post_process(
 
         // Re-run param_N[RSP] → local_XX
         for line in &mut lines {
+            // Crypto-round-style decompiled lines can carry hundreds of
+            // `param_` references and no `[RSP` at all; the per-`param_`
+            // re-scan of the whole line for `[RSP` was O(N²) and surfaced
+            // as an indefinite hang in M2 firmware triage. Early-out
+            // when `[RSP` is absent collapses the worst case to O(N).
+            if !line.contains("[RSP") {
+                continue;
+            }
             let mut search_from = 0usize;
             loop {
                 let remaining = &line[search_from..];
@@ -15276,8 +15290,21 @@ fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTrac
 
 /// Recursively check if an expression tree references any tracked register.
 fn expr_has_tracked_reg(expr: &Expr, ssa: &SsaCfg, tracker: &RegTracker) -> bool {
+    let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    expr_has_tracked_reg_rec(expr, ssa, tracker, &mut visited)
+}
+
+fn expr_has_tracked_reg_rec(
+    expr: &Expr,
+    ssa: &SsaCfg,
+    tracker: &RegTracker,
+    visited: &mut std::collections::HashSet<u32>,
+) -> bool {
     match expr {
         Expr::Var(inner) => {
+            if !visited.insert(inner.0) {
+                return false;
+            }
             let iv = ssa.var(*inner);
             if iv.varnode.space == AddressSpaceId::Register {
                 return tracker.get(iv.varnode.offset, iv.varnode.size).is_some()
@@ -15286,11 +15313,14 @@ fn expr_has_tracked_reg(expr: &Expr, ssa: &SsaCfg, tracker: &RegTracker) -> bool
                         .is_some();
             }
             if iv.varnode.space == AddressSpaceId::Unique {
-                return expr_has_tracked_reg(&iv.expr, ssa, tracker);
+                return expr_has_tracked_reg_rec(&iv.expr, ssa, tracker, visited);
             }
             false
         }
         Expr::UnaryOp(_, inner) => {
+            if !visited.insert(inner.0) {
+                return false;
+            }
             let iv = ssa.var(*inner);
             if iv.varnode.space == AddressSpaceId::Register {
                 return tracker.get(iv.varnode.offset, iv.varnode.size).is_some()
@@ -15299,13 +15329,22 @@ fn expr_has_tracked_reg(expr: &Expr, ssa: &SsaCfg, tracker: &RegTracker) -> bool
                         .is_some();
             }
             if iv.varnode.space == AddressSpaceId::Unique {
-                return expr_has_tracked_reg(&iv.expr, ssa, tracker);
+                return expr_has_tracked_reg_rec(&iv.expr, ssa, tracker, visited);
             }
             false
         }
         Expr::BinOp(_, left, right) => {
-            expr_has_tracked_reg(&ssa.var(*left).expr, ssa, tracker)
-                || expr_has_tracked_reg(&ssa.var(*right).expr, ssa, tracker)
+            if visited.insert(left.0)
+                && expr_has_tracked_reg_rec(&ssa.var(*left).expr, ssa, tracker, visited)
+            {
+                return true;
+            }
+            if visited.insert(right.0)
+                && expr_has_tracked_reg_rec(&ssa.var(*right).expr, ssa, tracker, visited)
+            {
+                return true;
+            }
+            false
         }
         _ => false,
     }

@@ -43,10 +43,13 @@ fn printer_does_not_hang_on_crypto_round_dag() {
     // it after the budget and report failure.
     let budget = Duration::from_secs(15);
 
+    // Discard child stdout/stderr — piping without draining would
+    // deadlock the test once the OS pipe buffer fills, masking a
+    // genuine pass as a 15s "hang".
     let mut child = Command::new(RSLEIGH_BIN)
         .args([&bin, "--raw", "arm32", "FUN_00000000"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .expect("spawn rsleigh");
 
