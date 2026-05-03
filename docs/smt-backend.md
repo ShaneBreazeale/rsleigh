@@ -140,9 +140,19 @@ Step-by-step implementation plan in
   trigger-byte model extraction. New `--smt-explore <func>` CLI
   flag. 3-of-3 fixtures SAT end-to-end through CLI (recv→strcpy,
   read→system, fgets→printf).
-- **M2 — first real CVE candidate (next)**: prove on a router-
-  firmware binary that an attacker-controlled `recv()` byte reaches
-  a network-handler `strcpy()`. Concrete trigger-input emitted.
+- **M2 — first real CVE candidate (parked)**: attempted on TP-Link
+  AX6000 v2 tdpServer (ARM32). Both `recvfrom` callers in the
+  binary failed v0's linear-flow constraint
+  (`UnsupportedTerminator(CBranch)` and `Indirect`). Real router-
+  daemon functions are universally non-linear; v0 cannot reach
+  them without graduating to v1 (CBranch exploration, indirect-
+  call resolution).
+  Triage surfaced four rsleigh bugs, all fixed: printer O(N²) hang
+  on crypto-round megalines, ARM32 ELF PLT stub decoder, ARM32
+  CFG-side spurious 0x04000000 tag mask, and the regression test
+  for the printer hang.
+  M2 reactivation is contingent on a v1 campaign completing first.
+  See `.opt/failed.md` for the parked-campaign notes.
 
 After M2 lands, the branch merges to master with the feature still
 default-OFF. Distros and library users not opting in pay no z3
