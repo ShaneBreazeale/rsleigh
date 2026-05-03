@@ -140,19 +140,23 @@ Step-by-step implementation plan in
   trigger-byte model extraction. New `--smt-explore <func>` CLI
   flag. 3-of-3 fixtures SAT end-to-end through CLI (recv→strcpy,
   read→system, fgets→printf).
-- **M2 — first real CVE candidate (parked)**: attempted on TP-Link
-  AX6000 v2 tdpServer (ARM32). Both `recvfrom` callers in the
-  binary failed v0's linear-flow constraint
-  (`UnsupportedTerminator(CBranch)` and `Indirect`). Real router-
-  daemon functions are universally non-linear; v0 cannot reach
-  them without graduating to v1 (CBranch exploration, indirect-
-  call resolution).
-  Triage surfaced four rsleigh bugs, all fixed: printer O(N²) hang
-  on crypto-round megalines, ARM32 ELF PLT stub decoder, ARM32
-  CFG-side spurious 0x04000000 tag mask, and the regression test
-  for the printer hang.
-  M2 reactivation is contingent on a v1 campaign completing first.
-  See `.opt/failed.md` for the parked-campaign notes.
+- **M2 — first real CVE candidate (parked twice)**: attempted on
+  TP-Link AX6000 v2 firmware. v0 hit the linear-flow ceiling
+  (`UnsupportedTerminator(CBranch)`); v1 lifted that ceiling
+  (CBranch + Indirect + Phi-skip + worklist 4096), then hit the
+  inter-procedural ceiling. Brute SMT scan over 3856 functions
+  across 5 ARM32 daemons (tdpServer, miniupnpd, dnsmasq, dropbear,
+  avahi-daemon) found ZERO functions with both attacker source
+  and dangerous sink in the same scope — every real flow takes
+  `recv() in handler() → helper(buf) → strcpy() in helper()`,
+  source and sink live in different functions.
+  v0 surfaced four rsleigh bugs (all fixed on master: printer
+  O(N²) hang, ARM32 ELF PLT decoder, ARM32 CFG offset mask,
+  retroactive hang test). v1 added CBranch + Indirect support and
+  proved the v0+v1 walker is panic-free at scale (3856-function
+  clean walk across the firmware's network surface).
+  M2 closure now needs v2: callee summaries / inter-procedural
+  reasoning. See `.opt/failed.md` for both parked-campaign notes.
 
 After M2 lands, the branch merges to master with the feature still
 default-OFF. Distros and library users not opting in pay no z3
