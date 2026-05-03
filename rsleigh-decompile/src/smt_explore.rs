@@ -246,11 +246,19 @@ pub struct TaintPath<'a> {
 }
 
 /// Maximum number of CBranch arms followed from entry to any path
-/// before the walker bails. Keeps worklist size bounded — at depth
-/// k the worst case is 2^k explored arms. k=4 → 16 paths max per
-/// function, which is plenty for the M2-class targets v1 chases
-/// without blowing up on giant dispatch tables.
-pub const MAX_BRANCH_DEPTH: u32 = 4;
+/// before the walker bails. Real router-firmware functions have
+/// 20+ branches before reaching a sink; 4 was too low. 32 covers
+/// the realistic depth without burning memory because we also cap
+/// the global worklist size.
+pub const MAX_BRANCH_DEPTH: u32 = 32;
+
+/// Hard cap on total `WalkState`s the worklist can hold. With
+/// MAX_BRANCH_DEPTH=32 the unbounded worst case is 2^32 — never
+/// happens in practice because most CBranches reconverge, but we
+/// still ceiling at this number to keep memory bounded on
+/// pathological dispatch tables. When the cap is hit, surplus
+/// states are dropped and the rejection reason is recorded.
+pub const MAX_WORKLIST_SIZE: usize = 4096;
 
 /// One in-progress walk state in the v1 collector's worklist.
 struct WalkState<'a> {
@@ -347,7 +355,7 @@ pub fn collect_paths<'a>(
                         });
                     }
                     Stmt::Call { target, args, out } => {
-                        match classify_call(idx, target, args, *out, imports) {
+                        match classify_call(idx, target, args, *out, imports, &ssa.vars) {
                             Ok(ev) => state.events.push(ev),
                             Err(e) => {
                                 last_reject = Some(e);
@@ -370,7 +378,7 @@ pub fn collect_paths<'a>(
                     args,
                     out,
                     fallthrough,
-                } => match classify_call(term_idx, target, args, *out, imports) {
+                } => match classify_call(term_idx, target, args, *out, imports, &ssa.vars) {
                     Ok(ev) => {
                         state.events.push(ev);
                         state.current = *fallthrough;
@@ -400,8 +408,12 @@ pub fn collect_paths<'a>(
                     taken,
                     fallthrough,
                 } => {
-                    // Spawn a copy on the fallthrough arm; we keep
-                    // walking on the taken arm in this iteration.
+                    // Spawn a copy on the fallthrough arm; keep
+                    // walking on the taken arm. Two caps: depth
+                    // (MAX_BRANCH_DEPTH) and global worklist size
+                    // (MAX_WORKLIST_SIZE). Surplus states are
+                    // dropped — a real CVE candidate either fits in
+                    // the budget or surfaces in a later pass.
                     if (state.branch_decisions.len() as u32) >= MAX_BRANCH_DEPTH {
                         last_reject =
                             Some(PathRejection::UnsupportedTerminator("depth limit"));
@@ -409,18 +421,23 @@ pub fn collect_paths<'a>(
                         break;
                     }
                     let block_addr = block.addr;
-                    let mut alt = WalkState {
-                        current: *fallthrough,
-                        events: state.events.clone(),
-                        visited: state.visited.clone(),
-                        branch_decisions: state.branch_decisions.clone(),
-                    };
-                    alt.branch_decisions.push(BranchDecision {
-                        block_addr,
-                        cond: *cond,
-                        taken: false,
-                    });
-                    worklist.push(alt);
+                    if worklist.len() < MAX_WORKLIST_SIZE {
+                        let mut alt = WalkState {
+                            current: *fallthrough,
+                            events: state.events.clone(),
+                            visited: state.visited.clone(),
+                            branch_decisions: state.branch_decisions.clone(),
+                        };
+                        alt.branch_decisions.push(BranchDecision {
+                            block_addr,
+                            cond: *cond,
+                            taken: false,
+                        });
+                        worklist.push(alt);
+                    } else {
+                        last_reject =
+                            Some(PathRejection::UnsupportedTerminator("worklist cap"));
+                    }
 
                     state.current = *taken;
                     state.branch_decisions.push(BranchDecision {
@@ -430,8 +447,14 @@ pub fn collect_paths<'a>(
                     });
                 }
                 SsaTerminator::Indirect(_) => {
-                    last_reject =
-                        Some(PathRejection::UnsupportedTerminator("Indirect"));
+                    // Unresolved register-indirect branch — usually
+                    // a tail-call or a jump-table dispatch we can't
+                    // statically follow. Treat as a path endpoint
+                    // rather than rejecting outright: any Source→
+                    // Sink pair collected before this point is still
+                    // a valid candidate for SAT. v2 will resolve
+                    // jump tables through Load(GOT_table + idx).
+                    completed.push(state);
                     keep_walking = false;
                     break;
                 }
@@ -471,16 +494,84 @@ pub fn collect_paths<'a>(
     Ok(paths)
 }
 
+/// v1.N1: resolve an Indirect call's target VarId to a constant
+/// address by walking the SSA expression cone. Two patterns
+/// supported:
+///   1. Const(addr) directly — fully resolved.
+///   2. Load(addr_var) where addr_var resolves to Const(slot_addr)
+///      AND `imports` knows that slot's name. Common for GOT-based
+///      calls and Mach-O lazy-binding stubs.
+///
+/// Returns `Some(addr)` whose lookup in imports yields a configured
+/// Source or Sink, else `None`. v2 extends to BinOp(base, idx) for
+/// vtable-style dispatch.
+fn resolve_indirect_target(
+    target_vn: &pcode_ir::Varnode,
+    vars: &[crate::ir::VarDef],
+    imports: &HashMap<u64, String>,
+) -> Option<u64> {
+    // Find a VarDef whose varnode matches the indirect target's
+    // varnode. Walk Var-chains and Load(Const) edges up to a depth
+    // budget. Return the first Const-or-Load-resolved address whose
+    // imports.get matches a Source or Sink spec.
+    let mut visited: std::collections::HashSet<u32> =
+        std::collections::HashSet::new();
+    let mut stack: Vec<u32> = vars
+        .iter()
+        .rev()
+        .filter(|d| d.varnode == *target_vn)
+        .map(|d| d.id.0)
+        .collect();
+    while let Some(id) = stack.pop() {
+        if !visited.insert(id) {
+            continue;
+        }
+        if visited.len() > 32 {
+            break;
+        }
+        let Some(def) = vars.get(id as usize) else {
+            continue;
+        };
+        match &def.expr {
+            crate::ir::Expr::Const(c, _) => {
+                let addr = *c & 0x0FFF_FFFF;
+                if imports.contains_key(&addr) || imports.contains_key(c) {
+                    return Some(if imports.contains_key(c) { *c } else { addr });
+                }
+            }
+            crate::ir::Expr::Var(inner) => stack.push(inner.0),
+            crate::ir::Expr::Load(addr_var) => {
+                if let Some(addr_def) = vars.get(addr_var.0 as usize) {
+                    if let crate::ir::Expr::Const(slot, _) = addr_def.expr {
+                        let candidates = [slot, slot & 0x0FFF_FFFF];
+                        for c in candidates {
+                            if imports.contains_key(&c) {
+                                return Some(c);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn classify_call<'a>(
     stmt_index: usize,
     target: &CallTarget,
     args: &[VarId],
     out: Option<VarId>,
     imports: &HashMap<u64, String>,
+    vars: &[crate::ir::VarDef],
 ) -> Result<TaintEvent<'a>, PathRejection> {
+    // v1.N1: try to resolve Indirect call targets through the SSA
+    // cone. Direct(addr) is the trivial case; Indirect(vn) attempts
+    // a Var-chain + Load(Const) walk for GOT-style dispatch.
     let direct_addr = match target {
         CallTarget::Direct(a) => Some(*a),
-        CallTarget::Indirect(_) => None,
+        CallTarget::Indirect(vn) => resolve_indirect_target(vn, vars, imports),
     };
     let kind = match direct_addr.and_then(|a| resolve_call(a, imports)) {
         Some(SpecRef::Source(s)) => {
