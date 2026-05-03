@@ -230,76 +230,86 @@ pub struct TaintPath<'a> {
     pub events: Vec<TaintEvent<'a>>,
 }
 
-/// Walk the entry block of `ssa`, classify every statement against
-/// the import map, and pair each Source with the next Sink. Returns
-/// the collected paths, or `PathRejection` if the walk hits an
-/// out-of-scope construct (Phi, indirect call, non-Call terminator).
+/// Walk a linear fallthrough chain from the entry block, classify
+/// every Stmt::Call and SsaTerminator::Call against the import map,
+/// and pair each Source with the next Sink. Returns the collected
+/// paths, or `PathRejection` if the walk hits an out-of-scope
+/// construct (Phi, indirect call, branching terminator).
 ///
-/// v0 invariant: only the entry block is walked. The terminator must
-/// be one of:
-///   - `Call { target: Direct(addr), .. }` whose target IS a Sink
-///     (the sink invocation lives in the terminator slot, e.g. a
-///     tail call), OR
-///   - any other terminator → reject as `UnsupportedTerminator`,
-///     UNLESS at least one Sink already fired inside `stmts`.
+/// v0 invariant: NO branching. The walk follows
+/// `Call { fallthrough }` and `Fallthrough(next)` terminators until
+/// it hits Return / Branch (rejected) / CBranch (rejected) /
+/// Indirect (rejected). Real CFGs split a block at every Call, so a
+/// "single basic block" rule would reject every realistic fixture.
+/// What v0 forbids is path *branching*, not block boundaries.
 ///
-/// In other words: every accepted path's Sink event lies either in
-/// `stmts` or in the terminator's call slot. No second-block walk.
+/// Loop guard: `visited` BlockId set. A revisit aborts the walk
+/// with `UnsupportedTerminator("loop back-edge")`.
 pub fn collect_paths<'a>(
     ssa: &'a SsaCfg,
     imports: &HashMap<u64, String>,
 ) -> Result<Vec<TaintPath<'a>>, PathRejection> {
-    let entry = ssa
-        .blocks
-        .iter()
-        .find(|b| b.id == ssa.entry)
-        .ok_or(PathRejection::UnsupportedTerminator("missing entry block"))?;
+    let mut events: Vec<TaintEvent<'a>> = Vec::new();
+    let mut visited: std::collections::HashSet<crate::ir::BlockId> =
+        std::collections::HashSet::new();
+    let mut current = ssa.entry;
 
-    let mut events: Vec<TaintEvent<'a>> = Vec::with_capacity(entry.stmts.len() + 1);
+    loop {
+        if !visited.insert(current) {
+            return Err(PathRejection::UnsupportedTerminator("loop back-edge"));
+        }
+        let block = ssa
+            .blocks
+            .iter()
+            .find(|b| b.id == current)
+            .ok_or(PathRejection::UnsupportedTerminator("dangling block id"))?;
 
-    for (idx, stmt) in entry.stmts.iter().enumerate() {
-        match stmt {
-            Stmt::Assign(v) => {
-                if matches!(ssa.vars.get(v.0 as usize).map(|d| &d.expr), Some(crate::ir::Expr::Phi(_))) {
-                    return Err(PathRejection::PhiInPath);
+        for (idx, stmt) in block.stmts.iter().enumerate() {
+            match stmt {
+                Stmt::Assign(v) => {
+                    if matches!(ssa.vars.get(v.0 as usize).map(|d| &d.expr), Some(crate::ir::Expr::Phi(_))) {
+                        return Err(PathRejection::PhiInPath);
+                    }
+                    events.push(TaintEvent { stmt_index: idx, kind: TaintEventKind::Assign(*v) });
                 }
-                events.push(TaintEvent { stmt_index: idx, kind: TaintEventKind::Assign(*v) });
-            }
-            Stmt::Store { addr, val } => {
-                events.push(TaintEvent {
-                    stmt_index: idx,
-                    kind: TaintEventKind::Store { addr: *addr, val: *val },
-                });
-            }
-            Stmt::Call { target, args, out } => {
-                events.push(classify_call(idx, target, args, *out, imports)?);
+                Stmt::Store { addr, val } => {
+                    events.push(TaintEvent {
+                        stmt_index: idx,
+                        kind: TaintEventKind::Store { addr: *addr, val: *val },
+                    });
+                }
+                Stmt::Call { target, args, out } => {
+                    events.push(classify_call(idx, target, args, *out, imports)?);
+                }
             }
         }
-    }
 
-    // Terminator handling: a terminator-Call may itself be a Sink.
-    let term_idx = entry.stmts.len();
-    match &entry.terminator {
-        SsaTerminator::Call { target, args, out, .. } => {
-            events.push(classify_call(term_idx, target, args, *out, imports)?);
-        }
-        SsaTerminator::Return(_) => {
-            // Tail of straight-line block — fine, nothing more to record.
-        }
-        SsaTerminator::Fallthrough(_) | SsaTerminator::Branch(_) => {
-            // No paths fired inside this block, and the terminator
-            // exits to another block. v0 rejects.
-            if !events.iter().any(|e| matches!(e.kind, TaintEventKind::SinkCall { .. })) {
-                return Err(PathRejection::UnsupportedTerminator("Fallthrough/Branch"));
+        let term_idx = block.stmts.len();
+        match &block.terminator {
+            SsaTerminator::Call { target, args, out, fallthrough } => {
+                events.push(classify_call(term_idx, target, args, *out, imports)?);
+                current = *fallthrough;
+                continue;
             }
-            // A sink already fired earlier — surface accepted paths,
-            // ignore the unreachable continuation in v0.
-        }
-        SsaTerminator::CBranch { .. } => {
-            return Err(PathRejection::UnsupportedTerminator("CBranch"));
-        }
-        SsaTerminator::Indirect(_) => {
-            return Err(PathRejection::UnsupportedTerminator("Indirect"));
+            SsaTerminator::Fallthrough(next) => {
+                current = *next;
+                continue;
+            }
+            SsaTerminator::Return(_) => {
+                break;
+            }
+            SsaTerminator::Branch(_) => {
+                if !events.iter().any(|e| matches!(e.kind, TaintEventKind::SinkCall { .. })) {
+                    return Err(PathRejection::UnsupportedTerminator("Branch"));
+                }
+                break;
+            }
+            SsaTerminator::CBranch { .. } => {
+                return Err(PathRejection::UnsupportedTerminator("CBranch"));
+            }
+            SsaTerminator::Indirect(_) => {
+                return Err(PathRejection::UnsupportedTerminator("Indirect"));
+            }
         }
     }
 
@@ -376,28 +386,83 @@ fn classify_call<'a>(
     Ok(TaintEvent { stmt_index, kind })
 }
 
-/// True if `a`'s VarDef chain (following `Expr::Var(inner)`)
-/// terminates at `b`, or `a == b` directly. v0 lineage check.
-fn varid_lineage_eq(a: VarId, b: VarId, vars: &[crate::ir::VarDef]) -> bool {
+/// Map of last-Store addresses (as Varnodes) to the VarId of the
+/// stored value. Built once per `solve` invocation by walking the
+/// path's events. Used by `varid_lineage_eq` to follow Load(addr)
+/// back to the value most recently stored at that addr.
+type MemMap = HashMap<pcode_ir::Varnode, VarId>;
+
+fn build_mem_map(events: &[TaintEvent<'_>], vars: &[crate::ir::VarDef]) -> MemMap {
+    let mut m = MemMap::new();
+    for ev in events {
+        if let TaintEventKind::Store { addr, val } = ev.kind {
+            if let Some(addr_vn) = vars.get(addr.0 as usize).map(|d| d.varnode) {
+                m.insert(addr_vn, val);
+            }
+        }
+    }
+    m
+}
+
+/// True if `a` and `b` share a common logical location after
+/// following SSA `Var` chains AND a single layer of Store→Load
+/// indirection through `mem`. Lifters split a buffer pointer into
+/// many SSA versions across Store/Load round-trips; without the
+/// memory map this lineage trace would miss every realistic flow.
+fn varid_lineage_eq(
+    a: VarId,
+    b: VarId,
+    vars: &[crate::ir::VarDef],
+    mem: &MemMap,
+) -> bool {
     if a == b {
         return true;
     }
-    let mut current = a;
-    for _ in 0..32 {
-        let Some(def) = vars.get(current.0 as usize) else {
-            break;
-        };
-        match &def.expr {
-            crate::ir::Expr::Var(inner) => {
-                if *inner == b {
-                    return true;
-                }
-                current = *inner;
-            }
-            _ => break,
+    let chain_a = chain_varnodes(a, vars, mem);
+    let chain_b = chain_varnodes(b, vars, mem);
+    for vn_a in &chain_a {
+        if chain_b.iter().any(|vn_b| vn_a == vn_b) {
+            return true;
         }
     }
     false
+}
+
+/// Collect the set of Varnodes encountered while unwinding `start`
+/// through `Expr::Var` chains and (one-step) Store→Load redirection
+/// via `mem`. Bounded depth so cyclic IRs don't hang the v0 prover.
+fn chain_varnodes(
+    start: VarId,
+    vars: &[crate::ir::VarDef],
+    mem: &MemMap,
+) -> Vec<pcode_ir::Varnode> {
+    let mut out = Vec::new();
+    let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut stack = vec![start];
+    while let Some(current) = stack.pop() {
+        if !visited.insert(current.0) {
+            continue;
+        }
+        if visited.len() > 64 {
+            break;
+        }
+        let Some(def) = vars.get(current.0 as usize) else {
+            continue;
+        };
+        out.push(def.varnode);
+        match &def.expr {
+            crate::ir::Expr::Var(inner) => stack.push(*inner),
+            crate::ir::Expr::Load(addr) => {
+                if let Some(addr_vn) = vars.get(addr.0 as usize).map(|d| d.varnode) {
+                    if let Some(stored) = mem.get(&addr_vn).copied() {
+                        stack.push(stored);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// v0 SAT prover: takes a `TaintPath` produced by `collect_paths`,
@@ -435,7 +500,8 @@ pub fn solve(path: &TaintPath, ssa: &crate::ir::SsaCfg) -> SmtFinding {
     let (Some(src), Some(snk)) = (source_var, sink_var) else {
         return SmtFinding::Unsupported("source/sink slot missing");
     };
-    if !varid_lineage_eq(snk, src, &ssa.vars) {
+    let mem = build_mem_map(&path.events, &ssa.vars);
+    if !varid_lineage_eq(snk, src, &ssa.vars, &mem) {
         return SmtFinding::NotReachable;
     }
 
@@ -927,34 +993,66 @@ mod tests {
             mk_var(4, Expr::Var(VarId(3))),
             mk_var(5, Expr::Var(VarId(4))),
         ];
-        assert!(varid_lineage_eq(VarId(5), VarId(2), &vars));
-        assert!(!varid_lineage_eq(VarId(5), VarId(0), &vars));
+        let mem = MemMap::new();
+        assert!(varid_lineage_eq(VarId(5), VarId(2), &vars, &mem));
+        assert!(!varid_lineage_eq(VarId(5), VarId(0), &vars, &mem));
+    }
+
+    #[cfg(feature = "smt")]
+    #[test]
+    fn lineage_eq_follows_store_then_load() {
+        // Store v1 -> mem[addr=v0]; Load(v0) → should resolve to v1.
+        // lineage_eq(load_var, v1) must be true via the memory map.
+        let vars = vec![
+            mk_var(0, Expr::Const(0x1000, 8)),     // addr
+            mk_var(1, Expr::Const(0xdeadbeef, 8)), // stored value
+            mk_var(2, Expr::Load(VarId(0))),       // load from same addr
+        ];
+        let mut mem = MemMap::new();
+        mem.insert(vars[0].varnode, VarId(1));
+        // Without memmap entry, lineage fails.
+        assert!(!varid_lineage_eq(VarId(2), VarId(1), &vars, &MemMap::new()));
+        // With memmap entry, lineage holds.
+        assert!(varid_lineage_eq(VarId(2), VarId(1), &vars, &mem));
     }
 
     #[test]
     fn sink_in_terminator_call_slot() {
-        // strcpy lives in the SsaTerminator::Call slot (tail-call
-        // shape). Path collector must surface it.
+        // strcpy lives in the SsaTerminator::Call slot. Path
+        // collector must walk the Call terminator and continue to
+        // the fallthrough block (which here just returns).
         let vars = vec![
             mk_var(0, Expr::Const(0, 8)),
             mk_var(1, Expr::Const(0x4000, 8)),
             mk_var(2, Expr::Const(0x5000, 8)),
         ];
-        let stmts = vec![Stmt::Call {
-            target: CallTarget::Direct(0x1000),
-            args: vec![VarId(0), VarId(1), VarId(0), VarId(0)],
-            out: None,
-        }];
-        let block = block_with_term(
-            stmts,
-            SsaTerminator::Call {
+        let block0 = SsaBlock {
+            id: BlockId(0),
+            addr: 0,
+            stmts: vec![Stmt::Call {
+                target: CallTarget::Direct(0x1000),
+                args: vec![VarId(0), VarId(1), VarId(0), VarId(0)],
+                out: None,
+            }],
+            terminator: SsaTerminator::Call {
                 target: CallTarget::Direct(0x2000),
                 args: vec![VarId(2), VarId(1)],
                 out: None,
-                fallthrough: BlockId(0),
+                fallthrough: BlockId(1),
             },
-        );
-        let ssa = cfg(vars, block);
+        };
+        let block1 = SsaBlock {
+            id: BlockId(1),
+            addr: 0x10,
+            stmts: vec![],
+            terminator: SsaTerminator::Return(None),
+        };
+        let ssa = SsaCfg {
+            blocks: vec![block0, block1],
+            vars,
+            entry: BlockId(0),
+            diagnostics: Vec::<Diagnostic>::new(),
+        };
         let imports = imports_with(&[(0x1000, "recv"), (0x2000, "strcpy")]);
 
         let paths = collect_paths(&ssa, &imports).expect("should accept terminator-Call sink");
