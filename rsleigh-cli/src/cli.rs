@@ -127,6 +127,7 @@ pub fn entrypoint() {
         eprintln!("  rsleigh <binary> --search --const <hex> Find functions with constant");
         eprintln!("  rsleigh <binary> --seh-fixpoint      Apply SEH-driven SMC patches until fixpoint, report new functions");
         eprintln!("  rsleigh <binary> --vulnscan          Scan for vulnerability patterns");
+        eprintln!("  rsleigh <binary> --smt-explore <func> [--json]  SMT taint-flow CVE proof (requires --features smt)");
         eprintln!("  rsleigh <binary> --ioc [--json]      Extract IOCs (URLs, IPs, paths, registry keys)");
         eprintln!("  rsleigh <binary> --xor-strings [--json]  Brute single-byte XOR string recovery");
         eprintln!("  rsleigh <binary> --sigcheck [--json] Parse Authenticode signature (signer, timestamp, chain)");
@@ -1468,7 +1469,8 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
     let pcode_json = args.iter().any(|a| a == "--pcode-json");
     let ssa_json = args.iter().any(|a| a == "--ssa-json");
     let opaque_scan = args.iter().any(|a| a == "--opaque-scan");
-    if pcode_json || ssa_json || opaque_scan {
+    let smt_explore = args.iter().any(|a| a == "--smt-explore");
+    if pcode_json || ssa_json || opaque_scan || smt_explore {
         for name in &targets {
             let func_addr =
                 if let Some(hex) = name.strip_prefix("0x").or_else(|| name.strip_prefix("0X")) {
@@ -1620,6 +1622,9 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                         );
                     }
                 }
+            }
+            if smt_explore {
+                run_smt_explore(&data, arch, func_addr, &func_name, &insts, json_mode);
             }
         }
         return;
@@ -1825,6 +1830,136 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
             }))
             .unwrap()
         );
+    }
+}
+
+/// `--smt-explore <func>`: build SSA, walk straight-line for
+/// Source -> Sink pairs, ask Z3 to produce a SAT trigger or fail.
+/// Output: human-readable per-path verdict by default, JSON with
+/// `--json`.
+///
+/// Without `--features smt` this prints a clear "rebuild" hint and
+/// exits zero (so scripted callers can probe for support).
+fn run_smt_explore(
+    data: &[u8],
+    arch: rsleigh_api::Architecture,
+    func_addr: u64,
+    func_name: &str,
+    insts: &[(u64, pcode_ir::Instruction)],
+    json: bool,
+) {
+    let cfg = rsleigh_decompile::cfg::build_cfg(insts);
+    let cc = match arch {
+        rsleigh_api::Architecture::X86_64
+            if rsleigh_decompile::go_pclntab::parse(data)
+                .keys()
+                .next()
+                .is_some() =>
+        {
+            rsleigh_decompile::fold::CallingConv::GoAmd64
+        }
+        rsleigh_api::Architecture::X86_32 | rsleigh_api::Architecture::MIPS32 => {
+            rsleigh_decompile::fold::CallingConv::Cdecl32
+        }
+        rsleigh_api::Architecture::ARM32 => rsleigh_decompile::fold::CallingConv::Arm32,
+        rsleigh_api::Architecture::AArch64 => rsleigh_decompile::fold::CallingConv::AArch64,
+        _ => rsleigh_decompile::fold::CallingConv::SysV,
+    };
+    let mut ssa = rsleigh_decompile::ssa::build_ssa_with_cc(&cfg, cc);
+    rsleigh_decompile::fold::fold_with_cc(&mut ssa, cc);
+
+    let imports = rsleigh_decompile::imports::resolve_imports(data);
+
+    use rsleigh_decompile::smt_explore::{collect_paths, solve, PathRejection, SmtFinding};
+
+    let paths = match collect_paths(&ssa, &imports) {
+        Ok(p) => p,
+        Err(reason) => {
+            if json {
+                let payload = serde_json::json!({
+                    "function": func_name,
+                    "address":  format!("0x{:x}", func_addr),
+                    "rejected": format!("{:?}", reason),
+                    "paths":    [],
+                });
+                println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+            } else {
+                println!(
+                    "// {func_name} 0x{func_addr:x} — no v0 paths ({})",
+                    match reason {
+                        PathRejection::UnsupportedTerminator(t) => format!("UnsupportedTerminator({t})"),
+                        PathRejection::PhiInPath => "PhiInPath".to_string(),
+                        PathRejection::IndirectCall => "IndirectCall".to_string(),
+                        PathRejection::NoSinkFound => "NoSinkFound".to_string(),
+                    }
+                );
+            }
+            return;
+        }
+    };
+
+    let mut findings = Vec::with_capacity(paths.len());
+    for path in &paths {
+        let verdict = solve(path, &ssa);
+        findings.push(serde_json::json!({
+            "source":  path.source.name,
+            "source_event": path.source_event,
+            "sink":    path.sink.name,
+            "sink_event":   path.sink_event,
+            "kind":    format!("{:?}", path.sink.kind),
+            "verdict": match &verdict {
+                SmtFinding::Reachable { input_bytes } => serde_json::json!({
+                    "kind":  "Reachable",
+                    "input": input_bytes
+                        .iter()
+                        .map(|(o, b)| serde_json::json!({
+                            "offset": o,
+                            "byte":   format!("0x{:02x}", b),
+                        }))
+                        .collect::<Vec<_>>(),
+                }),
+                SmtFinding::NotReachable => serde_json::json!({ "kind": "NotReachable" }),
+                SmtFinding::Unsupported(why) => serde_json::json!({
+                    "kind":   "Unsupported",
+                    "reason": *why,
+                }),
+            },
+        }));
+    }
+
+    if json {
+        let payload = serde_json::json!({
+            "function": func_name,
+            "address":  format!("0x{:x}", func_addr),
+            "paths":    findings,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+    } else {
+        println!("// {func_name} 0x{func_addr:x} — {} v0 path(s)", paths.len());
+        for (i, path) in paths.iter().enumerate() {
+            let verdict = solve(path, &ssa);
+            print!(
+                "  [{i}] {} -> {}  ({:?})  ",
+                path.source.name, path.sink.name, path.sink.kind
+            );
+            match verdict {
+                SmtFinding::Reachable { input_bytes } => {
+                    let preview: String = input_bytes
+                        .iter()
+                        .take(8)
+                        .map(|(_, b)| format!("{:02x}", b))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    println!(
+                        "REACHABLE — trigger: {}{}",
+                        preview,
+                        if input_bytes.len() > 8 { " ..." } else { "" }
+                    );
+                }
+                SmtFinding::NotReachable => println!("not reachable"),
+                SmtFinding::Unsupported(why) => println!("unsupported ({why})"),
+            }
+        }
     }
 }
 
