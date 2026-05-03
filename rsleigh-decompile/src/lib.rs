@@ -40,6 +40,7 @@ mod signatures_libc;
 mod signatures_msvcrt;
 mod signatures_python;
 mod signatures_win32;
+pub mod smt_explore;
 pub mod smt_verify;
 pub mod ssa;
 pub mod structure;
