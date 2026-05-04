@@ -204,11 +204,19 @@ pub enum TaintEventKind<'a> {
         spec: &'a SourceSpec,
         args: Vec<VarId>,
         out: Option<VarId>,
+        /// v2.V8: empty for direct (intra-function) source calls.
+        /// Populated when this event was synthesized from a callee's
+        /// FunctionSummary — the chain records the call-site PCs
+        /// traversed from the analysed function down to the actual
+        /// source invocation.
+        call_chain: Vec<u64>,
     },
     SinkCall {
         spec: &'a SinkSpec,
         args: Vec<VarId>,
         out: Option<VarId>,
+        /// v2.V8: see SourceCall::call_chain.
+        call_chain: Vec<u64>,
     },
     OtherCall {
         target_addr: Option<u64>,
@@ -290,6 +298,25 @@ pub fn collect_paths<'a>(
     ssa: &'a SsaCfg,
     imports: &HashMap<u64, String>,
 ) -> Result<Vec<TaintPath<'a>>, PathRejection> {
+    let empty: HashMap<crate::callgraph::FuncId, crate::function_summary::FunctionSummary> =
+        HashMap::new();
+    collect_paths_with_summaries(ssa, imports, &empty)
+}
+
+/// v2.V8: inter-procedural path collection. Same walker as
+/// `collect_paths` but on every direct call to a known function
+/// (FuncId in `summaries`, not a library import) the walker pushes
+/// synthetic SourceCall / SinkCall events onto the path so the SAT
+/// prover can reason about callee taint without inlining the
+/// callee's body.
+///
+/// Synthetic events carry a `call_chain` recording the caller PCs
+/// traversed; v9 surfaces this in the JSON output.
+pub fn collect_paths_with_summaries<'a>(
+    ssa: &'a SsaCfg,
+    imports: &HashMap<u64, String>,
+    summaries: &HashMap<crate::callgraph::FuncId, crate::function_summary::FunctionSummary>,
+) -> Result<Vec<TaintPath<'a>>, PathRejection> {
     let initial = WalkState {
         current: ssa.entry,
         events: Vec::new(),
@@ -356,7 +383,19 @@ pub fn collect_paths<'a>(
                     }
                     Stmt::Call { target, args, out } => {
                         match classify_call(idx, target, args, *out, imports, &ssa.vars) {
-                            Ok(ev) => state.events.push(ev),
+                            Ok(ev) => {
+                                state.events.push(ev);
+                                synthesize_summary_events(
+                                    idx,
+                                    target,
+                                    args,
+                                    block.addr,
+                                    imports,
+                                    &ssa.vars,
+                                    summaries,
+                                    &mut state.events,
+                                );
+                            }
                             Err(e) => {
                                 last_reject = Some(e);
                                 phi_or_indirect = true;
@@ -381,6 +420,16 @@ pub fn collect_paths<'a>(
                 } => match classify_call(term_idx, target, args, *out, imports, &ssa.vars) {
                     Ok(ev) => {
                         state.events.push(ev);
+                        synthesize_summary_events(
+                            term_idx,
+                            target,
+                            args,
+                            block.addr,
+                            imports,
+                            &ssa.vars,
+                            summaries,
+                            &mut state.events,
+                        );
                         state.current = *fallthrough;
                     }
                     Err(e) => {
@@ -582,14 +631,24 @@ fn classify_call<'a>(
                 .iter()
                 .find(|sp| sp.name == s.name)
                 .expect("resolve_call returned a SourceSpec not in DEFAULT_SOURCES");
-            TaintEventKind::SourceCall { spec, args: args.to_vec(), out }
+            TaintEventKind::SourceCall {
+                spec,
+                args: args.to_vec(),
+                out,
+                call_chain: Vec::new(),
+            }
         }
         Some(SpecRef::Sink(s)) => {
             let spec = DEFAULT_SINKS
                 .iter()
                 .find(|sp| sp.name == s.name)
                 .expect("resolve_call returned a SinkSpec not in DEFAULT_SINKS");
-            TaintEventKind::SinkCall { spec, args: args.to_vec(), out }
+            TaintEventKind::SinkCall {
+                spec,
+                args: args.to_vec(),
+                out,
+                call_chain: Vec::new(),
+            }
         }
         None => {
             if direct_addr.is_none() {
@@ -603,6 +662,100 @@ fn classify_call<'a>(
         }
     };
     Ok(TaintEvent { stmt_index, kind })
+}
+
+/// v2.V8: when the walker hits a direct call whose target is a
+/// FuncId with a built FunctionSummary (not a library import),
+/// expand the callee's recorded sources/sinks into synthetic events
+/// at the caller's call site. The args list is reconstructed so
+/// `solve` can look up the watched VarId at the spec's slot index;
+/// non-watched slots are filler `VarId(0)` because the SAT prover
+/// only reads the watched slot.
+fn synthesize_summary_events<'a>(
+    stmt_index: usize,
+    target: &CallTarget,
+    caller_args: &[VarId],
+    caller_addr: u64,
+    imports: &HashMap<u64, String>,
+    vars: &[crate::ir::VarDef],
+    summaries: &HashMap<crate::callgraph::FuncId, crate::function_summary::FunctionSummary>,
+    events: &mut Vec<TaintEvent<'a>>,
+) {
+    let direct_addr = match target {
+        CallTarget::Direct(a) => Some(*a),
+        CallTarget::Indirect(vn) => resolve_indirect_target(vn, vars, imports),
+    };
+    let Some(addr) = direct_addr else {
+        return;
+    };
+    if imports.contains_key(&addr) {
+        return;
+    }
+    let Some(callee_sum) = summaries.get(&crate::callgraph::FuncId(addr)) else {
+        return;
+    };
+    for src in &callee_sum.sources {
+        let Some(var) = synth_pick_caller_var(&src.tainted_caller_slots, caller_args) else {
+            continue;
+        };
+        let watched_idx = match src.source.tainted {
+            AbiSlot::Arg(n) => n as usize,
+            AbiSlot::Ret => continue, // Ret-tainted sources can't be retargeted via arg slot
+        };
+        let mut args_vec = vec![VarId(0); watched_idx + 1];
+        args_vec[watched_idx] = var;
+        let spec = DEFAULT_SOURCES
+            .iter()
+            .find(|sp| sp.name == src.source.name)
+            .expect("summary source not in DEFAULT_SOURCES");
+        events.push(TaintEvent {
+            stmt_index,
+            kind: TaintEventKind::SourceCall {
+                spec,
+                args: args_vec,
+                out: None,
+                call_chain: vec![caller_addr, src.call_site],
+            },
+        });
+    }
+    for snk in &callee_sum.sinks {
+        let Some(var) = synth_pick_caller_var(&snk.tainted_caller_slots, caller_args) else {
+            continue;
+        };
+        let watched_idx = match snk.sink.watched {
+            AbiSlot::Arg(n) => n as usize,
+            AbiSlot::Ret => continue,
+        };
+        let mut args_vec = vec![VarId(0); watched_idx + 1];
+        args_vec[watched_idx] = var;
+        let spec = DEFAULT_SINKS
+            .iter()
+            .find(|sp| sp.name == snk.sink.name)
+            .expect("summary sink not in DEFAULT_SINKS");
+        events.push(TaintEvent {
+            stmt_index,
+            kind: TaintEventKind::SinkCall {
+                spec,
+                args: args_vec,
+                out: None,
+                call_chain: vec![caller_addr, snk.call_site],
+            },
+        });
+    }
+}
+
+fn synth_pick_caller_var(
+    tainted_slots: &[AbiSlot],
+    caller_args: &[VarId],
+) -> Option<VarId> {
+    for slot in tainted_slots {
+        if let AbiSlot::Arg(n) = slot {
+            if let Some(v) = caller_args.get(*n as usize) {
+                return Some(*v);
+            }
+        }
+    }
+    None
 }
 
 /// Map of last-Store addresses (as Varnodes) to the VarId of the
@@ -1369,6 +1522,78 @@ mod tests {
                     .any(|(_, b)| matches!(*b, b';' | b'&' | b'|')));
             }
             other => panic!("expected Reachable with shell metachar, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "smt")]
+    #[test]
+    fn v8_inter_procedural_summary_synthesizes_reachable_path() {
+        // outer(buf) → helper(buf). helper's summary records that
+        // its arg 0 receives recv()'s output AND feeds strcpy()'s
+        // watched slot. The walker must synthesize SourceCall +
+        // SinkCall events at the outer→helper site so SAT can prove
+        // taint reaches the strcpy without the helper body present.
+        use crate::callgraph::FuncId;
+        use crate::function_summary::{FunctionSummary, SinkInvocation, SourceEmission};
+
+        let vars = vec![
+            mk_var(0, Expr::Const(0x4000, 8)), // buf — outer's arg 0
+        ];
+        // outer body: a single Stmt::Call to helper(VarId 0).
+        let outer = SsaCfg {
+            blocks: vec![SsaBlock {
+                id: BlockId(0),
+                addr: 0x1000,
+                stmts: vec![Stmt::Call {
+                    target: CallTarget::Direct(0xBEEF),
+                    args: vec![VarId(0)],
+                    out: None,
+                }],
+                terminator: SsaTerminator::Return(None),
+            }],
+            vars,
+            entry: BlockId(0),
+            diagnostics: Vec::<Diagnostic>::new(),
+        };
+
+        // Imports: NO entry for 0xBEEF — that's the helper FuncId.
+        let imports: HashMap<u64, String> = HashMap::new();
+
+        // helper's pre-built summary (V6 would have produced this).
+        let recv_spec = DEFAULT_SOURCES.iter().find(|s| s.name == "recv").copied().unwrap();
+        let strcpy_spec = DEFAULT_SINKS.iter().find(|s| s.name == "strcpy").copied().unwrap();
+        let helper_summary = FunctionSummary {
+            func: FuncId(0xBEEF),
+            sources: vec![SourceEmission {
+                source: recv_spec,
+                call_site: 0xBEEF + 4,
+                tainted_caller_slots: vec![AbiSlot::Arg(0)],
+            }],
+            sinks: vec![SinkInvocation {
+                sink: strcpy_spec,
+                call_site: 0xBEEF + 8,
+                tainted_caller_slots: vec![AbiSlot::Arg(0)],
+            }],
+        };
+        let mut summaries = HashMap::new();
+        summaries.insert(FuncId(0xBEEF), helper_summary);
+
+        let paths = collect_paths_with_summaries(&outer, &imports, &summaries)
+            .expect("V8 should synthesize Source/Sink events from helper's summary");
+        assert_eq!(paths.len(), 1);
+        let path = &paths[0];
+        assert_eq!(path.source.name, "recv");
+        assert_eq!(path.sink.name, "strcpy");
+        // Synthesized events must carry the call chain.
+        match &path.events[path.sink_event].kind {
+            TaintEventKind::SinkCall { call_chain, .. } => {
+                assert!(!call_chain.is_empty(), "sink call_chain should be populated");
+            }
+            other => panic!("expected SinkCall, got {other:?}"),
+        }
+        match solve(path, &outer) {
+            SmtFinding::Reachable { .. } => {}
+            other => panic!("expected Reachable via summary synthesis, got {other:?}"),
         }
     }
 
