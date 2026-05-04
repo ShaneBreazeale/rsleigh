@@ -623,6 +623,38 @@ fn build_mem_map(events: &[TaintEvent<'_>], vars: &[crate::ir::VarDef]) -> MemMa
     m
 }
 
+/// Map of a Call's `out` VarId to the Call's argument VarIds.
+/// v2.V5: a return value carries taint forward from any tainted arg
+/// (intra-procedural pass-through assumption). The lineage walker
+/// uses this so a sink VarId derived from `out = strdup(tainted)`
+/// resolves back to the source.
+type CallReturnMap = HashMap<VarId, Vec<VarId>>;
+
+fn build_call_return_map(ssa: &crate::ir::SsaCfg) -> CallReturnMap {
+    let mut m = CallReturnMap::new();
+    for block in &ssa.blocks {
+        for stmt in &block.stmts {
+            if let crate::ir::Stmt::Call {
+                args,
+                out: Some(o),
+                ..
+            } = stmt
+            {
+                m.insert(*o, args.clone());
+            }
+        }
+        if let crate::ir::SsaTerminator::Call {
+            args,
+            out: Some(o),
+            ..
+        } = &block.terminator
+        {
+            m.insert(*o, args.clone());
+        }
+    }
+    m
+}
+
 /// True if `a` and `b` share a common logical location after
 /// following SSA `Var` chains AND a single layer of Store→Load
 /// indirection through `mem`. Lifters split a buffer pointer into
@@ -633,12 +665,13 @@ fn varid_lineage_eq(
     b: VarId,
     vars: &[crate::ir::VarDef],
     mem: &MemMap,
+    calls: &CallReturnMap,
 ) -> bool {
     if a == b {
         return true;
     }
-    let chain_a = chain_varnodes(a, vars, mem);
-    let chain_b = chain_varnodes(b, vars, mem);
+    let chain_a = chain_varnodes(a, vars, mem, calls);
+    let chain_b = chain_varnodes(b, vars, mem, calls);
     for vn_a in &chain_a {
         if chain_b.iter().any(|vn_b| vn_a == vn_b) {
             return true;
@@ -654,6 +687,7 @@ fn chain_varnodes(
     start: VarId,
     vars: &[crate::ir::VarDef],
     mem: &MemMap,
+    calls: &CallReturnMap,
 ) -> Vec<pcode_ir::Varnode> {
     let mut out = Vec::new();
     let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
@@ -664,6 +698,14 @@ fn chain_varnodes(
         }
         if visited.len() > 64 {
             break;
+        }
+        // v2.V5: if `current` is a Call's `out`, push every arg —
+        // the return value is treated as carrying taint forward
+        // from any tainted argument (intra-procedural pass-through).
+        if let Some(args) = calls.get(&current) {
+            for a in args {
+                stack.push(*a);
+            }
         }
         let Some(def) = vars.get(current.0 as usize) else {
             continue;
@@ -720,7 +762,8 @@ pub fn solve(path: &TaintPath, ssa: &crate::ir::SsaCfg) -> SmtFinding {
         return SmtFinding::Unsupported("source/sink slot missing");
     };
     let mem = build_mem_map(&path.events, &ssa.vars);
-    if !varid_lineage_eq(snk, src, &ssa.vars, &mem) {
+    let calls = build_call_return_map(ssa);
+    if !varid_lineage_eq(snk, src, &ssa.vars, &mem, &calls) {
         return SmtFinding::NotReachable;
     }
 
@@ -907,7 +950,7 @@ mod tests {
     fn mk_var(id: u32, expr: Expr) -> VarDef {
         VarDef {
             id: VarId(id),
-            varnode: Varnode::constant(0, 8),
+            varnode: Varnode::constant(id as u64, 8),
             expr,
             size: 8,
             use_count: 1,
@@ -1369,8 +1412,9 @@ mod tests {
             mk_var(5, Expr::Var(VarId(4))),
         ];
         let mem = MemMap::new();
-        assert!(varid_lineage_eq(VarId(5), VarId(2), &vars, &mem));
-        assert!(!varid_lineage_eq(VarId(5), VarId(0), &vars, &mem));
+        let calls = CallReturnMap::new();
+        assert!(varid_lineage_eq(VarId(5), VarId(2), &vars, &mem, &calls));
+        assert!(!varid_lineage_eq(VarId(5), VarId(0), &vars, &mem, &calls));
     }
 
     #[cfg(feature = "smt")]
@@ -1385,10 +1429,80 @@ mod tests {
         ];
         let mut mem = MemMap::new();
         mem.insert(vars[0].varnode, VarId(1));
+        let calls = CallReturnMap::new();
         // Without memmap entry, lineage fails.
-        assert!(!varid_lineage_eq(VarId(2), VarId(1), &vars, &MemMap::new()));
+        assert!(!varid_lineage_eq(
+            VarId(2),
+            VarId(1),
+            &vars,
+            &MemMap::new(),
+            &calls
+        ));
         // With memmap entry, lineage holds.
-        assert!(varid_lineage_eq(VarId(2), VarId(1), &vars, &mem));
+        assert!(varid_lineage_eq(VarId(2), VarId(1), &vars, &mem, &calls));
+    }
+
+    #[cfg(feature = "smt")]
+    #[test]
+    fn lineage_eq_follows_call_return_pass_through() {
+        // v2.V5: out = strdup(arg). Sink reads `out`. Lineage from
+        // `out` (VarId 2) must reach the source-tainted `arg`
+        // (VarId 1) through the call's argument list.
+        let vars = vec![
+            mk_var(0, Expr::Const(0x1000, 8)),
+            mk_var(1, Expr::Const(0xdead, 8)), // tainted source value
+            mk_var(2, Expr::Const(0xbeef, 8)), // out of strdup; opaque expr
+        ];
+        let mem = MemMap::new();
+        let mut calls = CallReturnMap::new();
+        // Without the call-return map: lineage misses (out is opaque).
+        assert!(!varid_lineage_eq(VarId(2), VarId(1), &vars, &mem, &calls));
+        // With the map: out=2 → args=[1], lineage holds.
+        calls.insert(VarId(2), vec![VarId(1)]);
+        assert!(varid_lineage_eq(VarId(2), VarId(1), &vars, &mem, &calls));
+        // Argument that wasn't passed must still miss.
+        assert!(!varid_lineage_eq(VarId(2), VarId(0), &vars, &mem, &calls));
+    }
+
+    #[cfg(feature = "smt")]
+    #[test]
+    fn build_call_return_map_captures_stmt_and_terminator_calls() {
+        let vars = vec![
+            mk_var(0, Expr::Const(0, 8)),
+            mk_var(1, Expr::Const(0, 8)),
+            mk_var(2, Expr::Const(0, 8)),
+            mk_var(3, Expr::Const(0, 8)),
+        ];
+        let block = SsaBlock {
+            id: BlockId(0),
+            addr: 0,
+            stmts: vec![Stmt::Call {
+                target: CallTarget::Direct(0x1000),
+                args: vec![VarId(0)],
+                out: Some(VarId(2)),
+            }],
+            terminator: SsaTerminator::Call {
+                target: CallTarget::Direct(0x2000),
+                args: vec![VarId(1)],
+                out: Some(VarId(3)),
+                fallthrough: BlockId(1),
+            },
+        };
+        let block1 = SsaBlock {
+            id: BlockId(1),
+            addr: 4,
+            stmts: vec![],
+            terminator: SsaTerminator::Return(None),
+        };
+        let ssa = SsaCfg {
+            blocks: vec![block, block1],
+            vars,
+            entry: BlockId(0),
+            diagnostics: Vec::<Diagnostic>::new(),
+        };
+        let calls = build_call_return_map(&ssa);
+        assert_eq!(calls.get(&VarId(2)).map(|a| a.as_slice()), Some(&[VarId(0)][..]));
+        assert_eq!(calls.get(&VarId(3)).map(|a| a.as_slice()), Some(&[VarId(1)][..]));
     }
 
     #[test]
