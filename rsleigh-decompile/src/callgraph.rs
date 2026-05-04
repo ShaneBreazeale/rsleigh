@@ -206,6 +206,148 @@ fn tarjan_visit(id: FuncId, graph: &CallGraph, state: &mut TarjanState) {
     }
 }
 
+/// Build a `CallGraph` over a set of (FuncId, SSA) pairs. For each
+/// function, walks every Stmt::Call and SsaTerminator::Call,
+/// classifying the target as `Direct` / `Import` / `Indirect`.
+///
+/// `funcs` is the explored set: an edge to a FuncId NOT in `funcs`
+/// is dropped (only intra-binary direct calls produce `Direct`
+/// edges). Direct calls to addresses that match `imports` produce
+/// `Import` edges; the import takes priority over direct because
+/// PLT stub addresses live in the imports map but their bodies
+/// (the stubs) aren't typically in the explored set.
+pub fn build_call_graph(
+    funcs: &[(FuncId, &crate::ir::SsaCfg)],
+    imports: &HashMap<u64, String>,
+) -> CallGraph {
+    let mut g = CallGraph::new();
+    let func_set: std::collections::HashSet<FuncId> =
+        funcs.iter().map(|(id, _)| *id).collect();
+
+    for (id, _) in funcs {
+        g.add_function(*id);
+    }
+
+    for (caller_id, ssa) in funcs {
+        for block in &ssa.blocks {
+            for stmt in &block.stmts {
+                if let crate::ir::Stmt::Call { target, .. } = stmt {
+                    if let Some(edge) = classify_edge(target, &ssa.vars, imports, &func_set) {
+                        g.add_edge(*caller_id, edge);
+                    }
+                }
+            }
+            if let crate::ir::SsaTerminator::Call { target, .. } = &block.terminator {
+                if let Some(edge) = classify_edge(target, &ssa.vars, imports, &func_set) {
+                    g.add_edge(*caller_id, edge);
+                }
+            }
+        }
+    }
+
+    g
+}
+
+fn classify_edge(
+    target: &crate::ir::CallTarget,
+    vars: &[crate::ir::VarDef],
+    imports: &HashMap<u64, String>,
+    func_set: &std::collections::HashSet<FuncId>,
+) -> Option<CallEdge> {
+    let resolved = match target {
+        crate::ir::CallTarget::Direct(addr) => Some(*addr),
+        crate::ir::CallTarget::Indirect(vn) => resolve_via_vars(vn, vars, imports),
+    };
+    let edge = match resolved {
+        Some(addr) => {
+            if let Some(name) = imports.get(&addr) {
+                CallEdge {
+                    callee: CalleeRef::Import {
+                        name: name.clone(),
+                        addr,
+                    },
+                    call_site: 0,
+                }
+            } else if func_set.contains(&FuncId(addr)) {
+                CallEdge {
+                    callee: CalleeRef::Direct(FuncId(addr)),
+                    call_site: 0,
+                }
+            } else {
+                // Direct call to an address outside the explored
+                // function set and outside imports — typically a
+                // discovered-but-not-explored callee. v2 records
+                // it as an opaque Indirect for now (could become a
+                // ToBeExplored variant in v3).
+                CallEdge {
+                    callee: CalleeRef::Indirect,
+                    call_site: 0,
+                }
+            }
+        }
+        None => CallEdge {
+            callee: CalleeRef::Indirect,
+            call_site: 0,
+        },
+    };
+    Some(edge)
+}
+
+/// Lightweight stand-in for smt_explore::resolve_indirect_target.
+/// Same algorithm — walk Var-chains and Load(Const) edges — but
+/// returns the raw address regardless of imports membership so the
+/// caller can decide between Direct/Import classification. Bounded
+/// depth to avoid pathological IRs.
+fn resolve_via_vars(
+    target_vn: &pcode_ir::Varnode,
+    vars: &[crate::ir::VarDef],
+    imports: &HashMap<u64, String>,
+) -> Option<u64> {
+    let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut stack: Vec<u32> = vars
+        .iter()
+        .rev()
+        .filter(|d| d.varnode == *target_vn)
+        .map(|d| d.id.0)
+        .collect();
+    while let Some(id) = stack.pop() {
+        if !visited.insert(id) || visited.len() > 32 {
+            continue;
+        }
+        let Some(def) = vars.get(id as usize) else {
+            continue;
+        };
+        match &def.expr {
+            crate::ir::Expr::Const(c, _) => {
+                let candidate = c & 0x0FFF_FFFF;
+                if imports.contains_key(c) {
+                    return Some(*c);
+                }
+                if imports.contains_key(&candidate) {
+                    return Some(candidate);
+                }
+                return Some(*c);
+            }
+            crate::ir::Expr::Var(inner) => stack.push(inner.0),
+            crate::ir::Expr::Load(addr_var) => {
+                if let Some(addr_def) = vars.get(addr_var.0 as usize) {
+                    if let crate::ir::Expr::Const(slot, _) = addr_def.expr {
+                        if imports.contains_key(&slot) {
+                            return Some(slot);
+                        }
+                        let masked = slot & 0x0FFF_FFFF;
+                        if imports.contains_key(&masked) {
+                            return Some(masked);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,6 +452,134 @@ mod tests {
         for scc in &sccs.components {
             assert_eq!(scc.len(), 2);
         }
+    }
+
+    use crate::ir::{
+        BlockId, CallTarget, Diagnostic, Expr, InferredType, SsaBlock, SsaCfg,
+        SsaTerminator, Stmt, VarDef, VarId,
+    };
+    use pcode_ir::Varnode;
+
+    fn mk_var(id: u32, expr: Expr) -> VarDef {
+        VarDef {
+            id: VarId(id),
+            varnode: Varnode::constant(0, 8),
+            expr,
+            size: 8,
+            use_count: 1,
+            param_name: None,
+            call_return: false,
+            inferred_type: InferredType::Unknown,
+            display_type: None,
+        }
+    }
+
+    fn ssa_with_terminator_call(target: CallTarget, vars: Vec<VarDef>) -> SsaCfg {
+        SsaCfg {
+            blocks: vec![SsaBlock {
+                id: BlockId(0),
+                addr: 0,
+                stmts: vec![],
+                terminator: SsaTerminator::Call {
+                    target,
+                    args: vec![],
+                    out: None,
+                    fallthrough: BlockId(1),
+                },
+            }, SsaBlock {
+                id: BlockId(1),
+                addr: 0x10,
+                stmts: vec![],
+                terminator: SsaTerminator::Return(None),
+            }],
+            vars,
+            entry: BlockId(0),
+            diagnostics: Vec::<Diagnostic>::new(),
+        }
+    }
+
+    #[test]
+    fn build_emits_direct_edge_within_funcset() {
+        // Function 0x1000 calls 0x2000 (also in func set) → Direct edge.
+        let ssa_a = ssa_with_terminator_call(
+            CallTarget::Direct(0x2000),
+            vec![mk_var(0, Expr::Const(0, 8))],
+        );
+        let ssa_b = ssa_with_terminator_call(
+            CallTarget::Direct(0x3000),
+            vec![mk_var(0, Expr::Const(0, 8))],
+        );
+        let funcs = vec![
+            (FuncId(0x1000), &ssa_a),
+            (FuncId(0x2000), &ssa_b),
+        ];
+        let imports: HashMap<u64, String> = HashMap::new();
+        let g = build_call_graph(&funcs, &imports);
+
+        let edges_a = g.edges.get(&FuncId(0x1000)).unwrap();
+        assert_eq!(edges_a.len(), 1);
+        assert!(matches!(edges_a[0].callee, CalleeRef::Direct(FuncId(0x2000))));
+        assert_eq!(g.direct_successors(FuncId(0x1000)), vec![FuncId(0x2000)]);
+    }
+
+    #[test]
+    fn build_emits_import_edge_when_target_in_imports() {
+        // Direct(0x125d8) where imports[0x125d8] = "recvfrom" → Import.
+        let ssa = ssa_with_terminator_call(
+            CallTarget::Direct(0x125d8),
+            vec![mk_var(0, Expr::Const(0, 8))],
+        );
+        let funcs = vec![(FuncId(0x1000), &ssa)];
+        let mut imports = HashMap::new();
+        imports.insert(0x125d8u64, "recvfrom".to_string());
+        let g = build_call_graph(&funcs, &imports);
+
+        let edges = g.edges.get(&FuncId(0x1000)).unwrap();
+        assert_eq!(edges.len(), 1);
+        match &edges[0].callee {
+            CalleeRef::Import { name, addr } => {
+                assert_eq!(name, "recvfrom");
+                assert_eq!(*addr, 0x125d8);
+            }
+            other => panic!("expected Import, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_classifies_unknown_direct_as_indirect() {
+        // Direct(0x9000) where 0x9000 isn't in funcs and isn't an
+        // import → Indirect (opaque). Future v3 may add a
+        // ToBeExplored variant.
+        let ssa = ssa_with_terminator_call(
+            CallTarget::Direct(0x9000),
+            vec![mk_var(0, Expr::Const(0, 8))],
+        );
+        let funcs = vec![(FuncId(0x1000), &ssa)];
+        let imports: HashMap<u64, String> = HashMap::new();
+        let g = build_call_graph(&funcs, &imports);
+
+        let edges = g.edges.get(&FuncId(0x1000)).unwrap();
+        assert!(matches!(edges[0].callee, CalleeRef::Indirect));
+    }
+
+    #[test]
+    fn build_handles_ssa_with_no_calls() {
+        let ssa = SsaCfg {
+            blocks: vec![SsaBlock {
+                id: BlockId(0),
+                addr: 0,
+                stmts: vec![],
+                terminator: SsaTerminator::Return(None),
+            }],
+            vars: vec![mk_var(0, Expr::Const(0, 8))],
+            entry: BlockId(0),
+            diagnostics: Vec::<Diagnostic>::new(),
+        };
+        let funcs = vec![(FuncId(0x1000), &ssa)];
+        let imports: HashMap<u64, String> = HashMap::new();
+        let g = build_call_graph(&funcs, &imports);
+        assert_eq!(g.funcs, vec![FuncId(0x1000)]);
+        assert!(g.edges.get(&FuncId(0x1000)).unwrap().is_empty());
     }
 
     #[test]
