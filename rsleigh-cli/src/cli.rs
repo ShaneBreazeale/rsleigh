@@ -1908,7 +1908,7 @@ fn run_smt_explore(
             "sink_event":   path.sink_event,
             "kind":    format!("{:?}", path.sink.kind),
             "verdict": match &verdict {
-                SmtFinding::Reachable { input_bytes } => serde_json::json!({
+                SmtFinding::Reachable { input_bytes, call_chain } => serde_json::json!({
                     "kind":  "Reachable",
                     "input": input_bytes
                         .iter()
@@ -1916,6 +1916,10 @@ fn run_smt_explore(
                             "offset": o,
                             "byte":   format!("0x{:02x}", b),
                         }))
+                        .collect::<Vec<_>>(),
+                    "call_chain": call_chain
+                        .iter()
+                        .map(|a| format!("0x{:x}", a))
                         .collect::<Vec<_>>(),
                 }),
                 SmtFinding::NotReachable => serde_json::json!({ "kind": "NotReachable" }),
@@ -1943,17 +1947,25 @@ fn run_smt_explore(
                 path.source.name, path.sink.name, path.sink.kind
             );
             match verdict {
-                SmtFinding::Reachable { input_bytes } => {
+                SmtFinding::Reachable { input_bytes, call_chain } => {
                     let preview: String = input_bytes
                         .iter()
                         .take(8)
                         .map(|(_, b)| format!("{:02x}", b))
                         .collect::<Vec<_>>()
                         .join(" ");
+                    let chain = if call_chain.is_empty() {
+                        String::new()
+                    } else {
+                        let s: Vec<String> =
+                            call_chain.iter().map(|a| format!("0x{:x}", a)).collect();
+                        format!("  via [{}]", s.join(" -> "))
+                    };
                     println!(
-                        "REACHABLE — trigger: {}{}",
+                        "REACHABLE — trigger: {}{}{}",
                         preview,
-                        if input_bytes.len() > 8 { " ..." } else { "" }
+                        if input_bytes.len() > 8 { " ..." } else { "" },
+                        chain,
                     );
                 }
                 SmtFinding::NotReachable => println!("not reachable"),

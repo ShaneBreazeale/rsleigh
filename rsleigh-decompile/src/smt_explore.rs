@@ -162,7 +162,13 @@ pub enum SmtFinding {
     /// Z3 found a symbolic input that drives the sink's watched arg
     /// into a CVE-class state. The model is exposed as
     /// `(input_byte_offset, value)` pairs.
-    Reachable { input_bytes: Vec<(usize, u8)> },
+    Reachable {
+        input_bytes: Vec<(usize, u8)>,
+        /// v2.V9: chain of caller PCs traversed when this path was
+        /// constructed via inter-procedural summary synthesis.
+        /// Empty for direct (intra-function) Source→Sink pairs.
+        call_chain: Vec<u64>,
+    },
     /// Solver proved no input drives the violation under the path's
     /// constraints — false-positive cull.
     NotReachable,
@@ -975,7 +981,11 @@ pub fn solve(path: &TaintPath, ssa: &crate::ir::SsaCfg) -> SmtFinding {
                     }
                 }
             }
-            SmtFinding::Reachable { input_bytes }
+            let call_chain = match &path.events[path.sink_event].kind {
+                TaintEventKind::SinkCall { call_chain, .. } => call_chain.clone(),
+                _ => Vec::new(),
+            };
+            SmtFinding::Reachable { input_bytes, call_chain }
         }
         z3::SatResult::Unsat => SmtFinding::NotReachable,
         z3::SatResult::Unknown => SmtFinding::Unsupported("solver Unknown / timeout"),
@@ -1469,7 +1479,7 @@ mod tests {
         let imports = imports_with(&[(0x1000, "recv"), (0x2000, "strcpy")]);
         let paths = collect_paths(&ssa, &imports).expect("v0 path collection");
         match solve(&paths[0], &ssa) {
-            SmtFinding::Reachable { input_bytes } => {
+            SmtFinding::Reachable { input_bytes, .. } => {
                 assert_eq!(input_bytes.len(), 32);
                 assert!(input_bytes.iter().all(|(_, b)| *b != 0));
             }
@@ -1494,7 +1504,7 @@ mod tests {
         let imports = imports_with(&[(0x1000, "recv"), (0x2000, "printf")]);
         let paths = collect_paths(&ssa, &imports).expect("v0 path collection");
         match solve(&paths[0], &ssa) {
-            SmtFinding::Reachable { input_bytes } => {
+            SmtFinding::Reachable { input_bytes, .. } => {
                 assert!(input_bytes.iter().any(|(_, b)| *b == b'%'));
             }
             other => panic!("expected Reachable with `%`, got {other:?}"),
@@ -1516,7 +1526,7 @@ mod tests {
         let imports = imports_with(&[(0x1000, "argv"), (0x2000, "system")]);
         let paths = collect_paths(&ssa, &imports).expect("v0 path collection");
         match solve(&paths[0], &ssa) {
-            SmtFinding::Reachable { input_bytes } => {
+            SmtFinding::Reachable { input_bytes, .. } => {
                 assert!(input_bytes
                     .iter()
                     .any(|(_, b)| matches!(*b, b';' | b'&' | b'|')));
@@ -1592,7 +1602,14 @@ mod tests {
             other => panic!("expected SinkCall, got {other:?}"),
         }
         match solve(path, &outer) {
-            SmtFinding::Reachable { .. } => {}
+            SmtFinding::Reachable { call_chain, .. } => {
+                // v2.V9: chain must surface on the SmtFinding so the
+                // CLI can render `via [0x... -> 0x...]` traces.
+                assert!(
+                    !call_chain.is_empty(),
+                    "Reachable.call_chain should propagate from synthesized event"
+                );
+            }
             other => panic!("expected Reachable via summary synthesis, got {other:?}"),
         }
     }
