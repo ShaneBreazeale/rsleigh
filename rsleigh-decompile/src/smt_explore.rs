@@ -146,13 +146,14 @@ pub enum SpecRef {
 fn normalise_name(raw: &str) -> &str {
     // Strip a `@plt`/`@@VERSION` suffix.
     let stripped = raw.split('@').next().unwrap_or(raw);
-    // Strip up to two leading underscores (Mach-O stubs commonly
-    // expose `_recv`, glibc-internal names sometimes appear with
-    // `__recv` for the *_chk family — we don't include checked
-    // variants in M1, so this just unwraps the canonical name).
-    stripped
-        .trim_start_matches('_')
-        .trim_start_matches('_')
+    // Strip leading underscores (Mach-O `_recv`, glibc internal
+    // `__recv`, etc.).
+    let unprefixed = stripped.trim_start_matches('_');
+    // v2.V10: collapse fortify-source `*_chk` checked variants to
+    // their canonical name (Mach-O exposes `___strcpy_chk` for
+    // strcpy under -D_FORTIFY_SOURCE). The chk wrapper has the
+    // same arg layout for the slots we watch.
+    unprefixed.strip_suffix("_chk").unwrap_or(unprefixed)
 }
 
 /// SAT-as-CVE-proof outcome for one `TaintPath`. Produced by
@@ -694,11 +695,14 @@ fn synthesize_summary_events<'a>(
     let Some(addr) = direct_addr else {
         return;
     };
-    if imports.contains_key(&addr) {
-        return;
-    }
-    let Some(callee_sum) = summaries.get(&crate::callgraph::FuncId(addr)) else {
-        return;
+    // v2.V10: prefer summary lookup over imports check. In Mach-O
+    // (and stripped ELF) both imports and intra-binary symbols can
+    // coexist in the import map; skipping any addr present in
+    // imports would suppress all inter-procedural propagation. If
+    // a summary exists, the call is intra-binary and worth lifting.
+    let callee_sum = match summaries.get(&crate::callgraph::FuncId(addr)) {
+        Some(s) => s,
+        None => return,
     };
     for src in &callee_sum.sources {
         let Some(var) = synth_pick_caller_var(&src.tainted_caller_slots, caller_args) else {

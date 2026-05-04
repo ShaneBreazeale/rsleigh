@@ -127,7 +127,7 @@ pub fn entrypoint() {
         eprintln!("  rsleigh <binary> --search --const <hex> Find functions with constant");
         eprintln!("  rsleigh <binary> --seh-fixpoint      Apply SEH-driven SMC patches until fixpoint, report new functions");
         eprintln!("  rsleigh <binary> --vulnscan          Scan for vulnerability patterns");
-        eprintln!("  rsleigh <binary> --smt-explore <func> [--json]  SMT taint-flow CVE proof (requires --features smt)");
+        eprintln!("  rsleigh <binary> --smt-explore <func> [--smt-summaries] [--json]  SMT taint-flow CVE proof (requires --features smt; --smt-summaries enables inter-procedural V2)");
         eprintln!("  rsleigh <binary> --ioc [--json]      Extract IOCs (URLs, IPs, paths, registry keys)");
         eprintln!("  rsleigh <binary> --xor-strings [--json]  Brute single-byte XOR string recovery");
         eprintln!("  rsleigh <binary> --sigcheck [--json] Parse Authenticode signature (signer, timestamp, chain)");
@@ -1470,6 +1470,12 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
     let ssa_json = args.iter().any(|a| a == "--ssa-json");
     let opaque_scan = args.iter().any(|a| a == "--opaque-scan");
     let smt_explore = args.iter().any(|a| a == "--smt-explore");
+    let smt_summaries = args.iter().any(|a| a == "--smt-summaries");
+    let inter_proc_summaries = if smt_explore && smt_summaries {
+        Some(build_binary_summaries(&data, arch, &symbols, &segs, &mut dec))
+    } else {
+        None
+    };
     if pcode_json || ssa_json || opaque_scan || smt_explore {
         for name in &targets {
             let func_addr =
@@ -1624,7 +1630,15 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                 }
             }
             if smt_explore {
-                run_smt_explore(&data, arch, func_addr, &func_name, &insts, json_mode);
+                run_smt_explore(
+                    &data,
+                    arch,
+                    func_addr,
+                    &func_name,
+                    &insts,
+                    json_mode,
+                    inter_proc_summaries.as_ref(),
+                );
             }
         }
         return;
@@ -1840,6 +1854,86 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
 ///
 /// Without `--features smt` this prints a clear "rebuild" hint and
 /// exits zero (so scripted callers can probe for support).
+/// v2.V10: pre-compute a per-function FunctionSummary for every
+/// symbol in the binary so `--smt-explore` can use the inter-
+/// procedural V8 path collector. Returns the summaries map (keyed
+/// by FuncId = function start address).
+///
+/// One-time cost paid up front (~minutes on a 1000-func daemon);
+/// the alternative is rebuilding summaries per --smt-explore call.
+fn build_binary_summaries(
+    data: &[u8],
+    arch: rsleigh_api::Architecture,
+    symbols: &[(u64, String)],
+    segs: &[(u64, u64, u64)],
+    dec: &mut rsleigh_api::Decoder,
+) -> std::collections::HashMap<
+    rsleigh_decompile::callgraph::FuncId,
+    rsleigh_decompile::function_summary::FunctionSummary,
+> {
+    use rsleigh_decompile::callgraph::{build_call_graph, tarjan_sccs, FuncId};
+    use rsleigh_decompile::function_summary::{
+        arg_vars_from_ssa, build_summaries_bottom_up, FunctionContext,
+    };
+
+    let cc = match arch {
+        rsleigh_api::Architecture::X86_64
+            if rsleigh_decompile::go_pclntab::parse(data)
+                .keys()
+                .next()
+                .is_some() =>
+        {
+            rsleigh_decompile::fold::CallingConv::GoAmd64
+        }
+        rsleigh_api::Architecture::X86_32 | rsleigh_api::Architecture::MIPS32 => {
+            rsleigh_decompile::fold::CallingConv::Cdecl32
+        }
+        rsleigh_api::Architecture::ARM32 => rsleigh_decompile::fold::CallingConv::Arm32,
+        rsleigh_api::Architecture::AArch64 => rsleigh_decompile::fold::CallingConv::AArch64,
+        _ => rsleigh_decompile::fold::CallingConv::SysV,
+    };
+
+    let imports = rsleigh_decompile::imports::resolve_imports(data);
+
+    let mut ssas: Vec<(FuncId, rsleigh_decompile::ir::SsaCfg)> = Vec::new();
+    let mut arg_vars_map: std::collections::HashMap<
+        FuncId,
+        std::collections::HashMap<u8, rsleigh_decompile::ir::VarId>,
+    > = std::collections::HashMap::new();
+    for (addr, _name) in symbols {
+        let insts = decode_func(*addr, symbols, segs, data, dec);
+        if insts.is_empty() {
+            continue;
+        }
+        let cfg = rsleigh_decompile::cfg::build_cfg(&insts);
+        let mut ssa = rsleigh_decompile::ssa::build_ssa_with_cc(&cfg, cc);
+        rsleigh_decompile::fold::fold_with_cc(&mut ssa, cc);
+        let arg_vars = arg_vars_from_ssa(&ssa);
+        arg_vars_map.insert(FuncId(*addr), arg_vars);
+        ssas.push((FuncId(*addr), ssa));
+    }
+
+    let funcs_ref: Vec<(FuncId, &rsleigh_decompile::ir::SsaCfg)> =
+        ssas.iter().map(|(k, v)| (*k, v)).collect();
+    let graph = build_call_graph(&funcs_ref, &imports);
+    let sccs = tarjan_sccs(&graph);
+
+    let mut contexts: std::collections::HashMap<FuncId, FunctionContext<'_>> =
+        std::collections::HashMap::new();
+    for (fid, ssa) in &ssas {
+        if let Some(arg_vars) = arg_vars_map.get(fid) {
+            contexts.insert(
+                *fid,
+                FunctionContext {
+                    ssa,
+                    arg_vars,
+                },
+            );
+        }
+    }
+    build_summaries_bottom_up(&graph, &sccs, &contexts, &imports)
+}
+
 fn run_smt_explore(
     data: &[u8],
     arch: rsleigh_api::Architecture,
@@ -1847,6 +1941,10 @@ fn run_smt_explore(
     func_name: &str,
     insts: &[(u64, pcode_ir::Instruction)],
     json: bool,
+    summaries: Option<&std::collections::HashMap<
+        rsleigh_decompile::callgraph::FuncId,
+        rsleigh_decompile::function_summary::FunctionSummary,
+    >>,
 ) {
     let cfg = rsleigh_decompile::cfg::build_cfg(insts);
     let cc = match arch {
@@ -1870,9 +1968,15 @@ fn run_smt_explore(
 
     let imports = rsleigh_decompile::imports::resolve_imports(data);
 
-    use rsleigh_decompile::smt_explore::{collect_paths, solve, PathRejection, SmtFinding};
+    use rsleigh_decompile::smt_explore::{
+        collect_paths, collect_paths_with_summaries, solve, PathRejection, SmtFinding,
+    };
 
-    let paths = match collect_paths(&ssa, &imports) {
+    let paths_result = match summaries {
+        Some(s) => collect_paths_with_summaries(&ssa, &imports, s),
+        None => collect_paths(&ssa, &imports),
+    };
+    let paths = match paths_result {
         Ok(p) => p,
         Err(reason) => {
             if json {

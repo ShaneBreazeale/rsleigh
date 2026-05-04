@@ -83,3 +83,44 @@ fn fgets_printf_format_string_reachable() {
     assert!(out.contains("FormatArg"), "missing FormatArg kind:\n{out}");
     assert_reachable_or_skip_no_smt(&out, "fgets_printf");
 }
+
+#[test]
+fn v10_inter_procedural_reachable_via_summaries() {
+    // outer(sock) → fill_buf(buf, sock)::recv  +
+    //                copy_into(buf, dst)::strcpy
+    // v1 (no --smt-summaries): NoSinkFound at outer.
+    // v2 (--smt-summaries):    REACHABLE with non-empty call_chain.
+    let Some(bin) = fixture("wrapped_recv_strcpy") else { return };
+
+    let v1 = Command::new(RSLEIGH_BIN)
+        .args([&bin, "--smt-explore", "outer"])
+        .output()
+        .expect("rsleigh invocation");
+    let v1_out = String::from_utf8(v1.stdout).expect("utf-8");
+    if v1_out.contains("smt feature not enabled at build time") {
+        eprintln!("[skip-no-smt] V10 wrapped: rebuild with --features smt");
+        return;
+    }
+    assert!(
+        v1_out.contains("NoSinkFound"),
+        "v1 (no --smt-summaries) should not see the wrapped sink:\n{v1_out}"
+    );
+
+    let v2 = Command::new(RSLEIGH_BIN)
+        .args([&bin, "--smt-explore", "outer", "--smt-summaries"])
+        .output()
+        .expect("rsleigh invocation");
+    let v2_out = String::from_utf8(v2.stdout).expect("utf-8");
+    assert!(
+        v2_out.contains("recv -> strcpy"),
+        "v2 missing recv->strcpy:\n{v2_out}"
+    );
+    assert!(
+        v2_out.contains("REACHABLE"),
+        "v2 should be REACHABLE via summary synthesis:\n{v2_out}"
+    );
+    assert!(
+        v2_out.contains("via ["),
+        "v2 should render call_chain trace:\n{v2_out}"
+    );
+}

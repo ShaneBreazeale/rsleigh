@@ -175,20 +175,23 @@ fn process_call(
 }
 
 /// Determine which of the function's own arg slots `var` traces
-/// back to via the SSA Var-chain. Returns an empty Vec when the
-/// var doesn't trace to any caller-supplied arg (e.g. it's a
-/// function-local Const or comes from a Source's output).
+/// back to via the SSA Var-chain plus one layer of Store→Load
+/// redirection. Without the Store→Load layer most -O0 prologues
+/// (which spill arg registers to stack and reload them at every
+/// call site) defeat the chain — `arg_slots_for_var` would always
+/// return empty for any compiled C function.
 fn arg_slots_for_var(
     var: VarId,
     ssa: &SsaCfg,
     function_arg_vars: &HashMap<u8, VarId>,
 ) -> Vec<AbiSlot> {
+    let mem = build_store_map(ssa);
     let mut out = Vec::new();
     let mut visited: std::collections::HashSet<u32> =
         std::collections::HashSet::new();
     let mut stack = vec![var];
     while let Some(cur) = stack.pop() {
-        if !visited.insert(cur.0) || visited.len() > 32 {
+        if !visited.insert(cur.0) || visited.len() > 64 {
             continue;
         }
         for (slot, arg_var) in function_arg_vars {
@@ -197,12 +200,94 @@ fn arg_slots_for_var(
             }
         }
         if let Some(def) = ssa.vars.get(cur.0 as usize) {
-            if let crate::ir::Expr::Var(inner) = &def.expr {
-                stack.push(*inner);
+            match &def.expr {
+                crate::ir::Expr::Var(inner) => stack.push(*inner),
+                crate::ir::Expr::Load(addr) => {
+                    if let Some(key) = addr_canon(*addr, &ssa.vars) {
+                        if let Some(stored) = mem.get(&key).copied() {
+                            stack.push(stored);
+                        }
+                    }
+                }
+                crate::ir::Expr::FieldAccess(base, offset) => {
+                    // FieldAccess(base, off) is a folded form of
+                    // Load(BinOp(Add, base, Const(off))) — canonicalise
+                    // it to the same key so a stack-spilled param
+                    // reload still maps back to the param's Store.
+                    let key = field_access_canon(*base, *offset, &ssa.vars);
+                    if let Some(stored) = mem.get(&key).copied() {
+                        stack.push(stored);
+                    }
+                }
+                _ => {}
             }
         }
     }
     out
+}
+
+/// Per-SSA Store-address → stored-value map. Keyed by a canonical
+/// string form of the address expression so two SSA addresses that
+/// COMPUTE the same address (typical -O0 reload patterns: each call
+/// site freshly recomputes `add(fp, const)` with different Unique
+/// VarIds) collide on the same key.
+fn build_store_map(ssa: &SsaCfg) -> HashMap<String, VarId> {
+    let mut m: HashMap<String, VarId> = HashMap::new();
+    for block in &ssa.blocks {
+        for stmt in &block.stmts {
+            if let Stmt::Store { addr, val } = stmt {
+                if let Some(key) = addr_canon(*addr, &ssa.vars) {
+                    m.insert(key, *val);
+                }
+            }
+        }
+    }
+    m
+}
+
+/// Recursive canonical-form key for an address expression. Folds
+/// `Var(Var(...))` chains to the underlying varnode and stringifies
+/// `BinOp` / `Const` / `Load` so two structurally-equal address
+/// computations on different SSA Unique varnodes share a key.
+/// Build the same canonical key as `addr_canon` would produce for
+/// `BinOp(Add, base, Const(offset, 8))` — so a `FieldAccess(base,
+/// offset)` Load form aliases the corresponding pointer-arithmetic
+/// Store on the same stack slot.
+fn field_access_canon(
+    base: VarId,
+    offset: u64,
+    vars: &[crate::ir::VarDef],
+) -> String {
+    let kb = addr_canon(base, vars).unwrap_or_else(|| "?".to_string());
+    let kc = format!("C{}.8", offset);
+    format!("BAdd({},{})", kb, kc)
+}
+
+fn addr_canon(var: VarId, vars: &[crate::ir::VarDef]) -> Option<String> {
+    fn rec(var: VarId, vars: &[crate::ir::VarDef], depth: u32) -> Option<String> {
+        if depth > 16 {
+            return None;
+        }
+        let def = vars.get(var.0 as usize)?;
+        Some(match &def.expr {
+            crate::ir::Expr::Var(inner) => rec(*inner, vars, depth + 1)?,
+            crate::ir::Expr::Const(c, sz) => format!("C{}.{}", c, sz),
+            crate::ir::Expr::BinOp(op, a, b) => {
+                let ka = rec(*a, vars, depth + 1).unwrap_or_else(|| "?".to_string());
+                let kb = rec(*b, vars, depth + 1).unwrap_or_else(|| "?".to_string());
+                format!("B{:?}({},{})", op, ka, kb)
+            }
+            crate::ir::Expr::UnaryOp(op, a) => {
+                let ka = rec(*a, vars, depth + 1).unwrap_or_else(|| "?".to_string());
+                format!("U{:?}({})", op, ka)
+            }
+            _ => format!(
+                "V{:?}/{}/{}",
+                def.varnode.space, def.varnode.offset, def.varnode.size
+            ),
+        })
+    }
+    rec(var, vars, 0)
 }
 
 /// Per-function context the V6 bottom-up builder needs. The SSA is
@@ -325,11 +410,29 @@ fn remap_slots(
     out
 }
 
+/// Recover the function's incoming-arg VarIds from the SSA's
+/// `param_name` annotations (set by the calling-convention pass).
+/// Returns a slot → VarId map for slots advertised as `param_N`.
+pub fn arg_vars_from_ssa(ssa: &SsaCfg) -> HashMap<u8, VarId> {
+    let mut out = HashMap::new();
+    for v in &ssa.vars {
+        if let Some(name) = &v.param_name {
+            if let Some(rest) = name.strip_prefix("param_") {
+                if let Ok(n) = rest.parse::<u8>() {
+                    out.entry(n).or_insert(v.id);
+                }
+            }
+        }
+    }
+    out
+}
+
 fn normalise_libc_name(raw: &str) -> &str {
     let stripped = raw.split('@').next().unwrap_or(raw);
-    stripped
-        .trim_start_matches('_')
-        .trim_start_matches('_')
+    let unprefixed = stripped.trim_start_matches('_');
+    // v2.V10: strip fortify-source _chk suffix so __strcpy_chk
+    // matches the strcpy DEFAULT_SINKS entry.
+    unprefixed.strip_suffix("_chk").unwrap_or(unprefixed)
 }
 
 #[cfg(test)]
