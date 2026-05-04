@@ -1234,7 +1234,8 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
         .map(|(_, a)| a.as_str())
         .collect();
 
-    if func_args.is_empty() && !all_mode && !disasm_mode {
+    let smt_explore_all_early = args.iter().any(|a| a == "--smt-explore-all");
+    if func_args.is_empty() && !all_mode && !disasm_mode && !smt_explore_all_early {
         // List functions. Hide CRT-internal / runtime glue whose names start
         // with a single `_` (`_init`, `_fini`, `_start`, `_dl_*`, etc.) but
         // KEEP demangled-candidate symbols starting with `_Z` / `__Z` (C++
@@ -1470,12 +1471,17 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
     let ssa_json = args.iter().any(|a| a == "--ssa-json");
     let opaque_scan = args.iter().any(|a| a == "--opaque-scan");
     let smt_explore = args.iter().any(|a| a == "--smt-explore");
+    let smt_explore_all = args.iter().any(|a| a == "--smt-explore-all");
     let smt_summaries = args.iter().any(|a| a == "--smt-summaries");
-    let inter_proc_summaries = if smt_explore && smt_summaries {
+    let inter_proc_summaries = if (smt_explore || smt_explore_all) && smt_summaries {
         Some(build_binary_summaries(&data, arch, &symbols, &segs, &mut dec))
     } else {
         None
     };
+    if smt_explore_all {
+        run_smt_explore_all(&data, arch, &symbols, &segs, &mut dec, json_mode, inter_proc_summaries.as_ref());
+        return;
+    }
     if pcode_json || ssa_json || opaque_scan || smt_explore {
         for name in &targets {
             let func_addr =
@@ -1932,6 +1938,123 @@ fn build_binary_summaries(
         }
     }
     build_summaries_bottom_up(&graph, &sccs, &contexts, &imports)
+}
+
+/// v2.V10: sweep mode. Iterate every symbol-rooted function in the
+/// binary, run `--smt-explore` against each, emit one JSON line per
+/// REACHABLE finding (or a one-line summary in plain mode). Path
+/// rejections / no-sink-found are silently skipped to keep output
+/// scannable across a 1000-function daemon.
+fn run_smt_explore_all(
+    data: &[u8],
+    arch: rsleigh_api::Architecture,
+    symbols: &[(u64, String)],
+    segs: &[(u64, u64, u64)],
+    dec: &mut rsleigh_api::Decoder,
+    json: bool,
+    summaries: Option<&std::collections::HashMap<
+        rsleigh_decompile::callgraph::FuncId,
+        rsleigh_decompile::function_summary::FunctionSummary,
+    >>,
+) {
+    let mut hits = 0usize;
+    let mut scanned = 0usize;
+    if json {
+        println!("[");
+    }
+    let mut first = true;
+    for (addr, name) in symbols {
+        if name.is_empty() || name.starts_with("dyld") {
+            continue;
+        }
+        let insts = decode_func(*addr, symbols, segs, data, dec);
+        if insts.is_empty() {
+            continue;
+        }
+        scanned += 1;
+        // Capture stdout into a buffer by re-running the explorer
+        // and parsing for "REACHABLE" / "Reachable" tokens. Simpler
+        // path: re-run the inner pipeline directly and emit only on
+        // hit. We reuse run_smt_explore's logic by redirecting to a
+        // writer; for v10 minimum we just call run_smt_explore and
+        // let the user grep — but that produces noise. Instead,
+        // duplicate the lean SAT loop here without per-function
+        // header lines and only print on REACHABLE.
+        let cfg = rsleigh_decompile::cfg::build_cfg(&insts);
+        let cc = match arch {
+            rsleigh_api::Architecture::X86_32 | rsleigh_api::Architecture::MIPS32 => {
+                rsleigh_decompile::fold::CallingConv::Cdecl32
+            }
+            rsleigh_api::Architecture::ARM32 => rsleigh_decompile::fold::CallingConv::Arm32,
+            rsleigh_api::Architecture::AArch64 => rsleigh_decompile::fold::CallingConv::AArch64,
+            _ => rsleigh_decompile::fold::CallingConv::SysV,
+        };
+        let mut ssa = rsleigh_decompile::ssa::build_ssa_with_cc(&cfg, cc);
+        rsleigh_decompile::fold::fold_with_cc(&mut ssa, cc);
+        let imports = rsleigh_decompile::imports::resolve_imports(data);
+        use rsleigh_decompile::smt_explore::{
+            collect_paths, collect_paths_with_summaries, solve, SmtFinding,
+        };
+        let paths = match summaries {
+            Some(s) => collect_paths_with_summaries(&ssa, &imports, s),
+            None => collect_paths(&ssa, &imports),
+        };
+        let Ok(paths) = paths else { continue };
+        for path in &paths {
+            let verdict = solve(path, &ssa);
+            if let SmtFinding::Reachable { input_bytes, call_chain } = verdict {
+                hits += 1;
+                if json {
+                    if !first {
+                        println!(",");
+                    }
+                    first = false;
+                    let payload = serde_json::json!({
+                        "function": name,
+                        "address":  format!("0x{:x}", addr),
+                        "source":   path.source.name,
+                        "sink":     path.sink.name,
+                        "kind":     format!("{:?}", path.sink.kind),
+                        "input":    input_bytes
+                            .iter()
+                            .map(|(o, b)| serde_json::json!({
+                                "offset": o,
+                                "byte":   format!("0x{:02x}", b),
+                            }))
+                            .collect::<Vec<_>>(),
+                        "call_chain": call_chain
+                            .iter()
+                            .map(|a| format!("0x{:x}", a))
+                            .collect::<Vec<_>>(),
+                    });
+                    print!("{}", serde_json::to_string_pretty(&payload).unwrap());
+                } else {
+                    let preview: String = input_bytes
+                        .iter()
+                        .take(8)
+                        .map(|(_, b)| format!("{:02x}", b))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let chain = if call_chain.is_empty() {
+                        String::new()
+                    } else {
+                        let s: Vec<String> =
+                            call_chain.iter().map(|a| format!("0x{:x}", a)).collect();
+                        format!("  via [{}]", s.join(" -> "))
+                    };
+                    println!(
+                        "{} 0x{:x}  {} -> {}  ({:?})  REACHABLE: {}{}",
+                        name, addr, path.source.name, path.sink.name, path.sink.kind,
+                        preview, chain
+                    );
+                }
+            }
+        }
+    }
+    if json {
+        println!("\n]");
+    }
+    eprintln!("[smt-explore-all] {} hits across {} functions scanned", hits, scanned);
 }
 
 fn run_smt_explore(
