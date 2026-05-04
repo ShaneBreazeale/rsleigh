@@ -587,6 +587,191 @@ mod tests {
     }
 
     #[test]
+    fn bottom_up_three_hop_wrapping_chain() {
+        // v2.V7: outer(a, b) → mid(a, b) → inner(a, b) → strcpy(a, b).
+        // The lift must propagate the strcpy sink up through TWO
+        // wrapper layers, with the watched slot remaining Arg(1) at
+        // every hop.
+        use crate::callgraph::{build_call_graph, tarjan_sccs};
+
+        let mk_pass_through = |callee_addr: u64, addr: u64| -> SsaCfg {
+            SsaCfg {
+                blocks: vec![SsaBlock {
+                    id: BlockId(0),
+                    addr,
+                    stmts: vec![Stmt::Call {
+                        target: CallTarget::Direct(callee_addr),
+                        args: vec![VarId(0), VarId(1)],
+                        out: None,
+                    }],
+                    terminator: SsaTerminator::Return(None),
+                }],
+                vars: vec![mk_var(0, Expr::Const(0, 8)), mk_var(1, Expr::Const(0, 8))],
+                entry: BlockId(0),
+                diagnostics: Vec::<Diagnostic>::new(),
+            }
+        };
+
+        // inner: directly calls strcpy at 0x125d8.
+        let inner_ssa = SsaCfg {
+            blocks: vec![SsaBlock {
+                id: BlockId(0),
+                addr: 0x3000,
+                stmts: vec![Stmt::Call {
+                    target: CallTarget::Direct(0x125d8),
+                    args: vec![VarId(0), VarId(1)],
+                    out: None,
+                }],
+                terminator: SsaTerminator::Return(None),
+            }],
+            vars: vec![mk_var(0, Expr::Const(0, 8)), mk_var(1, Expr::Const(0, 8))],
+            entry: BlockId(0),
+            diagnostics: Vec::<Diagnostic>::new(),
+        };
+        let mid_ssa = mk_pass_through(0x3000, 0x2000);
+        let outer_ssa = mk_pass_through(0x2000, 0x1000);
+
+        let mut imports = HashMap::new();
+        imports.insert(0x125d8u64, "strcpy".to_string());
+
+        let funcs: Vec<(FuncId, &SsaCfg)> = vec![
+            (FuncId(0x3000), &inner_ssa),
+            (FuncId(0x2000), &mid_ssa),
+            (FuncId(0x1000), &outer_ssa),
+        ];
+        let graph = build_call_graph(&funcs, &imports);
+        let sccs = tarjan_sccs(&graph);
+
+        let mut arg_vars = HashMap::new();
+        arg_vars.insert(0u8, VarId(0));
+        arg_vars.insert(1u8, VarId(1));
+
+        let mut contexts: HashMap<FuncId, FunctionContext<'_>> = HashMap::new();
+        for (fid, ssa) in [
+            (FuncId(0x3000), &inner_ssa),
+            (FuncId(0x2000), &mid_ssa),
+            (FuncId(0x1000), &outer_ssa),
+        ] {
+            contexts.insert(
+                fid,
+                FunctionContext {
+                    ssa,
+                    arg_vars: &arg_vars,
+                },
+            );
+        }
+
+        let summaries =
+            build_summaries_bottom_up(&graph, &sccs, &contexts, &imports);
+        for (fid, addr) in [
+            (FuncId(0x3000), 0x3000u64),
+            (FuncId(0x2000), 0x2000u64),
+            (FuncId(0x1000), 0x1000u64),
+        ] {
+            let s = summaries.get(&fid).unwrap();
+            assert_eq!(s.sinks.len(), 1, "fid {:#x}", fid.0);
+            assert_eq!(s.sinks[0].sink.name, "strcpy");
+            assert_eq!(
+                s.sinks[0].tainted_caller_slots,
+                vec![AbiSlot::Arg(1)],
+                "fid {:#x}",
+                fid.0
+            );
+            assert_eq!(s.sinks[0].call_site, addr, "fid {:#x}", fid.0);
+        }
+    }
+
+    #[test]
+    fn bottom_up_pass_through_with_slot_swap() {
+        // v2.V7: helper(x, y) calls strcpy(y, x) — args SWAPPED.
+        // outer(a, b) calls helper(a, b).
+        // After lift, outer's strcpy entry must claim caller slot
+        // Arg(0), not Arg(1), because helper's watched slot Arg(1)
+        // is helper's `x` (which outer passed as Arg(0)).
+        use crate::callgraph::{build_call_graph, tarjan_sccs};
+
+        let helper_ssa = SsaCfg {
+            blocks: vec![SsaBlock {
+                id: BlockId(0),
+                addr: 0x2000,
+                stmts: vec![Stmt::Call {
+                    target: CallTarget::Direct(0x125d8),
+                    args: vec![VarId(1), VarId(0)], // strcpy(y, x) — swapped
+                    out: None,
+                }],
+                terminator: SsaTerminator::Return(None),
+            }],
+            vars: vec![mk_var(0, Expr::Const(0, 8)), mk_var(1, Expr::Const(0, 8))],
+            entry: BlockId(0),
+            diagnostics: Vec::<Diagnostic>::new(),
+        };
+        let outer_ssa = SsaCfg {
+            blocks: vec![SsaBlock {
+                id: BlockId(0),
+                addr: 0x1000,
+                stmts: vec![Stmt::Call {
+                    target: CallTarget::Direct(0x2000),
+                    args: vec![VarId(0), VarId(1)],
+                    out: None,
+                }],
+                terminator: SsaTerminator::Return(None),
+            }],
+            vars: vec![mk_var(0, Expr::Const(0, 8)), mk_var(1, Expr::Const(0, 8))],
+            entry: BlockId(0),
+            diagnostics: Vec::<Diagnostic>::new(),
+        };
+
+        let mut imports = HashMap::new();
+        imports.insert(0x125d8u64, "strcpy".to_string());
+
+        let funcs: Vec<(FuncId, &SsaCfg)> = vec![
+            (FuncId(0x2000), &helper_ssa),
+            (FuncId(0x1000), &outer_ssa),
+        ];
+        let graph = build_call_graph(&funcs, &imports);
+        let sccs = tarjan_sccs(&graph);
+
+        let mut arg_vars = HashMap::new();
+        arg_vars.insert(0u8, VarId(0));
+        arg_vars.insert(1u8, VarId(1));
+
+        let mut contexts: HashMap<FuncId, FunctionContext<'_>> = HashMap::new();
+        contexts.insert(
+            FuncId(0x2000),
+            FunctionContext {
+                ssa: &helper_ssa,
+                arg_vars: &arg_vars,
+            },
+        );
+        contexts.insert(
+            FuncId(0x1000),
+            FunctionContext {
+                ssa: &outer_ssa,
+                arg_vars: &arg_vars,
+            },
+        );
+
+        let summaries =
+            build_summaries_bottom_up(&graph, &sccs, &contexts, &imports);
+
+        // helper's intra summary: strcpy watched=Arg(1) → helper's
+        // VarId(0) → helper arg 0.
+        let helper_sum = summaries.get(&FuncId(0x2000)).unwrap();
+        assert_eq!(
+            helper_sum.sinks[0].tainted_caller_slots,
+            vec![AbiSlot::Arg(0)]
+        );
+        // outer's lifted summary: helper's tainted slot Arg(0) →
+        // outer's call args[0]=VarId(0) → outer arg 0.
+        let outer_sum = summaries.get(&FuncId(0x1000)).unwrap();
+        assert_eq!(outer_sum.sinks.len(), 1);
+        assert_eq!(
+            outer_sum.sinks[0].tainted_caller_slots,
+            vec![AbiSlot::Arg(0)]
+        );
+    }
+
+    #[test]
     fn bottom_up_recursive_scc_is_opaque() {
         // a → b → a (mutual recursion). Both must be classified as
         // recursive and receive only intra summaries (which here are
