@@ -17,6 +17,7 @@ pub mod dwarf;
 pub mod eh_frame;
 pub mod eqsat;
 pub mod fold;
+pub mod function_summary;
 pub mod go_pclntab;
 pub mod handler_summary;
 pub mod imports;
