@@ -30,6 +30,7 @@ pub mod pdb_info;
 pub mod peb_walk;
 pub mod peb_walk_detect;
 pub mod printer;
+pub mod region;
 pub mod rip_xref;
 pub mod scratch_leak;
 #[cfg(feature = "experimental")]
