@@ -879,7 +879,21 @@ fn chain_varnodes(
         let Some(def) = vars.get(current.0 as usize) else {
             continue;
         };
-        out.push(def.varnode);
+        // v3 precision: only emit a Varnode-level alias key for
+        // spaces where varnode identity implies value identity.
+        // Register-space reuse (ARM32 `r0 = popen(); r0 = fgets()`)
+        // and per-instruction Unique slots get DIFFERENT VarIds
+        // under SSA, but if we cross-link them via Varnode equality
+        // every register-reuse pair becomes a spurious lineage hit.
+        // Call-return VarIds always get fresh data — never alias by
+        // their outgoing register.
+        let space_aliases = !matches!(
+            def.varnode.space,
+            pcode_ir::AddressSpaceId::Register
+        ) && !def.call_return;
+        if space_aliases {
+            out.push(def.varnode);
+        }
         match &def.expr {
             crate::ir::Expr::Var(inner) => stack.push(*inner),
             crate::ir::Expr::Load(addr) => {
