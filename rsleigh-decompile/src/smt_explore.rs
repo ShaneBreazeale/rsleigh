@@ -518,20 +518,26 @@ pub fn collect_paths_with_summaries<'a>(
         }
     }
 
-    // Pair each Source with the next Sink in each completed walk.
+    // Pair each Source with EVERY subsequent Sink in each
+    // completed walk. v3: previous "next-Sink-only" rule meant a
+    // path like `fgets(...) → strncpy(LengthArg) → popen(Command)`
+    // got paired off as fgets→strncpy and the popen sink was lost
+    // when LengthArg returned Unsupported. Emitting one path per
+    // (source, downstream-sink) tuple lets SAT prove the deeper
+    // sink even when an intermediate one is unsupported.
     let mut paths = Vec::new();
     for state in completed {
-        let mut last_source: Option<(usize, &'a SourceSpec)> = None;
+        let mut sources: Vec<(usize, &'a SourceSpec)> = Vec::new();
         for (i, ev) in state.events.iter().enumerate() {
             match &ev.kind {
                 TaintEventKind::SourceCall { spec, .. } => {
-                    last_source = Some((i, spec));
+                    sources.push((i, spec));
                 }
                 TaintEventKind::SinkCall { spec, .. } => {
-                    if let Some((src_i, src_spec)) = last_source.take() {
+                    for (src_i, src_spec) in &sources {
                         paths.push(TaintPath {
                             source: src_spec,
-                            source_event: src_i,
+                            source_event: *src_i,
                             sink: spec,
                             sink_event: i,
                             events: state.events.clone(),
