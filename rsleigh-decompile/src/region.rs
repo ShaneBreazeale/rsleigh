@@ -183,6 +183,12 @@ fn classify(
         Expr::BinOp(_, a, b) => site_of_var(*a, map).or_else(|| site_of_var(*b, map)),
         Expr::UnaryOp(_, a) => site_of_var(*a, map),
         Expr::FieldAccess(base, _) => site_of_var(*base, map),
+        // v4 approximation: a value loaded from inside a region
+        // is treated as pointing at the SAME region. Not sound in
+        // general (struct fields can point at heap), but matches
+        // the common -O0 pattern where stack-spill reload
+        // recovers the original ptr.
+        Expr::Load(addr) => site_of_var(*addr, map),
         Expr::Phi(args) => args.iter().find_map(|a| site_of_var(*a, map)),
         Expr::Unknown if def.varnode.space == AddressSpaceId::Register => {
             Some(AllocSite::StackFrame)

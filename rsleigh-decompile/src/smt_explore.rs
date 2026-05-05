@@ -785,48 +785,81 @@ fn synth_pick_caller_var(
 /// correctly. Without this, every `-O0` reload pattern (`add fp,
 /// #const_off` recomputed at each call site) defeats Store→Load
 /// matching because each instance lands in a distinct Unique slot.
-type MemMap = HashMap<String, VarId>;
+/// v4 region-keyed mem map. Each Store insert keys by
+/// `(Region, OffsetClass)` derived from `region::infer_regions`,
+/// so two -O0 reload sites recomputing the same `add(fp, c)`
+/// shape with different Unique varnodes collide on the same key.
+type MemMap = HashMap<(crate::region::Region, crate::region::OffsetClass), VarId>;
 
-fn build_mem_map(events: &[TaintEvent<'_>], vars: &[crate::ir::VarDef]) -> MemMap {
+fn build_mem_map(
+    events: &[TaintEvent<'_>],
+    vars: &[crate::ir::VarDef],
+    regions: &crate::region::RegionMap,
+) -> MemMap {
     let mut m = MemMap::new();
     for ev in events {
         if let TaintEventKind::Store { addr, val } = ev.kind {
-            if let Some(key) = mem_addr_canon(addr, vars) {
-                m.insert(key, val);
-            }
+            let key = mem_key(addr, vars, regions);
+            m.insert(key, val);
         }
     }
     m
 }
 
-/// Stable string key for an address expression. Mirrors the helper
-/// in `function_summary.rs` — kept here as a module-private to
-/// avoid pulling the alias modelling out into a new crate.
-fn mem_addr_canon(var: VarId, vars: &[crate::ir::VarDef]) -> Option<String> {
-    fn rec(var: VarId, vars: &[crate::ir::VarDef], depth: u32) -> Option<String> {
-        if depth > 16 {
-            return None;
+/// Compute the region-keyed alias key for an address expression.
+fn mem_key(
+    addr: VarId,
+    vars: &[crate::ir::VarDef],
+    regions: &crate::region::RegionMap,
+) -> (crate::region::Region, crate::region::OffsetClass) {
+    let region = regions.region_of(addr);
+    let offset = classify_offset(addr, vars);
+    (region, offset)
+}
+
+fn classify_offset(addr: VarId, vars: &[crate::ir::VarDef]) -> crate::region::OffsetClass {
+    use crate::ir::{BinOpKind, Expr};
+    use crate::region::OffsetClass;
+    let Some(def) = vars.get(addr.0 as usize) else {
+        return OffsetClass::ConstOffset(0);
+    };
+    match &def.expr {
+        Expr::FieldAccess(_, off) => OffsetClass::ConstOffset(*off as i64),
+        Expr::BinOp(BinOpKind::Add, a, b) => {
+            if let Some(c) = const_value(*a, vars) {
+                return OffsetClass::ConstOffset(c);
+            }
+            if let Some(c) = const_value(*b, vars) {
+                return OffsetClass::ConstOffset(c);
+            }
+            OffsetClass::Symbolic
         }
-        let def = vars.get(var.0 as usize)?;
-        Some(match &def.expr {
-            crate::ir::Expr::Var(inner) => rec(*inner, vars, depth + 1)?,
-            crate::ir::Expr::Const(c, sz) => format!("C{}.{}", c, sz),
-            crate::ir::Expr::BinOp(op, a, b) => {
-                let ka = rec(*a, vars, depth + 1).unwrap_or_else(|| "?".to_string());
-                let kb = rec(*b, vars, depth + 1).unwrap_or_else(|| "?".to_string());
-                format!("B{:?}({},{})", op, ka, kb)
+        Expr::BinOp(BinOpKind::Sub, a, b) => {
+            if let Some(c) = const_value(*b, vars) {
+                if let Some(ca) = const_value(*a, vars) {
+                    return OffsetClass::ConstOffset(ca.wrapping_sub(c));
+                }
+                return OffsetClass::ConstOffset(-c);
             }
-            crate::ir::Expr::UnaryOp(op, a) => {
-                let ka = rec(*a, vars, depth + 1).unwrap_or_else(|| "?".to_string());
-                format!("U{:?}({})", op, ka)
-            }
-            _ => format!(
-                "V{:?}/{}/{}",
-                def.varnode.space, def.varnode.offset, def.varnode.size
-            ),
-        })
+            OffsetClass::Symbolic
+        }
+        Expr::Var(inner) => classify_offset(*inner, vars),
+        Expr::Const(c, _) => OffsetClass::ConstOffset(*c as i64),
+        _ => OffsetClass::ConstOffset(0),
     }
-    rec(var, vars, 0)
+}
+
+fn const_value(v: VarId, vars: &[crate::ir::VarDef]) -> Option<i64> {
+    let mut cur = v;
+    for _ in 0..16 {
+        let def = vars.get(cur.0 as usize)?;
+        match &def.expr {
+            crate::ir::Expr::Const(c, _) => return Some(*c as i64),
+            crate::ir::Expr::Var(inner) => cur = *inner,
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// Map of a Call's `out` VarId to the Call's argument VarIds.
@@ -872,12 +905,13 @@ fn varid_lineage_eq(
     vars: &[crate::ir::VarDef],
     mem: &MemMap,
     calls: &CallReturnMap,
+    regions: &crate::region::RegionMap,
 ) -> bool {
     if a == b {
         return true;
     }
-    let chain_a = chain_varnodes(a, vars, mem, calls);
-    let chain_b = chain_varnodes(b, vars, mem, calls);
+    let chain_a = chain_varnodes(a, vars, mem, calls, regions);
+    let chain_b = chain_varnodes(b, vars, mem, calls, regions);
     for vn_a in &chain_a {
         if chain_b.iter().any(|vn_b| vn_a == vn_b) {
             return true;
@@ -894,6 +928,7 @@ fn chain_varnodes(
     vars: &[crate::ir::VarDef],
     mem: &MemMap,
     calls: &CallReturnMap,
+    regions: &crate::region::RegionMap,
 ) -> Vec<pcode_ir::Varnode> {
     let mut out = Vec::new();
     let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
@@ -934,8 +969,17 @@ fn chain_varnodes(
         match &def.expr {
             crate::ir::Expr::Var(inner) => stack.push(*inner),
             crate::ir::Expr::Load(addr) => {
-                if let Some(key) = mem_addr_canon(*addr, vars) {
-                    if let Some(stored) = mem.get(&key).copied() {
+                let key = mem_key(*addr, vars, regions);
+                if let Some(stored) = mem.get(&key).copied() {
+                    stack.push(stored);
+                } else {
+                    // v4 over-approximate: any Symbolic-offset
+                    // Store on the same region aliases this Load.
+                    let sym_key = (
+                        key.0,
+                        crate::region::OffsetClass::Symbolic,
+                    );
+                    if let Some(stored) = mem.get(&sym_key).copied() {
                         stack.push(stored);
                     }
                 }
@@ -997,9 +1041,10 @@ pub fn solve(path: &TaintPath, ssa: &crate::ir::SsaCfg) -> SmtFinding {
     let (Some(src), Some(snk)) = (source_var, sink_var) else {
         return SmtFinding::Unsupported("source/sink slot missing");
     };
-    let mem = build_mem_map(&path.events, &ssa.vars);
+    let regions = crate::region::infer_regions(ssa);
+    let mem = build_mem_map(&path.events, &ssa.vars, &regions);
     let calls = build_call_return_map(ssa);
-    if !varid_lineage_eq(snk, src, &ssa.vars, &mem, &calls) {
+    if !varid_lineage_eq(snk, src, &ssa.vars, &mem, &calls, &regions) {
         return SmtFinding::NotReachable;
     }
 
@@ -1732,8 +1777,9 @@ mod tests {
         ];
         let mem = MemMap::new();
         let calls = CallReturnMap::new();
-        assert!(varid_lineage_eq(VarId(5), VarId(2), &vars, &mem, &calls));
-        assert!(!varid_lineage_eq(VarId(5), VarId(0), &vars, &mem, &calls));
+        let regions = crate::region::RegionMap::default();
+        assert!(varid_lineage_eq(VarId(5), VarId(2), &vars, &mem, &calls, &regions));
+        assert!(!varid_lineage_eq(VarId(5), VarId(0), &vars, &mem, &calls, &regions));
     }
 
     #[cfg(feature = "smt")]
@@ -1746,8 +1792,9 @@ mod tests {
             mk_var(1, Expr::Const(0xdeadbeef, 8)), // stored value
             mk_var(2, Expr::Load(VarId(0))),       // load from same addr
         ];
+        let regions = crate::region::RegionMap::default();
         let mut mem = MemMap::new();
-        let key = mem_addr_canon(VarId(0), &vars).unwrap();
+        let key = mem_key(VarId(0), &vars, &regions);
         mem.insert(key, VarId(1));
         let calls = CallReturnMap::new();
         // Without memmap entry, lineage fails.
@@ -1756,10 +1803,11 @@ mod tests {
             VarId(1),
             &vars,
             &MemMap::new(),
-            &calls
+            &calls,
+            &regions,
         ));
         // With memmap entry, lineage holds.
-        assert!(varid_lineage_eq(VarId(2), VarId(1), &vars, &mem, &calls));
+        assert!(varid_lineage_eq(VarId(2), VarId(1), &vars, &mem, &calls, &regions));
     }
 
     #[cfg(feature = "smt")]
@@ -1775,13 +1823,14 @@ mod tests {
         ];
         let mem = MemMap::new();
         let mut calls = CallReturnMap::new();
+        let regions = crate::region::RegionMap::default();
         // Without the call-return map: lineage misses (out is opaque).
-        assert!(!varid_lineage_eq(VarId(2), VarId(1), &vars, &mem, &calls));
+        assert!(!varid_lineage_eq(VarId(2), VarId(1), &vars, &mem, &calls, &regions));
         // With the map: out=2 → args=[1], lineage holds.
         calls.insert(VarId(2), vec![VarId(1)]);
-        assert!(varid_lineage_eq(VarId(2), VarId(1), &vars, &mem, &calls));
+        assert!(varid_lineage_eq(VarId(2), VarId(1), &vars, &mem, &calls, &regions));
         // Argument that wasn't passed must still miss.
-        assert!(!varid_lineage_eq(VarId(2), VarId(0), &vars, &mem, &calls));
+        assert!(!varid_lineage_eq(VarId(2), VarId(0), &vars, &mem, &calls, &regions));
     }
 
     #[cfg(feature = "smt")]
