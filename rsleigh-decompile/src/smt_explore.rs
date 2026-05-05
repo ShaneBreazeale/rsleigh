@@ -774,22 +774,59 @@ fn synth_pick_caller_var(
     None
 }
 
-/// Map of last-Store addresses (as Varnodes) to the VarId of the
-/// stored value. Built once per `solve` invocation by walking the
-/// path's events. Used by `varid_lineage_eq` to follow Load(addr)
-/// back to the value most recently stored at that addr.
-type MemMap = HashMap<pcode_ir::Varnode, VarId>;
+/// Map of last-Store addresses (as canonical-form keys) to the
+/// VarId of the stored value. Built once per `solve` invocation by
+/// walking the path's events. Used by `varid_lineage_eq` to follow
+/// Load(addr) back to the value most recently stored at that addr.
+///
+/// v3 region-lite: the key is a recursive stringification of the
+/// address expression so two address-computations that produce the
+/// SAME logical address via different SSA Unique varnodes alias
+/// correctly. Without this, every `-O0` reload pattern (`add fp,
+/// #const_off` recomputed at each call site) defeats Store→Load
+/// matching because each instance lands in a distinct Unique slot.
+type MemMap = HashMap<String, VarId>;
 
 fn build_mem_map(events: &[TaintEvent<'_>], vars: &[crate::ir::VarDef]) -> MemMap {
     let mut m = MemMap::new();
     for ev in events {
         if let TaintEventKind::Store { addr, val } = ev.kind {
-            if let Some(addr_vn) = vars.get(addr.0 as usize).map(|d| d.varnode) {
-                m.insert(addr_vn, val);
+            if let Some(key) = mem_addr_canon(addr, vars) {
+                m.insert(key, val);
             }
         }
     }
     m
+}
+
+/// Stable string key for an address expression. Mirrors the helper
+/// in `function_summary.rs` — kept here as a module-private to
+/// avoid pulling the alias modelling out into a new crate.
+fn mem_addr_canon(var: VarId, vars: &[crate::ir::VarDef]) -> Option<String> {
+    fn rec(var: VarId, vars: &[crate::ir::VarDef], depth: u32) -> Option<String> {
+        if depth > 16 {
+            return None;
+        }
+        let def = vars.get(var.0 as usize)?;
+        Some(match &def.expr {
+            crate::ir::Expr::Var(inner) => rec(*inner, vars, depth + 1)?,
+            crate::ir::Expr::Const(c, sz) => format!("C{}.{}", c, sz),
+            crate::ir::Expr::BinOp(op, a, b) => {
+                let ka = rec(*a, vars, depth + 1).unwrap_or_else(|| "?".to_string());
+                let kb = rec(*b, vars, depth + 1).unwrap_or_else(|| "?".to_string());
+                format!("B{:?}({},{})", op, ka, kb)
+            }
+            crate::ir::Expr::UnaryOp(op, a) => {
+                let ka = rec(*a, vars, depth + 1).unwrap_or_else(|| "?".to_string());
+                format!("U{:?}({})", op, ka)
+            }
+            _ => format!(
+                "V{:?}/{}/{}",
+                def.varnode.space, def.varnode.offset, def.varnode.size
+            ),
+        })
+    }
+    rec(var, vars, 0)
 }
 
 /// Map of a Call's `out` VarId to the Call's argument VarIds.
@@ -897,8 +934,8 @@ fn chain_varnodes(
         match &def.expr {
             crate::ir::Expr::Var(inner) => stack.push(*inner),
             crate::ir::Expr::Load(addr) => {
-                if let Some(addr_vn) = vars.get(addr.0 as usize).map(|d| d.varnode) {
-                    if let Some(stored) = mem.get(&addr_vn).copied() {
+                if let Some(key) = mem_addr_canon(*addr, vars) {
+                    if let Some(stored) = mem.get(&key).copied() {
                         stack.push(stored);
                     }
                 }
@@ -1694,7 +1731,8 @@ mod tests {
             mk_var(2, Expr::Load(VarId(0))),       // load from same addr
         ];
         let mut mem = MemMap::new();
-        mem.insert(vars[0].varnode, VarId(1));
+        let key = mem_addr_canon(VarId(0), &vars).unwrap();
+        mem.insert(key, VarId(1));
         let calls = CallReturnMap::new();
         // Without memmap entry, lineage fails.
         assert!(!varid_lineage_eq(
