@@ -920,16 +920,30 @@ fn varid_lineage_eq(
     false
 }
 
-/// Collect the set of Varnodes encountered while unwinding `start`
-/// through `Expr::Var` chains and (one-step) Store→Load redirection
-/// via `mem`. Bounded depth so cyclic IRs don't hang the v0 prover.
+/// Alias key for two-chain intersection in `varid_lineage_eq`.
+/// Two VarIds alias when their alias sets share at least one key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum AliasKey {
+    /// Stable Varnode (Ram / Unique / Const) of a non-call_return def.
+    Vn(pcode_ir::Varnode),
+    /// Region+offset class derived from the VarId's region
+    /// classification. Lets two distinct VarIds that point at
+    /// the same logical region+offset alias even when their
+    /// SSA expressions don't share a Varnode.
+    Region(crate::region::Region, crate::region::OffsetClass),
+}
+
+/// Collect the set of alias keys reached from `start` via SSA
+/// Var-chain, BinOp/UnaryOp/Phi/FieldAccess propagation, and one
+/// layer of Store→Load redirection through the region-keyed
+/// `mem`. Bounded depth so cyclic IRs don't hang the prover.
 fn chain_varnodes(
     start: VarId,
     vars: &[crate::ir::VarDef],
     mem: &MemMap,
     calls: &CallReturnMap,
     regions: &crate::region::RegionMap,
-) -> Vec<pcode_ir::Varnode> {
+) -> Vec<AliasKey> {
     let mut out = Vec::new();
     let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut stack = vec![start];
@@ -964,7 +978,19 @@ fn chain_varnodes(
             pcode_ir::AddressSpaceId::Register
         ) && !def.call_return;
         if space_aliases {
-            out.push(def.varnode);
+            out.push(AliasKey::Vn(def.varnode));
+        }
+        // v4: region+offset is a more robust alias key than
+        // raw varnode for stack-spilled pointer values. We
+        // include it for any VarId whose region resolved to a
+        // non-Unknown AllocSite — Unknown regions are minted
+        // per-VarId so they'd never alias anyway.
+        let region = regions.region_of(current);
+        if let Some(site) = regions.site_of(region) {
+            if !matches!(site, crate::region::AllocSite::Unknown(_)) {
+                let off = classify_offset(current, vars);
+                out.push(AliasKey::Region(region, off));
+            }
         }
         match &def.expr {
             crate::ir::Expr::Var(inner) => stack.push(*inner),
