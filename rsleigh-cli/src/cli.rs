@@ -3093,9 +3093,14 @@ fn run_xrefs(binary_path: &str, data: &[u8], target_name: &str) {
                         pos += 1;
                         continue;
                     }
-                    // Check if this instruction calls the target
+                    // Check if this instruction calls the target.
+                    // ARM32 disasm uses lowercase `bl`; x86 uses
+                    // uppercase `CALL`; AArch64 mixes `bl`/`blr`.
+                    // Case-insensitive prefix match keeps the xrefs
+                    // UI honest across architectures.
                     let dis = &inst.disassembly;
-                    if dis.starts_with("CALL ") || dis.starts_with("BL ") {
+                    let dis_lower = dis.to_ascii_lowercase();
+                    if dis_lower.starts_with("call ") || dis_lower.starts_with("bl ") {
                         if let Some(target_str) = dis.split_whitespace().nth(1) {
                             if let Some(hex) = target_str.strip_prefix("0x") {
                                 if let Ok(addr) = u64::from_str_radix(hex, 16) {
