@@ -940,6 +940,22 @@ fn chain_varnodes(
                     }
                 }
             }
+            // v3 lineage widening: taint propagates through
+            // arithmetic / type-casts / phi joins. A loop counter
+            // mixed with a tainted byte still leaves the result
+            // attacker-influenced; the per-SinkKind constraint
+            // does the actual feasibility check.
+            crate::ir::Expr::BinOp(_, a, b) => {
+                stack.push(*a);
+                stack.push(*b);
+            }
+            crate::ir::Expr::UnaryOp(_, a) => stack.push(*a),
+            crate::ir::Expr::FieldAccess(base, _off) => stack.push(*base),
+            crate::ir::Expr::Phi(args) => {
+                for a in args {
+                    stack.push(*a);
+                }
+            }
             _ => {}
         }
     }
