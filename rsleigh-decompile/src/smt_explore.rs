@@ -265,7 +265,7 @@ pub struct TaintPath<'a> {
 /// 20+ branches before reaching a sink; 4 was too low. 32 covers
 /// the realistic depth without burning memory because we also cap
 /// the global worklist size.
-pub const MAX_BRANCH_DEPTH: u32 = 32;
+pub const MAX_BRANCH_DEPTH: u32 = 64;
 
 /// Hard cap on total `WalkState`s the worklist can hold. With
 /// MAX_BRANCH_DEPTH=32 the unbounded worst case is 2^32 — never
@@ -273,7 +273,7 @@ pub const MAX_BRANCH_DEPTH: u32 = 32;
 /// still ceiling at this number to keep memory bounded on
 /// pathological dispatch tables. When the cap is hit, surplus
 /// states are dropped and the rejection reason is recorded.
-pub const MAX_WORKLIST_SIZE: usize = 4096;
+pub const MAX_WORKLIST_SIZE: usize = 16384;
 
 /// One in-progress walk state in the v1 collector's worklist.
 struct WalkState<'a> {
