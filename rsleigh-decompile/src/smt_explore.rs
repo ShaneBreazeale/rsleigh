@@ -1861,6 +1861,34 @@ mod tests {
 
     #[cfg(feature = "smt")]
     #[test]
+    fn region_keyed_mem_map_collides_distinct_unique_addrs_on_same_offset() {
+        // v4.W7: two address VarIds computed via DISTINCT expression
+        // shapes that nonetheless evaluate to the same logical
+        // location must collide on the same MemMap key.
+        // Simulated by giving both addr VarIds the same Region+
+        // offset via classify_offset returning ConstOffset(8) for
+        // both.
+        let vars = vec![
+            mk_var(0, Expr::Const(8, 8)),                // const offset 8
+            mk_var(1, Expr::Const(8, 8)),                // distinct VarId, same const
+            mk_var(2, Expr::Const(0xDEAD, 8)),           // stored value A
+            mk_var(3, Expr::Const(0xBEEF, 8)),           // stored value B (later)
+        ];
+        let regions = crate::region::RegionMap::default();
+        let mut mem = MemMap::new();
+        let key0 = mem_key(VarId(0), &vars, &regions);
+        let key1 = mem_key(VarId(1), &vars, &regions);
+        assert_eq!(key0, key1, "same const-offset addrs must share MemMap key");
+        mem.insert(key0.clone(), VarId(2));
+        // Second store via distinct addr VarId overwrites — verifies
+        // the alias relation, not just two equal keys.
+        mem.insert(key1, VarId(3));
+        assert_eq!(mem.get(&key0).copied(), Some(VarId(3)));
+        assert_eq!(mem.len(), 1);
+    }
+
+    #[cfg(feature = "smt")]
+    #[test]
     fn build_call_return_map_captures_stmt_and_terminator_calls() {
         let vars = vec![
             mk_var(0, Expr::Const(0, 8)),
