@@ -1349,18 +1349,27 @@ pub fn solve_diag(
             let chain_b = chain_varnodes_with_bound(
                 src, &ssa.vars, &mem, &calls, &regions, Some(&bounded),
             );
-            // v6.W1: only Vn-key alias counts for LengthArg. Region
-            // keys (Param/StackFrame/Heap) over-approximate: the
-            // function's read-buffer and the function's args both
-            // map to Region::Param(N) on a leaf ARM32 routine, so a
-            // Region match is satisfied trivially even when the
-            // taint actually flows through a Const-bounded read
-            // return. Vn equality requires SSA structural alias —
-            // a far stronger signal that the length value really is
-            // the source buffer.
+            // v6.W1: Vn-key alias is the strongest signal. v7.W3:
+            // Vn-strict alone is too tight on Heartbleed-shape flows
+            // (`len = (buf[0] << 8) | buf[1]; memcpy(dst, buf+2,
+            // len)`) where the buffer contents are attacker-
+            // controlled but the SSA carries `buf` in Register
+            // space (no Vn key emitted). Allow a Region match when
+            // and only when the shared region is the SOURCE's
+            // specific region — not a generic Param/StackFrame
+            // match which over-approximates.
+            let src_region = regions.region_of(src);
+            let region_eq = matches!(regions.site_of(src_region),
+                Some(s) if !matches!(s, crate::region::AllocSite::Unknown(_)))
+                && chain_a.iter().any(|k| {
+                    matches!(k, AliasKey::Region(r, _) if *r == src_region)
+                })
+                && chain_b.iter().any(|k| {
+                    matches!(k, AliasKey::Region(r, _) if *r == src_region)
+                });
             let unbounded_eq = chain_a.iter().any(|k_a| {
                 matches!(k_a, AliasKey::Vn(_)) && chain_b.contains(k_a)
-            });
+            }) || region_eq;
             if !unbounded_eq {
                 reason_log.push(format!(
                     "LengthArg lineage bounded by wrapper return ({} bounded VarIds: {:?})",

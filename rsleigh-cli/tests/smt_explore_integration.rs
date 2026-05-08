@@ -76,6 +76,24 @@ fn read_system_command_injection_reachable() {
 }
 
 #[test]
+fn heartbleed_shape_lengtharg_reachable() {
+    // recv(_, buf, 1024, 0); len = (buf[0] << 8) | buf[1];
+    // memcpy(dst, buf+2, len)  // dst is 64-byte stack alloca.
+    //
+    // v6.W1 strict bound classified this NotReachable because the
+    // legitimate buf-content lineage shared a call_return bridge
+    // through recv.out. v7.W3 allows Region match when the shared
+    // region is the SOURCE's specific region (not generic Param/
+    // StackFrame), which preserves the FP guard while admitting the
+    // Heartbleed-shape true positive.
+    let Some(bin) = fixture("heartbleed_shape") else { return };
+    let out = run_explore(&bin, "vuln_heartbleed");
+    assert!(out.contains("recv -> memcpy"), "missing recv->memcpy path:\n{out}");
+    assert!(out.contains("LengthArg"), "missing LengthArg kind:\n{out}");
+    assert_reachable_or_skip_no_smt(&out, "heartbleed_shape");
+}
+
+#[test]
 fn fgets_printf_format_string_reachable() {
     let Some(bin) = fixture("fgets_printf") else { return };
     let out = run_explore(&bin, "vuln_fgets_printf");
