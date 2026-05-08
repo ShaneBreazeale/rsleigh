@@ -220,6 +220,20 @@ pub fn build_call_graph(
     funcs: &[(FuncId, &crate::ir::SsaCfg)],
     imports: &HashMap<u64, String>,
 ) -> CallGraph {
+    build_call_graph_with_image(funcs, imports, None)
+}
+
+/// Same as `build_call_graph` but with an optional `ImageView` so
+/// vtable / function-pointer-table indirect calls can be resolved
+/// to multiple synthetic Direct edges (v4.W9). When `image` is
+/// `None` behaviour is identical to the legacy entrypoint.
+pub fn build_call_graph_with_image(
+    funcs: &[(FuncId, &crate::ir::SsaCfg)],
+    imports: &HashMap<u64, String>,
+    image: Option<ImageView<'_>>,
+) -> CallGraph {
+    const VTABLE_CAP: usize = 64;
+
     let mut g = CallGraph::new();
     let func_set: std::collections::HashSet<FuncId> =
         funcs.iter().map(|(id, _)| *id).collect();
@@ -229,17 +243,46 @@ pub fn build_call_graph(
     }
 
     for (caller_id, ssa) in funcs {
+        // Per-caller dedup against (call_site, callee). Avoids
+        // emitting multiple identical edges when both a stmt and
+        // a terminator reference the same target, or when the
+        // vtable resolver returns an entry already present from a
+        // direct call elsewhere in the function.
+        let mut seen: std::collections::HashSet<(u64, CalleeRef)> =
+            std::collections::HashSet::new();
         for block in &ssa.blocks {
             for stmt in &block.stmts {
                 if let crate::ir::Stmt::Call { target, .. } = stmt {
-                    if let Some(edge) = classify_edge(target, &ssa.vars, imports, &func_set) {
-                        g.add_edge(*caller_id, edge);
+                    let edges = classify_edges(
+                        target,
+                        &ssa.vars,
+                        imports,
+                        &func_set,
+                        image,
+                        VTABLE_CAP,
+                    );
+                    for e in edges {
+                        let key = (e.call_site, e.callee.clone());
+                        if seen.insert(key) {
+                            g.add_edge(*caller_id, e);
+                        }
                     }
                 }
             }
             if let crate::ir::SsaTerminator::Call { target, .. } = &block.terminator {
-                if let Some(edge) = classify_edge(target, &ssa.vars, imports, &func_set) {
-                    g.add_edge(*caller_id, edge);
+                let edges = classify_edges(
+                    target,
+                    &ssa.vars,
+                    imports,
+                    &func_set,
+                    image,
+                    VTABLE_CAP,
+                );
+                for e in edges {
+                    let key = (e.call_site, e.callee.clone());
+                    if seen.insert(key) {
+                        g.add_edge(*caller_id, e);
+                    }
                 }
             }
         }
@@ -248,49 +291,57 @@ pub fn build_call_graph(
     g
 }
 
-fn classify_edge(
+fn classify_edges(
     target: &crate::ir::CallTarget,
     vars: &[crate::ir::VarDef],
     imports: &HashMap<u64, String>,
     func_set: &std::collections::HashSet<FuncId>,
-) -> Option<CallEdge> {
+    image: Option<ImageView<'_>>,
+    vtable_cap: usize,
+) -> Vec<CallEdge> {
+    let classify_addr = |addr: u64| -> CalleeRef {
+        if let Some(name) = imports.get(&addr) {
+            CalleeRef::Import {
+                name: name.clone(),
+                addr,
+            }
+        } else if func_set.contains(&FuncId(addr)) {
+            CalleeRef::Direct(FuncId(addr))
+        } else {
+            CalleeRef::Indirect
+        }
+    };
+
     let resolved = match target {
         crate::ir::CallTarget::Direct(addr) => Some(*addr),
         crate::ir::CallTarget::Indirect(vn) => resolve_via_vars(vn, vars, imports),
     };
-    let edge = match resolved {
-        Some(addr) => {
-            if let Some(name) = imports.get(&addr) {
-                CallEdge {
-                    callee: CalleeRef::Import {
-                        name: name.clone(),
-                        addr,
-                    },
-                    call_site: 0,
-                }
-            } else if func_set.contains(&FuncId(addr)) {
-                CallEdge {
-                    callee: CalleeRef::Direct(FuncId(addr)),
-                    call_site: 0,
-                }
-            } else {
-                // Direct call to an address outside the explored
-                // function set and outside imports — typically a
-                // discovered-but-not-explored callee. v2 records
-                // it as an opaque Indirect for now (could become a
-                // ToBeExplored variant in v3).
-                CallEdge {
-                    callee: CalleeRef::Indirect,
-                    call_site: 0,
-                }
-            }
-        }
-        None => CallEdge {
-            callee: CalleeRef::Indirect,
+    if let Some(addr) = resolved {
+        return vec![CallEdge {
+            callee: classify_addr(addr),
             call_site: 0,
-        },
-    };
-    Some(edge)
+        }];
+    }
+
+    // Indirect with no scalar resolution — try the vtable resolver
+    // when an image is available.
+    if let (crate::ir::CallTarget::Indirect(vn), Some(img)) = (target, image) {
+        let entries = resolve_vtable_targets(vn, vars, img, vtable_cap);
+        if !entries.is_empty() {
+            return entries
+                .into_iter()
+                .map(|addr| CallEdge {
+                    callee: classify_addr(addr),
+                    call_site: 0,
+                })
+                .collect();
+        }
+    }
+
+    vec![CallEdge {
+        callee: CalleeRef::Indirect,
+        call_site: 0,
+    }]
 }
 
 /// View over a binary's loaded segments, used to read constant
@@ -850,6 +901,140 @@ mod tests {
         ];
         let out = resolve_vtable_targets(&target_vn, &vars, image, 64);
         assert_eq!(out, vec![0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn build_with_image_emits_synthetic_direct_edges_per_vtable_entry() {
+        // table at 0x4000 = [0x2000, 0x3000, 0]. Both entries are
+        // also explored functions, so each becomes a Direct edge.
+        let mut data = vec![0u8; 0x40];
+        data[0..8].copy_from_slice(&0x2000u64.to_le_bytes());
+        data[8..16].copy_from_slice(&0x3000u64.to_le_bytes());
+        let segs: Vec<(u64, u64, u64)> = vec![(0x4000, 0x40, 0)];
+        let image = ImageView {
+            data: &data,
+            segs: &segs,
+            ptr_size: 8,
+        };
+
+        let target_vn = Varnode::register(0x600, 8);
+        let vars = vec![
+            mk_var(0, Expr::Const(0x4000, 8)),
+            mk_var(1, Expr::Const(8, 8)),
+            mk_var(2, Expr::Const(0, 8)),
+            mk_var(3, Expr::BinOp(crate::ir::BinOpKind::Mult, VarId(2), VarId(1))),
+            mk_var(4, Expr::BinOp(crate::ir::BinOpKind::Add, VarId(0), VarId(3))),
+            mk_var_with_vn(5, Expr::Load(VarId(4)), target_vn.clone()),
+        ];
+        let ssa = SsaCfg {
+            blocks: vec![
+                SsaBlock {
+                    id: BlockId(0),
+                    addr: 0,
+                    stmts: vec![],
+                    terminator: SsaTerminator::Call {
+                        target: CallTarget::Indirect(target_vn),
+                        args: vec![],
+                        out: None,
+                        fallthrough: BlockId(1),
+                    },
+                },
+                SsaBlock {
+                    id: BlockId(1),
+                    addr: 0x10,
+                    stmts: vec![],
+                    terminator: SsaTerminator::Return(None),
+                },
+            ],
+            vars,
+            entry: BlockId(0),
+            diagnostics: Vec::<Diagnostic>::new(),
+        };
+        let stub_b = SsaCfg {
+            blocks: vec![SsaBlock {
+                id: BlockId(0),
+                addr: 0x2000,
+                stmts: vec![],
+                terminator: SsaTerminator::Return(None),
+            }],
+            vars: vec![],
+            entry: BlockId(0),
+            diagnostics: Vec::<Diagnostic>::new(),
+        };
+        let stub_c = SsaCfg {
+            blocks: vec![SsaBlock {
+                id: BlockId(0),
+                addr: 0x3000,
+                stmts: vec![],
+                terminator: SsaTerminator::Return(None),
+            }],
+            vars: vec![],
+            entry: BlockId(0),
+            diagnostics: Vec::<Diagnostic>::new(),
+        };
+        let funcs = vec![
+            (FuncId(0x1000), &ssa),
+            (FuncId(0x2000), &stub_b),
+            (FuncId(0x3000), &stub_c),
+        ];
+        let imports: HashMap<u64, String> = HashMap::new();
+        let g = build_call_graph_with_image(&funcs, &imports, Some(image));
+
+        let edges = g.edges.get(&FuncId(0x1000)).unwrap();
+        let direct: Vec<FuncId> = edges
+            .iter()
+            .filter_map(|e| match e.callee {
+                CalleeRef::Direct(f) => Some(f),
+                _ => None,
+            })
+            .collect();
+        assert!(direct.contains(&FuncId(0x2000)));
+        assert!(direct.contains(&FuncId(0x3000)));
+        assert_eq!(direct.len(), 2);
+    }
+
+    #[test]
+    fn build_with_image_falls_back_to_indirect_when_no_match() {
+        // Indirect target with no var trail and no vtable shape →
+        // legacy Indirect classification, image present or not.
+        let target_vn = Varnode::register(0x700, 8);
+        let ssa = SsaCfg {
+            blocks: vec![
+                SsaBlock {
+                    id: BlockId(0),
+                    addr: 0,
+                    stmts: vec![],
+                    terminator: SsaTerminator::Call {
+                        target: CallTarget::Indirect(target_vn),
+                        args: vec![],
+                        out: None,
+                        fallthrough: BlockId(1),
+                    },
+                },
+                SsaBlock {
+                    id: BlockId(1),
+                    addr: 0x10,
+                    stmts: vec![],
+                    terminator: SsaTerminator::Return(None),
+                },
+            ],
+            vars: vec![],
+            entry: BlockId(0),
+            diagnostics: Vec::<Diagnostic>::new(),
+        };
+        let funcs = vec![(FuncId(0x1000), &ssa)];
+        let imports: HashMap<u64, String> = HashMap::new();
+        let data: Vec<u8> = vec![];
+        let segs: Vec<(u64, u64, u64)> = vec![];
+        let image = ImageView {
+            data: &data,
+            segs: &segs,
+            ptr_size: 8,
+        };
+        let g = build_call_graph_with_image(&funcs, &imports, Some(image));
+        let edges = g.edges.get(&FuncId(0x1000)).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert!(matches!(edges[0].callee, CalleeRef::Indirect));
     }
 
     #[test]

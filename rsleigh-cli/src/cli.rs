@@ -1877,7 +1877,9 @@ fn build_binary_summaries(
     rsleigh_decompile::callgraph::FuncId,
     rsleigh_decompile::function_summary::FunctionSummary,
 > {
-    use rsleigh_decompile::callgraph::{build_call_graph, tarjan_sccs, FuncId};
+    use rsleigh_decompile::callgraph::{
+        build_call_graph_with_image, tarjan_sccs, FuncId, ImageView,
+    };
     use rsleigh_decompile::function_summary::{
         arg_vars_from_ssa, build_summaries_bottom_up, FunctionContext,
     };
@@ -1921,7 +1923,18 @@ fn build_binary_summaries(
 
     let funcs_ref: Vec<(FuncId, &rsleigh_decompile::ir::SsaCfg)> =
         ssas.iter().map(|(k, v)| (*k, v)).collect();
-    let graph = build_call_graph(&funcs_ref, &imports);
+    let ptr_size: u8 = match arch {
+        rsleigh_api::Architecture::X86_32
+        | rsleigh_api::Architecture::ARM32
+        | rsleigh_api::Architecture::MIPS32 => 4,
+        _ => 8,
+    };
+    let image = ImageView {
+        data,
+        segs,
+        ptr_size,
+    };
+    let graph = build_call_graph_with_image(&funcs_ref, &imports, Some(image));
     let sccs = tarjan_sccs(&graph);
 
     let mut contexts: std::collections::HashMap<FuncId, FunctionContext<'_>> =
