@@ -1235,7 +1235,8 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
         .collect();
 
     let smt_explore_all_early = args.iter().any(|a| a == "--smt-explore-all");
-    if func_args.is_empty() && !all_mode && !disasm_mode && !smt_explore_all_early {
+    let smt_diag_early = args.iter().any(|a| a == "--smt-diag");
+    if func_args.is_empty() && !all_mode && !disasm_mode && !smt_explore_all_early && !smt_diag_early {
         // List functions. Hide CRT-internal / runtime glue whose names start
         // with a single `_` (`_init`, `_fini`, `_start`, `_dl_*`, etc.) but
         // KEEP demangled-candidate symbols starting with `_Z` / `__Z` (C++
@@ -1473,6 +1474,11 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
     let smt_explore = args.iter().any(|a| a == "--smt-explore");
     let smt_explore_all = args.iter().any(|a| a == "--smt-explore-all");
     let smt_summaries = args.iter().any(|a| a == "--smt-summaries");
+    let smt_diag = args.iter().any(|a| a == "--smt-diag");
+    if smt_diag {
+        run_smt_diag(&data, arch, &symbols, &segs, &mut dec, json_mode);
+        return;
+    }
     let inter_proc_summaries = if (smt_explore || smt_explore_all) && smt_summaries {
         Some(build_binary_summaries(&data, arch, &symbols, &segs, &mut dec))
     } else {
@@ -1958,6 +1964,291 @@ fn build_binary_summaries(
 /// REACHABLE finding (or a one-line summary in plain mode). Path
 /// rejections / no-sink-found are silently skipped to keep output
 /// scannable across a 1000-function daemon.
+/// `--smt-diag <binary>`: ground-truth diagnostic for the SMT
+/// path-explorer's wiring against real binaries. Counts every BL/
+/// CALL site in every explored function, classifies it via the
+/// imports + func-set tables exactly as `build_call_graph` does,
+/// and tallies how many libc sources / sinks the explorer would
+/// actually see end-to-end. Writes human-readable to stdout (or
+/// JSON with --json). v5.W1.C1.
+fn run_smt_diag(
+    data: &[u8],
+    arch: rsleigh_api::Architecture,
+    symbols: &[(u64, String)],
+    segs: &[(u64, u64, u64)],
+    dec: &mut rsleigh_api::Decoder,
+    json: bool,
+) {
+    use rsleigh_decompile::callgraph::FuncId;
+    use rsleigh_decompile::smt_explore::{
+        collect_paths, collect_paths_with_summaries, resolve_call, SpecRef, DEFAULT_SINKS,
+        DEFAULT_SOURCES,
+    };
+
+    let imports = rsleigh_decompile::imports::resolve_imports(data);
+    let cc = match arch {
+        rsleigh_api::Architecture::X86_32 | rsleigh_api::Architecture::MIPS32 => {
+            rsleigh_decompile::fold::CallingConv::Cdecl32
+        }
+        rsleigh_api::Architecture::ARM32 => rsleigh_decompile::fold::CallingConv::Arm32,
+        rsleigh_api::Architecture::AArch64 => rsleigh_decompile::fold::CallingConv::AArch64,
+        _ => rsleigh_decompile::fold::CallingConv::SysV,
+    };
+
+    let mut funcs_explored: usize = 0;
+    let mut bl_sites: usize = 0;
+    let mut direct_imports: usize = 0;
+    let mut direct_funcset: usize = 0;
+    let mut direct_unknown: usize = 0;
+    let mut indirect: usize = 0;
+
+    let mut source_hits: std::collections::HashMap<&'static str, usize> =
+        std::collections::HashMap::new();
+    let mut sink_hits: std::collections::HashMap<&'static str, usize> =
+        std::collections::HashMap::new();
+    for s in DEFAULT_SOURCES {
+        source_hits.insert(s.name, 0);
+    }
+    for s in DEFAULT_SINKS {
+        sink_hits.insert(s.name, 0);
+    }
+
+    let mut funcs_with_paths: usize = 0;
+    let mut funcs_with_paths_summary: usize = 0;
+    let mut funcs_with_taint_source: usize = 0;
+    let mut funcs_with_sink: usize = 0;
+    let mut total_paths: usize = 0;
+    let mut total_paths_summary: usize = 0;
+
+    let func_set: std::collections::HashSet<u64> = symbols.iter().map(|(a, _)| *a).collect();
+
+    // Build full inter-proc summaries up front so the diag can
+    // measure path discovery WITH summaries vs WITHOUT.
+    let summaries = build_binary_summaries(data, arch, symbols, segs, dec);
+
+    for (addr, name) in symbols {
+        if name.is_empty() || name.starts_with("dyld") {
+            continue;
+        }
+        let insts = decode_func(*addr, symbols, segs, data, dec);
+        if insts.is_empty() {
+            continue;
+        }
+        funcs_explored += 1;
+        let cfg = rsleigh_decompile::cfg::build_cfg(&insts);
+        let mut ssa = rsleigh_decompile::ssa::build_ssa_with_cc(&cfg, cc);
+        rsleigh_decompile::fold::fold_with_cc(&mut ssa, cc);
+
+        let mut saw_source = false;
+        let mut saw_sink = false;
+        for block in &ssa.blocks {
+            let visit_target = |target: &rsleigh_decompile::ir::CallTarget| -> (
+                bool,
+                Option<u64>,
+            ) {
+                match target {
+                    rsleigh_decompile::ir::CallTarget::Direct(a) => (false, Some(*a)),
+                    rsleigh_decompile::ir::CallTarget::Indirect(_) => (true, None),
+                }
+            };
+            for stmt in &block.stmts {
+                if let rsleigh_decompile::ir::Stmt::Call { target, .. } = stmt {
+                    bl_sites += 1;
+                    let (is_indirect, addr_opt) = visit_target(target);
+                    classify_diag_target(
+                        is_indirect,
+                        addr_opt,
+                        &imports,
+                        &func_set,
+                        &mut direct_imports,
+                        &mut direct_funcset,
+                        &mut direct_unknown,
+                        &mut indirect,
+                        &mut source_hits,
+                        &mut sink_hits,
+                        &mut saw_source,
+                        &mut saw_sink,
+                    );
+                }
+            }
+            if let rsleigh_decompile::ir::SsaTerminator::Call { target, .. } = &block.terminator {
+                bl_sites += 1;
+                let (is_indirect, addr_opt) = visit_target(target);
+                classify_diag_target(
+                    is_indirect,
+                    addr_opt,
+                    &imports,
+                    &func_set,
+                    &mut direct_imports,
+                    &mut direct_funcset,
+                    &mut direct_unknown,
+                    &mut indirect,
+                    &mut source_hits,
+                    &mut sink_hits,
+                    &mut saw_source,
+                    &mut saw_sink,
+                );
+            }
+        }
+
+        if saw_source {
+            funcs_with_taint_source += 1;
+        }
+        if saw_sink {
+            funcs_with_sink += 1;
+        }
+
+        if let Ok(paths) = collect_paths(&ssa, &imports) {
+            if !paths.is_empty() {
+                funcs_with_paths += 1;
+                total_paths += paths.len();
+            }
+        }
+        if let Ok(paths) = collect_paths_with_summaries(&ssa, &imports, &summaries) {
+            if !paths.is_empty() {
+                funcs_with_paths_summary += 1;
+                total_paths_summary += paths.len();
+            }
+        }
+        let _ = FuncId(*addr);
+        let _ = SpecRef::Source(DEFAULT_SOURCES[0]); // suppress unused warn on import
+        let _ = resolve_call;
+    }
+
+    let _ = funcs_with_sink; // reported below
+
+    if json {
+        let payload = serde_json::json!({
+            "funcs_explored":         funcs_explored,
+            "bl_sites":               bl_sites,
+            "direct_imports":         direct_imports,
+            "direct_funcset":         direct_funcset,
+            "direct_unknown":         direct_unknown,
+            "indirect":               indirect,
+            "funcs_with_paths":       funcs_with_paths,
+            "funcs_with_taint_source": funcs_with_taint_source,
+            "funcs_with_sink":        funcs_with_sink,
+            "source_hits":            source_hits,
+            "sink_hits":              sink_hits,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+        return;
+    }
+
+    println!("[smt-diag] arch={:?}", arch);
+    println!("  funcs_explored:           {}", funcs_explored);
+    println!("  bl_sites:                 {}", bl_sites);
+    let pct = |n: usize| -> f64 {
+        if bl_sites == 0 {
+            0.0
+        } else {
+            (n as f64) * 100.0 / (bl_sites as f64)
+        }
+    };
+    println!(
+        "  direct -> imports:        {} ({:.1}%)",
+        direct_imports,
+        pct(direct_imports)
+    );
+    println!(
+        "  direct -> func_set:       {} ({:.1}%)",
+        direct_funcset,
+        pct(direct_funcset)
+    );
+    println!(
+        "  direct -> unknown:        {} ({:.1}%)",
+        direct_unknown,
+        pct(direct_unknown)
+    );
+    println!(
+        "  indirect (unresolved):    {} ({:.1}%)",
+        indirect,
+        pct(indirect)
+    );
+    println!();
+    println!("  libc_sources_resolved:");
+    let mut sources_sorted: Vec<(&&str, &usize)> = source_hits.iter().collect();
+    sources_sorted.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    for (name, n) in sources_sorted {
+        if *n > 0 {
+            println!("    {:<14} {}", name, n);
+        }
+    }
+    println!();
+    println!("  libc_sinks_resolved:");
+    let mut sinks_sorted: Vec<(&&str, &usize)> = sink_hits.iter().collect();
+    sinks_sorted.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    for (name, n) in sinks_sorted {
+        if *n > 0 {
+            println!("    {:<14} {}", name, n);
+        }
+    }
+    println!();
+    println!(
+        "  funcs_with_paths (v0):    {} / {}   (total paths: {})",
+        funcs_with_paths, funcs_explored, total_paths
+    );
+    println!(
+        "  funcs_with_paths (v2):    {} / {}   (total paths: {})",
+        funcs_with_paths_summary, funcs_explored, total_paths_summary
+    );
+    println!(
+        "  funcs_with_taint_source:  {} / {}",
+        funcs_with_taint_source, funcs_explored
+    );
+    println!(
+        "  funcs_with_sink:          {} / {}",
+        funcs_with_sink, funcs_explored
+    );
+}
+
+fn classify_diag_target(
+    is_indirect: bool,
+    addr_opt: Option<u64>,
+    imports: &std::collections::HashMap<u64, String>,
+    func_set: &std::collections::HashSet<u64>,
+    direct_imports: &mut usize,
+    direct_funcset: &mut usize,
+    direct_unknown: &mut usize,
+    indirect: &mut usize,
+    source_hits: &mut std::collections::HashMap<&'static str, usize>,
+    sink_hits: &mut std::collections::HashMap<&'static str, usize>,
+    saw_source: &mut bool,
+    saw_sink: &mut bool,
+) {
+    use rsleigh_decompile::smt_explore::{resolve_call, SpecRef};
+    if is_indirect {
+        *indirect += 1;
+        return;
+    }
+    let Some(addr) = addr_opt else {
+        *indirect += 1;
+        return;
+    };
+    if imports.contains_key(&addr) {
+        *direct_imports += 1;
+        match resolve_call(addr, imports) {
+            Some(SpecRef::Source(spec)) => {
+                if let Some(c) = source_hits.get_mut(spec.name) {
+                    *c += 1;
+                }
+                *saw_source = true;
+            }
+            Some(SpecRef::Sink(spec)) => {
+                if let Some(c) = sink_hits.get_mut(spec.name) {
+                    *c += 1;
+                }
+                *saw_sink = true;
+            }
+            None => {}
+        }
+    } else if func_set.contains(&addr) {
+        *direct_funcset += 1;
+    } else {
+        *direct_unknown += 1;
+    }
+}
+
 fn run_smt_explore_all(
     data: &[u8],
     arch: rsleigh_api::Architecture,
