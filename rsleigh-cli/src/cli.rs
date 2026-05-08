@@ -2527,6 +2527,85 @@ fn run_smt_candidates(
                 _ => Vec::new(),
             };
 
+            // v7.W2: per-event memory-flow trace. Walks every
+            // TaintEvent between source_event and sink_event
+            // (inclusive) and records its kind, varids, and the
+            // region/site of each arg/out. Lets the LLM audit
+            // "what regions does this lineage actually touch?"
+            // independently of the static filter classification.
+            let regions = rsleigh_decompile::region::infer_regions(&ssa);
+            let var_descriptor = |v: rsleigh_decompile::ir::VarId| -> serde_json::Value {
+                let r = regions.region_of(v);
+                let site = regions.site_of(r).map(|s| format!("{:?}", s));
+                let expr = ssa
+                    .vars
+                    .get(v.0 as usize)
+                    .map(|d| format!("{:?}", d.expr))
+                    .unwrap_or_default();
+                serde_json::json!({
+                    "var":    v.0,
+                    "region": r.0,
+                    "site":   site,
+                    "expr":   expr,
+                })
+            };
+            let lo = path.source_event.min(path.sink_event);
+            let hi = path.source_event.max(path.sink_event);
+            let mut event_records: Vec<serde_json::Value> = Vec::new();
+            for (i, ev) in path.events.iter().enumerate() {
+                if i < lo || i > hi {
+                    continue;
+                }
+                let rec = match &ev.kind {
+                    TaintEventKind::Assign(v) => serde_json::json!({
+                        "kind": "Assign",
+                        "out":  var_descriptor(*v),
+                    }),
+                    TaintEventKind::Store { addr, val } => serde_json::json!({
+                        "kind": "Store",
+                        "addr": var_descriptor(*addr),
+                        "val":  var_descriptor(*val),
+                    }),
+                    TaintEventKind::SourceCall { spec, args, out, call_chain } => {
+                        serde_json::json!({
+                            "kind":       "SourceCall",
+                            "name":       spec.name,
+                            "tainted":    format!("{:?}", spec.tainted),
+                            "args":       args.iter().map(|v| var_descriptor(*v))
+                                              .collect::<Vec<_>>(),
+                            "out":        out.map(|v| var_descriptor(v)),
+                            "call_chain": call_chain.iter()
+                                              .map(|a| format!("0x{:x}", a))
+                                              .collect::<Vec<_>>(),
+                        })
+                    }
+                    TaintEventKind::SinkCall { spec, args, out, call_chain } => {
+                        serde_json::json!({
+                            "kind":       "SinkCall",
+                            "name":       spec.name,
+                            "watched":    format!("{:?}", spec.watched),
+                            "kind_class": format!("{:?}", spec.kind),
+                            "args":       args.iter().map(|v| var_descriptor(*v))
+                                              .collect::<Vec<_>>(),
+                            "out":        out.map(|v| var_descriptor(v)),
+                            "call_chain": call_chain.iter()
+                                              .map(|a| format!("0x{:x}", a))
+                                              .collect::<Vec<_>>(),
+                        })
+                    }
+                    TaintEventKind::OtherCall { target_addr, args, out } => {
+                        serde_json::json!({
+                            "kind":       "OtherCall",
+                            "target":     target_addr.map(|a| format!("0x{:x}", a)),
+                            "args":       args.iter().map(|v| var_descriptor(*v))
+                                              .collect::<Vec<_>>(),
+                            "out":        out.map(|v| var_descriptor(v)),
+                        })
+                    }
+                };
+                event_records.push(rec);
+            }
+
             if !first {
                 println!(",");
             }
@@ -2545,6 +2624,7 @@ fn run_smt_candidates(
                 "sink_expr":     sink_expr,
                 "call_chain":    call_chain,
                 "trigger":       trigger,
+                "events":        event_records,
             });
             print!("{}", serde_json::to_string_pretty(&payload).unwrap());
         }
