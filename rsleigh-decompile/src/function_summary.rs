@@ -241,15 +241,19 @@ fn arg_slots_for_var(
                     // offset is implicit in the global VA already.
                     stack.push(*base);
                 }
-                crate::ir::Expr::BinOp(op, a, b) => {
-                    // v5.W2.D2a: pointer arithmetic. For Add/Sub,
-                    // descend into both sides — either could be the
-                    // base pointer (the other being an index).
-                    use crate::ir::BinOpKind;
-                    if matches!(op, BinOpKind::Add | BinOpKind::Sub) {
-                        stack.push(*a);
-                        stack.push(*b);
-                    }
+                crate::ir::Expr::BinOp(_op, a, b) => {
+                    // v5.W2.D2a: pointer arithmetic. Originally only
+                    // Add/Sub descended (base + index pattern). v8:
+                    // descend any BinOp — Heartbleed-shape length
+                    // computation is `(Load(buf+0) << 8) | Load(buf+1)`
+                    // which uses Lsl + Or. Without descending into
+                    // arithmetic operators the chain stops at the
+                    // BinOp and the source's tainted_caller_slot
+                    // never reaches the buffer's Param/Global slot.
+                    // Over-descent is OK at this layer — false slots
+                    // get filtered downstream by lineage_eq.
+                    stack.push(*a);
+                    stack.push(*b);
                 }
                 crate::ir::Expr::Phi(inputs) => {
                     // v5.W2.D2a: descend into all Phi inputs; CBranch
@@ -258,6 +262,14 @@ fn arg_slots_for_var(
                     for v in inputs {
                         stack.push(*v);
                     }
+                }
+                crate::ir::Expr::UnaryOp(_op, a) => {
+                    // v8: Zext / Sext / Neg / etc all preserve the
+                    // taint identity. Heartbleed-shape on AArch64
+                    // synthesises Zext when widening a byte load
+                    // (`(uint16_t)buf[0]`); without descending the
+                    // chain breaks at the first cast.
+                    stack.push(*a);
                 }
                 _ => {}
             }

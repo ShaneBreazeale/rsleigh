@@ -94,6 +94,30 @@ fn heartbleed_shape_lengtharg_reachable() {
 }
 
 #[test]
+fn inter_proc_heartbleed_lengtharg_reachable() {
+    // v8: caller (handler) does recv into local buf; callee (parse_packet)
+    // does memcpy with tainted length extracted from buf contents.
+    // Neither function alone has both source + sink. Tests inter-proc
+    // taint propagation via callee summary lift.
+    let Some(bin) = fixture("inter_proc_heartbleed") else { return };
+
+    let out = Command::new(RSLEIGH_BIN)
+        .args([&bin, "--smt-explore", "handler", "--smt-summaries"])
+        .output()
+        .expect("rsleigh invocation");
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    if stdout.contains("smt feature not enabled at build time") {
+        eprintln!("[skip-no-smt] inter_proc_heartbleed");
+        return;
+    }
+    assert!(stdout.contains("recv -> memcpy"),
+        "missing recv->memcpy path:\n{stdout}");
+    assert!(stdout.contains("LengthArg"), "missing LengthArg kind:\n{stdout}");
+    assert!(stdout.contains("REACHABLE"),
+        "inter-proc Heartbleed should be REACHABLE via summary lift:\n{stdout}");
+}
+
+#[test]
 fn fgets_printf_format_string_reachable() {
     let Some(bin) = fixture("fgets_printf") else { return };
     let out = run_explore(&bin, "vuln_fgets_printf");
