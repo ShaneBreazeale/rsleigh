@@ -293,6 +293,182 @@ fn classify_edge(
     Some(edge)
 }
 
+/// View over a binary's loaded segments, used to read constant
+/// pointer tables (vtables / function-pointer dispatch arrays)
+/// while resolving indirect calls. Segments use the same
+/// `(va, size, file_offset)` schema as the rest of the CLI; data
+/// is the raw image bytes.
+#[derive(Clone, Copy)]
+pub struct ImageView<'a> {
+    pub data: &'a [u8],
+    pub segs: &'a [(u64, u64, u64)],
+    /// Pointer width: 4 (32-bit) or 8 (64-bit).
+    pub ptr_size: u8,
+}
+
+impl<'a> ImageView<'a> {
+    fn va_to_offset(&self, va: u64) -> Option<usize> {
+        for (seg_va, size, file_off) in self.segs {
+            if va >= *seg_va && va < seg_va.saturating_add(*size) {
+                let delta = va - *seg_va;
+                let off = file_off.saturating_add(delta) as usize;
+                return Some(off);
+            }
+        }
+        None
+    }
+
+    /// Little-endian pointer read at `va`. Returns None when `va`
+    /// is outside any mapped segment or runs off the image.
+    pub fn read_ptr(&self, va: u64) -> Option<u64> {
+        let off = self.va_to_offset(va)?;
+        match self.ptr_size {
+            4 => self
+                .data
+                .get(off..off + 4)
+                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64),
+            8 => self.data.get(off..off + 8).map(|b| {
+                u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// Resolve an indirect call shaped like a vtable / function-pointer
+/// dispatch table dereference and enumerate its entries.
+///
+/// Two patterns are recognised:
+///
+///   * Function-pointer table (single indirection):
+///     `Load(Add(Const(table_va), idx * stride))`
+///
+///   * C++ vtable through object slot (two indirections):
+///     `Load(Add(Load(Const(slot_va)), idx * stride))`,
+///     where `*slot_va` resolves to `vtable_va` at link time.
+///
+/// `idx * stride` accepts either `Mult(_, Const(stride))` or
+/// `Lsl(_, Const(log2_stride))`; `stride` must equal `ptr_size`.
+///
+/// Enumerates up to `cap` entries; stops on a NULL slot or a
+/// pointer that falls outside any mapped segment. Duplicates are
+/// suppressed.
+pub fn resolve_vtable_targets(
+    target_vn: &pcode_ir::Varnode,
+    vars: &[crate::ir::VarDef],
+    image: ImageView<'_>,
+    cap: usize,
+) -> Vec<u64> {
+    use crate::ir::{BinOpKind, Expr};
+
+    fn drill_var<'b>(
+        mut def: Option<&'b crate::ir::VarDef>,
+        vars: &'b [crate::ir::VarDef],
+    ) -> Option<&'b crate::ir::VarDef> {
+        let mut budget = 16usize;
+        while let Some(d) = def {
+            match &d.expr {
+                Expr::Var(inner) => {
+                    if budget == 0 {
+                        return None;
+                    }
+                    budget -= 1;
+                    def = vars.get(inner.0 as usize);
+                }
+                _ => break,
+            }
+        }
+        def
+    }
+
+    let target_def = match drill_var(
+        vars.iter().rev().find(|d| d.varnode == *target_vn),
+        vars,
+    ) {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+    let outer_addr = match &target_def.expr {
+        Expr::Load(v) => v.0,
+        _ => return Vec::new(),
+    };
+    let outer_addr_def = match drill_var(vars.get(outer_addr as usize), vars) {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+    let (lhs_id, rhs_id) = match outer_addr_def.expr {
+        Expr::BinOp(BinOpKind::Add, a, b) => (a.0, b.0),
+        _ => return Vec::new(),
+    };
+
+    let stride = image.ptr_size as u64;
+
+    // One side must be the table base; the other must be a scaled
+    // index whose stride matches the pointer width.
+    let resolve_table_base = |id: u32| -> Option<u64> {
+        let d = drill_var(vars.get(id as usize), vars)?;
+        match &d.expr {
+            Expr::Const(c, _) => Some(*c),
+            Expr::Load(inner) => {
+                let inner_def = drill_var(vars.get(inner.0 as usize), vars)?;
+                if let Expr::Const(slot_va, _) = inner_def.expr {
+                    image.read_ptr(slot_va)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    };
+    let is_index_term = |id: u32| -> bool {
+        let Some(d) = drill_var(vars.get(id as usize), vars) else {
+            return false;
+        };
+        match d.expr {
+            Expr::BinOp(BinOpKind::Mult, _, k) => {
+                matches!(vars.get(k.0 as usize).map(|x| &x.expr),
+                    Some(Expr::Const(c, _)) if *c == stride)
+            }
+            Expr::BinOp(BinOpKind::Lsl, _, k) => {
+                let log2 = match stride {
+                    4 => 2,
+                    8 => 3,
+                    _ => return false,
+                };
+                matches!(vars.get(k.0 as usize).map(|x| &x.expr),
+                    Some(Expr::Const(c, _)) if *c == log2)
+            }
+            _ => false,
+        }
+    };
+
+    let table_va = if is_index_term(rhs_id) {
+        resolve_table_base(lhs_id)
+    } else if is_index_term(lhs_id) {
+        resolve_table_base(rhs_id)
+    } else {
+        None
+    };
+    let Some(table_va) = table_va else {
+        return Vec::new();
+    };
+
+    let mut out: Vec<u64> = Vec::new();
+    for i in 0..cap as u64 {
+        let entry_va = table_va.wrapping_add(i * stride);
+        match image.read_ptr(entry_va) {
+            Some(0) => break,
+            Some(p) => {
+                if !out.contains(&p) {
+                    out.push(p);
+                }
+            }
+            None => break,
+        }
+    }
+    out
+}
+
 /// Lightweight stand-in for smt_explore::resolve_indirect_target.
 /// Same algorithm — walk Var-chains and Load(Const) edges — but
 /// returns the raw address regardless of imports membership so the
@@ -580,6 +756,150 @@ mod tests {
         let g = build_call_graph(&funcs, &imports);
         assert_eq!(g.funcs, vec![FuncId(0x1000)]);
         assert!(g.edges.get(&FuncId(0x1000)).unwrap().is_empty());
+    }
+
+    fn mk_var_with_vn(id: u32, expr: Expr, vn: pcode_ir::Varnode) -> VarDef {
+        let mut d = mk_var(id, expr);
+        d.varnode = vn;
+        d
+    }
+
+    #[test]
+    fn vtable_resolver_enumerates_funcptr_table() {
+        // table at va=0x4000, size 32 bytes (4 entries × 8). entries
+        // = [0x1000, 0x2000, 0x3000, 0]. ptr-size 8.
+        let mut data = vec![0u8; 0x40];
+        for (i, fp) in [0x1000u64, 0x2000, 0x3000, 0].iter().enumerate() {
+            data[i * 8..i * 8 + 8].copy_from_slice(&fp.to_le_bytes());
+        }
+        let segs: Vec<(u64, u64, u64)> = vec![(0x4000, 0x40, 0)];
+        let image = ImageView {
+            data: &data,
+            segs: &segs,
+            ptr_size: 8,
+        };
+
+        // Build SSA: target = Load(Add(Const(0x4000), Mult(idx, Const(8))))
+        let target_vn = Varnode::register(0x100, 8);
+        let vars = vec![
+            mk_var(0, Expr::Const(0x4000, 8)),         // 0: table base
+            mk_var(1, Expr::Const(8, 8)),              // 1: stride
+            mk_var(2, Expr::Const(7, 8)),              // 2: idx (any)
+            mk_var(3, Expr::BinOp(crate::ir::BinOpKind::Mult, VarId(2), VarId(1))), // 3: idx*stride
+            mk_var(4, Expr::BinOp(crate::ir::BinOpKind::Add, VarId(0), VarId(3))),  // 4: addr
+            mk_var_with_vn(5, Expr::Load(VarId(4)), target_vn.clone()),             // 5: target
+        ];
+
+        let out = resolve_vtable_targets(&target_vn, &vars, image, 64);
+        assert_eq!(out, vec![0x1000, 0x2000, 0x3000]);
+    }
+
+    #[test]
+    fn vtable_resolver_handles_lsl_index() {
+        // target = Load(Add(idx<<3, Const(0x4000))) — operands flipped.
+        let mut data = vec![0u8; 0x10];
+        data[0..8].copy_from_slice(&0xdeadbeefu64.to_le_bytes());
+        let segs: Vec<(u64, u64, u64)> = vec![(0x4000, 0x10, 0)];
+        let image = ImageView {
+            data: &data,
+            segs: &segs,
+            ptr_size: 8,
+        };
+        let target_vn = Varnode::register(0x200, 8);
+        let vars = vec![
+            mk_var(0, Expr::Const(0x4000, 8)),
+            mk_var(1, Expr::Const(3, 8)), // log2(8)
+            mk_var(2, Expr::Const(0, 8)), // idx
+            mk_var(3, Expr::BinOp(crate::ir::BinOpKind::Lsl, VarId(2), VarId(1))),
+            mk_var(4, Expr::BinOp(crate::ir::BinOpKind::Add, VarId(3), VarId(0))),
+            mk_var_with_vn(5, Expr::Load(VarId(4)), target_vn.clone()),
+        ];
+        let out = resolve_vtable_targets(&target_vn, &vars, image, 64);
+        assert_eq!(out, vec![0xdeadbeef]);
+    }
+
+    #[test]
+    fn vtable_resolver_two_indirection_through_slot() {
+        // slot_va = 0x3000 holds vtable_va = 0x5000.
+        // vtable: [0xAA, 0xBB, 0].
+        let mut data = vec![0u8; 0x60];
+        // segment 1 is slot at 0x3000 → file_off 0
+        data[0..8].copy_from_slice(&0x5000u64.to_le_bytes());
+        // segment 2 is vtable at 0x5000 → file_off 0x10
+        data[0x10..0x18].copy_from_slice(&0xAAu64.to_le_bytes());
+        data[0x18..0x20].copy_from_slice(&0xBBu64.to_le_bytes());
+        // 0x20..0x28 left zero
+        let segs: Vec<(u64, u64, u64)> = vec![
+            (0x3000, 0x10, 0),
+            (0x5000, 0x40, 0x10),
+        ];
+        let image = ImageView {
+            data: &data,
+            segs: &segs,
+            ptr_size: 8,
+        };
+        let target_vn = Varnode::register(0x300, 8);
+        let vars = vec![
+            mk_var(0, Expr::Const(0x3000, 8)),       // slot const
+            mk_var(1, Expr::Load(VarId(0))),         // vtable ptr
+            mk_var(2, Expr::Const(8, 8)),
+            mk_var(3, Expr::Const(2, 8)),
+            mk_var(4, Expr::BinOp(crate::ir::BinOpKind::Mult, VarId(3), VarId(2))),
+            mk_var(5, Expr::BinOp(crate::ir::BinOpKind::Add, VarId(1), VarId(4))),
+            mk_var_with_vn(6, Expr::Load(VarId(5)), target_vn.clone()),
+        ];
+        let out = resolve_vtable_targets(&target_vn, &vars, image, 64);
+        assert_eq!(out, vec![0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn vtable_resolver_caps_entries() {
+        // Table of 100 non-null pointers; cap=8 limits output.
+        let mut data = vec![0u8; 100 * 8];
+        for i in 0..100 {
+            let v = (0x1000 + i as u64) * 0x10;
+            data[i * 8..i * 8 + 8].copy_from_slice(&v.to_le_bytes());
+        }
+        let segs: Vec<(u64, u64, u64)> = vec![(0x4000, 100 * 8, 0)];
+        let image = ImageView {
+            data: &data,
+            segs: &segs,
+            ptr_size: 8,
+        };
+        let target_vn = Varnode::register(0x400, 8);
+        let vars = vec![
+            mk_var(0, Expr::Const(0x4000, 8)),
+            mk_var(1, Expr::Const(8, 8)),
+            mk_var(2, Expr::Const(0, 8)),
+            mk_var(3, Expr::BinOp(crate::ir::BinOpKind::Mult, VarId(2), VarId(1))),
+            mk_var(4, Expr::BinOp(crate::ir::BinOpKind::Add, VarId(0), VarId(3))),
+            mk_var_with_vn(5, Expr::Load(VarId(4)), target_vn.clone()),
+        ];
+        let out = resolve_vtable_targets(&target_vn, &vars, image, 8);
+        assert_eq!(out.len(), 8);
+    }
+
+    #[test]
+    fn vtable_resolver_rejects_wrong_stride() {
+        // Stride 4 in SSA but ptr_size 8 → should not match.
+        let segs: Vec<(u64, u64, u64)> = vec![(0x4000, 0x40, 0)];
+        let data = vec![0u8; 0x40];
+        let image = ImageView {
+            data: &data,
+            segs: &segs,
+            ptr_size: 8,
+        };
+        let target_vn = Varnode::register(0x500, 8);
+        let vars = vec![
+            mk_var(0, Expr::Const(0x4000, 8)),
+            mk_var(1, Expr::Const(4, 8)), // wrong stride
+            mk_var(2, Expr::Const(0, 8)),
+            mk_var(3, Expr::BinOp(crate::ir::BinOpKind::Mult, VarId(2), VarId(1))),
+            mk_var(4, Expr::BinOp(crate::ir::BinOpKind::Add, VarId(0), VarId(3))),
+            mk_var_with_vn(5, Expr::Load(VarId(4)), target_vn.clone()),
+        ];
+        let out = resolve_vtable_targets(&target_vn, &vars, image, 64);
+        assert!(out.is_empty());
     }
 
     #[test]
