@@ -1482,7 +1482,32 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
     }
     let smt_candidates = args.iter().any(|a| a == "--smt-candidates");
     if smt_candidates {
-        run_smt_candidates(&data, arch, &symbols, &segs, &mut dec);
+        // v7.W4: optional per-fn scope. If positional func args are
+        // present, restrict the sweep to those addresses; otherwise
+        // dump every symbol.
+        let scope_addrs: Vec<u64> = func_args
+            .iter()
+            .filter_map(|name| {
+                if let Some(hex) = name.strip_prefix("0x").or_else(|| name.strip_prefix("0X")) {
+                    u64::from_str_radix(hex, 16).ok()
+                } else {
+                    symbols
+                        .iter()
+                        .find(|(_, n)| n == *name)
+                        .map(|(a, _)| *a)
+                }
+            })
+            .collect();
+        // v7.W4: per-fn candidate cap (default 256). Stops one
+        // pathological function from generating gigabyte-scale
+        // dumps. Override with --smt-candidates-cap N.
+        let cap: usize = args
+            .iter()
+            .position(|a| a == "--smt-candidates-cap")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(256);
+        run_smt_candidates(&data, arch, &symbols, &segs, &mut dec, &scope_addrs, cap);
         return;
     }
     let inter_proc_summaries = if (smt_explore || smt_explore_all) && smt_summaries {
@@ -2421,11 +2446,22 @@ fn run_smt_candidates(
     symbols: &[(u64, String)],
     segs: &[(u64, u64, u64)],
     dec: &mut rsleigh_api::Decoder,
+    scope_addrs: &[u64],
+    per_fn_cap: usize,
 ) {
     use rsleigh_decompile::callgraph::FuncId;
     use rsleigh_decompile::smt_explore::{
         collect_paths_with_summaries, SinkKind, SmtFinding,
     };
+    use std::io::Write;
+
+    // v7.W4: NDJSON output (one record per line). Each record is
+    // self-contained, so partial dumps from OOM/SIGINT are still
+    // analyst-consumable. Stdout is line-buffered + explicitly
+    // flushed per record so a downstream `head -100 | jq` sees
+    // results immediately rather than after a multi-GB array.
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
 
     let summaries = build_binary_summaries(data, arch, symbols, segs, dec);
     let imports = rsleigh_decompile::imports::resolve_imports(data);
@@ -2439,10 +2475,14 @@ fn run_smt_candidates(
         _ => rsleigh_decompile::fold::CallingConv::SysV,
     };
 
-    println!("[");
-    let mut first = true;
+    let scope_set: std::collections::HashSet<u64> = scope_addrs.iter().copied().collect();
+    let mut total_emitted = 0usize;
+    let mut total_capped = 0usize;
     for (addr, name) in symbols {
         if name.is_empty() || name.starts_with("dyld") {
+            continue;
+        }
+        if !scope_set.is_empty() && !scope_set.contains(addr) {
             continue;
         }
         let insts = decode_func(*addr, symbols, segs, data, dec);
@@ -2456,7 +2496,17 @@ fn run_smt_candidates(
         let Ok(paths) = collect_paths_with_summaries(&ssa, &imports, &summaries) else {
             continue;
         };
+        let mut per_fn_emitted = 0usize;
         for path in &paths {
+            if per_fn_cap > 0 && per_fn_emitted >= per_fn_cap {
+                let skipped = paths.len() - per_fn_emitted;
+                total_capped += skipped;
+                eprintln!(
+                    "[smt-candidates] {} ({}): emitted {}, capped {} more",
+                    name, format!("0x{:x}", addr), per_fn_emitted, skipped
+                );
+                break;
+            }
             #[cfg(feature = "smt")]
             let (verdict, reasons, trigger) = {
                 use rsleigh_decompile::smt_explore::solve_diag;
@@ -2606,10 +2656,6 @@ fn run_smt_candidates(
                 event_records.push(rec);
             }
 
-            if !first {
-                println!(",");
-            }
-            first = false;
             let payload = serde_json::json!({
                 "function":      name,
                 "address":       format!("0x{:x}", addr),
@@ -2626,12 +2672,19 @@ fn run_smt_candidates(
                 "trigger":       trigger,
                 "events":        event_records,
             });
-            print!("{}", serde_json::to_string_pretty(&payload).unwrap());
+            // NDJSON: one record per line. Compact form keeps each
+            // record on a single line so jq / grep can stream.
+            let _ = writeln!(out, "{}", serde_json::to_string(&payload).unwrap());
+            let _ = out.flush();
+            per_fn_emitted += 1;
+            total_emitted += 1;
         }
         let _ = FuncId(*addr);
     }
-    println!();
-    println!("]");
+    eprintln!(
+        "[smt-candidates] total emitted: {}, total capped: {}",
+        total_emitted, total_capped
+    );
 }
 
 fn run_smt_explore_all(

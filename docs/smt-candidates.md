@@ -12,14 +12,31 @@ the two.
 CPATH=$(brew --prefix z3)/include LIBRARY_PATH=$(brew --prefix z3)/lib \
   cargo build -p rsleigh-cli --release --features smt
 
-# Dump every v2 path in a binary as a structured candidate record
-rsleigh /path/to/binary --smt-candidates > candidates.json
+# Dump every v2 path in a binary as NDJSON candidate records
+rsleigh /path/to/binary --smt-candidates > candidates.ndjson
+
+# Scope to one function (by name or 0xVA):
+rsleigh /path/to/binary --smt-candidates extract_name > candidates.ndjson
+rsleigh /path/to/binary --smt-candidates 0x1ba3c       > candidates.ndjson
+
+# Cap per-function record count (default 256). Useful on binaries
+# with pathological config-parser functions that explode candidate
+# generation. Cap of 0 disables (legacy behaviour).
+rsleigh /path/to/binary --smt-candidates --smt-candidates-cap 16 > candidates.ndjson
 ```
 
-Output is a JSON array of records, one per Source→Sink path that
-the inter-procedural collector found (`collect_paths_with_summaries`).
+Output is **NDJSON** (one record per line, terminated by `\n`).
+Each record is self-contained, so partial dumps from OOM/SIGINT
+remain analyst-consumable. Stdout is flushed per record so a
+downstream `jq` / `head` / `grep` sees results immediately.
+
 **Every** v2 path appears, regardless of verdict — the analyst
 chooses which static-bound classifications to trust.
+
+A summary line is written to stderr at the end:
+```
+[smt-candidates] total emitted: <N>, total capped: <M>
+```
 
 ## Record schema
 
