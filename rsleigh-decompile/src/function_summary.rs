@@ -87,6 +87,9 @@ pub fn build_function_summary(
         sources: Vec::new(),
     };
 
+    // v9: region inference for TaintedStore detection.
+    let regions = crate::region::infer_regions(ssa);
+
     for block in &ssa.blocks {
         for stmt in &block.stmts {
             if let Stmt::Call { target, args, .. } = stmt {
@@ -99,6 +102,21 @@ pub fn build_function_summary(
                     function_arg_vars,
                     &mut summary,
                 );
+            }
+            // v9: detect compiler-emitted Store-loop "extract_name"
+            // pattern. When this function writes from one of its
+            // own param-pointers into another (a copy/parser
+            // helper), record a synthetic TaintedStore sink so the
+            // caller's path collection sees a sink lift even when
+            // there's no libc memcpy/strncpy in the body.
+            if let Stmt::Store { addr, val } = stmt {
+                if let Some(slots) = detect_tainted_store(*addr, *val, ssa, &regions) {
+                    summary.sinks.push(SinkInvocation {
+                        sink: crate::smt_explore::STORE_SINK_SPEC,
+                        call_site: block.addr,
+                        tainted_caller_slots: slots,
+                    });
+                }
             }
         }
         if let SsaTerminator::Call { target, args, .. } = &block.terminator {
@@ -115,6 +133,178 @@ pub fn build_function_summary(
     }
 
     summary
+}
+
+/// v9: classify a `Store(addr, val)` statement as a "TaintedStore"
+/// sink. Returns the dst-pointer's caller-arg slot when the store
+/// is shaped like `*caller_supplied_ptr = byte_from_caller_supplied_buf`
+/// (the dominant compiler-emitted-loop OOB-write pattern, e.g.
+/// `extract_name`'s `*out++ = c`).
+///
+/// Heuristic:
+///   - addr traces back to a Param slot (via direct Param region OR
+///     via spill-reload Store→Load chain — the -O0/-Os pattern where
+///     the param pointer is spilled to fp+offset and reloaded each
+///     iteration).
+///   - val's expression involves at least one Load — read from
+///     somewhere, suggesting "byte from input" rather than constant.
+fn detect_tainted_store(
+    addr: VarId,
+    val: VarId,
+    ssa: &crate::ir::SsaCfg,
+    regions: &crate::region::RegionMap,
+) -> Option<Vec<crate::smt_explore::AbiSlot>> {
+    use crate::smt_explore::AbiSlot;
+    let arg_vars = arg_vars_from_ssa(ssa);
+    let mut dst_slots = arg_slots_for_var(addr, ssa, &arg_vars);
+
+    // Direct Param region match.
+    let addr_region = regions.region_of(addr);
+    if let Some(crate::region::AllocSite::Param(n)) = regions.site_of(addr_region) {
+        let cs = AbiSlot::Arg(*n);
+        if !dst_slots.contains(&cs) {
+            dst_slots.push(cs);
+        }
+    }
+
+    // v9: spill-reload-loop pattern. The dst pointer is spilled to
+    // a stack slot, reloaded each iteration, incremented, restored.
+    // The Store map only records the LAST store per key (the
+    // post-increment store), so arg_slots_for_var can't bottom out
+    // at the original param. Build an inverted index of "addresses
+    // ever stored a Param-bearing value" by scanning every Store
+    // and classifying the value side. Then if `addr`'s expression
+    // bottoms to a Load from one of those addresses, treat as
+    // Param-pointing.
+    if dst_slots.is_empty() {
+        let param_slots = collect_param_bearing_slots(ssa, &arg_vars);
+        if let Some(slots) = addr_loads_from_param_slot(addr, ssa, &param_slots) {
+            for s in slots {
+                if !dst_slots.contains(&s) {
+                    dst_slots.push(s);
+                }
+            }
+        }
+    }
+
+    dst_slots.retain(|s| matches!(s, AbiSlot::Arg(_)));
+    if dst_slots.is_empty() {
+        return None;
+    }
+    if !val_involves_load(val, ssa, &mut std::collections::HashSet::new(), 0) {
+        return None;
+    }
+    Some(dst_slots)
+}
+
+/// v9: address-canon-key → set of caller arg slots ever stored at
+/// that address. Used by `detect_tainted_store` to recover the
+/// param identity through spill-reload-loop patterns where the
+/// HashMap-flat Store map keeps only the latest (post-increment)
+/// store at the slot.
+fn collect_param_bearing_slots(
+    ssa: &crate::ir::SsaCfg,
+    arg_vars: &HashMap<u8, VarId>,
+) -> HashMap<String, Vec<crate::smt_explore::AbiSlot>> {
+    use crate::smt_explore::AbiSlot;
+    let mut m: HashMap<String, Vec<AbiSlot>> = HashMap::new();
+    let arg_set: HashMap<VarId, u8> = arg_vars.iter().map(|(k, v)| (*v, *k)).collect();
+    for block in &ssa.blocks {
+        for stmt in &block.stmts {
+            if let Stmt::Store { addr, val } = stmt {
+                let Some(key) = addr_canon(*addr, &ssa.vars) else {
+                    continue;
+                };
+                // Walk val's Var-chain looking for any function arg.
+                let mut visited: std::collections::HashSet<u32> =
+                    std::collections::HashSet::new();
+                let mut cur = *val;
+                for _ in 0..16 {
+                    if !visited.insert(cur.0) {
+                        break;
+                    }
+                    if let Some(slot) = arg_set.get(&cur) {
+                        m.entry(key.clone())
+                            .or_default()
+                            .push(AbiSlot::Arg(*slot));
+                        break;
+                    }
+                    let Some(def) = ssa.vars.get(cur.0 as usize) else { break };
+                    match &def.expr {
+                        crate::ir::Expr::Var(inner) => cur = *inner,
+                        _ => break,
+                    }
+                }
+            }
+        }
+    }
+    m
+}
+
+fn addr_loads_from_param_slot(
+    addr: VarId,
+    ssa: &crate::ir::SsaCfg,
+    param_slots: &HashMap<String, Vec<crate::smt_explore::AbiSlot>>,
+) -> Option<Vec<crate::smt_explore::AbiSlot>> {
+    let mut visited: std::collections::HashSet<u32> =
+        std::collections::HashSet::new();
+    let mut stack = vec![addr];
+    while let Some(cur) = stack.pop() {
+        if !visited.insert(cur.0) || visited.len() > 32 {
+            continue;
+        }
+        let Some(def) = ssa.vars.get(cur.0 as usize) else { continue };
+        match &def.expr {
+            crate::ir::Expr::Var(inner) => stack.push(*inner),
+            crate::ir::Expr::Load(load_addr) => {
+                if let Some(key) = addr_canon(*load_addr, &ssa.vars) {
+                    if let Some(slots) = param_slots.get(&key) {
+                        return Some(slots.clone());
+                    }
+                }
+            }
+            crate::ir::Expr::BinOp(_, a, b) => {
+                stack.push(*a);
+                stack.push(*b);
+            }
+            crate::ir::Expr::UnaryOp(_, a) => stack.push(*a),
+            crate::ir::Expr::Phi(inputs) => {
+                for v in inputs {
+                    stack.push(*v);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn val_involves_load(
+    v: VarId,
+    ssa: &crate::ir::SsaCfg,
+    visited: &mut std::collections::HashSet<u32>,
+    depth: u32,
+) -> bool {
+    if depth > 16 || !visited.insert(v.0) {
+        return false;
+    }
+    let Some(def) = ssa.vars.get(v.0 as usize) else {
+        return false;
+    };
+    match &def.expr {
+        crate::ir::Expr::Load(_) => true,
+        crate::ir::Expr::FieldAccess(_, _) => true,
+        crate::ir::Expr::Var(inner) => val_involves_load(*inner, ssa, visited, depth + 1),
+        crate::ir::Expr::UnaryOp(_, a) => val_involves_load(*a, ssa, visited, depth + 1),
+        crate::ir::Expr::BinOp(_, a, b) => {
+            val_involves_load(*a, ssa, visited, depth + 1)
+                || val_involves_load(*b, ssa, visited, depth + 1)
+        }
+        crate::ir::Expr::Phi(inputs) => inputs
+            .iter()
+            .any(|x| val_involves_load(*x, ssa, visited, depth + 1)),
+        _ => false,
+    }
 }
 
 fn process_call(

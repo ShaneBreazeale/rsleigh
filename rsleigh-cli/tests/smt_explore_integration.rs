@@ -118,6 +118,36 @@ fn inter_proc_heartbleed_lengtharg_reachable() {
 }
 
 #[test]
+fn tainted_store_loop_surfaces_taintedstore_candidate() {
+    // v9: caller (vuln_loop_store) does recv into local buf, then
+    // calls copy_until_zero(buf, dst). Callee body has compiler-
+    // emitted store loop *out++ = byte (no libc memcpy). v9 detects
+    // this as a TaintedStore sink in copy_until_zero's summary; the
+    // caller's path collection lifts it as a synthetic SinkCall.
+    // Verdict is `Unsupported` (SAT model deferred to v10), but the
+    // candidate IS surfaced for analyst/LLM triage.
+    let Some(bin) = fixture("tainted_store_loop") else { return };
+
+    let out = Command::new(RSLEIGH_BIN)
+        .args([&bin, "--smt-explore", "vuln_loop_store", "--smt-summaries"])
+        .output()
+        .expect("rsleigh invocation");
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    if stdout.contains("smt feature not enabled at build time") {
+        eprintln!("[skip-no-smt] tainted_store_loop");
+        return;
+    }
+    assert!(
+        stdout.contains("TaintedStore"),
+        "missing TaintedStore kind:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("recv -> <tainted_store>"),
+        "missing recv->store path label:\n{stdout}"
+    );
+}
+
+#[test]
 fn fgets_printf_format_string_reachable() {
     let Some(bin) = fixture("fgets_printf") else { return };
     let out = run_explore(&bin, "vuln_fgets_printf");

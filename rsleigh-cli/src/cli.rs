@@ -2358,6 +2358,7 @@ fn run_smt_diag(
                     SinkKind::FormatArg => "FormatArg",
                     SinkKind::Command => "Command",
                     SinkKind::LengthArg => "LengthArg",
+                    SinkKind::TaintedStore => "TaintedStore",
                 };
                 *by_kind.entry(kind_name).or_default() += 1;
                 match solve_with_imports(path, &ssa, &imports) {
@@ -2542,6 +2543,7 @@ fn run_smt_candidates(
                 SinkKind::FormatArg => "FormatArg",
                 SinkKind::Command => "Command",
                 SinkKind::LengthArg => "LengthArg",
+                SinkKind::TaintedStore => "TaintedStore",
             };
 
             let source_event = &path.events[path.source_event];

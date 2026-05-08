@@ -50,6 +50,12 @@ pub enum SinkKind {
     /// Length operand of a bounded copy (memcpy/strncpy/memmove);
     /// SAT when the tainted length can exceed the dst capacity.
     LengthArg,
+    /// v9: synthetic sink for compiler-emitted store loops (the
+    /// extract_name / parser pattern: `*dst++ = byte_from_taint`).
+    /// No libc API is involved — the store is raw SSA. SAT modeling
+    /// is deferred (v10); v9 surfaces these in the candidate dump
+    /// for LLM triage with verdict Unsupported.
+    TaintedStore,
 }
 
 /// Attacker-controlled API. The function returns or fills a buffer
@@ -118,6 +124,18 @@ pub const DEFAULT_SINKS: &[SinkSpec] = &[
     SinkSpec { name: "execlp",  watched: AbiSlot::Arg(0), kind: SinkKind::Command     },
     SinkSpec { name: "execvp",  watched: AbiSlot::Arg(0), kind: SinkKind::Command     },
 ];
+
+/// v9: synthetic sink spec for compiler-emitted Store loops. Used
+/// only by `build_function_summary` when it detects a function
+/// that writes from a Param-region pointer into another Param-
+/// region pointer (the "copy_until_zero" / extract_name pattern).
+/// `watched: Arg(1)` means the dst-pointer slot — a tainted source
+/// reaching this slot indicates an OOB-write candidate.
+pub const STORE_SINK_SPEC: SinkSpec = SinkSpec {
+    name: "<tainted_store>",
+    watched: AbiSlot::Arg(1),
+    kind: SinkKind::TaintedStore,
+};
 
 /// Resolve a call-target address against the import map. Returns
 /// `Some(SpecRef)` when the target matches one of the configured
@@ -757,10 +775,14 @@ fn synthesize_summary_events<'a>(
         };
         let mut args_vec = vec![VarId(0); watched_idx + 1];
         args_vec[watched_idx] = var;
-        let spec = DEFAULT_SINKS
-            .iter()
-            .find(|sp| sp.name == snk.sink.name)
-            .expect("summary sink not in DEFAULT_SINKS");
+        let spec: &SinkSpec = if snk.sink.name == STORE_SINK_SPEC.name {
+            &STORE_SINK_SPEC
+        } else {
+            DEFAULT_SINKS
+                .iter()
+                .find(|sp| sp.name == snk.sink.name)
+                .expect("summary sink not in DEFAULT_SINKS")
+        };
         events.push(TaintEvent {
             stmt_index,
             kind: TaintEventKind::SinkCall {
@@ -1333,6 +1355,16 @@ pub fn solve_diag(
                 let nz = b._eq(&BV::from_u64(&ctx, 0, 8)).not();
                 solver.assert(&nz);
             }
+        }
+        SinkKind::TaintedStore => {
+            // v9: SAT model deferred to v10 (needs loop-aware
+            // analysis + dst-buffer-size inference). For now,
+            // surface as Unsupported so --smt-candidates emits
+            // the record with reason for analyst/LLM triage.
+            reason_log.push(
+                "TaintedStore SAT model deferred to v10 (loop-aware analysis required)".into(),
+            );
+            return SmtFinding::Unsupported("TaintedStore not SAT-modeled in v9");
         }
         SinkKind::LengthArg => {
             // v5.W2.D2b: Reachable iff
