@@ -139,6 +139,7 @@ fn process_call(
         let slot_idx = match spec.tainted {
             AbiSlot::Arg(n) => Some(n as usize),
             AbiSlot::Ret => None,
+            AbiSlot::Global(_) => None,
         };
         let tainted_caller_slots = if let Some(idx) = slot_idx {
             args.get(idx)
@@ -158,6 +159,7 @@ fn process_call(
         let slot_idx = match spec.watched {
             AbiSlot::Arg(n) => Some(n as usize),
             AbiSlot::Ret => None,
+            AbiSlot::Global(_) => None,
         };
         let tainted_caller_slots = if let Some(idx) = slot_idx {
             args.get(idx)
@@ -202,7 +204,26 @@ fn arg_slots_for_var(
         if let Some(def) = ssa.vars.get(cur.0 as usize) {
             match &def.expr {
                 crate::ir::Expr::Var(inner) => stack.push(*inner),
+                // v5.W2.D2a: global-pointer buffer flow. Real ARM32
+                // router code rarely passes the source's tainted
+                // arg through the caller's stack-frame (which is
+                // what the Store→Load match below assumes); instead
+                // it passes a global RAM address directly. Capture
+                // this so the inter-procedural propagation can
+                // bridge a leaf's `recv(_, GLOBAL, _, _)` to a
+                // peer's `strcpy(_, GLOBAL)`.
+                crate::ir::Expr::Const(va, _) if is_global_va(*va) && out.len() < 4 => {
+                    let slot = AbiSlot::Global(*va);
+                    if !out.contains(&slot) {
+                        out.push(slot);
+                    }
+                }
                 crate::ir::Expr::Load(addr) => {
+                    // Recurse into the address subtree to find any
+                    // Const leaves (covers Load(Const(va)), Load(
+                    // Var(Const(va))), and Load(BinOp(Add, ptr,
+                    // idx)) where ptr eventually bottoms to Const).
+                    stack.push(*addr);
                     if let Some(key) = addr_canon(*addr, &ssa.vars) {
                         if let Some(stored) = mem.get(&key).copied() {
                             stack.push(stored);
@@ -210,13 +231,32 @@ fn arg_slots_for_var(
                     }
                 }
                 crate::ir::Expr::FieldAccess(base, offset) => {
-                    // FieldAccess(base, off) is a folded form of
-                    // Load(BinOp(Add, base, Const(off))) — canonicalise
-                    // it to the same key so a stack-spilled param
-                    // reload still maps back to the param's Store.
                     let key = field_access_canon(*base, *offset, &ssa.vars);
                     if let Some(stored) = mem.get(&key).copied() {
                         stack.push(stored);
+                    }
+                    // v5.W2.D2a: also descend into base so an
+                    // arg-passed-through-struct-field surfaces the
+                    // base's slot identity. The struct-field's
+                    // offset is implicit in the global VA already.
+                    stack.push(*base);
+                }
+                crate::ir::Expr::BinOp(op, a, b) => {
+                    // v5.W2.D2a: pointer arithmetic. For Add/Sub,
+                    // descend into both sides — either could be the
+                    // base pointer (the other being an index).
+                    use crate::ir::BinOpKind;
+                    if matches!(op, BinOpKind::Add | BinOpKind::Sub) {
+                        stack.push(*a);
+                        stack.push(*b);
+                    }
+                }
+                crate::ir::Expr::Phi(inputs) => {
+                    // v5.W2.D2a: descend into all Phi inputs; CBranch
+                    // merges in real code commonly mask the param
+                    // chain otherwise.
+                    for v in inputs {
+                        stack.push(*v);
                     }
                 }
                 _ => {}
@@ -224,6 +264,17 @@ fn arg_slots_for_var(
         }
     }
     out
+}
+
+/// Heuristic: a "global VA" is anything outside the typical
+/// stack/heap range and large enough to be a real RAM address.
+/// ARM32 + AArch64 + x86 all share the convention that anything
+/// below 0x1000 (page 0) and anything in the typical scratch-
+/// constant range (small ints, sub-page arithmetic) is unlikely
+/// to be a pointer. This is a soft filter to keep AbiSlot::Global
+/// out of the way of integer length args / index multipliers.
+fn is_global_va(va: u64) -> bool {
+    va >= 0x1000 && va < 0xffff_0000_0000_0000
 }
 
 /// Per-SSA Store-address → stored-value map. Keyed by a canonical
@@ -397,13 +448,28 @@ fn remap_slots(
 ) -> Vec<AbiSlot> {
     let mut out = Vec::new();
     for slot in callee_slots {
-        let AbiSlot::Arg(n) = slot else { continue };
-        let Some(arg_var) = caller_args.get(*n as usize) else {
-            continue;
-        };
-        for cs in arg_slots_for_var(*arg_var, ctx.ssa, ctx.arg_vars) {
-            if !out.contains(&cs) {
-                out.push(cs);
+        match slot {
+            AbiSlot::Arg(n) => {
+                let Some(arg_var) = caller_args.get(*n as usize) else {
+                    continue;
+                };
+                for cs in arg_slots_for_var(*arg_var, ctx.ssa, ctx.arg_vars) {
+                    if !out.contains(&cs) {
+                        out.push(cs);
+                    }
+                }
+            }
+            AbiSlot::Global(va) => {
+                // Global slots pass through the call boundary
+                // unchanged — the global is a process-wide
+                // identifier, independent of caller frame.
+                let cs = AbiSlot::Global(*va);
+                if !out.contains(&cs) {
+                    out.push(cs);
+                }
+            }
+            AbiSlot::Ret => {
+                // Ret-tainted callee output: untracked at this layer.
             }
         }
     }
@@ -553,10 +619,13 @@ mod tests {
 
     #[test]
     fn unrelated_args_yield_no_caller_slots() {
-        // Function calls strcpy with constants, no caller-supplied args.
+        // Function calls strcpy with sub-page constants, no
+        // caller-supplied args. Uses 0x10/0x20 (below the 0x1000
+        // global-VA cutoff in is_global_va) so the v5.W2.D2a
+        // Global-slot probe correctly rejects them.
         let vars = vec![
-            mk_var(0, Expr::Const(0xAAAA, 8)),
-            mk_var(1, Expr::Const(0xBBBB, 8)),
+            mk_var(0, Expr::Const(0x10, 8)),
+            mk_var(1, Expr::Const(0x20, 8)),
         ];
         let ssa = SsaCfg {
             blocks: vec![SsaBlock {

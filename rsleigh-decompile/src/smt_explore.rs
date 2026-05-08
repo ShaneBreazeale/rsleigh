@@ -26,6 +26,13 @@ pub enum AbiSlot {
     Arg(u8),
     /// Return value (typically RAX/X0/v0).
     Ret,
+    /// v5.W2.D2a: a global RAM address (or a global pointer slot
+    /// whose contents alias to a buffer). Used by inter-procedural
+    /// summary propagation to bridge a callee's `recv(_, GLOBAL,
+    /// _, _)` source to a peer's `strcpy(_, GLOBAL)` sink without
+    /// requiring the buffer to flow through the caller's arg
+    /// registers (which it almost never does in real router code).
+    Global(u64),
 }
 
 /// What kind of CVE-class violation the sink exposes.
@@ -711,12 +718,15 @@ fn synthesize_summary_events<'a>(
         None => return,
     };
     for src in &callee_sum.sources {
-        let Some(var) = synth_pick_caller_var(&src.tainted_caller_slots, caller_args) else {
+        let Some(var) =
+            synth_pick_caller_var(&src.tainted_caller_slots, caller_args, vars)
+        else {
             continue;
         };
         let watched_idx = match src.source.tainted {
             AbiSlot::Arg(n) => n as usize,
             AbiSlot::Ret => continue, // Ret-tainted sources can't be retargeted via arg slot
+            AbiSlot::Global(_) => continue, // libc specs never use Global
         };
         let mut args_vec = vec![VarId(0); watched_idx + 1];
         args_vec[watched_idx] = var;
@@ -735,12 +745,15 @@ fn synthesize_summary_events<'a>(
         });
     }
     for snk in &callee_sum.sinks {
-        let Some(var) = synth_pick_caller_var(&snk.tainted_caller_slots, caller_args) else {
+        let Some(var) =
+            synth_pick_caller_var(&snk.tainted_caller_slots, caller_args, vars)
+        else {
             continue;
         };
         let watched_idx = match snk.sink.watched {
             AbiSlot::Arg(n) => n as usize,
             AbiSlot::Ret => continue,
+            AbiSlot::Global(_) => continue,
         };
         let mut args_vec = vec![VarId(0); watched_idx + 1];
         args_vec[watched_idx] = var;
@@ -763,12 +776,43 @@ fn synthesize_summary_events<'a>(
 fn synth_pick_caller_var(
     tainted_slots: &[AbiSlot],
     caller_args: &[VarId],
+    caller_vars: &[crate::ir::VarDef],
 ) -> Option<VarId> {
     for slot in tainted_slots {
-        if let AbiSlot::Arg(n) = slot {
-            if let Some(v) = caller_args.get(*n as usize) {
-                return Some(*v);
+        match slot {
+            AbiSlot::Arg(n) => {
+                if let Some(v) = caller_args.get(*n as usize) {
+                    return Some(*v);
+                }
             }
+            AbiSlot::Global(va) => {
+                // v5.W2.D2a: find any caller VarDef whose expr is
+                // `Const(va)` or `Load(Const(va))` — the global
+                // address is materialised somewhere in the caller's
+                // SSA (otherwise the caller couldn't have passed it
+                // to the callee). Return the first match so the
+                // synthesized event's args carry that VarId; v4's
+                // region-keyed MemMap then aliases this load with
+                // any sink's Load of the same VA.
+                for vd in caller_vars {
+                    match &vd.expr {
+                        crate::ir::Expr::Const(c, _) if *c == *va => {
+                            return Some(vd.id);
+                        }
+                        crate::ir::Expr::Load(addr) => {
+                            if let Some(addr_def) = caller_vars.get(addr.0 as usize) {
+                                if let crate::ir::Expr::Const(c, _) = addr_def.expr {
+                                    if c == *va {
+                                        return Some(vd.id);
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            AbiSlot::Ret => {}
         }
     }
     None

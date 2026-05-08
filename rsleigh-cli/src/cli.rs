@@ -2026,6 +2026,61 @@ fn run_smt_diag(
     // measure path discovery WITH summaries vs WITHOUT.
     let summaries = build_binary_summaries(data, arch, symbols, segs, dec);
 
+    // v5.W2 instrumentation: did summaries actually fire?
+    let mut summaries_with_source = 0usize;
+    let mut summaries_with_sink = 0usize;
+    let mut source_emissions_total = 0usize;
+    let mut source_emissions_with_slot = 0usize;
+    let mut sink_invocations_total = 0usize;
+    let mut sink_invocations_with_slot = 0usize;
+    let mut empty_slot_funcs: Vec<u64> = Vec::new();
+
+    // Probe: how many funcs have non-empty function_arg_vars?
+    // If most funcs have 0 named params, name_parameters_with_cc is
+    // the upstream bottleneck.
+    let mut funcs_with_named_params: usize = 0;
+    let mut total_named_params: usize = 0;
+    for (addr, name) in symbols {
+        if name.is_empty() || name.starts_with("dyld") {
+            continue;
+        }
+        let insts = decode_func(*addr, symbols, segs, data, dec);
+        if insts.is_empty() {
+            continue;
+        }
+        let cfg = rsleigh_decompile::cfg::build_cfg(&insts);
+        let mut ssa = rsleigh_decompile::ssa::build_ssa_with_cc(&cfg, cc);
+        rsleigh_decompile::fold::fold_with_cc(&mut ssa, cc);
+        let av = rsleigh_decompile::function_summary::arg_vars_from_ssa(&ssa);
+        if !av.is_empty() {
+            funcs_with_named_params += 1;
+            total_named_params += av.len();
+        }
+    }
+
+    for s in summaries.values() {
+        if !s.sources.is_empty() {
+            summaries_with_source += 1;
+        }
+        if !s.sinks.is_empty() {
+            summaries_with_sink += 1;
+        }
+        for src in &s.sources {
+            source_emissions_total += 1;
+            if !src.tainted_caller_slots.is_empty() {
+                source_emissions_with_slot += 1;
+            } else if empty_slot_funcs.len() < 5 && !empty_slot_funcs.contains(&s.func.0) {
+                empty_slot_funcs.push(s.func.0);
+            }
+        }
+        for snk in &s.sinks {
+            sink_invocations_total += 1;
+            if !snk.tainted_caller_slots.is_empty() {
+                sink_invocations_with_slot += 1;
+            }
+        }
+    }
+
     for (addr, name) in symbols {
         if name.is_empty() || name.starts_with("dyld") {
             continue;
@@ -2200,6 +2255,99 @@ fn run_smt_diag(
         "  funcs_with_sink:          {} / {}",
         funcs_with_sink, funcs_explored
     );
+    println!();
+    println!("  [summary build]");
+    println!(
+        "  summaries_with_source:    {} / {}",
+        summaries_with_source,
+        summaries.len()
+    );
+    println!(
+        "  summaries_with_sink:      {} / {}",
+        summaries_with_sink,
+        summaries.len()
+    );
+    println!(
+        "  source_emissions:         {} (with caller_slot: {} / {})",
+        source_emissions_total, source_emissions_with_slot, source_emissions_total
+    );
+    println!(
+        "  sink_invocations:         {} (with caller_slot: {} / {})",
+        sink_invocations_total, sink_invocations_with_slot, sink_invocations_total
+    );
+    println!(
+        "  funcs_with_named_params:  {} / {}   (avg {:.1} params/func)",
+        funcs_with_named_params,
+        funcs_explored,
+        if funcs_with_named_params > 0 {
+            (total_named_params as f64) / (funcs_with_named_params as f64)
+        } else {
+            0.0
+        }
+    );
+    if !empty_slot_funcs.is_empty() {
+        println!();
+        println!(
+            "  [first {} funcs with SourceEmission but empty caller_slots]",
+            empty_slot_funcs.len()
+        );
+        for a in &empty_slot_funcs {
+            println!("    0x{:x}", a);
+        }
+    }
+
+    #[cfg(feature = "smt")]
+    {
+        // v5.W2 verdict breakdown: walk every v2 path and run solve()
+        // to see which kinds dominate. Without this we can't tell
+        // whether 0 hits = no paths vs. all paths in unsupported
+        // sink kinds (LengthArg) vs. legitimately Unsat.
+        use rsleigh_decompile::smt_explore::{solve, SmtFinding, SinkKind};
+        let mut verdict_reachable = 0usize;
+        let mut verdict_not = 0usize;
+        let mut verdict_unsupported = 0usize;
+        let mut by_kind: std::collections::HashMap<&'static str, usize> =
+            std::collections::HashMap::new();
+        for (addr, name) in symbols {
+            if name.is_empty() || name.starts_with("dyld") {
+                continue;
+            }
+            let insts = decode_func(*addr, symbols, segs, data, dec);
+            if insts.is_empty() {
+                continue;
+            }
+            let cfg = rsleigh_decompile::cfg::build_cfg(&insts);
+            let mut ssa = rsleigh_decompile::ssa::build_ssa_with_cc(&cfg, cc);
+            rsleigh_decompile::fold::fold_with_cc(&mut ssa, cc);
+            let Ok(paths) = collect_paths_with_summaries(&ssa, &imports, &summaries)
+            else { continue };
+            for path in &paths {
+                let kind_name = match path.sink.kind {
+                    SinkKind::StackBuffer => "StackBuffer",
+                    SinkKind::FormatArg => "FormatArg",
+                    SinkKind::Command => "Command",
+                    SinkKind::LengthArg => "LengthArg",
+                };
+                *by_kind.entry(kind_name).or_default() += 1;
+                match solve(path, &ssa) {
+                    SmtFinding::Reachable { .. } => verdict_reachable += 1,
+                    SmtFinding::NotReachable => verdict_not += 1,
+                    SmtFinding::Unsupported(_) => verdict_unsupported += 1,
+                }
+            }
+        }
+        println!();
+        println!("  [v2 path solve breakdown]");
+        println!(
+            "  reachable / notreachable / unsupported = {} / {} / {}",
+            verdict_reachable, verdict_not, verdict_unsupported
+        );
+        let mut k_sorted: Vec<(&&str, &usize)> = by_kind.iter().collect();
+        k_sorted.sort_by(|a, b| b.1.cmp(a.1));
+        for (k, n) in k_sorted {
+            println!("    {:<14} {}", k, n);
+        }
+    }
 }
 
 fn classify_diag_target(
