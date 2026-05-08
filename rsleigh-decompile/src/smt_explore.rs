@@ -945,40 +945,97 @@ fn build_bounded_returns_set(
     imports: &HashMap<u64, String>,
 ) -> std::collections::HashSet<VarId> {
     let mut out = std::collections::HashSet::new();
-    let is_wrapper = |target: &CallTarget| -> bool {
+    let wrapper_kind = |target: &CallTarget| -> Option<&'static str> {
         if let CallTarget::Direct(addr) = target {
             if let Some(raw) = imports.get(addr) {
                 let n = normalise_name(raw);
-                return LENGTH_BOUNDING_WRAPPERS.contains(&n);
+                if let Some(name) = LENGTH_BOUNDING_WRAPPERS
+                    .iter()
+                    .find(|w| **w == n)
+                    .copied()
+                {
+                    return Some(name);
+                }
             }
         }
-        false
+        None
+    };
+    let mut consider = |target: &CallTarget, args: &[VarId], o: VarId| {
+        let Some(name) = wrapper_kind(target) else { return };
+        // v6.W1: read/recv-class returns are bounded only when
+        // their `count` operand is statically Const. When the
+        // count itself comes from network input or another Load,
+        // the return value can grow as large as the attacker
+        // wants — treating it as bounded would suppress real
+        // protocol-field length-overflow flows.
+        let count_idx: Option<usize> = match name {
+            "read" | "recv" | "recvfrom" | "recvmsg" => Some(2),
+            "fread" => Some(2),
+            "fgets" => Some(1),
+            _ => None,
+        };
+        if let Some(idx) = count_idx {
+            if !arg_resolves_to_const(args.get(idx).copied(), &ssa.vars) {
+                return;
+            }
+        }
+        out.insert(o);
     };
     for block in &ssa.blocks {
         for stmt in &block.stmts {
             if let crate::ir::Stmt::Call {
                 target,
+                args,
                 out: Some(o),
                 ..
             } = stmt
             {
-                if is_wrapper(target) {
-                    out.insert(*o);
-                }
+                consider(target, args, *o);
             }
         }
         if let crate::ir::SsaTerminator::Call {
             target,
+            args,
             out: Some(o),
             ..
         } = &block.terminator
         {
-            if is_wrapper(target) {
-                out.insert(*o);
-            }
+            consider(target, args, *o);
         }
     }
     out
+}
+
+/// v6.W1: walk the Var/Phi DAG from `var` and return true iff every
+/// reachable leaf is `Const`. Phi joins of constant counts (e.g.
+/// `count = cond ? 4096 : 1024;`) are statically bounded. Bounded
+/// depth + visited-set to avoid pathological IRs.
+fn arg_resolves_to_const(var: Option<VarId>, vars: &[crate::ir::VarDef]) -> bool {
+    let Some(start) = var else { return false };
+    let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut stack = vec![start];
+    let mut steps = 0usize;
+    while let Some(cur) = stack.pop() {
+        if !visited.insert(cur.0) {
+            continue;
+        }
+        steps += 1;
+        if steps > 64 {
+            return false;
+        }
+        let Some(def) = vars.get(cur.0 as usize) else { return false };
+        match &def.expr {
+            crate::ir::Expr::Var(inner) => stack.push(*inner),
+            crate::ir::Expr::Const(_, _) => {}
+            crate::ir::Expr::Phi(inputs) => {
+                for v in inputs {
+                    stack.push(*v);
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
 }
 
 fn build_call_return_map(ssa: &crate::ir::SsaCfg) -> CallReturnMap {
@@ -1274,7 +1331,18 @@ pub fn solve_with_imports(
             let chain_b = chain_varnodes_with_bound(
                 src, &ssa.vars, &mem, &calls, &regions, Some(&bounded),
             );
-            let unbounded_eq = chain_a.iter().any(|k| chain_b.contains(k));
+            // v6.W1: only Vn-key alias counts for LengthArg. Region
+            // keys (Param/StackFrame/Heap) over-approximate: the
+            // function's read-buffer and the function's args both
+            // map to Region::Param(N) on a leaf ARM32 routine, so a
+            // Region match is satisfied trivially even when the
+            // taint actually flows through a Const-bounded read
+            // return. Vn equality requires SSA structural alias —
+            // a far stronger signal that the length value really is
+            // the source buffer.
+            let unbounded_eq = chain_a.iter().any(|k_a| {
+                matches!(k_a, AliasKey::Vn(_)) && chain_b.contains(k_a)
+            });
             if !unbounded_eq {
                 return SmtFinding::NotReachable;
             }
