@@ -1251,6 +1251,22 @@ pub fn solve_with_imports(
     ssa: &crate::ir::SsaCfg,
     imports: &HashMap<u64, String>,
 ) -> SmtFinding {
+    solve_diag(path, ssa, imports, &mut Vec::new())
+}
+
+/// v7.W1: same as `solve_with_imports` but appends a
+/// human-readable filter-reason string for each precision check
+/// the solver applied. Empty `reason_log` ⇒ Reachable verdict
+/// hit no filter; non-empty ⇒ at least one filter classified the
+/// path as bounded / out-of-scope. Used by `--smt-candidates` to
+/// dump the analyst-facing reasoning trail per path.
+#[cfg(feature = "smt")]
+pub fn solve_diag(
+    path: &TaintPath,
+    ssa: &crate::ir::SsaCfg,
+    imports: &HashMap<u64, String>,
+    reason_log: &mut Vec<String>,
+) -> SmtFinding {
     use z3::ast::{Ast, BV};
 
     let source_event = &path.events[path.source_event];
@@ -1272,12 +1288,14 @@ pub fn solve_with_imports(
     };
 
     let (Some(src), Some(snk)) = (source_var, sink_var) else {
+        reason_log.push("source/sink slot missing".into());
         return SmtFinding::Unsupported("source/sink slot missing");
     };
     let regions = crate::region::infer_regions(ssa);
     let mem = build_mem_map(&path.events, &ssa.vars, &regions);
     let calls = build_call_return_map(ssa);
     if !varid_lineage_eq(snk, src, &ssa.vars, &mem, &calls, &regions) {
+        reason_log.push("lineage_eq failed (no shared alias key)".into());
         return SmtFinding::NotReachable;
     }
 
@@ -1344,6 +1362,11 @@ pub fn solve_with_imports(
                 matches!(k_a, AliasKey::Vn(_)) && chain_b.contains(k_a)
             });
             if !unbounded_eq {
+                reason_log.push(format!(
+                    "LengthArg lineage bounded by wrapper return ({} bounded VarIds: {:?})",
+                    bounded.len(),
+                    bounded.iter().map(|v| v.0).take(8).collect::<Vec<_>>()
+                ));
                 return SmtFinding::NotReachable;
             }
             // dst region check (memcpy/strncpy/memmove all use Arg(0)).
@@ -1361,6 +1384,16 @@ pub fn solve_with_imports(
                 })
                 .unwrap_or(false);
             if !dst_is_stack {
+                let region_label = dst_var
+                    .map(|v| {
+                        let r = regions.region_of(v);
+                        format!("{:?}", regions.site_of(r))
+                    })
+                    .unwrap_or_else(|| "(no dst var)".into());
+                reason_log.push(format!(
+                    "LengthArg dst region not StackFrame: {}",
+                    region_label
+                ));
                 return SmtFinding::NotReachable;
             }
             // Encode length as 32-bit BV from 4 input bytes (LE);
@@ -1378,7 +1411,10 @@ pub fn solve_with_imports(
         z3::SatResult::Sat => {
             let m = match solver.get_model() {
                 Some(m) => m,
-                None => return SmtFinding::Unsupported("SAT but no model returned"),
+                None => {
+                    reason_log.push("Z3 SAT but model unavailable".into());
+                    return SmtFinding::Unsupported("SAT but no model returned");
+                }
             };
             let mut input_bytes = Vec::new();
             for (i, b) in bytes.iter().enumerate() {
@@ -1395,8 +1431,14 @@ pub fn solve_with_imports(
             };
             SmtFinding::Reachable { input_bytes, call_chain }
         }
-        z3::SatResult::Unsat => SmtFinding::NotReachable,
-        z3::SatResult::Unknown => SmtFinding::Unsupported("solver Unknown / timeout"),
+        z3::SatResult::Unsat => {
+            reason_log.push("Z3 unsat under sink-kind constraint".into());
+            SmtFinding::NotReachable
+        }
+        z3::SatResult::Unknown => {
+            reason_log.push("Z3 returned Unknown / timeout".into());
+            SmtFinding::Unsupported("solver Unknown / timeout")
+        }
     }
 }
 
@@ -1413,6 +1455,17 @@ pub fn solve_with_imports(
     _ssa: &crate::ir::SsaCfg,
     _imports: &HashMap<u64, String>,
 ) -> SmtFinding {
+    SmtFinding::Unsupported("smt feature not enabled at build time")
+}
+
+#[cfg(not(feature = "smt"))]
+pub fn solve_diag(
+    _path: &TaintPath,
+    _ssa: &crate::ir::SsaCfg,
+    _imports: &HashMap<u64, String>,
+    reason_log: &mut Vec<String>,
+) -> SmtFinding {
+    reason_log.push("smt feature not enabled at build time".into());
     SmtFinding::Unsupported("smt feature not enabled at build time")
 }
 

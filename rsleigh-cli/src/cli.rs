@@ -1236,7 +1236,8 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
 
     let smt_explore_all_early = args.iter().any(|a| a == "--smt-explore-all");
     let smt_diag_early = args.iter().any(|a| a == "--smt-diag");
-    if func_args.is_empty() && !all_mode && !disasm_mode && !smt_explore_all_early && !smt_diag_early {
+    let smt_candidates_early = args.iter().any(|a| a == "--smt-candidates");
+    if func_args.is_empty() && !all_mode && !disasm_mode && !smt_explore_all_early && !smt_diag_early && !smt_candidates_early {
         // List functions. Hide CRT-internal / runtime glue whose names start
         // with a single `_` (`_init`, `_fini`, `_start`, `_dl_*`, etc.) but
         // KEEP demangled-candidate symbols starting with `_Z` / `__Z` (C++
@@ -1477,6 +1478,11 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
     let smt_diag = args.iter().any(|a| a == "--smt-diag");
     if smt_diag {
         run_smt_diag(&data, arch, &symbols, &segs, &mut dec, json_mode);
+        return;
+    }
+    let smt_candidates = args.iter().any(|a| a == "--smt-candidates");
+    if smt_candidates {
+        run_smt_candidates(&data, arch, &symbols, &segs, &mut dec);
         return;
     }
     let inter_proc_summaries = if (smt_explore || smt_explore_all) && smt_summaries {
@@ -2395,6 +2401,157 @@ fn classify_diag_target(
     } else {
         *direct_unknown += 1;
     }
+}
+
+/// v7.W1: dump every v2 path as a structured candidate record
+/// regardless of solver verdict. Output is always JSON to stdout
+/// (one array of records); designed for LLM ingestion. Each
+/// record carries source/sink/kind, verdict, filter reasons, the
+/// source/sink VarIds + their SSA expressions, the call_chain (PC
+/// hops if the path was synthesised from a callee summary), and
+/// the trigger bytes when the SAT model produced one.
+///
+/// Differs from `--smt-explore-all` (which only emits Reachable
+/// hits): `--smt-candidates` is the analyst-facing data feed.
+/// Differs from `--smt-diag` (which is per-binary aggregate
+/// stats): `--smt-candidates` is per-path detail.
+fn run_smt_candidates(
+    data: &[u8],
+    arch: rsleigh_api::Architecture,
+    symbols: &[(u64, String)],
+    segs: &[(u64, u64, u64)],
+    dec: &mut rsleigh_api::Decoder,
+) {
+    use rsleigh_decompile::callgraph::FuncId;
+    use rsleigh_decompile::smt_explore::{
+        collect_paths_with_summaries, SinkKind, SmtFinding,
+    };
+
+    let summaries = build_binary_summaries(data, arch, symbols, segs, dec);
+    let imports = rsleigh_decompile::imports::resolve_imports(data);
+
+    let cc = match arch {
+        rsleigh_api::Architecture::X86_32 | rsleigh_api::Architecture::MIPS32 => {
+            rsleigh_decompile::fold::CallingConv::Cdecl32
+        }
+        rsleigh_api::Architecture::ARM32 => rsleigh_decompile::fold::CallingConv::Arm32,
+        rsleigh_api::Architecture::AArch64 => rsleigh_decompile::fold::CallingConv::AArch64,
+        _ => rsleigh_decompile::fold::CallingConv::SysV,
+    };
+
+    println!("[");
+    let mut first = true;
+    for (addr, name) in symbols {
+        if name.is_empty() || name.starts_with("dyld") {
+            continue;
+        }
+        let insts = decode_func(*addr, symbols, segs, data, dec);
+        if insts.is_empty() {
+            continue;
+        }
+        let cfg = rsleigh_decompile::cfg::build_cfg(&insts);
+        let mut ssa = rsleigh_decompile::ssa::build_ssa_with_cc(&cfg, cc);
+        rsleigh_decompile::fold::fold_with_cc(&mut ssa, cc);
+
+        let Ok(paths) = collect_paths_with_summaries(&ssa, &imports, &summaries) else {
+            continue;
+        };
+        for path in &paths {
+            #[cfg(feature = "smt")]
+            let (verdict, reasons, trigger) = {
+                use rsleigh_decompile::smt_explore::solve_diag;
+                let mut log: Vec<String> = Vec::new();
+                let v = solve_diag(path, &ssa, &imports, &mut log);
+                let trigger = match &v {
+                    SmtFinding::Reachable { input_bytes, .. } => Some(
+                        input_bytes
+                            .iter()
+                            .take(16)
+                            .map(|(_, b)| format!("{:02x}", b))
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    ),
+                    _ => None,
+                };
+                (v, log, trigger)
+            };
+            #[cfg(not(feature = "smt"))]
+            let (verdict, reasons, trigger): (SmtFinding, Vec<String>, Option<String>) = (
+                SmtFinding::Unsupported("smt feature not enabled at build time"),
+                vec!["smt feature not enabled at build time".into()],
+                None,
+            );
+
+            let verdict_str = match &verdict {
+                SmtFinding::Reachable { .. } => "Reachable",
+                SmtFinding::NotReachable => "NotReachable",
+                SmtFinding::Unsupported(_) => "Unsupported",
+            };
+            let kind = match path.sink.kind {
+                SinkKind::StackBuffer => "StackBuffer",
+                SinkKind::FormatArg => "FormatArg",
+                SinkKind::Command => "Command",
+                SinkKind::LengthArg => "LengthArg",
+            };
+
+            let source_event = &path.events[path.source_event];
+            let sink_event = &path.events[path.sink_event];
+            use rsleigh_decompile::smt_explore::{AbiSlot, TaintEventKind};
+            let source_var = match (&source_event.kind, path.source.tainted) {
+                (TaintEventKind::SourceCall { args, .. }, AbiSlot::Arg(n)) => {
+                    args.get(n as usize).copied()
+                }
+                (TaintEventKind::SourceCall { out, .. }, AbiSlot::Ret) => *out,
+                _ => None,
+            };
+            let sink_var = match (&sink_event.kind, path.sink.watched) {
+                (TaintEventKind::SinkCall { args, .. }, AbiSlot::Arg(n)) => {
+                    args.get(n as usize).copied()
+                }
+                (TaintEventKind::SinkCall { out, .. }, AbiSlot::Ret) => *out,
+                _ => None,
+            };
+            let source_expr = source_var
+                .and_then(|v| ssa.vars.get(v.0 as usize))
+                .map(|d| format!("{:?}", d.expr))
+                .unwrap_or_default();
+            let sink_expr = sink_var
+                .and_then(|v| ssa.vars.get(v.0 as usize))
+                .map(|d| format!("{:?}", d.expr))
+                .unwrap_or_default();
+            let call_chain: Vec<String> = match &sink_event.kind {
+                TaintEventKind::SinkCall { call_chain, .. } => call_chain
+                    .iter()
+                    .map(|a| format!("0x{:x}", a))
+                    .collect(),
+                _ => Vec::new(),
+            };
+
+            if !first {
+                println!(",");
+            }
+            first = false;
+            let payload = serde_json::json!({
+                "function":      name,
+                "address":       format!("0x{:x}", addr),
+                "source":        path.source.name,
+                "sink":          path.sink.name,
+                "sink_kind":     kind,
+                "verdict":       verdict_str,
+                "filter_reasons": reasons,
+                "source_var":    source_var.map(|v| v.0),
+                "source_expr":   source_expr,
+                "sink_var":      sink_var.map(|v| v.0),
+                "sink_expr":     sink_expr,
+                "call_chain":    call_chain,
+                "trigger":       trigger,
+            });
+            print!("{}", serde_json::to_string_pretty(&payload).unwrap());
+        }
+        let _ = FuncId(*addr);
+    }
+    println!();
+    println!("]");
 }
 
 fn run_smt_explore_all(
