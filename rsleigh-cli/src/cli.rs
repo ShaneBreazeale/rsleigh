@@ -2302,7 +2302,7 @@ fn run_smt_diag(
         // to see which kinds dominate. Without this we can't tell
         // whether 0 hits = no paths vs. all paths in unsupported
         // sink kinds (LengthArg) vs. legitimately Unsat.
-        use rsleigh_decompile::smt_explore::{solve, SmtFinding, SinkKind};
+        use rsleigh_decompile::smt_explore::{solve_with_imports, SmtFinding, SinkKind};
         let mut verdict_reachable = 0usize;
         let mut verdict_not = 0usize;
         let mut verdict_unsupported = 0usize;
@@ -2329,7 +2329,7 @@ fn run_smt_diag(
                     SinkKind::LengthArg => "LengthArg",
                 };
                 *by_kind.entry(kind_name).or_default() += 1;
-                match solve(path, &ssa) {
+                match solve_with_imports(path, &ssa, &imports) {
                     SmtFinding::Reachable { .. } => verdict_reachable += 1,
                     SmtFinding::NotReachable => verdict_not += 1,
                     SmtFinding::Unsupported(_) => verdict_unsupported += 1,
@@ -2445,7 +2445,7 @@ fn run_smt_explore_all(
         rsleigh_decompile::fold::fold_with_cc(&mut ssa, cc);
         let imports = rsleigh_decompile::imports::resolve_imports(data);
         use rsleigh_decompile::smt_explore::{
-            collect_paths, collect_paths_with_summaries, solve, SmtFinding,
+            collect_paths, collect_paths_with_summaries, solve_with_imports, SmtFinding,
         };
         let paths = match summaries {
             Some(s) => collect_paths_with_summaries(&ssa, &imports, s),
@@ -2453,7 +2453,7 @@ fn run_smt_explore_all(
         };
         let Ok(paths) = paths else { continue };
         for path in &paths {
-            let verdict = solve(path, &ssa);
+            let verdict = solve_with_imports(path, &ssa, &imports);
             if let SmtFinding::Reachable { input_bytes, call_chain } = verdict {
                 hits += 1;
                 if json {
@@ -2544,7 +2544,8 @@ fn run_smt_explore(
     let imports = rsleigh_decompile::imports::resolve_imports(data);
 
     use rsleigh_decompile::smt_explore::{
-        collect_paths, collect_paths_with_summaries, solve, PathRejection, SmtFinding,
+        collect_paths, collect_paths_with_summaries, solve_with_imports, PathRejection,
+        SmtFinding,
     };
 
     let paths_result = match summaries {
@@ -2579,7 +2580,7 @@ fn run_smt_explore(
 
     let mut findings = Vec::with_capacity(paths.len());
     for path in &paths {
-        let verdict = solve(path, &ssa);
+        let verdict = solve_with_imports(path, &ssa, &imports);
         findings.push(serde_json::json!({
             "source":  path.source.name,
             "source_event": path.source_event,
@@ -2620,7 +2621,7 @@ fn run_smt_explore(
     } else {
         println!("// {func_name} 0x{func_addr:x} — {} v0 path(s)", paths.len());
         for (i, path) in paths.iter().enumerate() {
-            let verdict = solve(path, &ssa);
+            let verdict = solve_with_imports(path, &ssa, &imports);
             print!(
                 "  [{i}] {} -> {}  ({:?})  ",
                 path.source.name, path.sink.name, path.sink.kind

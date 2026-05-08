@@ -913,6 +913,74 @@ fn const_value(v: VarId, vars: &[crate::ir::VarDef]) -> Option<i64> {
 /// resolves back to the source.
 type CallReturnMap = HashMap<VarId, Vec<VarId>>;
 
+/// v5.W2.D2b: libc functions whose return value is a strict upper
+/// bound on the length of their string/buffer input. Lineage from
+/// network/file input that flows through one of these can no longer
+/// drive a length-overflow at a downstream memcpy/strncpy/memmove,
+/// because the wrapper has clipped the length to a known small
+/// range. Used by the LengthArg solver to reject FP candidates
+/// like `strncpy(dst, fgets_buf, strlen(fgets_buf))` where strlen
+/// caps at 511 ≤ fgets-cap.
+const LENGTH_BOUNDING_WRAPPERS: &[&str] = &[
+    "strlen", "strnlen", "wcslen", "wcsnlen",
+    // snprintf / vsnprintf return value is the count of bytes that
+    // would have been written — clipped to size by the caller in
+    // every sane code path. Treat as bounded.
+    "snprintf", "vsnprintf",
+    // v5.W2.D2b: read/recv-class return value is the count of
+    // bytes received, bounded by the count arg. When the count is
+    // a Const (the dominant case in real code), the return is a
+    // small constant upper bound — using it as a memcpy length
+    // can't drive a > 0xFFFF overflow regardless of attacker-
+    // controlled BUFFER content. Treating their returns as
+    // bounded gives up some inter-procedural recall in exchange
+    // for FP elimination on the AX6000 corpus (dropbear FUN_-
+    // 0001ba3c was the only hit before this filter and was
+    // bounded by `read(_, _, 4096)`).
+    "read", "recv", "recvfrom", "recvmsg", "fread", "fgets",
+];
+
+fn build_bounded_returns_set(
+    ssa: &crate::ir::SsaCfg,
+    imports: &HashMap<u64, String>,
+) -> std::collections::HashSet<VarId> {
+    let mut out = std::collections::HashSet::new();
+    let is_wrapper = |target: &CallTarget| -> bool {
+        if let CallTarget::Direct(addr) = target {
+            if let Some(raw) = imports.get(addr) {
+                let n = normalise_name(raw);
+                return LENGTH_BOUNDING_WRAPPERS.contains(&n);
+            }
+        }
+        false
+    };
+    for block in &ssa.blocks {
+        for stmt in &block.stmts {
+            if let crate::ir::Stmt::Call {
+                target,
+                out: Some(o),
+                ..
+            } = stmt
+            {
+                if is_wrapper(target) {
+                    out.insert(*o);
+                }
+            }
+        }
+        if let crate::ir::SsaTerminator::Call {
+            target,
+            out: Some(o),
+            ..
+        } = &block.terminator
+        {
+            if is_wrapper(target) {
+                out.insert(*o);
+            }
+        }
+    }
+    out
+}
+
 fn build_call_return_map(ssa: &crate::ir::SsaCfg) -> CallReturnMap {
     let mut m = CallReturnMap::new();
     for block in &ssa.blocks {
@@ -988,6 +1056,22 @@ fn chain_varnodes(
     calls: &CallReturnMap,
     regions: &crate::region::RegionMap,
 ) -> Vec<AliasKey> {
+    chain_varnodes_with_bound(start, vars, mem, calls, regions, None)
+}
+
+/// v5.W2.D2b: variant that stops the call-return pass-through at
+/// VarIds present in `bounded_outs` (returns from length-bounding
+/// wrappers like strlen / snprintf). Used by the LengthArg solver
+/// to reject FP paths where the tainted length flows through a
+/// bound-shrinking wrapper.
+fn chain_varnodes_with_bound(
+    start: VarId,
+    vars: &[crate::ir::VarDef],
+    mem: &MemMap,
+    calls: &CallReturnMap,
+    regions: &crate::region::RegionMap,
+    bounded_outs: Option<&std::collections::HashSet<VarId>>,
+) -> Vec<AliasKey> {
     let mut out = Vec::new();
     let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut stack = vec![start];
@@ -1001,9 +1085,18 @@ fn chain_varnodes(
         // v2.V5: if `current` is a Call's `out`, push every arg —
         // the return value is treated as carrying taint forward
         // from any tainted argument (intra-procedural pass-through).
+        // v5.W2.D2b: skip args when the call target is a length-
+        // bounding wrapper (strlen, snprintf, ...) — the wrapper's
+        // return is bounded by definition, so taint upstream of
+        // the wrapper isn't a length-overflow predicate.
         if let Some(args) = calls.get(&current) {
-            for a in args {
-                stack.push(*a);
+            let is_bounded = bounded_outs
+                .map(|s| s.contains(&current))
+                .unwrap_or(false);
+            if !is_bounded {
+                for a in args {
+                    stack.push(*a);
+                }
             }
         }
         let Some(def) = vars.get(current.0 as usize) else {
@@ -1088,6 +1181,19 @@ fn chain_varnodes(
 ///   - Lineage check is `Expr::Var` chain only — no BinOp/Phi taint.
 #[cfg(feature = "smt")]
 pub fn solve(path: &TaintPath, ssa: &crate::ir::SsaCfg) -> SmtFinding {
+    solve_with_imports(path, ssa, &HashMap::new())
+}
+
+/// v5.W2.D2b: solve variant aware of length-bounding wrappers.
+/// `imports` is consulted only to build a per-SSA set of VarIds
+/// returned from `strlen` / `snprintf` / etc.; LengthArg sinks
+/// reject lineages that pass through one of those wrappers.
+#[cfg(feature = "smt")]
+pub fn solve_with_imports(
+    path: &TaintPath,
+    ssa: &crate::ir::SsaCfg,
+    imports: &HashMap<u64, String>,
+) -> SmtFinding {
     use z3::ast::{Ast, BV};
 
     let source_event = &path.events[path.source_event];
@@ -1154,7 +1260,49 @@ pub fn solve(path: &TaintPath, ssa: &crate::ir::SsaCfg) -> SmtFinding {
             }
         }
         SinkKind::LengthArg => {
-            return SmtFinding::Unsupported("LengthArg sink not modeled in v0");
+            // v5.W2.D2b: Reachable iff
+            //   (a) tainted lineage from src reaches the length
+            //       operand WITHOUT passing through a length-
+            //       bounding wrapper (strlen / snprintf / ...), AND
+            //   (b) the dst arg is a stack-frame region (per v4
+            //       region inference) — heap/global dsts have
+            //       runtime size, not statically a stack-frame BOF.
+            let bounded = build_bounded_returns_set(ssa, imports);
+            let chain_a = chain_varnodes_with_bound(
+                snk, &ssa.vars, &mem, &calls, &regions, Some(&bounded),
+            );
+            let chain_b = chain_varnodes_with_bound(
+                src, &ssa.vars, &mem, &calls, &regions, Some(&bounded),
+            );
+            let unbounded_eq = chain_a.iter().any(|k| chain_b.contains(k));
+            if !unbounded_eq {
+                return SmtFinding::NotReachable;
+            }
+            // dst region check (memcpy/strncpy/memmove all use Arg(0)).
+            let dst_var = match &sink_event.kind {
+                TaintEventKind::SinkCall { args, .. } => args.first().copied(),
+                _ => None,
+            };
+            let dst_is_stack = dst_var
+                .map(|v| {
+                    let r = regions.region_of(v);
+                    matches!(
+                        regions.site_of(r),
+                        Some(crate::region::AllocSite::StackFrame)
+                    )
+                })
+                .unwrap_or(false);
+            if !dst_is_stack {
+                return SmtFinding::NotReachable;
+            }
+            // Encode length as 32-bit BV from 4 input bytes (LE);
+            // assert > 0xFFFF (any plausible stack buffer cap).
+            let len = bytes[0]
+                .concat(&bytes[1])
+                .concat(&bytes[2])
+                .concat(&bytes[3]);
+            let threshold = BV::from_u64(&ctx, 0xFFFF, 32);
+            solver.assert(&len.bvugt(&threshold));
         }
     }
 
@@ -1188,6 +1336,15 @@ pub fn solve(path: &TaintPath, ssa: &crate::ir::SsaCfg) -> SmtFinding {
 /// --features smt" hint when they see this.
 #[cfg(not(feature = "smt"))]
 pub fn solve(_path: &TaintPath, _ssa: &crate::ir::SsaCfg) -> SmtFinding {
+    SmtFinding::Unsupported("smt feature not enabled at build time")
+}
+
+#[cfg(not(feature = "smt"))]
+pub fn solve_with_imports(
+    _path: &TaintPath,
+    _ssa: &crate::ir::SsaCfg,
+    _imports: &HashMap<u64, String>,
+) -> SmtFinding {
     SmtFinding::Unsupported("smt feature not enabled at build time")
 }
 
