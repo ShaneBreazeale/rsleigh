@@ -1545,9 +1545,15 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                 eprintln!("// {} — no instructions", name);
                 continue;
             }
+            // v13 fix: prefer non-empty symbol name. The discovery
+            // pipeline can push duplicate addr entries with empty
+            // strings (placeholders for unanalysed call targets);
+            // those would shadow the real symbol's name otherwise.
             let func_name = symbols
                 .iter()
-                .find(|(a, _)| *a == func_addr)
+                .filter(|(a, _)| *a == func_addr)
+                .find(|(_, n)| !n.is_empty())
+                .or_else(|| symbols.iter().find(|(a, _)| *a == func_addr))
                 .map(|(_, n)| n.clone())
                 .unwrap_or_else(|| format!("func_{:x}", func_addr));
             if pcode_json {
@@ -2021,8 +2027,8 @@ fn run_smt_diag(
 ) {
     use rsleigh_decompile::callgraph::FuncId;
     use rsleigh_decompile::smt_explore::{
-        collect_paths, collect_paths_with_summaries, resolve_call, SpecRef, DEFAULT_SINKS,
-        DEFAULT_SOURCES,
+        collect_paths, collect_paths_with_summaries_named, resolve_call, SpecRef,
+        DEFAULT_SINKS, DEFAULT_SOURCES,
     };
 
     let imports = rsleigh_decompile::imports::resolve_imports(data);
@@ -2199,7 +2205,7 @@ fn run_smt_diag(
                 total_paths += paths.len();
             }
         }
-        if let Ok(paths) = collect_paths_with_summaries(&ssa, &imports, &summaries) {
+        if let Ok(paths) = collect_paths_with_summaries_named(&ssa, &imports, &summaries, Some(name)) {
             if !paths.is_empty() {
                 funcs_with_paths_summary += 1;
                 total_paths_summary += paths.len();
@@ -2359,7 +2365,7 @@ fn run_smt_diag(
             let cfg = rsleigh_decompile::cfg::build_cfg(&insts);
             let mut ssa = rsleigh_decompile::ssa::build_ssa_with_cc(&cfg, cc);
             rsleigh_decompile::fold::fold_with_cc(&mut ssa, cc);
-            let Ok(paths) = collect_paths_with_summaries(&ssa, &imports, &summaries)
+            let Ok(paths) = collect_paths_with_summaries_named(&ssa, &imports, &summaries, Some(name))
             else { continue };
             for path in &paths {
                 let kind_name = match path.sink.kind {
@@ -2463,7 +2469,7 @@ fn run_smt_candidates(
 ) {
     use rsleigh_decompile::callgraph::FuncId;
     use rsleigh_decompile::smt_explore::{
-        collect_paths_with_summaries, SinkKind, SmtFinding,
+        collect_paths_with_summaries_named, SinkKind, SmtFinding,
     };
     use std::io::Write;
 
@@ -2509,7 +2515,7 @@ fn run_smt_candidates(
         let mut ssa = rsleigh_decompile::ssa::build_ssa_with_cc(&cfg, cc);
         rsleigh_decompile::fold::fold_with_cc(&mut ssa, cc);
 
-        let Ok(paths) = collect_paths_with_summaries(&ssa, &imports, &summaries) else {
+        let Ok(paths) = collect_paths_with_summaries_named(&ssa, &imports, &summaries, Some(name)) else {
             continue;
         };
         let mut per_fn_emitted = 0usize;
@@ -2818,11 +2824,11 @@ fn run_smt_explore_all(
         rsleigh_decompile::fold::fold_with_cc(&mut ssa, cc);
         let imports = rsleigh_decompile::imports::resolve_imports(data);
         use rsleigh_decompile::smt_explore::{
-            collect_paths, collect_paths_with_summaries, solve_with_imports, SmtFinding,
+            collect_paths_with_summaries_named, solve_with_imports, SmtFinding,
         };
         let paths = match summaries {
-            Some(s) => collect_paths_with_summaries(&ssa, &imports, s),
-            None => collect_paths(&ssa, &imports),
+            Some(s) => collect_paths_with_summaries_named(&ssa, &imports, s, Some(name)),
+            None => collect_paths_with_summaries_named(&ssa, &imports, &std::collections::HashMap::new(), Some(name)),
         };
         let Ok(paths) = paths else { continue };
         for path in &paths {
@@ -2917,13 +2923,13 @@ fn run_smt_explore(
     let imports = rsleigh_decompile::imports::resolve_imports(data);
 
     use rsleigh_decompile::smt_explore::{
-        collect_paths, collect_paths_with_summaries, solve_with_imports, PathRejection,
+        collect_paths_with_summaries_named, solve_with_imports, PathRejection,
         SmtFinding,
     };
 
     let paths_result = match summaries {
-        Some(s) => collect_paths_with_summaries(&ssa, &imports, s),
-        None => collect_paths(&ssa, &imports),
+        Some(s) => collect_paths_with_summaries_named(&ssa, &imports, s, Some(func_name)),
+        None => collect_paths_with_summaries_named(&ssa, &imports, &std::collections::HashMap::new(), Some(func_name)),
     };
     let paths = match paths_result {
         Ok(p) => p,

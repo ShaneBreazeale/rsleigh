@@ -16,12 +16,12 @@
     },
     {
       "id": "CVE-2013-1813-like",
-      "function": "mdev_load_like",
+      "function": "main",
       "kind": "StackBuffer",
       "source": "argv",
       "sink": "strcat",
       "expected_reachable": true,
-      "notes": "strcat into 64-byte stack buffer with attacker-controlled device name"
+      "notes": "strcat into 64-byte stack buffer via argv[2]. v13 argv-injection surfaces the candidate on main (the path-collecting function); verdict currently FOUND-but-unproven because region inference doesn't bridge Load(stack_spill_of_argv) back to Param(1) region. v14 follow-up."
     },
     {
       "id": "CVE-2015-3294-like-known-FN",

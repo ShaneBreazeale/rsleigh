@@ -353,9 +353,50 @@ pub fn collect_paths_with_summaries<'a>(
     imports: &HashMap<u64, String>,
     summaries: &HashMap<crate::callgraph::FuncId, crate::function_summary::FunctionSummary>,
 ) -> Result<Vec<TaintPath<'a>>, PathRejection> {
+    collect_paths_with_summaries_named(ssa, imports, summaries, None)
+}
+
+/// v13: variant that knows the function's name. When name is "main"
+/// (or `_main` Mach-O mangling), the walker prepends a synthetic
+/// SourceCall for the `argv` source spec — `argv` isn't a libc
+/// call, it's the second arg to `main`, so without this injection
+/// path collection in main can never see argv-tainted bytes flowing
+/// to a sink even when the SSA carries the chain perfectly.
+pub fn collect_paths_with_summaries_named<'a>(
+    ssa: &'a SsaCfg,
+    imports: &HashMap<u64, String>,
+    summaries: &HashMap<crate::callgraph::FuncId, crate::function_summary::FunctionSummary>,
+    func_name: Option<&str>,
+) -> Result<Vec<TaintPath<'a>>, PathRejection> {
+    let mut initial_events: Vec<TaintEvent<'a>> = Vec::new();
+    if let Some(name) = func_name {
+        let trimmed = name.trim_start_matches('_');
+        if trimmed == "main" {
+            // Find param_1 (argv) — the SSA's first VarDef whose
+            // param_name == "param_1" carries the argv pointer.
+            for v in &ssa.vars {
+                if v.param_name.as_deref() == Some("param_1") {
+                    let argv_spec = DEFAULT_SOURCES
+                        .iter()
+                        .find(|s| s.name == "argv")
+                        .expect("argv spec missing from DEFAULT_SOURCES");
+                    initial_events.push(TaintEvent {
+                        stmt_index: 0,
+                        kind: TaintEventKind::SourceCall {
+                            spec: argv_spec,
+                            args: vec![VarId(0), v.id],
+                            out: None,
+                            call_chain: Vec::new(),
+                        },
+                    });
+                    break;
+                }
+            }
+        }
+    }
     let initial = WalkState {
         current: ssa.entry,
-        events: Vec::new(),
+        events: initial_events,
         visited: std::collections::HashSet::new(),
         branch_decisions: Vec::new(),
     };
@@ -1320,7 +1361,19 @@ pub fn solve_diag(
     let regions = crate::region::infer_regions(ssa);
     let mem = build_mem_map(&path.events, &ssa.vars, &regions);
     let calls = build_call_return_map(ssa);
-    if !varid_lineage_eq(snk, src, &ssa.vars, &mem, &calls, &regions) {
+    let lineage_ok = if path.source.name == "argv" {
+        // v13: argv source taints the entire `argv` region. Any
+        // VarId whose SSA chain reaches the Region(Param(1), *)
+        // matches, ignoring OffsetClass — `argv[N]` and `argv` share
+        // a region in v4 inference.
+        let src_region = regions.region_of(src);
+        let chain_snk = chain_varnodes(snk, &ssa.vars, &mem, &calls, &regions);
+        chain_snk.iter().any(|k| matches!(k, AliasKey::Region(r, _) if *r == src_region))
+            || varid_lineage_eq(snk, src, &ssa.vars, &mem, &calls, &regions)
+    } else {
+        varid_lineage_eq(snk, src, &ssa.vars, &mem, &calls, &regions)
+    };
+    if !lineage_ok {
         reason_log.push("lineage_eq failed (no shared alias key)".into());
         return SmtFinding::NotReachable;
     }
