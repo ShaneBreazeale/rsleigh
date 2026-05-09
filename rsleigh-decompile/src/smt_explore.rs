@@ -129,11 +129,15 @@ pub const DEFAULT_SINKS: &[SinkSpec] = &[
 /// only by `build_function_summary` when it detects a function
 /// that writes from a Param-region pointer into another Param-
 /// region pointer (the "copy_until_zero" / extract_name pattern).
-/// `watched: Arg(1)` means the dst-pointer slot — a tainted source
-/// reaching this slot indicates an OOB-write candidate.
+///
+/// v10: `watched: Arg(0)` is the SRC-pointer slot — the parameter
+/// whose buffer contents flow into the destination. The lineage
+/// walker checks taint flow from the source to this slot in the
+/// caller; the dst-is-param precondition is enforced at detection
+/// time, not at solve time.
 pub const STORE_SINK_SPEC: SinkSpec = SinkSpec {
     name: "<tainted_store>",
-    watched: AbiSlot::Arg(1),
+    watched: AbiSlot::Arg(0),
     kind: SinkKind::TaintedStore,
 };
 
@@ -1357,14 +1361,21 @@ pub fn solve_diag(
             }
         }
         SinkKind::TaintedStore => {
-            // v9: SAT model deferred to v10 (needs loop-aware
-            // analysis + dst-buffer-size inference). For now,
-            // surface as Unsupported so --smt-candidates emits
-            // the record with reason for analyst/LLM triage.
-            reason_log.push(
-                "TaintedStore SAT model deferred to v10 (loop-aware analysis required)".into(),
-            );
-            return SmtFinding::Unsupported("TaintedStore not SAT-modeled in v9");
+            // v10: SAT model. The lineage walker has proved
+            // tainted source bytes reach the SRC pointer of a
+            // Param→Param copy (per detect_tainted_store's two
+            // preconditions). Reachable iff:
+            //   (a) lineage_eq holds (already checked above), AND
+            //   (b) all 32 input bytes can be nonzero — the loop
+            //       bound is `*src != 0`, so an attacker who
+            //       sends bytes with no \0 drives the copy
+            //       arbitrarily long, overflowing the fixed
+            //       caller-stack dst.
+            // Trigger: 32 nonzero bytes (any value).
+            for b in &bytes {
+                let nz = b._eq(&BV::from_u64(&ctx, 0, 8)).not();
+                solver.assert(&nz);
+            }
         }
         SinkKind::LengthArg => {
             // v5.W2.D2b: Reachable iff

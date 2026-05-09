@@ -136,18 +136,17 @@ pub fn build_function_summary(
 }
 
 /// v9: classify a `Store(addr, val)` statement as a "TaintedStore"
-/// sink. Returns the dst-pointer's caller-arg slot when the store
-/// is shaped like `*caller_supplied_ptr = byte_from_caller_supplied_buf`
-/// (the dominant compiler-emitted-loop OOB-write pattern, e.g.
-/// `extract_name`'s `*out++ = c`).
+/// sink. v10: returns the SRC-pointer's caller-arg slot (the param
+/// whose buffer contents flow into the store), so the lineage walker
+/// can prove "tainted source reaches the SRC of the copy."
 ///
 /// Heuristic:
-///   - addr traces back to a Param slot (via direct Param region OR
-///     via spill-reload Store→Load chain — the -O0/-Os pattern where
-///     the param pointer is spilled to fp+offset and reloaded each
-///     iteration).
-///   - val's expression involves at least one Load — read from
-///     somewhere, suggesting "byte from input" rather than constant.
+///   - addr traces back to a Param slot (dst is caller-supplied)
+///     via direct Param region OR spill-reload Store→Load chain.
+///     This is the precondition — written buffer is on caller stack.
+///   - val's expression involves at least one Load whose address
+///     traces to ANOTHER Param slot (src is caller-supplied buffer
+///     whose bytes are being read). Returns the SRC param slot(s).
 fn detect_tainted_store(
     addr: VarId,
     val: VarId,
@@ -156,9 +155,9 @@ fn detect_tainted_store(
 ) -> Option<Vec<crate::smt_explore::AbiSlot>> {
     use crate::smt_explore::AbiSlot;
     let arg_vars = arg_vars_from_ssa(ssa);
-    let mut dst_slots = arg_slots_for_var(addr, ssa, &arg_vars);
 
-    // Direct Param region match.
+    // (1) Precondition: dst (addr) is a caller-supplied pointer.
+    let mut dst_slots = arg_slots_for_var(addr, ssa, &arg_vars);
     let addr_region = regions.region_of(addr);
     if let Some(crate::region::AllocSite::Param(n)) = regions.site_of(addr_region) {
         let cs = AbiSlot::Arg(*n);
@@ -166,16 +165,6 @@ fn detect_tainted_store(
             dst_slots.push(cs);
         }
     }
-
-    // v9: spill-reload-loop pattern. The dst pointer is spilled to
-    // a stack slot, reloaded each iteration, incremented, restored.
-    // The Store map only records the LAST store per key (the
-    // post-increment store), so arg_slots_for_var can't bottom out
-    // at the original param. Build an inverted index of "addresses
-    // ever stored a Param-bearing value" by scanning every Store
-    // and classifying the value side. Then if `addr`'s expression
-    // bottoms to a Load from one of those addresses, treat as
-    // Param-pointing.
     if dst_slots.is_empty() {
         let param_slots = collect_param_bearing_slots(ssa, &arg_vars);
         if let Some(slots) = addr_loads_from_param_slot(addr, ssa, &param_slots) {
@@ -186,15 +175,117 @@ fn detect_tainted_store(
             }
         }
     }
-
     dst_slots.retain(|s| matches!(s, AbiSlot::Arg(_)));
     if dst_slots.is_empty() {
         return None;
     }
+
+    // (2) Try to identify SRC: val involves a Load whose address
+    // traces back to another Param. When found, SAT can fire on
+    // src↔source taint match.
+    let src_slots = find_load_src_param_slots(val, ssa, &arg_vars, regions);
+    let mut out: Vec<AbiSlot> = src_slots
+        .into_iter()
+        .filter(|s| !dst_slots.contains(s))
+        .collect();
+    out.dedup();
+    if !out.is_empty() {
+        return Some(out);
+    }
+
+    // (3) Fallback: src not identified as a Param, but val involves
+    // a Load (suggests reading from somewhere). Record dst slot so
+    // the candidate IS surfaced in --smt-candidates for analyst
+    // triage, even though SAT lineage_eq won't fire (sink_var =
+    // caller's dst pointer, which isn't directly tainted by the
+    // source). Verdict will end up NotReachable or Unsupported but
+    // the path appears in the dump with `filter_reasons`.
     if !val_involves_load(val, ssa, &mut std::collections::HashSet::new(), 0) {
         return None;
     }
     Some(dst_slots)
+}
+
+/// v10: walk val's expression tree; at every `Load(addr)`, classify
+/// the addr's source param (via arg_slots_for_var + region map +
+/// param-slot inverted index — same three checks as the dst path).
+/// Returns every SRC param slot the load chain reaches.
+fn find_load_src_param_slots(
+    val: VarId,
+    ssa: &crate::ir::SsaCfg,
+    arg_vars: &HashMap<u8, VarId>,
+    regions: &crate::region::RegionMap,
+) -> Vec<crate::smt_explore::AbiSlot> {
+    use crate::smt_explore::AbiSlot;
+    let param_slots = collect_param_bearing_slots(ssa, arg_vars);
+    let mut out: Vec<AbiSlot> = Vec::new();
+    let mut visited: std::collections::HashSet<u32> =
+        std::collections::HashSet::new();
+    let mut stack = vec![val];
+    let mut classify_addr = |addr: VarId, sink: &mut Vec<AbiSlot>| {
+        for cs in arg_slots_for_var(addr, ssa, arg_vars) {
+            if !sink.contains(&cs) {
+                sink.push(cs);
+            }
+        }
+        let r = regions.region_of(addr);
+        if let Some(crate::region::AllocSite::Param(n)) = regions.site_of(r) {
+            let cs = AbiSlot::Arg(*n);
+            if !sink.contains(&cs) {
+                sink.push(cs);
+            }
+        }
+        if let Some(slots) = addr_loads_from_param_slot(addr, ssa, &param_slots) {
+            for s in slots {
+                if !sink.contains(&s) {
+                    sink.push(s);
+                }
+            }
+        }
+    };
+    while let Some(cur) = stack.pop() {
+        if !visited.insert(cur.0) || visited.len() > 64 {
+            continue;
+        }
+        let Some(def) = ssa.vars.get(cur.0 as usize) else { continue };
+        match &def.expr {
+            crate::ir::Expr::Var(inner) => stack.push(*inner),
+            crate::ir::Expr::Load(addr) => {
+                classify_addr(*addr, &mut out);
+                stack.push(*addr);
+            }
+            crate::ir::Expr::FieldAccess(base, offset) => {
+                // FieldAccess(base, off) is a folded Load(base+off).
+                // Construct the synthetic add-canon and check the
+                // param_slots map directly for spill-slot loads
+                // that classify_addr's chain walk would miss
+                // (base alone doesn't carry the offset info).
+                let key = field_access_canon(*base, *offset, &ssa.vars);
+                if let Some(slots) = param_slots.get(&key) {
+                    for s in slots {
+                        if !out.contains(s) {
+                            out.push(*s);
+                        }
+                    }
+                }
+                classify_addr(*base, &mut out);
+                stack.push(*base);
+            }
+            crate::ir::Expr::UnaryOp(_, a) => stack.push(*a),
+            crate::ir::Expr::BinOp(_, a, b) => {
+                stack.push(*a);
+                stack.push(*b);
+            }
+            crate::ir::Expr::Phi(inputs) => {
+                for v in inputs {
+                    stack.push(*v);
+                }
+            }
+            _ => {}
+        }
+    }
+    out.retain(|s| matches!(s, AbiSlot::Arg(_)));
+    out
 }
 
 /// v9: address-canon-key → set of caller arg slots ever stored at

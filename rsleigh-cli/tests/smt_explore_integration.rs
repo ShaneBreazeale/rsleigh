@@ -118,14 +118,15 @@ fn inter_proc_heartbleed_lengtharg_reachable() {
 }
 
 #[test]
-fn tainted_store_loop_surfaces_taintedstore_candidate() {
-    // v9: caller (vuln_loop_store) does recv into local buf, then
-    // calls copy_until_zero(buf, dst). Callee body has compiler-
-    // emitted store loop *out++ = byte (no libc memcpy). v9 detects
-    // this as a TaintedStore sink in copy_until_zero's summary; the
-    // caller's path collection lifts it as a synthetic SinkCall.
-    // Verdict is `Unsupported` (SAT model deferred to v10), but the
-    // candidate IS surfaced for analyst/LLM triage.
+fn tainted_store_loop_reachable_via_summary() {
+    // v9 detects the compiler-emitted Store loop as a TaintedStore
+    // sink in copy_until_zero's summary. v10 SAT-models it: tainted
+    // bytes have no \0 terminator, so the loop runs unbounded and
+    // overflows the caller's fixed dst.
+    //
+    // Caller (vuln_loop_store) does recv into local buf, calls
+    // copy_until_zero(buf, dst). Callee body: *out++ = byte. v10
+    // produces REACHABLE w/ trigger of 32 nonzero bytes.
     let Some(bin) = fixture("tainted_store_loop") else { return };
 
     let out = Command::new(RSLEIGH_BIN)
@@ -144,6 +145,10 @@ fn tainted_store_loop_surfaces_taintedstore_candidate() {
     assert!(
         stdout.contains("recv -> <tainted_store>"),
         "missing recv->store path label:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("REACHABLE"),
+        "v10 should produce REACHABLE for tainted-store loop:\n{stdout}"
     );
 }
 
