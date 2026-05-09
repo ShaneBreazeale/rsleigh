@@ -178,6 +178,34 @@ Fixture: `test-harness/fixtures/crackmev3.pyd` (PyVMProtect v4).
 - Register-indirect calls across non-trivial CFG (e.g. multi-path conv. through a phi merge) still not resolved; same-function linear cases including cross-block IAT-into-reg now handled (resolve_callind_via_all_ops)
 - ARM32 VFP/NEON: decode OK, FP reg values not fully traced through folding
 
+## SMT backend (`--features smt`)
+
+- Build: `CPATH=$(brew --prefix z3)/include LIBRARY_PATH=$(brew --prefix z3)/lib cargo build --release --features smt -p rsleigh-cli`
+- Calibration harness: `python3 scripts/smt-calibrate.py test-harness/fixtures/smt/calibration` — 12-fixture corpus, 100% TP/TN target
+- Modes: `--smt-explore <fn>` (single fn), `--smt-explore-all` (sweep, only Reachable), `--smt-candidates [<fn>]` (NDJSON dump for LLM, dedup+score+top-N+per-fn-cap), `--smt-diag` (per-binary aggregate stats)
+- AX6000 router corpus: `/tmp/ax6000_ubi/ubi_out/431909977/rootfs_ubifs/usr/{bin,sbin}/{tdpServer,miniupnpd,dnsmasq,dropbear,avahi-daemon}`. Sweep baseline: 288 hits dnsmasq, 0 elsewhere
+- Real-CVE corpus under `test-harness/fixtures/smt/calibration/<entry>/{<binary>,EXPECTED.json}`. Harness verdicts: TP / TN / FP / FN / FOUND-but-unproven
+- `MAX_PATHS_PER_FN = 8192` truncates `collect_paths_with_summaries` output per-function (prevents 96k+ path explosion on parser-heavy fns)
+- Lazy summary build: whole-binary `--smt-candidates` seeds with libc-source/sink-touching funcs, closure walks BOTH directions (forward for TaintedStore-eligible callees, reverse for inter-proc propagation callers)
+- `--smt-candidates <fn>` per-fn scope ~30× faster than whole-binary on dnsmasq-class binaries; recommended
+
+## Container builds (CVE corpus)
+
+- `colima start --cpu 4 --memory 4 --disk 20` (after `brew install colima docker`); `colima stop` to free RAM
+- **Colima quirk**: only `$HOME/...` mounts auto-pass into containers; `/tmp/...` mounts appear empty inside. Stage under `~/cve-build/{cache,scripts,out}`
+- busybox-1.21.0 needs `ubuntu:18.04` image (debian:bookworm's glibc 2.36 removed `stime`, breaks rdate/date applets). Disable `CONFIG_INETD` (needs `rpc/rpc.h`)
+- dropbear-2016.74: build with bare `make` (default target multibinary), NOT `make dropbear` (libtomcrypt include-path bug). Configure with `--disable-zlib` if no zlib1g-dev
+- dnsmasq pre-2.70 removed from upstream archive — use 2.71 as proxy or Debian snapshot
+
+## Symbol-table gotcha
+
+- `symbols: Vec<(u64, String)>` can contain duplicate-address entries with empty names (call-graph discovery placeholders). `iter().find(|(a,_)| ..)` may return the empty-name placeholder before the real symbol. Prefer non-empty: `.filter(...).find(|(_,n)| !n.is_empty()).or_else(|| .find(...))`
+
+## SMT feat branch state
+
+- Master HEAD has v0..v21 merged. Branches alive: `feat/smt-backend`, `v18-real-cve-corpus`, `v19-v21-followups`
+- v22+ filed in `.opt/failed.md`: FilePipe-write SinkKind (dropbear x11setauth FN), PathTraversal SinkKind (busybox mdev FN), pointer-arith OOB SinkKind (dnsmasq extract_name FN), LAVA-M docker pipeline
+
 ## License
 
 Apache 2.0

@@ -36,6 +36,7 @@ assistance, not ground truth.
 - [Rust API](#rust-api)
 - [Decompiler](#decompiler)
 - [Malware and Triage Features](#malware-and-triage-features)
+- [SMT-Aided Taint Flow](#smt-aided-taint-flow---features-smt)
 - [Testing and Benchmarks](#testing-and-benchmarks)
 - [Known Limitations](#known-limitations)
 - [Security Posture](#security-posture)
@@ -301,6 +302,47 @@ Current examples include:
 
 These features can miss real behavior and can produce false positives. Treat
 them as leads to inspect, not conclusions.
+
+## SMT-Aided Taint Flow (`--features smt`)
+
+Optional Z3-backed taint-flow prover. Inter-procedural source→sink path
+collection with a labeled-CVE calibration corpus. Designed as static
+evidence for an LLM analyst, not an auto-CVE-prover.
+
+Build:
+
+```
+CPATH=$(brew --prefix z3)/include LIBRARY_PATH=$(brew --prefix z3)/lib \
+  cargo build --release --features smt -p rsleigh-cli
+```
+
+Modes:
+
+- `rsleigh <bin> --smt-explore <fn> [--smt-summaries]` — single-function SAT proof.
+- `rsleigh <bin> --smt-explore-all --smt-summaries` — sweep, only prints `REACHABLE` hits.
+- `rsleigh <bin> --smt-candidates [<fn>]` — NDJSON dump of every Source→Sink path
+  with verdict, filter reasons, source/sink VarIds, call_chain, trigger bytes,
+  and per-event memory-flow trace (region/AllocSite per VarId). LLM-consumable.
+  Flags: `--smt-candidates-cap N` (per-fn output cap), `--smt-candidates-top N`
+  (highest-scored N after dedup), `--smt-candidates-no-dedup`.
+- `rsleigh <bin> --smt-diag` — per-binary aggregate stats (BL site classification,
+  source/sink resolution, summary build counts, per-kind v2-path verdict breakdown).
+
+Sink kinds with SAT models: `StackBuffer` (strcpy / strcat), `FormatArg`
+(printf / sprintf class), `Command` (system / popen / execve), `LengthArg`
+(memcpy / strncpy / memmove), `TaintedStore` (compiler-emitted store-loop
+extract_name pattern). Source kinds: recv-class / read / fread / fgets / scanf
+/ getenv / argv (auto-injected at `main`).
+
+Calibration: `python3 scripts/smt-calibrate.py test-harness/fixtures/smt/calibration`
+walks each `<entry>/EXPECTED.json` and prints TP / TN / FP / FN per CVE.
+Current corpus is 12 entries (synthetic Heartbleed shapes + cve_synth +
+real-world Linux ARM64 ELF: dnsmasq-2.71, dropbear-2016.74, busybox-1.21.0).
+100% TP / 100% TN target; documented out-of-scope CVE shapes (pointer-arith
+OOB, fprintf-to-popen-pipe, path-traversal) are marked Unsupported / TN.
+
+See `docs/smt-candidates.md` for the candidate JSON schema and the
+`--smt-candidates` consumer recipe.
 
 ## Testing and Benchmarks
 
