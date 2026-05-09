@@ -1,0 +1,9 @@
+{
+  "binary": "recv_strcpy",
+  "version": "M1-fixture",
+  "cves": [
+    { "id": "M1-recv-strcpy", "function": "vuln_recv_strcpy",
+      "kind": "StackBuffer", "source": "recv", "sink": "strcpy",
+      "notes": "synthetic stack BOF: recv into local buf, strcpy to local dst" }
+  ]
+}

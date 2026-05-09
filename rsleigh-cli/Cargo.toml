@@ -13,6 +13,11 @@ categories = ["command-line-utilities", "development-tools"]
 name = "rsleigh"
 path = "src/main.rs"
 
+[features]
+# Pass-through to rsleigh-decompile's `smt` feature. Off by default.
+# Pulls libz3 — see docs/smt-backend.md for build env.
+smt = ["rsleigh-decompile/smt"]
+
 [dependencies]
 pcode-ir = { path = "../pcode-ir", version = "0.4.1" }
 rsleigh-api = { path = "../rsleigh-api", version = "0.4.1" }

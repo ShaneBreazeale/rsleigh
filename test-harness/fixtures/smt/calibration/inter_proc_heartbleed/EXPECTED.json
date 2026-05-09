@@ -1,0 +1,9 @@
+{
+  "binary": "inter_proc_heartbleed",
+  "version": "v8-fixture",
+  "cves": [
+    { "id": "v8-inter-proc-heartbleed", "function": "handler",
+      "kind": "LengthArg", "source": "recv", "sink": "memcpy",
+      "notes": "inter-proc Heartbleed via callee parse_packet" }
+  ]
+}

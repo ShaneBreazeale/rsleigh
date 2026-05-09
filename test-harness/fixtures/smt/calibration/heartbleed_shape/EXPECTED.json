@@ -1,0 +1,9 @@
+{
+  "binary": "heartbleed_shape",
+  "version": "M1-fixture",
+  "cves": [
+    { "id": "M1-heartbleed", "function": "vuln_heartbleed",
+      "kind": "LengthArg", "source": "recv", "sink": "memcpy",
+      "notes": "Heartbleed-shape: 16-bit length from buf[0..2], memcpy len bytes" }
+  ]
+}

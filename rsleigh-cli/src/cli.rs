@@ -127,6 +127,7 @@ pub fn entrypoint() {
         eprintln!("  rsleigh <binary> --search --const <hex> Find functions with constant");
         eprintln!("  rsleigh <binary> --seh-fixpoint      Apply SEH-driven SMC patches until fixpoint, report new functions");
         eprintln!("  rsleigh <binary> --vulnscan          Scan for vulnerability patterns");
+        eprintln!("  rsleigh <binary> --smt-explore <func> [--smt-summaries] [--json]  SMT taint-flow CVE proof (requires --features smt; --smt-summaries enables inter-procedural V2)");
         eprintln!("  rsleigh <binary> --ioc [--json]      Extract IOCs (URLs, IPs, paths, registry keys)");
         eprintln!("  rsleigh <binary> --xor-strings [--json]  Brute single-byte XOR string recovery");
         eprintln!("  rsleigh <binary> --sigcheck [--json] Parse Authenticode signature (signer, timestamp, chain)");
@@ -1233,7 +1234,10 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
         .map(|(_, a)| a.as_str())
         .collect();
 
-    if func_args.is_empty() && !all_mode && !disasm_mode {
+    let smt_explore_all_early = args.iter().any(|a| a == "--smt-explore-all");
+    let smt_diag_early = args.iter().any(|a| a == "--smt-diag");
+    let smt_candidates_early = args.iter().any(|a| a == "--smt-candidates");
+    if func_args.is_empty() && !all_mode && !disasm_mode && !smt_explore_all_early && !smt_diag_early && !smt_candidates_early {
         // List functions. Hide CRT-internal / runtime glue whose names start
         // with a single `_` (`_init`, `_fini`, `_start`, `_dl_*`, etc.) but
         // KEEP demangled-candidate symbols starting with `_Z` / `__Z` (C++
@@ -1468,7 +1472,63 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
     let pcode_json = args.iter().any(|a| a == "--pcode-json");
     let ssa_json = args.iter().any(|a| a == "--ssa-json");
     let opaque_scan = args.iter().any(|a| a == "--opaque-scan");
-    if pcode_json || ssa_json || opaque_scan {
+    let smt_explore = args.iter().any(|a| a == "--smt-explore");
+    let smt_explore_all = args.iter().any(|a| a == "--smt-explore-all");
+    let smt_summaries = args.iter().any(|a| a == "--smt-summaries");
+    let smt_diag = args.iter().any(|a| a == "--smt-diag");
+    if smt_diag {
+        run_smt_diag(&data, arch, &symbols, &segs, &mut dec, json_mode);
+        return;
+    }
+    let smt_candidates = args.iter().any(|a| a == "--smt-candidates");
+    if smt_candidates {
+        // v11.B: top-N + dedup flags
+        let top_n: Option<usize> = args
+            .iter()
+            .position(|a| a == "--smt-candidates-top")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|s| s.parse().ok());
+        let no_dedup = args.iter().any(|a| a == "--smt-candidates-no-dedup");
+        // v7.W4: optional per-fn scope. If positional func args are
+        // present, restrict the sweep to those addresses; otherwise
+        // dump every symbol.
+        let scope_addrs: Vec<u64> = func_args
+            .iter()
+            .filter_map(|name| {
+                if let Some(hex) = name.strip_prefix("0x").or_else(|| name.strip_prefix("0X")) {
+                    u64::from_str_radix(hex, 16).ok()
+                } else {
+                    symbols
+                        .iter()
+                        .find(|(_, n)| n == *name)
+                        .map(|(a, _)| *a)
+                }
+            })
+            .collect();
+        // v7.W4: per-fn candidate cap (default 256). Stops one
+        // pathological function from generating gigabyte-scale
+        // dumps. Override with --smt-candidates-cap N.
+        let cap: usize = args
+            .iter()
+            .position(|a| a == "--smt-candidates-cap")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(256);
+        run_smt_candidates(
+            &data, arch, &symbols, &segs, &mut dec, &scope_addrs, cap, top_n, no_dedup,
+        );
+        return;
+    }
+    let inter_proc_summaries = if (smt_explore || smt_explore_all) && smt_summaries {
+        Some(build_binary_summaries(&data, arch, &symbols, &segs, &mut dec))
+    } else {
+        None
+    };
+    if smt_explore_all {
+        run_smt_explore_all(&data, arch, &symbols, &segs, &mut dec, json_mode, inter_proc_summaries.as_ref());
+        return;
+    }
+    if pcode_json || ssa_json || opaque_scan || smt_explore {
         for name in &targets {
             let func_addr =
                 if let Some(hex) = name.strip_prefix("0x").or_else(|| name.strip_prefix("0X")) {
@@ -1485,9 +1545,15 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                 eprintln!("// {} — no instructions", name);
                 continue;
             }
+            // v13 fix: prefer non-empty symbol name. The discovery
+            // pipeline can push duplicate addr entries with empty
+            // strings (placeholders for unanalysed call targets);
+            // those would shadow the real symbol's name otherwise.
             let func_name = symbols
                 .iter()
-                .find(|(a, _)| *a == func_addr)
+                .filter(|(a, _)| *a == func_addr)
+                .find(|(_, n)| !n.is_empty())
+                .or_else(|| symbols.iter().find(|(a, _)| *a == func_addr))
                 .map(|(_, n)| n.clone())
                 .unwrap_or_else(|| format!("func_{:x}", func_addr));
             if pcode_json {
@@ -1620,6 +1686,17 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                         );
                     }
                 }
+            }
+            if smt_explore {
+                run_smt_explore(
+                    &data,
+                    arch,
+                    func_addr,
+                    &func_name,
+                    &insts,
+                    json_mode,
+                    inter_proc_summaries.as_ref(),
+                );
             }
         }
         return;
@@ -1825,6 +1902,1201 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
             }))
             .unwrap()
         );
+    }
+}
+
+/// `--smt-explore <func>`: build SSA, walk straight-line for
+/// Source -> Sink pairs, ask Z3 to produce a SAT trigger or fail.
+/// Output: human-readable per-path verdict by default, JSON with
+/// `--json`.
+///
+/// Without `--features smt` this prints a clear "rebuild" hint and
+/// exits zero (so scripted callers can probe for support).
+/// v2.V10: pre-compute a per-function FunctionSummary for every
+/// symbol in the binary so `--smt-explore` can use the inter-
+/// procedural V8 path collector. Returns the summaries map (keyed
+/// by FuncId = function start address).
+///
+/// One-time cost paid up front (~minutes on a 1000-func daemon);
+/// the alternative is rebuilding summaries per --smt-explore call.
+fn build_binary_summaries(
+    data: &[u8],
+    arch: rsleigh_api::Architecture,
+    symbols: &[(u64, String)],
+    segs: &[(u64, u64, u64)],
+    dec: &mut rsleigh_api::Decoder,
+) -> std::collections::HashMap<
+    rsleigh_decompile::callgraph::FuncId,
+    rsleigh_decompile::function_summary::FunctionSummary,
+> {
+    build_binary_summaries_scoped(data, arch, symbols, segs, dec, &[])
+}
+
+/// v17: lazy summary build. When `scope_addrs` is non-empty, builds
+/// summaries only for functions reachable (via direct BL/CALL
+/// edges, transitive closure) from any address in scope_addrs.
+/// Empty scope = legacy whole-binary build.
+///
+/// On large binaries (dnsmasq-2.78 ≈800 funcs), per-fn scope cuts
+/// the summary build's wall-clock from minutes to seconds because
+/// each summary requires a full SSA build + region-inference pass.
+fn build_binary_summaries_scoped(
+    data: &[u8],
+    arch: rsleigh_api::Architecture,
+    symbols: &[(u64, String)],
+    segs: &[(u64, u64, u64)],
+    dec: &mut rsleigh_api::Decoder,
+    scope_addrs: &[u64],
+) -> std::collections::HashMap<
+    rsleigh_decompile::callgraph::FuncId,
+    rsleigh_decompile::function_summary::FunctionSummary,
+> {
+    use rsleigh_decompile::callgraph::{
+        build_call_graph_with_image, tarjan_sccs, FuncId, ImageView,
+    };
+    use rsleigh_decompile::function_summary::{
+        arg_vars_from_ssa, build_summaries_bottom_up, FunctionContext,
+    };
+
+    let cc = match arch {
+        rsleigh_api::Architecture::X86_64
+            if rsleigh_decompile::go_pclntab::parse(data)
+                .keys()
+                .next()
+                .is_some() =>
+        {
+            rsleigh_decompile::fold::CallingConv::GoAmd64
+        }
+        rsleigh_api::Architecture::X86_32 | rsleigh_api::Architecture::MIPS32 => {
+            rsleigh_decompile::fold::CallingConv::Cdecl32
+        }
+        rsleigh_api::Architecture::ARM32 => rsleigh_decompile::fold::CallingConv::Arm32,
+        rsleigh_api::Architecture::AArch64 => rsleigh_decompile::fold::CallingConv::AArch64,
+        _ => rsleigh_decompile::fold::CallingConv::SysV,
+    };
+
+    let imports = rsleigh_decompile::imports::resolve_imports(data);
+
+    // v17: compute reachable set when scope is non-empty. Cheap
+    // BL/CALL-target scan over each function's raw instruction
+    // stream (no SSA build) propagated to fixpoint.
+    let symbol_addrs: std::collections::HashSet<u64> =
+        symbols.iter().map(|(a, _)| *a).collect();
+    let reachable: Option<std::collections::HashSet<u64>> = if scope_addrs.is_empty() {
+        None
+    } else {
+        let mut set: std::collections::HashSet<u64> =
+            scope_addrs.iter().copied().collect();
+        let mut frontier: Vec<u64> = scope_addrs.to_vec();
+        const MAX_DEPTH: usize = 32;
+        for _ in 0..MAX_DEPTH {
+            if frontier.is_empty() {
+                break;
+            }
+            let mut next: Vec<u64> = Vec::new();
+            for fa in frontier.drain(..) {
+                let insts = decode_func(fa, symbols, segs, data, dec);
+                for (_, inst) in &insts {
+                    for op in &inst.ops {
+                        if let pcode_ir::PcodeOp::Call { dest } = op {
+                            let target = dest.offset;
+                            if symbol_addrs.contains(&target) && set.insert(target) {
+                                next.push(target);
+                            }
+                        }
+                    }
+                }
+            }
+            frontier = next;
+        }
+        Some(set)
+    };
+
+    let mut ssas: Vec<(FuncId, rsleigh_decompile::ir::SsaCfg)> = Vec::new();
+    let mut arg_vars_map: std::collections::HashMap<
+        FuncId,
+        std::collections::HashMap<u8, rsleigh_decompile::ir::VarId>,
+    > = std::collections::HashMap::new();
+    for (addr, _name) in symbols {
+        if let Some(ref r) = reachable {
+            if !r.contains(addr) {
+                continue;
+            }
+        }
+        let insts = decode_func(*addr, symbols, segs, data, dec);
+        if insts.is_empty() {
+            continue;
+        }
+        let cfg = rsleigh_decompile::cfg::build_cfg(&insts);
+        let mut ssa = rsleigh_decompile::ssa::build_ssa_with_cc(&cfg, cc);
+        rsleigh_decompile::fold::fold_with_cc(&mut ssa, cc);
+        let arg_vars = arg_vars_from_ssa(&ssa);
+        arg_vars_map.insert(FuncId(*addr), arg_vars);
+        ssas.push((FuncId(*addr), ssa));
+    }
+
+    let funcs_ref: Vec<(FuncId, &rsleigh_decompile::ir::SsaCfg)> =
+        ssas.iter().map(|(k, v)| (*k, v)).collect();
+    let ptr_size: u8 = match arch {
+        rsleigh_api::Architecture::X86_32
+        | rsleigh_api::Architecture::ARM32
+        | rsleigh_api::Architecture::MIPS32 => 4,
+        _ => 8,
+    };
+    let image = ImageView {
+        data,
+        segs,
+        ptr_size,
+    };
+    let graph = build_call_graph_with_image(&funcs_ref, &imports, Some(image));
+    let sccs = tarjan_sccs(&graph);
+
+    let mut contexts: std::collections::HashMap<FuncId, FunctionContext<'_>> =
+        std::collections::HashMap::new();
+    for (fid, ssa) in &ssas {
+        if let Some(arg_vars) = arg_vars_map.get(fid) {
+            contexts.insert(
+                *fid,
+                FunctionContext {
+                    ssa,
+                    arg_vars,
+                },
+            );
+        }
+    }
+    build_summaries_bottom_up(&graph, &sccs, &contexts, &imports)
+}
+
+/// v2.V10: sweep mode. Iterate every symbol-rooted function in the
+/// binary, run `--smt-explore` against each, emit one JSON line per
+/// REACHABLE finding (or a one-line summary in plain mode). Path
+/// rejections / no-sink-found are silently skipped to keep output
+/// scannable across a 1000-function daemon.
+/// `--smt-diag <binary>`: ground-truth diagnostic for the SMT
+/// path-explorer's wiring against real binaries. Counts every BL/
+/// CALL site in every explored function, classifies it via the
+/// imports + func-set tables exactly as `build_call_graph` does,
+/// and tallies how many libc sources / sinks the explorer would
+/// actually see end-to-end. Writes human-readable to stdout (or
+/// JSON with --json). v5.W1.C1.
+fn run_smt_diag(
+    data: &[u8],
+    arch: rsleigh_api::Architecture,
+    symbols: &[(u64, String)],
+    segs: &[(u64, u64, u64)],
+    dec: &mut rsleigh_api::Decoder,
+    json: bool,
+) {
+    use rsleigh_decompile::callgraph::FuncId;
+    use rsleigh_decompile::smt_explore::{
+        collect_paths, collect_paths_with_summaries_named, resolve_call, SpecRef,
+        DEFAULT_SINKS, DEFAULT_SOURCES,
+    };
+
+    let imports = rsleigh_decompile::imports::resolve_imports(data);
+    let cc = match arch {
+        rsleigh_api::Architecture::X86_32 | rsleigh_api::Architecture::MIPS32 => {
+            rsleigh_decompile::fold::CallingConv::Cdecl32
+        }
+        rsleigh_api::Architecture::ARM32 => rsleigh_decompile::fold::CallingConv::Arm32,
+        rsleigh_api::Architecture::AArch64 => rsleigh_decompile::fold::CallingConv::AArch64,
+        _ => rsleigh_decompile::fold::CallingConv::SysV,
+    };
+
+    let mut funcs_explored: usize = 0;
+    let mut bl_sites: usize = 0;
+    let mut direct_imports: usize = 0;
+    let mut direct_funcset: usize = 0;
+    let mut direct_unknown: usize = 0;
+    let mut indirect: usize = 0;
+
+    let mut source_hits: std::collections::HashMap<&'static str, usize> =
+        std::collections::HashMap::new();
+    let mut sink_hits: std::collections::HashMap<&'static str, usize> =
+        std::collections::HashMap::new();
+    for s in DEFAULT_SOURCES {
+        source_hits.insert(s.name, 0);
+    }
+    for s in DEFAULT_SINKS {
+        sink_hits.insert(s.name, 0);
+    }
+
+    let mut funcs_with_paths: usize = 0;
+    let mut funcs_with_paths_summary: usize = 0;
+    let mut funcs_with_taint_source: usize = 0;
+    let mut funcs_with_sink: usize = 0;
+    let mut total_paths: usize = 0;
+    let mut total_paths_summary: usize = 0;
+
+    let func_set: std::collections::HashSet<u64> = symbols.iter().map(|(a, _)| *a).collect();
+
+    // Build full inter-proc summaries up front so the diag can
+    // measure path discovery WITH summaries vs WITHOUT.
+    let summaries = build_binary_summaries(data, arch, symbols, segs, dec);
+
+    // v5.W2 instrumentation: did summaries actually fire?
+    let mut summaries_with_source = 0usize;
+    let mut summaries_with_sink = 0usize;
+    let mut source_emissions_total = 0usize;
+    let mut source_emissions_with_slot = 0usize;
+    let mut sink_invocations_total = 0usize;
+    let mut sink_invocations_with_slot = 0usize;
+    let mut empty_slot_funcs: Vec<u64> = Vec::new();
+
+    // Probe: how many funcs have non-empty function_arg_vars?
+    // If most funcs have 0 named params, name_parameters_with_cc is
+    // the upstream bottleneck.
+    let mut funcs_with_named_params: usize = 0;
+    let mut total_named_params: usize = 0;
+    for (addr, name) in symbols {
+        if name.is_empty() || name.starts_with("dyld") {
+            continue;
+        }
+        let insts = decode_func(*addr, symbols, segs, data, dec);
+        if insts.is_empty() {
+            continue;
+        }
+        let cfg = rsleigh_decompile::cfg::build_cfg(&insts);
+        let mut ssa = rsleigh_decompile::ssa::build_ssa_with_cc(&cfg, cc);
+        rsleigh_decompile::fold::fold_with_cc(&mut ssa, cc);
+        let av = rsleigh_decompile::function_summary::arg_vars_from_ssa(&ssa);
+        if !av.is_empty() {
+            funcs_with_named_params += 1;
+            total_named_params += av.len();
+        }
+    }
+
+    for s in summaries.values() {
+        if !s.sources.is_empty() {
+            summaries_with_source += 1;
+        }
+        if !s.sinks.is_empty() {
+            summaries_with_sink += 1;
+        }
+        for src in &s.sources {
+            source_emissions_total += 1;
+            if !src.tainted_caller_slots.is_empty() {
+                source_emissions_with_slot += 1;
+            } else if empty_slot_funcs.len() < 5 && !empty_slot_funcs.contains(&s.func.0) {
+                empty_slot_funcs.push(s.func.0);
+            }
+        }
+        for snk in &s.sinks {
+            sink_invocations_total += 1;
+            if !snk.tainted_caller_slots.is_empty() {
+                sink_invocations_with_slot += 1;
+            }
+        }
+    }
+
+    for (addr, name) in symbols {
+        if name.is_empty() || name.starts_with("dyld") {
+            continue;
+        }
+        let insts = decode_func(*addr, symbols, segs, data, dec);
+        if insts.is_empty() {
+            continue;
+        }
+        funcs_explored += 1;
+        let cfg = rsleigh_decompile::cfg::build_cfg(&insts);
+        let mut ssa = rsleigh_decompile::ssa::build_ssa_with_cc(&cfg, cc);
+        rsleigh_decompile::fold::fold_with_cc(&mut ssa, cc);
+
+        let mut saw_source = false;
+        let mut saw_sink = false;
+        for block in &ssa.blocks {
+            let visit_target = |target: &rsleigh_decompile::ir::CallTarget| -> (
+                bool,
+                Option<u64>,
+            ) {
+                match target {
+                    rsleigh_decompile::ir::CallTarget::Direct(a) => (false, Some(*a)),
+                    rsleigh_decompile::ir::CallTarget::Indirect(_) => (true, None),
+                }
+            };
+            for stmt in &block.stmts {
+                if let rsleigh_decompile::ir::Stmt::Call { target, .. } = stmt {
+                    bl_sites += 1;
+                    let (is_indirect, addr_opt) = visit_target(target);
+                    classify_diag_target(
+                        is_indirect,
+                        addr_opt,
+                        &imports,
+                        &func_set,
+                        &mut direct_imports,
+                        &mut direct_funcset,
+                        &mut direct_unknown,
+                        &mut indirect,
+                        &mut source_hits,
+                        &mut sink_hits,
+                        &mut saw_source,
+                        &mut saw_sink,
+                    );
+                }
+            }
+            if let rsleigh_decompile::ir::SsaTerminator::Call { target, .. } = &block.terminator {
+                bl_sites += 1;
+                let (is_indirect, addr_opt) = visit_target(target);
+                classify_diag_target(
+                    is_indirect,
+                    addr_opt,
+                    &imports,
+                    &func_set,
+                    &mut direct_imports,
+                    &mut direct_funcset,
+                    &mut direct_unknown,
+                    &mut indirect,
+                    &mut source_hits,
+                    &mut sink_hits,
+                    &mut saw_source,
+                    &mut saw_sink,
+                );
+            }
+        }
+
+        if saw_source {
+            funcs_with_taint_source += 1;
+        }
+        if saw_sink {
+            funcs_with_sink += 1;
+        }
+
+        if let Ok(paths) = collect_paths(&ssa, &imports) {
+            if !paths.is_empty() {
+                funcs_with_paths += 1;
+                total_paths += paths.len();
+            }
+        }
+        if let Ok(paths) = collect_paths_with_summaries_named(&ssa, &imports, &summaries, Some(name)) {
+            if !paths.is_empty() {
+                funcs_with_paths_summary += 1;
+                total_paths_summary += paths.len();
+            }
+        }
+        let _ = FuncId(*addr);
+        let _ = SpecRef::Source(DEFAULT_SOURCES[0]); // suppress unused warn on import
+        let _ = resolve_call;
+    }
+
+    let _ = funcs_with_sink; // reported below
+
+    if json {
+        let payload = serde_json::json!({
+            "funcs_explored":         funcs_explored,
+            "bl_sites":               bl_sites,
+            "direct_imports":         direct_imports,
+            "direct_funcset":         direct_funcset,
+            "direct_unknown":         direct_unknown,
+            "indirect":               indirect,
+            "funcs_with_paths":       funcs_with_paths,
+            "funcs_with_taint_source": funcs_with_taint_source,
+            "funcs_with_sink":        funcs_with_sink,
+            "source_hits":            source_hits,
+            "sink_hits":              sink_hits,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+        return;
+    }
+
+    println!("[smt-diag] arch={:?}", arch);
+    println!("  funcs_explored:           {}", funcs_explored);
+    println!("  bl_sites:                 {}", bl_sites);
+    let pct = |n: usize| -> f64 {
+        if bl_sites == 0 {
+            0.0
+        } else {
+            (n as f64) * 100.0 / (bl_sites as f64)
+        }
+    };
+    println!(
+        "  direct -> imports:        {} ({:.1}%)",
+        direct_imports,
+        pct(direct_imports)
+    );
+    println!(
+        "  direct -> func_set:       {} ({:.1}%)",
+        direct_funcset,
+        pct(direct_funcset)
+    );
+    println!(
+        "  direct -> unknown:        {} ({:.1}%)",
+        direct_unknown,
+        pct(direct_unknown)
+    );
+    println!(
+        "  indirect (unresolved):    {} ({:.1}%)",
+        indirect,
+        pct(indirect)
+    );
+    println!();
+    println!("  libc_sources_resolved:");
+    let mut sources_sorted: Vec<(&&str, &usize)> = source_hits.iter().collect();
+    sources_sorted.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    for (name, n) in sources_sorted {
+        if *n > 0 {
+            println!("    {:<14} {}", name, n);
+        }
+    }
+    println!();
+    println!("  libc_sinks_resolved:");
+    let mut sinks_sorted: Vec<(&&str, &usize)> = sink_hits.iter().collect();
+    sinks_sorted.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+    for (name, n) in sinks_sorted {
+        if *n > 0 {
+            println!("    {:<14} {}", name, n);
+        }
+    }
+    println!();
+    println!(
+        "  funcs_with_paths (v0):    {} / {}   (total paths: {})",
+        funcs_with_paths, funcs_explored, total_paths
+    );
+    println!(
+        "  funcs_with_paths (v2):    {} / {}   (total paths: {})",
+        funcs_with_paths_summary, funcs_explored, total_paths_summary
+    );
+    println!(
+        "  funcs_with_taint_source:  {} / {}",
+        funcs_with_taint_source, funcs_explored
+    );
+    println!(
+        "  funcs_with_sink:          {} / {}",
+        funcs_with_sink, funcs_explored
+    );
+    println!();
+    println!("  [summary build]");
+    println!(
+        "  summaries_with_source:    {} / {}",
+        summaries_with_source,
+        summaries.len()
+    );
+    println!(
+        "  summaries_with_sink:      {} / {}",
+        summaries_with_sink,
+        summaries.len()
+    );
+    println!(
+        "  source_emissions:         {} (with caller_slot: {} / {})",
+        source_emissions_total, source_emissions_with_slot, source_emissions_total
+    );
+    println!(
+        "  sink_invocations:         {} (with caller_slot: {} / {})",
+        sink_invocations_total, sink_invocations_with_slot, sink_invocations_total
+    );
+    println!(
+        "  funcs_with_named_params:  {} / {}   (avg {:.1} params/func)",
+        funcs_with_named_params,
+        funcs_explored,
+        if funcs_with_named_params > 0 {
+            (total_named_params as f64) / (funcs_with_named_params as f64)
+        } else {
+            0.0
+        }
+    );
+    if !empty_slot_funcs.is_empty() {
+        println!();
+        println!(
+            "  [first {} funcs with SourceEmission but empty caller_slots]",
+            empty_slot_funcs.len()
+        );
+        for a in &empty_slot_funcs {
+            println!("    0x{:x}", a);
+        }
+    }
+
+    #[cfg(feature = "smt")]
+    {
+        // v5.W2 verdict breakdown: walk every v2 path and run solve()
+        // to see which kinds dominate. Without this we can't tell
+        // whether 0 hits = no paths vs. all paths in unsupported
+        // sink kinds (LengthArg) vs. legitimately Unsat.
+        use rsleigh_decompile::smt_explore::{solve_with_imports, SmtFinding, SinkKind};
+        let mut verdict_reachable = 0usize;
+        let mut verdict_not = 0usize;
+        let mut verdict_unsupported = 0usize;
+        let mut by_kind: std::collections::HashMap<&'static str, usize> =
+            std::collections::HashMap::new();
+        for (addr, name) in symbols {
+            if name.is_empty() || name.starts_with("dyld") {
+                continue;
+            }
+            let insts = decode_func(*addr, symbols, segs, data, dec);
+            if insts.is_empty() {
+                continue;
+            }
+            let cfg = rsleigh_decompile::cfg::build_cfg(&insts);
+            let mut ssa = rsleigh_decompile::ssa::build_ssa_with_cc(&cfg, cc);
+            rsleigh_decompile::fold::fold_with_cc(&mut ssa, cc);
+            let Ok(paths) = collect_paths_with_summaries_named(&ssa, &imports, &summaries, Some(name))
+            else { continue };
+            for path in &paths {
+                let kind_name = match path.sink.kind {
+                    SinkKind::StackBuffer => "StackBuffer",
+                    SinkKind::FormatArg => "FormatArg",
+                    SinkKind::Command => "Command",
+                    SinkKind::LengthArg => "LengthArg",
+                    SinkKind::TaintedStore => "TaintedStore",
+                };
+                *by_kind.entry(kind_name).or_default() += 1;
+                match solve_with_imports(path, &ssa, &imports) {
+                    SmtFinding::Reachable { .. } => verdict_reachable += 1,
+                    SmtFinding::NotReachable => verdict_not += 1,
+                    SmtFinding::Unsupported(_) => verdict_unsupported += 1,
+                }
+            }
+        }
+        println!();
+        println!("  [v2 path solve breakdown]");
+        println!(
+            "  reachable / notreachable / unsupported = {} / {} / {}",
+            verdict_reachable, verdict_not, verdict_unsupported
+        );
+        let mut k_sorted: Vec<(&&str, &usize)> = by_kind.iter().collect();
+        k_sorted.sort_by(|a, b| b.1.cmp(a.1));
+        for (k, n) in k_sorted {
+            println!("    {:<14} {}", k, n);
+        }
+    }
+}
+
+fn classify_diag_target(
+    is_indirect: bool,
+    addr_opt: Option<u64>,
+    imports: &std::collections::HashMap<u64, String>,
+    func_set: &std::collections::HashSet<u64>,
+    direct_imports: &mut usize,
+    direct_funcset: &mut usize,
+    direct_unknown: &mut usize,
+    indirect: &mut usize,
+    source_hits: &mut std::collections::HashMap<&'static str, usize>,
+    sink_hits: &mut std::collections::HashMap<&'static str, usize>,
+    saw_source: &mut bool,
+    saw_sink: &mut bool,
+) {
+    use rsleigh_decompile::smt_explore::{resolve_call, SpecRef};
+    if is_indirect {
+        *indirect += 1;
+        return;
+    }
+    let Some(addr) = addr_opt else {
+        *indirect += 1;
+        return;
+    };
+    if imports.contains_key(&addr) {
+        *direct_imports += 1;
+        match resolve_call(addr, imports) {
+            Some(SpecRef::Source(spec)) => {
+                if let Some(c) = source_hits.get_mut(spec.name) {
+                    *c += 1;
+                }
+                *saw_source = true;
+            }
+            Some(SpecRef::Sink(spec)) => {
+                if let Some(c) = sink_hits.get_mut(spec.name) {
+                    *c += 1;
+                }
+                *saw_sink = true;
+            }
+            None => {}
+        }
+    } else if func_set.contains(&addr) {
+        *direct_funcset += 1;
+    } else {
+        *direct_unknown += 1;
+    }
+}
+
+/// v7.W1: dump every v2 path as a structured candidate record
+/// regardless of solver verdict. Output is always JSON to stdout
+/// (one array of records); designed for LLM ingestion. Each
+/// record carries source/sink/kind, verdict, filter reasons, the
+/// source/sink VarIds + their SSA expressions, the call_chain (PC
+/// hops if the path was synthesised from a callee summary), and
+/// the trigger bytes when the SAT model produced one.
+///
+/// Differs from `--smt-explore-all` (which only emits Reachable
+/// hits): `--smt-candidates` is the analyst-facing data feed.
+/// Differs from `--smt-diag` (which is per-binary aggregate
+/// stats): `--smt-candidates` is per-path detail.
+fn run_smt_candidates(
+    data: &[u8],
+    arch: rsleigh_api::Architecture,
+    symbols: &[(u64, String)],
+    segs: &[(u64, u64, u64)],
+    dec: &mut rsleigh_api::Decoder,
+    scope_addrs: &[u64],
+    per_fn_cap: usize,
+    top_n: Option<usize>,
+    no_dedup: bool,
+) {
+    use rsleigh_decompile::callgraph::FuncId;
+    use rsleigh_decompile::smt_explore::{
+        collect_paths_with_summaries_named, SinkKind, SmtFinding,
+    };
+    use std::io::Write;
+
+    // v7.W4: NDJSON output (one record per line). Each record is
+    // self-contained, so partial dumps from OOM/SIGINT are still
+    // analyst-consumable. Stdout is line-buffered + explicitly
+    // flushed per record so a downstream `head -100 | jq` sees
+    // results immediately rather than after a multi-GB array.
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+
+    // v17: lazy summary build when scoped. Whole-binary mode
+    // (scope_addrs.is_empty()) preserves legacy behaviour.
+    let summaries = build_binary_summaries_scoped(
+        data, arch, symbols, segs, dec, scope_addrs,
+    );
+    let imports = rsleigh_decompile::imports::resolve_imports(data);
+
+    let cc = match arch {
+        rsleigh_api::Architecture::X86_32 | rsleigh_api::Architecture::MIPS32 => {
+            rsleigh_decompile::fold::CallingConv::Cdecl32
+        }
+        rsleigh_api::Architecture::ARM32 => rsleigh_decompile::fold::CallingConv::Arm32,
+        rsleigh_api::Architecture::AArch64 => rsleigh_decompile::fold::CallingConv::AArch64,
+        _ => rsleigh_decompile::fold::CallingConv::SysV,
+    };
+
+    let scope_set: std::collections::HashSet<u64> = scope_addrs.iter().copied().collect();
+    let mut total_capped = 0usize;
+    // v11.B: collect-then-rank instead of stream. Holds records in
+    // memory bounded by per_fn_cap × num_funcs, which is also the
+    // pre-v11 behaviour (each path generated a record).
+    let mut collected: Vec<(serde_json::Value, u32, usize, String)> = Vec::new();
+    // (json, score, call_chain_len, dedup_key)
+    for (addr, name) in symbols {
+        if name.is_empty() || name.starts_with("dyld") {
+            continue;
+        }
+        if !scope_set.is_empty() && !scope_set.contains(addr) {
+            continue;
+        }
+        let insts = decode_func(*addr, symbols, segs, data, dec);
+        if insts.is_empty() {
+            continue;
+        }
+        let cfg = rsleigh_decompile::cfg::build_cfg(&insts);
+        let mut ssa = rsleigh_decompile::ssa::build_ssa_with_cc(&cfg, cc);
+        rsleigh_decompile::fold::fold_with_cc(&mut ssa, cc);
+
+        let Ok(paths) = collect_paths_with_summaries_named(&ssa, &imports, &summaries, Some(name)) else {
+            continue;
+        };
+        let mut per_fn_emitted = 0usize;
+        for path in &paths {
+            if per_fn_cap > 0 && per_fn_emitted >= per_fn_cap {
+                let skipped = paths.len() - per_fn_emitted;
+                total_capped += skipped;
+                eprintln!(
+                    "[smt-candidates] {} ({}): emitted {}, capped {} more",
+                    name, format!("0x{:x}", addr), per_fn_emitted, skipped
+                );
+                break;
+            }
+            #[cfg(feature = "smt")]
+            let (verdict, reasons, trigger) = {
+                use rsleigh_decompile::smt_explore::solve_diag;
+                let mut log: Vec<String> = Vec::new();
+                let v = solve_diag(path, &ssa, &imports, &mut log);
+                let trigger = match &v {
+                    SmtFinding::Reachable { input_bytes, .. } => Some(
+                        input_bytes
+                            .iter()
+                            .take(16)
+                            .map(|(_, b)| format!("{:02x}", b))
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                    ),
+                    _ => None,
+                };
+                (v, log, trigger)
+            };
+            #[cfg(not(feature = "smt"))]
+            let (verdict, reasons, trigger): (SmtFinding, Vec<String>, Option<String>) = (
+                SmtFinding::Unsupported("smt feature not enabled at build time"),
+                vec!["smt feature not enabled at build time".into()],
+                None,
+            );
+
+            let verdict_str = match &verdict {
+                SmtFinding::Reachable { .. } => "Reachable",
+                SmtFinding::NotReachable => "NotReachable",
+                SmtFinding::Unsupported(_) => "Unsupported",
+            };
+            let kind = match path.sink.kind {
+                SinkKind::StackBuffer => "StackBuffer",
+                SinkKind::FormatArg => "FormatArg",
+                SinkKind::Command => "Command",
+                SinkKind::LengthArg => "LengthArg",
+                SinkKind::TaintedStore => "TaintedStore",
+            };
+
+            let source_event = &path.events[path.source_event];
+            let sink_event = &path.events[path.sink_event];
+            use rsleigh_decompile::smt_explore::{AbiSlot, TaintEventKind};
+            let source_var = match (&source_event.kind, path.source.tainted) {
+                (TaintEventKind::SourceCall { args, .. }, AbiSlot::Arg(n)) => {
+                    args.get(n as usize).copied()
+                }
+                (TaintEventKind::SourceCall { out, .. }, AbiSlot::Ret) => *out,
+                _ => None,
+            };
+            let sink_var = match (&sink_event.kind, path.sink.watched) {
+                (TaintEventKind::SinkCall { args, .. }, AbiSlot::Arg(n)) => {
+                    args.get(n as usize).copied()
+                }
+                (TaintEventKind::SinkCall { out, .. }, AbiSlot::Ret) => *out,
+                _ => None,
+            };
+            let source_expr = source_var
+                .and_then(|v| ssa.vars.get(v.0 as usize))
+                .map(|d| format!("{:?}", d.expr))
+                .unwrap_or_default();
+            let sink_expr = sink_var
+                .and_then(|v| ssa.vars.get(v.0 as usize))
+                .map(|d| format!("{:?}", d.expr))
+                .unwrap_or_default();
+            let call_chain: Vec<String> = match &sink_event.kind {
+                TaintEventKind::SinkCall { call_chain, .. } => call_chain
+                    .iter()
+                    .map(|a| format!("0x{:x}", a))
+                    .collect(),
+                _ => Vec::new(),
+            };
+
+            // v7.W2: per-event memory-flow trace. Walks every
+            // TaintEvent between source_event and sink_event
+            // (inclusive) and records its kind, varids, and the
+            // region/site of each arg/out. Lets the LLM audit
+            // "what regions does this lineage actually touch?"
+            // independently of the static filter classification.
+            let regions = rsleigh_decompile::region::infer_regions(&ssa);
+            let var_descriptor = |v: rsleigh_decompile::ir::VarId| -> serde_json::Value {
+                let r = regions.region_of(v);
+                let site = regions.site_of(r).map(|s| format!("{:?}", s));
+                let expr = ssa
+                    .vars
+                    .get(v.0 as usize)
+                    .map(|d| format!("{:?}", d.expr))
+                    .unwrap_or_default();
+                serde_json::json!({
+                    "var":    v.0,
+                    "region": r.0,
+                    "site":   site,
+                    "expr":   expr,
+                })
+            };
+            let lo = path.source_event.min(path.sink_event);
+            let hi = path.source_event.max(path.sink_event);
+            let mut event_records: Vec<serde_json::Value> = Vec::new();
+            for (i, ev) in path.events.iter().enumerate() {
+                if i < lo || i > hi {
+                    continue;
+                }
+                let rec = match &ev.kind {
+                    TaintEventKind::Assign(v) => serde_json::json!({
+                        "kind": "Assign",
+                        "out":  var_descriptor(*v),
+                    }),
+                    TaintEventKind::Store { addr, val } => serde_json::json!({
+                        "kind": "Store",
+                        "addr": var_descriptor(*addr),
+                        "val":  var_descriptor(*val),
+                    }),
+                    TaintEventKind::SourceCall { spec, args, out, call_chain } => {
+                        serde_json::json!({
+                            "kind":       "SourceCall",
+                            "name":       spec.name,
+                            "tainted":    format!("{:?}", spec.tainted),
+                            "args":       args.iter().map(|v| var_descriptor(*v))
+                                              .collect::<Vec<_>>(),
+                            "out":        out.map(|v| var_descriptor(v)),
+                            "call_chain": call_chain.iter()
+                                              .map(|a| format!("0x{:x}", a))
+                                              .collect::<Vec<_>>(),
+                        })
+                    }
+                    TaintEventKind::SinkCall { spec, args, out, call_chain } => {
+                        serde_json::json!({
+                            "kind":       "SinkCall",
+                            "name":       spec.name,
+                            "watched":    format!("{:?}", spec.watched),
+                            "kind_class": format!("{:?}", spec.kind),
+                            "args":       args.iter().map(|v| var_descriptor(*v))
+                                              .collect::<Vec<_>>(),
+                            "out":        out.map(|v| var_descriptor(v)),
+                            "call_chain": call_chain.iter()
+                                              .map(|a| format!("0x{:x}", a))
+                                              .collect::<Vec<_>>(),
+                        })
+                    }
+                    TaintEventKind::OtherCall { target_addr, args, out } => {
+                        serde_json::json!({
+                            "kind":       "OtherCall",
+                            "target":     target_addr.map(|a| format!("0x{:x}", a)),
+                            "args":       args.iter().map(|v| var_descriptor(*v))
+                                              .collect::<Vec<_>>(),
+                            "out":        out.map(|v| var_descriptor(v)),
+                        })
+                    }
+                };
+                event_records.push(rec);
+            }
+
+            let payload = serde_json::json!({
+                "function":      name,
+                "address":       format!("0x{:x}", addr),
+                "source":        path.source.name,
+                "sink":          path.sink.name,
+                "sink_kind":     kind,
+                "verdict":       verdict_str,
+                "filter_reasons": reasons,
+                "source_var":    source_var.map(|v| v.0),
+                "source_expr":   source_expr,
+                "sink_var":      sink_var.map(|v| v.0),
+                "sink_expr":     sink_expr,
+                "call_chain":    call_chain.clone(),
+                "trigger":       trigger,
+                "events":        event_records,
+            });
+            // v11.B: score per record. Higher = more likely to be
+            // a real CVE candidate worth analyst attention.
+            //   - Reachable verdict gets a big bump (Z3 actually
+            //     proved feasibility) over NotReachable/Unsupported.
+            //   - Source kind: recv-class > read > fgets > getenv.
+            //   - Sink kind: Command (RCE) > FormatArg (RCE) >
+            //     StackBuffer (BOF) > TaintedStore (loop-BOF) >
+            //     LengthArg (length-BOF).
+            //   - Shorter call_chain = simpler, more direct flow.
+            let source_score = match path.source.name {
+                "recv" | "recvfrom" | "recvmsg" => 100,
+                "read" | "fread" => 70,
+                "fgets" | "gets" => 60,
+                "scanf" | "sscanf" | "fscanf" => 50,
+                "getenv" => 30,
+                "argv" => 20,
+                _ => 10,
+            };
+            let kind_score = match path.sink.kind {
+                SinkKind::Command => 100,
+                SinkKind::FormatArg => 90,
+                SinkKind::StackBuffer => 80,
+                SinkKind::TaintedStore => 60,
+                SinkKind::LengthArg => 50,
+            };
+            let verdict_score = match verdict_str {
+                "Reachable" => 200,
+                "NotReachable" => 50,
+                _ => 0,
+            };
+            let chain_penalty = (call_chain.len() as u32).saturating_mul(5);
+            let score = source_score + kind_score + verdict_score - chain_penalty.min(50);
+            let dedup_key = format!(
+                "{}|{}|{}|{}",
+                name, path.source.name, path.sink.name, kind
+            );
+            collected.push((payload, score, call_chain.len(), dedup_key));
+            per_fn_emitted += 1;
+        }
+        let _ = FuncId(*addr);
+    }
+    // v11.B: dedup (highest score per dedup_key wins) + sort.
+    if !no_dedup {
+        let mut by_key: std::collections::HashMap<String, (serde_json::Value, u32, usize)> =
+            std::collections::HashMap::new();
+        for (json, score, len, key) in collected.drain(..) {
+            match by_key.entry(key) {
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert((json, score, len));
+                }
+                std::collections::hash_map::Entry::Occupied(mut o) => {
+                    if score > o.get().1 {
+                        o.insert((json, score, len));
+                    }
+                }
+            }
+        }
+        collected = by_key
+            .into_iter()
+            .map(|(k, (j, s, l))| (j, s, l, k))
+            .collect();
+    }
+    // Sort: score desc, then call_chain_len asc.
+    collected.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)));
+    if let Some(n) = top_n {
+        collected.truncate(n);
+    }
+    let final_count = collected.len();
+    for (json, _, _, _) in &collected {
+        let _ = writeln!(out, "{}", serde_json::to_string(json).unwrap());
+    }
+    let _ = out.flush();
+    eprintln!(
+        "[smt-candidates] emitted: {}, capped: {}, dedup={} top_n={:?}",
+        final_count,
+        total_capped,
+        !no_dedup,
+        top_n
+    );
+}
+
+fn run_smt_explore_all(
+    data: &[u8],
+    arch: rsleigh_api::Architecture,
+    symbols: &[(u64, String)],
+    segs: &[(u64, u64, u64)],
+    dec: &mut rsleigh_api::Decoder,
+    json: bool,
+    summaries: Option<&std::collections::HashMap<
+        rsleigh_decompile::callgraph::FuncId,
+        rsleigh_decompile::function_summary::FunctionSummary,
+    >>,
+) {
+    let mut hits = 0usize;
+    let mut scanned = 0usize;
+    if json {
+        println!("[");
+    }
+    let mut first = true;
+    for (addr, name) in symbols {
+        if name.is_empty() || name.starts_with("dyld") {
+            continue;
+        }
+        let insts = decode_func(*addr, symbols, segs, data, dec);
+        if insts.is_empty() {
+            continue;
+        }
+        scanned += 1;
+        // Capture stdout into a buffer by re-running the explorer
+        // and parsing for "REACHABLE" / "Reachable" tokens. Simpler
+        // path: re-run the inner pipeline directly and emit only on
+        // hit. We reuse run_smt_explore's logic by redirecting to a
+        // writer; for v10 minimum we just call run_smt_explore and
+        // let the user grep — but that produces noise. Instead,
+        // duplicate the lean SAT loop here without per-function
+        // header lines and only print on REACHABLE.
+        let cfg = rsleigh_decompile::cfg::build_cfg(&insts);
+        let cc = match arch {
+            rsleigh_api::Architecture::X86_32 | rsleigh_api::Architecture::MIPS32 => {
+                rsleigh_decompile::fold::CallingConv::Cdecl32
+            }
+            rsleigh_api::Architecture::ARM32 => rsleigh_decompile::fold::CallingConv::Arm32,
+            rsleigh_api::Architecture::AArch64 => rsleigh_decompile::fold::CallingConv::AArch64,
+            _ => rsleigh_decompile::fold::CallingConv::SysV,
+        };
+        let mut ssa = rsleigh_decompile::ssa::build_ssa_with_cc(&cfg, cc);
+        rsleigh_decompile::fold::fold_with_cc(&mut ssa, cc);
+        let imports = rsleigh_decompile::imports::resolve_imports(data);
+        use rsleigh_decompile::smt_explore::{
+            collect_paths_with_summaries_named, solve_with_imports, SmtFinding,
+        };
+        let paths = match summaries {
+            Some(s) => collect_paths_with_summaries_named(&ssa, &imports, s, Some(name)),
+            None => collect_paths_with_summaries_named(&ssa, &imports, &std::collections::HashMap::new(), Some(name)),
+        };
+        let Ok(paths) = paths else { continue };
+        for path in &paths {
+            let verdict = solve_with_imports(path, &ssa, &imports);
+            if let SmtFinding::Reachable { input_bytes, call_chain } = verdict {
+                hits += 1;
+                if json {
+                    if !first {
+                        println!(",");
+                    }
+                    first = false;
+                    let payload = serde_json::json!({
+                        "function": name,
+                        "address":  format!("0x{:x}", addr),
+                        "source":   path.source.name,
+                        "sink":     path.sink.name,
+                        "kind":     format!("{:?}", path.sink.kind),
+                        "input":    input_bytes
+                            .iter()
+                            .map(|(o, b)| serde_json::json!({
+                                "offset": o,
+                                "byte":   format!("0x{:02x}", b),
+                            }))
+                            .collect::<Vec<_>>(),
+                        "call_chain": call_chain
+                            .iter()
+                            .map(|a| format!("0x{:x}", a))
+                            .collect::<Vec<_>>(),
+                    });
+                    print!("{}", serde_json::to_string_pretty(&payload).unwrap());
+                } else {
+                    let preview: String = input_bytes
+                        .iter()
+                        .take(8)
+                        .map(|(_, b)| format!("{:02x}", b))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let chain = if call_chain.is_empty() {
+                        String::new()
+                    } else {
+                        let s: Vec<String> =
+                            call_chain.iter().map(|a| format!("0x{:x}", a)).collect();
+                        format!("  via [{}]", s.join(" -> "))
+                    };
+                    println!(
+                        "{} 0x{:x}  {} -> {}  ({:?})  REACHABLE: {}{}",
+                        name, addr, path.source.name, path.sink.name, path.sink.kind,
+                        preview, chain
+                    );
+                }
+            }
+        }
+    }
+    if json {
+        println!("\n]");
+    }
+    eprintln!("[smt-explore-all] {} hits across {} functions scanned", hits, scanned);
+}
+
+fn run_smt_explore(
+    data: &[u8],
+    arch: rsleigh_api::Architecture,
+    func_addr: u64,
+    func_name: &str,
+    insts: &[(u64, pcode_ir::Instruction)],
+    json: bool,
+    summaries: Option<&std::collections::HashMap<
+        rsleigh_decompile::callgraph::FuncId,
+        rsleigh_decompile::function_summary::FunctionSummary,
+    >>,
+) {
+    let cfg = rsleigh_decompile::cfg::build_cfg(insts);
+    let cc = match arch {
+        rsleigh_api::Architecture::X86_64
+            if rsleigh_decompile::go_pclntab::parse(data)
+                .keys()
+                .next()
+                .is_some() =>
+        {
+            rsleigh_decompile::fold::CallingConv::GoAmd64
+        }
+        rsleigh_api::Architecture::X86_32 | rsleigh_api::Architecture::MIPS32 => {
+            rsleigh_decompile::fold::CallingConv::Cdecl32
+        }
+        rsleigh_api::Architecture::ARM32 => rsleigh_decompile::fold::CallingConv::Arm32,
+        rsleigh_api::Architecture::AArch64 => rsleigh_decompile::fold::CallingConv::AArch64,
+        _ => rsleigh_decompile::fold::CallingConv::SysV,
+    };
+    let mut ssa = rsleigh_decompile::ssa::build_ssa_with_cc(&cfg, cc);
+    rsleigh_decompile::fold::fold_with_cc(&mut ssa, cc);
+
+    let imports = rsleigh_decompile::imports::resolve_imports(data);
+
+    use rsleigh_decompile::smt_explore::{
+        collect_paths_with_summaries_named, solve_with_imports, PathRejection,
+        SmtFinding,
+    };
+
+    let paths_result = match summaries {
+        Some(s) => collect_paths_with_summaries_named(&ssa, &imports, s, Some(func_name)),
+        None => collect_paths_with_summaries_named(&ssa, &imports, &std::collections::HashMap::new(), Some(func_name)),
+    };
+    let paths = match paths_result {
+        Ok(p) => p,
+        Err(reason) => {
+            if json {
+                let payload = serde_json::json!({
+                    "function": func_name,
+                    "address":  format!("0x{:x}", func_addr),
+                    "rejected": format!("{:?}", reason),
+                    "paths":    [],
+                });
+                println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+            } else {
+                println!(
+                    "// {func_name} 0x{func_addr:x} — no v0 paths ({})",
+                    match reason {
+                        PathRejection::UnsupportedTerminator(t) => format!("UnsupportedTerminator({t})"),
+                        PathRejection::PhiInPath => "PhiInPath".to_string(),
+                        PathRejection::IndirectCall => "IndirectCall".to_string(),
+                        PathRejection::NoSinkFound => "NoSinkFound".to_string(),
+                    }
+                );
+            }
+            return;
+        }
+    };
+
+    let mut findings = Vec::with_capacity(paths.len());
+    for path in &paths {
+        let verdict = solve_with_imports(path, &ssa, &imports);
+        findings.push(serde_json::json!({
+            "source":  path.source.name,
+            "source_event": path.source_event,
+            "sink":    path.sink.name,
+            "sink_event":   path.sink_event,
+            "kind":    format!("{:?}", path.sink.kind),
+            "verdict": match &verdict {
+                SmtFinding::Reachable { input_bytes, call_chain } => serde_json::json!({
+                    "kind":  "Reachable",
+                    "input": input_bytes
+                        .iter()
+                        .map(|(o, b)| serde_json::json!({
+                            "offset": o,
+                            "byte":   format!("0x{:02x}", b),
+                        }))
+                        .collect::<Vec<_>>(),
+                    "call_chain": call_chain
+                        .iter()
+                        .map(|a| format!("0x{:x}", a))
+                        .collect::<Vec<_>>(),
+                }),
+                SmtFinding::NotReachable => serde_json::json!({ "kind": "NotReachable" }),
+                SmtFinding::Unsupported(why) => serde_json::json!({
+                    "kind":   "Unsupported",
+                    "reason": *why,
+                }),
+            },
+        }));
+    }
+
+    if json {
+        let payload = serde_json::json!({
+            "function": func_name,
+            "address":  format!("0x{:x}", func_addr),
+            "paths":    findings,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+    } else {
+        println!("// {func_name} 0x{func_addr:x} — {} v0 path(s)", paths.len());
+        for (i, path) in paths.iter().enumerate() {
+            let verdict = solve_with_imports(path, &ssa, &imports);
+            print!(
+                "  [{i}] {} -> {}  ({:?})  ",
+                path.source.name, path.sink.name, path.sink.kind
+            );
+            match verdict {
+                SmtFinding::Reachable { input_bytes, call_chain } => {
+                    let preview: String = input_bytes
+                        .iter()
+                        .take(8)
+                        .map(|(_, b)| format!("{:02x}", b))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let chain = if call_chain.is_empty() {
+                        String::new()
+                    } else {
+                        let s: Vec<String> =
+                            call_chain.iter().map(|a| format!("0x{:x}", a)).collect();
+                        format!("  via [{}]", s.join(" -> "))
+                    };
+                    println!(
+                        "REACHABLE — trigger: {}{}{}",
+                        preview,
+                        if input_bytes.len() > 8 { " ..." } else { "" },
+                        chain,
+                    );
+                }
+                SmtFinding::NotReachable => println!("not reachable"),
+                SmtFinding::Unsupported(why) => println!("unsupported ({why})"),
+            }
+        }
     }
 }
 
@@ -2719,9 +3991,14 @@ fn run_xrefs(binary_path: &str, data: &[u8], target_name: &str) {
                         pos += 1;
                         continue;
                     }
-                    // Check if this instruction calls the target
+                    // Check if this instruction calls the target.
+                    // ARM32 disasm uses lowercase `bl`; x86 uses
+                    // uppercase `CALL`; AArch64 mixes `bl`/`blr`.
+                    // Case-insensitive prefix match keeps the xrefs
+                    // UI honest across architectures.
                     let dis = &inst.disassembly;
-                    if dis.starts_with("CALL ") || dis.starts_with("BL ") {
+                    let dis_lower = dis.to_ascii_lowercase();
+                    if dis_lower.starts_with("call ") || dis_lower.starts_with("bl ") {
                         if let Some(target_str) = dis.split_whitespace().nth(1) {
                             if let Some(hex) = target_str.strip_prefix("0x") {
                                 if let Ok(addr) = u64::from_str_radix(hex, 16) {

@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod callgraph;
 pub mod cfg;
 // Heuristic-heavy modules whose shape may shift across patch versions.
 // `experimental` is the only fully-isolated feature today: gating cpp_class
@@ -16,6 +17,7 @@ pub mod dwarf;
 pub mod eh_frame;
 pub mod eqsat;
 pub mod fold;
+pub mod function_summary;
 pub mod go_pclntab;
 pub mod handler_summary;
 pub mod imports;
@@ -28,6 +30,7 @@ pub mod pdb_info;
 pub mod peb_walk;
 pub mod peb_walk_detect;
 pub mod printer;
+pub mod region;
 pub mod rip_xref;
 pub mod scratch_leak;
 #[cfg(feature = "experimental")]
@@ -40,6 +43,7 @@ mod signatures_libc;
 mod signatures_msvcrt;
 mod signatures_python;
 mod signatures_win32;
+pub mod smt_explore;
 pub mod smt_verify;
 pub mod ssa;
 pub mod structure;

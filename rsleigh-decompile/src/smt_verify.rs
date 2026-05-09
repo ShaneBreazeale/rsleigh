@@ -28,6 +28,30 @@ pub enum SmtVerdict {
     Unknown,
 }
 
+/// How the lowering treats `Expr` variants that aren't directly
+/// translated (Phi, Load, Store, UserOp, ExprNew, ExprCPool, Ternary,
+/// FieldAccess, Unknown).
+///
+/// `Symbolic` is the historical behaviour used by `verify_branch`:
+/// any uncovered variant becomes a fresh symbolic bitvector so the
+/// solver can quantify over it. That is correct when asking
+/// "∀ inputs . cond holds?" — the unknown values represent
+/// universally-quantified attacker control.
+///
+/// `RejectUnsupported` is the new behaviour required by the M1
+/// taint-flow CVE finder: any uncovered variant immediately fails the
+/// lowering with `None`. CVE proof outputs cannot afford silent
+/// approximations; an unsupported lift must surface as
+/// `SmtVerdict::Unsupported`, never as a SAT model whose evidence
+/// rests on a free variable nobody constrained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LowerPolicy {
+    /// Uncovered `Expr` -> fresh BV. Sound for ∀-quantified queries.
+    Symbolic,
+    /// Uncovered `Expr` -> None. Required for SAT-as-CVE-proof.
+    RejectUnsupported,
+}
+
 #[cfg(feature = "smt")]
 pub fn verify_branch(cond: VarId, vars: &[VarDef]) -> SmtVerdict {
     use std::collections::HashMap;
@@ -40,7 +64,7 @@ pub fn verify_branch(cond: VarId, vars: &[VarDef]) -> SmtVerdict {
     let solver = Solver::new(&ctx);
 
     let mut env: HashMap<u32, BV> = HashMap::new();
-    let Some(c) = build(&ctx, cond, vars, &mut env) else {
+    let Some(c) = build(&ctx, cond, vars, &mut env, LowerPolicy::Symbolic) else {
         return SmtVerdict::Unsupported;
     };
     let zero = BV::from_u64(&ctx, 0, c.get_size());
@@ -76,12 +100,33 @@ pub fn verify_branch(_cond: VarId, _vars: &[VarDef]) -> SmtVerdict {
     SmtVerdict::Unsupported
 }
 
+/// Lower `v` (and its transitive dependencies in `vars`) to a Z3
+/// bitvector. `policy` controls behaviour for `Expr` variants the
+/// translator does not directly handle — see `LowerPolicy`.
+///
+/// Returns `None` when:
+///   - the cone references a `VarId` outside `vars`,
+///   - a covered variant fails width/operand constraints, or
+///   - `policy = RejectUnsupported` and the cone hits any
+///     uncovered variant.
+#[cfg(feature = "smt")]
+pub fn lower<'c>(
+    ctx: &'c z3::Context,
+    v: VarId,
+    vars: &[VarDef],
+    env: &mut std::collections::HashMap<u32, z3::ast::BV<'c>>,
+    policy: LowerPolicy,
+) -> Option<z3::ast::BV<'c>> {
+    build(ctx, v, vars, env, policy)
+}
+
 #[cfg(feature = "smt")]
 fn build<'c>(
     ctx: &'c z3::Context,
     v: VarId,
     vars: &[VarDef],
     env: &mut std::collections::HashMap<u32, z3::ast::BV<'c>>,
+    policy: LowerPolicy,
 ) -> Option<z3::ast::BV<'c>> {
     use crate::ir::{BinOpKind, UnaryOpKind};
     use z3::ast::{Ast, BV};
@@ -93,10 +138,10 @@ fn build<'c>(
     let bits = bits_for(def.size);
     let bv = match &def.expr {
         Expr::Const(c, _) => BV::from_u64(ctx, *c, bits),
-        Expr::Var(inner) => build(ctx, *inner, vars, env)?,
+        Expr::Var(inner) => build(ctx, *inner, vars, env, policy)?,
         Expr::BinOp(kind, l, r) => {
-            let a = build(ctx, *l, vars, env)?;
-            let b = build(ctx, *r, vars, env)?;
+            let a = build(ctx, *l, vars, env, policy)?;
+            let b = build(ctx, *r, vars, env, policy)?;
             // Equalize widths by zero-extending the narrower side.
             let (a, b) = align(a, b);
             match kind {
@@ -123,7 +168,7 @@ fn build<'c>(
             }
         }
         Expr::UnaryOp(kind, inner) => {
-            let a = build(ctx, *inner, vars, env)?;
+            let a = build(ctx, *inner, vars, env, policy)?;
             match kind {
                 UnaryOpKind::Neg => a.bvneg(),
                 UnaryOpKind::Not => a.bvnot(),
@@ -134,12 +179,20 @@ fn build<'c>(
                 _ => return None,
             }
         }
-        // Free var: fresh symbolic BV. Reuse on subsequent visits via env.
-        _ => {
-            let fresh = BV::fresh_const(ctx, "v", bits);
-            env.insert(v.0, fresh.clone());
-            fresh
-        }
+        // Uncovered variants: behaviour driven by policy.
+        //   Symbolic           -> fresh BV; the caller is asking a
+        //                          ∀-quantified question, treat the
+        //                          unknown as universally controlled.
+        //   RejectUnsupported  -> fail the lift; SAT proofs cannot
+        //                          rest on unconstrained free vars.
+        _ => match policy {
+            LowerPolicy::Symbolic => {
+                let fresh = BV::fresh_const(ctx, "v", bits);
+                env.insert(v.0, fresh.clone());
+                fresh
+            }
+            LowerPolicy::RejectUnsupported => return None,
+        },
     };
     Some(bv)
 }
@@ -220,5 +273,49 @@ mod tests {
             (Expr::BinOp(BinOpKind::Eq, VarId(0), VarId(1)), 1),
         ]);
         assert_eq!(verify_branch(VarId(2), &vars), SmtVerdict::Satisfiable);
+    }
+
+    #[test]
+    fn strict_policy_rejects_unknown() {
+        // M1 invariant: under RejectUnsupported, a cone whose root
+        // is `Expr::Unknown` must fail the lower (None), so the
+        // caller cannot use a SAT result as CVE evidence.
+        let vars = mk(vec![(Expr::Unknown, 8)]);
+        let mut cfg = z3::Config::new();
+        cfg.set_timeout_msec(1_000);
+        let ctx = z3::Context::new(&cfg);
+        let mut env = std::collections::HashMap::new();
+        let r = lower(&ctx, VarId(0), &vars, &mut env, LowerPolicy::RejectUnsupported);
+        assert!(r.is_none(), "Unknown leaked through strict lowering");
+    }
+
+    #[test]
+    fn symbolic_policy_passes_unknown() {
+        // The verifier path needs the legacy ∀-quantified semantic:
+        // Unknown becomes a free BV.
+        let vars = mk(vec![(Expr::Unknown, 8)]);
+        let mut cfg = z3::Config::new();
+        cfg.set_timeout_msec(1_000);
+        let ctx = z3::Context::new(&cfg);
+        let mut env = std::collections::HashMap::new();
+        let r = lower(&ctx, VarId(0), &vars, &mut env, LowerPolicy::Symbolic);
+        assert!(r.is_some(), "Symbolic policy regressed on Unknown");
+    }
+
+    #[test]
+    fn strict_policy_rejects_load() {
+        // Load is the canonical "M1 doesn't lower this yet" case.
+        // Document the boundary now so a future Load lowering
+        // surfaces in the test diff, not silently in production.
+        let vars = mk(vec![
+            (Expr::Const(0x1000, 8), 8),
+            (Expr::Load(VarId(0)), 8),
+        ]);
+        let mut cfg = z3::Config::new();
+        cfg.set_timeout_msec(1_000);
+        let ctx = z3::Context::new(&cfg);
+        let mut env = std::collections::HashMap::new();
+        let r = lower(&ctx, VarId(1), &vars, &mut env, LowerPolicy::RejectUnsupported);
+        assert!(r.is_none(), "Load leaked through strict lowering");
     }
 }
