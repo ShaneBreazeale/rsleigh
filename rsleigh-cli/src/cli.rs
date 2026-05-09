@@ -1929,6 +1929,28 @@ fn build_binary_summaries(
     rsleigh_decompile::callgraph::FuncId,
     rsleigh_decompile::function_summary::FunctionSummary,
 > {
+    build_binary_summaries_scoped(data, arch, symbols, segs, dec, &[])
+}
+
+/// v17: lazy summary build. When `scope_addrs` is non-empty, builds
+/// summaries only for functions reachable (via direct BL/CALL
+/// edges, transitive closure) from any address in scope_addrs.
+/// Empty scope = legacy whole-binary build.
+///
+/// On large binaries (dnsmasq-2.78 ≈800 funcs), per-fn scope cuts
+/// the summary build's wall-clock from minutes to seconds because
+/// each summary requires a full SSA build + region-inference pass.
+fn build_binary_summaries_scoped(
+    data: &[u8],
+    arch: rsleigh_api::Architecture,
+    symbols: &[(u64, String)],
+    segs: &[(u64, u64, u64)],
+    dec: &mut rsleigh_api::Decoder,
+    scope_addrs: &[u64],
+) -> std::collections::HashMap<
+    rsleigh_decompile::callgraph::FuncId,
+    rsleigh_decompile::function_summary::FunctionSummary,
+> {
     use rsleigh_decompile::callgraph::{
         build_call_graph_with_image, tarjan_sccs, FuncId, ImageView,
     };
@@ -1955,12 +1977,52 @@ fn build_binary_summaries(
 
     let imports = rsleigh_decompile::imports::resolve_imports(data);
 
+    // v17: compute reachable set when scope is non-empty. Cheap
+    // BL/CALL-target scan over each function's raw instruction
+    // stream (no SSA build) propagated to fixpoint.
+    let symbol_addrs: std::collections::HashSet<u64> =
+        symbols.iter().map(|(a, _)| *a).collect();
+    let reachable: Option<std::collections::HashSet<u64>> = if scope_addrs.is_empty() {
+        None
+    } else {
+        let mut set: std::collections::HashSet<u64> =
+            scope_addrs.iter().copied().collect();
+        let mut frontier: Vec<u64> = scope_addrs.to_vec();
+        const MAX_DEPTH: usize = 32;
+        for _ in 0..MAX_DEPTH {
+            if frontier.is_empty() {
+                break;
+            }
+            let mut next: Vec<u64> = Vec::new();
+            for fa in frontier.drain(..) {
+                let insts = decode_func(fa, symbols, segs, data, dec);
+                for (_, inst) in &insts {
+                    for op in &inst.ops {
+                        if let pcode_ir::PcodeOp::Call { dest } = op {
+                            let target = dest.offset;
+                            if symbol_addrs.contains(&target) && set.insert(target) {
+                                next.push(target);
+                            }
+                        }
+                    }
+                }
+            }
+            frontier = next;
+        }
+        Some(set)
+    };
+
     let mut ssas: Vec<(FuncId, rsleigh_decompile::ir::SsaCfg)> = Vec::new();
     let mut arg_vars_map: std::collections::HashMap<
         FuncId,
         std::collections::HashMap<u8, rsleigh_decompile::ir::VarId>,
     > = std::collections::HashMap::new();
     for (addr, _name) in symbols {
+        if let Some(ref r) = reachable {
+            if !r.contains(addr) {
+                continue;
+            }
+        }
         let insts = decode_func(*addr, symbols, segs, data, dec);
         if insts.is_empty() {
             continue;
@@ -2481,7 +2543,11 @@ fn run_smt_candidates(
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
-    let summaries = build_binary_summaries(data, arch, symbols, segs, dec);
+    // v17: lazy summary build when scoped. Whole-binary mode
+    // (scope_addrs.is_empty()) preserves legacy behaviour.
+    let summaries = build_binary_summaries_scoped(
+        data, arch, symbols, segs, dec, scope_addrs,
+    );
     let imports = rsleigh_decompile::imports::resolve_imports(data);
 
     let cc = match arch {
