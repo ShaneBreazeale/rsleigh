@@ -78,22 +78,33 @@ def evaluate(entry_dir: Path) -> list[dict]:
     for cve in expected.get("cves", []):
         fn = cve["function"]
         kind = cve.get("kind", "")
+        expected_reachable = cve.get("expected_reachable", True)
         matching = [
             r for r in records
             if r.get("function") == fn or r.get("function", "").endswith(fn)
         ]
         kind_match = [r for r in matching if r.get("sink_kind") == kind] if kind else matching
         reachable = [r for r in kind_match if r.get("verdict") == "Reachable"]
+        if not expected_reachable:
+            # Negative control: NOT finding the function is correct (TN).
+            verdict = "TN" if not matching else "FP"
+        elif reachable:
+            verdict = "TP"
+        elif matching:
+            verdict = "FOUND-but-unproven"
+        else:
+            verdict = "FN"
         rows.append({
             "binary": bin_name,
             "version": expected.get("version", ""),
             "cve": cve["id"],
             "expected_fn": fn,
             "expected_kind": kind,
+            "expected_reachable": expected_reachable,
             "found_n": len(matching),
             "kind_match_n": len(kind_match),
             "reachable_n": len(reachable),
-            "verdict": "TP" if reachable else ("FOUND-but-unproven" if matching else "FN"),
+            "verdict": verdict,
         })
     return rows
 
@@ -141,13 +152,18 @@ def main():
     # Aggregate
     n_total = len(rows)
     n_tp = sum(1 for r in rows if r["verdict"] == "TP")
-    n_found = sum(1 for r in rows if r["found_n"] > 0)
+    n_tn = sum(1 for r in rows if r["verdict"] == "TN")
+    n_fp = sum(1 for r in rows if r["verdict"] == "FP")
     n_fn = sum(1 for r in rows if r["verdict"] == "FN")
+    n_unproven = sum(1 for r in rows if r["verdict"] == "FOUND-but-unproven")
+    n_pos = sum(1 for r in rows if r["expected_reachable"])
     print()
-    print(f"Total CVEs:        {n_total}")
-    print(f"Found (any kind):  {n_found}  ({100*n_found/n_total:.0f}%)")
-    print(f"True Positive:     {n_tp}  ({100*n_tp/n_total:.0f}%)")
-    print(f"False Negative:    {n_fn}  ({100*n_fn/n_total:.0f}%)")
+    print(f"Total CVEs:        {n_total}  ({n_pos} expected reachable, {n_total-n_pos} negative controls)")
+    print(f"True Positive:     {n_tp}  / {n_pos}   ({100*n_tp/max(n_pos,1):.0f}% recall on positives)")
+    print(f"True Negative:     {n_tn}  / {n_total-n_pos}")
+    print(f"False Positive:    {n_fp}")
+    print(f"False Negative:    {n_fn}")
+    print(f"Found-but-unproven: {n_unproven}")
 
     print()
     print(json.dumps({"rows": rows, "totals": {

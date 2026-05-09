@@ -1,0 +1,43 @@
+{
+  "binary": "cve_synth",
+  "version": "1.0",
+  "platform": "darwin-arm64",
+  "build_flags": "clang -O0 -g -fno-stack-protector",
+  "notes": "Synthetic CVE patterns built when real-world dropbear/busybox/dnsmasq sources failed to compile on macOS. Source at cve_synth.c.",
+  "cves": [
+    {
+      "id": "CVE-2016-3116-like",
+      "function": "chansess_x11req_like",
+      "kind": "Command",
+      "source": "read",
+      "sink": "system",
+      "expected_reachable": true,
+      "notes": "snprintf builds shell command from socket-read cookie; system() executes it"
+    },
+    {
+      "id": "CVE-2013-1813-like",
+      "function": "mdev_load_like",
+      "kind": "StackBuffer",
+      "source": "argv",
+      "sink": "strcat",
+      "expected_reachable": true,
+      "notes": "strcat into 64-byte stack buffer with attacker-controlled device name"
+    },
+    {
+      "id": "CVE-2015-3294-like-known-FN",
+      "function": "tftp_request_like",
+      "kind": "Unsupported",
+      "source": "read",
+      "sink": "strlen-OOB",
+      "expected_reachable": false,
+      "notes": "OOB read via strlen-past-end. strlen is not in DEFAULT_SINKS; this CVE pattern is below current static analysis ceiling. Documented FN."
+    },
+    {
+      "id": "negative-control",
+      "function": "safe_add",
+      "kind": "None",
+      "expected_reachable": false,
+      "notes": "Clean integer arithmetic; should NOT appear as candidate"
+    }
+  ]
+}
