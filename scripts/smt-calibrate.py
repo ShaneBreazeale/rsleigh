@@ -167,7 +167,8 @@ def main():
 
     print()
     print(json.dumps({"rows": rows, "totals": {
-        "total": n_total, "tp": n_tp, "found": n_found, "fn": n_fn
+        "total": n_total, "tp": n_tp, "tn": n_tn, "fp": n_fp,
+        "fn": n_fn, "unproven": n_unproven,
     }}, indent=2))
 
 

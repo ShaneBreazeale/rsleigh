@@ -116,6 +116,14 @@ pub fn infer_regions(ssa: &SsaCfg) -> RegionMap {
     // returns (Heap site).
     let heap_returns = collect_heap_returns(ssa);
 
+    // v14: spill-map. Stack slots that received a Param value via
+    // a Store get an entry mapping the slot's canon-key to the
+    // stored VarId. classify_load_via_spill consults this so
+    // `Load(stack_spill_addr)` inherits the SPILLED value's region
+    // (typically Param(N)) instead of blindly taking the stack
+    // frame's region.
+    let spill_map = build_spill_map(ssa);
+
     // Seeds. Iteration N≤4 lets BinOp(Add, ptr, idx) inherit the
     // ptr's region after we discover ptr is a Param/Stack/Global.
     for _iter in 0..4 {
@@ -123,7 +131,7 @@ pub fn infer_regions(ssa: &SsaCfg) -> RegionMap {
         for i in 0..ssa.vars.len() {
             let id = VarId(i as u32);
             let cur = map.by_var[i];
-            let site_opt = classify(&ssa.vars[i], &map, &heap_returns, id);
+            let site_opt = classify(&ssa.vars[i], &map, &heap_returns, id, ssa, &spill_map);
             let new = match site_opt {
                 Some(s) => map.intern_site(s),
                 None => Region(u32::MAX),
@@ -157,7 +165,10 @@ fn classify(
     map: &RegionMap,
     heap_returns: &HashMap<VarId, u64>,
     id: VarId,
+    ssa: &SsaCfg,
+    spill_map: &HashMap<String, VarId>,
 ) -> Option<AllocSite> {
+    let _ = id;
     if let Some(name) = &def.param_name {
         if let Some(rest) = name.strip_prefix("param_") {
             if let Ok(n) = rest.parse::<u8>() {
@@ -182,13 +193,38 @@ fn classify(
         Expr::Var(inner) => site_of_var(*inner, map),
         Expr::BinOp(_, a, b) => site_of_var(*a, map).or_else(|| site_of_var(*b, map)),
         Expr::UnaryOp(_, a) => site_of_var(*a, map),
-        Expr::FieldAccess(base, _) => site_of_var(*base, map),
-        // v4 approximation: a value loaded from inside a region
-        // is treated as pointing at the SAME region. Not sound in
-        // general (struct fields can point at heap), but matches
-        // the common -O0 pattern where stack-spill reload
-        // recovers the original ptr.
-        Expr::Load(addr) => site_of_var(*addr, map),
+        Expr::FieldAccess(base, off) => {
+            // v14: FieldAccess(base, off) is folded Load(base+off).
+            // Check spill_map for synthetic BAdd canon-key.
+            let key = format!(
+                "BAdd({},C{}.8)",
+                addr_canon_local(*base, &ssa.vars).unwrap_or_else(|| "?".to_string()),
+                off
+            );
+            if let Some(stored) = spill_map.get(&key) {
+                if let Some(site) = site_of_var(*stored, map) {
+                    return Some(site);
+                }
+            }
+            site_of_var(*base, map)
+        }
+        // v14: if Load addr matches a spill slot whose stored
+        // value has a known region (typically Param), inherit
+        // that region — this bridges the spill-reload of param
+        // pointers (`mov [sp+N], param0` then `ldr xK, [sp+N]`)
+        // so the reloaded varid keeps the Param identity.
+        // Falls back to v4's "same region as addr" approximation
+        // when the spill map has no matching entry.
+        Expr::Load(addr) => {
+            if let Some(key) = addr_canon_local(*addr, &ssa.vars) {
+                if let Some(stored) = spill_map.get(&key) {
+                    if let Some(site) = site_of_var(*stored, map) {
+                        return Some(site);
+                    }
+                }
+            }
+            site_of_var(*addr, map)
+        }
         Expr::Phi(args) => args.iter().find_map(|a| site_of_var(*a, map)),
         Expr::Unknown if def.varnode.space == AddressSpaceId::Register => {
             Some(AllocSite::StackFrame)
@@ -236,6 +272,58 @@ fn collect_heap_returns(ssa: &SsaCfg) -> HashMap<VarId, u64> {
         }
     }
     m
+}
+
+/// v14: per-function spill map. Walks every Stmt::Store and indexes
+/// the address by a canonical-form string so multiple SSA versions
+/// of the same logical address (typical -O0 spill-reload pattern)
+/// alias to a single entry. The stored value's VarId is then
+/// available when classifying the region of `Load(addr)` for a
+/// later reload of the same slot.
+fn build_spill_map(ssa: &SsaCfg) -> HashMap<String, VarId> {
+    use crate::ir::Stmt;
+    let mut m: HashMap<String, VarId> = HashMap::new();
+    for block in &ssa.blocks {
+        for stmt in &block.stmts {
+            if let Stmt::Store { addr, val } = stmt {
+                if let Some(key) = addr_canon_local(*addr, &ssa.vars) {
+                    m.insert(key, *val);
+                }
+            }
+        }
+    }
+    m
+}
+
+/// Recursive canonical-form key for an address expression. Mirrors
+/// `function_summary::addr_canon` so the spill-map and the lineage
+/// walker's mem-map produce compatible keys for the same logical
+/// stack slot. Bounded depth.
+fn addr_canon_local(var: VarId, vars: &[VarDef]) -> Option<String> {
+    fn rec(var: VarId, vars: &[VarDef], depth: u32) -> Option<String> {
+        if depth > 16 {
+            return None;
+        }
+        let def = vars.get(var.0 as usize)?;
+        Some(match &def.expr {
+            Expr::Var(inner) => rec(*inner, vars, depth + 1)?,
+            Expr::Const(c, sz) => format!("C{}.{}", c, sz),
+            Expr::BinOp(op, a, b) => {
+                let ka = rec(*a, vars, depth + 1).unwrap_or_else(|| "?".to_string());
+                let kb = rec(*b, vars, depth + 1).unwrap_or_else(|| "?".to_string());
+                format!("B{:?}({},{})", op, ka, kb)
+            }
+            Expr::UnaryOp(op, a) => {
+                let ka = rec(*a, vars, depth + 1).unwrap_or_else(|| "?".to_string());
+                format!("U{:?}({})", op, ka)
+            }
+            _ => format!(
+                "V{:?}/{}/{}",
+                def.varnode.space, def.varnode.offset, def.varnode.size
+            ),
+        })
+    }
+    rec(var, vars, 0)
 }
 
 #[cfg(test)]
