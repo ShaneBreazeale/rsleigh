@@ -1,0 +1,9 @@
+{
+  "binary": "tainted_store_loop",
+  "version": "v9-fixture",
+  "cves": [
+    { "id": "v10-tainted-store-loop", "function": "vuln_loop_store",
+      "kind": "TaintedStore", "source": "recv", "sink": "<tainted_store>",
+      "notes": "extract_name shape: copy_until_zero compiler-emitted store loop" }
+  ]
+}
