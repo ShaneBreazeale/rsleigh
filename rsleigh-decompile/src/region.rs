@@ -166,7 +166,7 @@ fn classify(
     heap_returns: &HashMap<VarId, u64>,
     id: VarId,
     ssa: &SsaCfg,
-    spill_map: &HashMap<String, VarId>,
+    spill_map: &SpillMap,
 ) -> Option<AllocSite> {
     let _ = id;
     if let Some(name) = &def.param_name {
@@ -201,7 +201,7 @@ fn classify(
                 addr_canon_local(*base, &ssa.vars).unwrap_or_else(|| "?".to_string()),
                 off
             );
-            if let Some(stored) = spill_map.get(&key) {
+            if let Some(stored) = spill_map.by_canon.get(&key) {
                 if let Some(site) = site_of_var(*stored, map) {
                     return Some(site);
                 }
@@ -216,11 +216,9 @@ fn classify(
         // Falls back to v4's "same region as addr" approximation
         // when the spill map has no matching entry.
         Expr::Load(addr) => {
-            if let Some(key) = addr_canon_local(*addr, &ssa.vars) {
-                if let Some(stored) = spill_map.get(&key) {
-                    if let Some(site) = site_of_var(*stored, map) {
-                        return Some(site);
-                    }
+            if let Some(stored) = spill_map.lookup(*addr, &ssa.vars) {
+                if let Some(site) = site_of_var(stored, map) {
+                    return Some(site);
                 }
             }
             site_of_var(*addr, map)
@@ -275,24 +273,50 @@ fn collect_heap_returns(ssa: &SsaCfg) -> HashMap<VarId, u64> {
 }
 
 /// v14: per-function spill map. Walks every Stmt::Store and indexes
-/// the address by a canonical-form string so multiple SSA versions
-/// of the same logical address (typical -O0 spill-reload pattern)
-/// alias to a single entry. The stored value's VarId is then
-/// available when classifying the region of `Load(addr)` for a
-/// later reload of the same slot.
-fn build_spill_map(ssa: &SsaCfg) -> HashMap<String, VarId> {
+/// the address by a canonical-form string AND by raw varnode
+/// identity. Canonical-form catches the common -O0 stack-frame
+/// spill pattern (BAdd(sp,N) varying across SSA versions). Raw
+/// varnode catches the v15 case where the addr's expr is a bare
+/// register read (`Unknown` for a register varnode whose previous
+/// Store's addr happens to share the same varnode identity).
+struct SpillMap {
+    by_canon: HashMap<String, VarId>,
+    by_varnode: HashMap<pcode_ir::Varnode, VarId>,
+}
+
+fn build_spill_map(ssa: &SsaCfg) -> SpillMap {
     use crate::ir::Stmt;
-    let mut m: HashMap<String, VarId> = HashMap::new();
+    let mut by_canon: HashMap<String, VarId> = HashMap::new();
+    let mut by_varnode: HashMap<pcode_ir::Varnode, VarId> = HashMap::new();
     for block in &ssa.blocks {
         for stmt in &block.stmts {
             if let Stmt::Store { addr, val } = stmt {
                 if let Some(key) = addr_canon_local(*addr, &ssa.vars) {
-                    m.insert(key, *val);
+                    by_canon.insert(key, *val);
+                }
+                if let Some(addr_def) = ssa.vars.get(addr.0 as usize) {
+                    by_varnode.insert(addr_def.varnode, *val);
                 }
             }
         }
     }
-    m
+    SpillMap { by_canon, by_varnode }
+}
+
+impl SpillMap {
+    fn lookup(&self, addr: VarId, vars: &[VarDef]) -> Option<VarId> {
+        if let Some(key) = addr_canon_local(addr, vars) {
+            if let Some(v) = self.by_canon.get(&key) {
+                return Some(*v);
+            }
+        }
+        if let Some(d) = vars.get(addr.0 as usize) {
+            if let Some(v) = self.by_varnode.get(&d.varnode) {
+                return Some(*v);
+            }
+        }
+        None
+    }
 }
 
 /// Recursive canonical-form key for an address expression. Mirrors
