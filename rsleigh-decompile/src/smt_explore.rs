@@ -304,6 +304,21 @@ pub const MAX_BRANCH_DEPTH: u32 = 64;
 /// states are dropped and the rejection reason is recorded.
 pub const MAX_WORKLIST_SIZE: usize = 16384;
 
+/// v16: hard cap on the number of (source, sink) pairs the path
+/// collector will enumerate per function. Without it, parser-style
+/// functions with hundreds of `fgets`/`sprintf` call sites
+/// generate `O(sources × sinks × paths)` candidates which can
+/// balloon to 96k+ records (observed on dnsmasq-2.78::read_file)
+/// and OOM the candidate dump. Once the cap is hit, path
+/// collection returns the truncated list rather than continuing
+/// to enumerate. CLI's `--smt-candidates-cap` is downstream of
+/// this; this cap protects the in-memory enumeration itself.
+///
+/// Set high (8192) so dropbear-class functions with hundreds of
+/// real source-sink pairs aren't truncated; low enough that
+/// pathological dnsmasq read_file (96k+) hits the cap and stops.
+pub const MAX_PATHS_PER_FN: usize = 8192;
+
 /// One in-progress walk state in the v1 collector's worklist.
 struct WalkState<'a> {
     current: crate::ir::BlockId,
@@ -618,6 +633,15 @@ pub fn collect_paths_with_summaries_named<'a>(
                 _ => {}
             }
         }
+    }
+    // v16: hard truncate. Without this, parser-style functions
+    // can balloon `paths.len()` past 96k (observed on dnsmasq-2.78
+    // ::read_file) and OOM downstream solve()/JSON-serialize
+    // pipelines. Truncation happens AFTER full enumeration so
+    // small-function recall is unchanged; only pathological large
+    // outputs get cropped.
+    if paths.len() > MAX_PATHS_PER_FN {
+        paths.truncate(MAX_PATHS_PER_FN);
     }
 
     if paths.is_empty() {
