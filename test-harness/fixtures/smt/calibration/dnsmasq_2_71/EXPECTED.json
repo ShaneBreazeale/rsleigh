@@ -1,0 +1,27 @@
+{
+  "binary": "dnsmasq",
+  "version": "2.71",
+  "platform": "linux-aarch64-elf",
+  "build_flags": "gcc -g -O1 -DNO_DBUS -DNO_DNSSEC -DNO_TFTP -DNO_LUA -DNO_IDN -DNO_CONNTRACK -DNO_INOTIFY -DNO_AUTH -DNO_DUMPFILE -DNO_NETTLE -DNO_GMP -DNO_IPSET -DNO_SCRIPT",
+  "notes": "Real-world Linux ARM64 ELF built in colima/Debian-bookworm container. dnsmasq 2.71 (May 2014) predates CVE-2017-14491 patch; the extract_name and tcp_request DNS-name decompression bugs are present.",
+  "cves": [
+    {
+      "id": "CVE-2017-14491-extract_name",
+      "function": "extract_name",
+      "kind": "Unsupported",
+      "source": "recv",
+      "sink": "OOB-pointer-arith",
+      "expected_reachable": false,
+      "notes": "Recursive DNS-name decompression with pointer arithmetic — OOB write via *cp++ = c without proper length check. NOT a libc-sink shape, so rsleigh's static analyzer doesn't have a SAT model that fits. Documented FN, expected NOT to surface as Reachable. Calibration TN if no candidate; FP if it does fire."
+    },
+    {
+      "id": "CVE-2017-14491-tcp_request",
+      "function": "tcp_request",
+      "kind": "Unsupported",
+      "source": "recv",
+      "sink": "OOB-pointer-arith",
+      "expected_reachable": false,
+      "notes": "Same vuln family as extract_name, surfaced in the TCP DNS handler. Similarly below static-SAT ceiling."
+    }
+  ]
+}

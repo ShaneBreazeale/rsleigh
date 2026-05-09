@@ -1,0 +1,18 @@
+{
+  "binary": "dropbear",
+  "version": "2016.74",
+  "platform": "linux-aarch64-elf",
+  "build_flags": "gcc -g -O0 -fno-stack-protector --disable-zlib",
+  "notes": "Real-world Linux ARM64 ELF built in colima/Debian-bookworm container. Dropbear 2016.74 (Mar 2016) predates CVE-2016-3116 and CVE-2017-9078/9079 patches. Symbols visible: x11req @ 0x22040 (xauth handler), recv_msg_userauth_request @ 0x1aa4c.",
+  "cves": [
+    {
+      "id": "CVE-2016-3116-x11req",
+      "function": "x11req",
+      "kind": "Command",
+      "source": "recv",
+      "sink": "system",
+      "expected_reachable": true,
+      "notes": "xauth command-injection: x11req extracts attacker-controlled cookie from SSH packet, runs xauth via system/popen. Expected to surface as Command-kind candidate."
+    }
+  ]
+}
