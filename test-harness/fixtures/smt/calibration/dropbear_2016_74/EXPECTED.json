@@ -3,16 +3,16 @@
   "version": "2016.74",
   "platform": "linux-aarch64-elf",
   "build_flags": "gcc -g -O0 -fno-stack-protector --disable-zlib",
-  "notes": "Real-world Linux ARM64 ELF built in colima/Debian-bookworm container. Dropbear 2016.74 (Mar 2016) predates CVE-2016-3116 and CVE-2017-9078/9079 patches. Symbols visible: x11req @ 0x22040 (xauth handler), recv_msg_userauth_request @ 0x1aa4c.",
+  "notes": "Real-world Linux ARM64 ELF built in colima/Debian-bookworm container. Dropbear 2016.74 (Mar 2016) predates CVE-2016-3116 patch. CVE chain: x11req receives attacker-controlled cookie via SSH packet (buf_getstring), stores in chansess struct. x11accept callback (deferred until first X11 connection) invokes x11setauth, which calls popen('/usr/bin/xauth -q', 'w') then `fprintf(pipe, \"add %s %s %s\\n\", ...attacker_cookie...)`. xauth shell parses that input — cookie containing `;` or `\\n` injects shell commands.",
   "cves": [
     {
-      "id": "CVE-2016-3116-x11req",
-      "function": "x11req",
-      "kind": "Command",
-      "source": "recv",
-      "sink": "system",
-      "expected_reachable": true,
-      "notes": "xauth command-injection: x11req extracts attacker-controlled cookie from SSH packet, runs xauth via system/popen. Expected to surface as Command-kind candidate."
+      "id": "CVE-2016-3116-x11setauth",
+      "function": "x11setauth",
+      "kind": "Unsupported",
+      "source": "buf_getstring (deferred via chansess struct from x11req)",
+      "sink": "fprintf-to-popen-pipe",
+      "expected_reachable": false,
+      "notes": "Real sink shape: popen() args are Const, but fprintf(popen_FILE*, fmt, %s_args) writes attacker-controlled bytes into the xauth shell's stdin. Below current static SAT ceiling because: (1) requires cross-statement tracking of popen's FILE* return through subsequent fprintf calls, (2) needs a new SinkKind for `fprintf/fputs/fputc to popen-output FILE*`, and (3) the source flows via deferred callback (x11req → chansess struct field → x11accept → x11setauth) which the inter-proc summary lift doesn't follow. Documented FN; expected NOT to surface as Reachable. Calibration TN if no candidate fires; FP if pipeline produces a spurious Reachable. v22+ work: extend DEFAULT_SINKS with FilePipe-write sink kind."
     }
   ]
 }

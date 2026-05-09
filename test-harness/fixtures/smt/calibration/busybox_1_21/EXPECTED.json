@@ -1,0 +1,18 @@
+{
+  "binary": "busybox",
+  "version": "1.21.0",
+  "platform": "linux-aarch64-elf",
+  "build_flags": "gcc (ubuntu:18.04 image, glibc 2.27 — needed for stime). defconfig minus CONFIG_INETD. busybox_unstripped (debug symbols intact).",
+  "notes": "Real-world Linux ARM64 busybox 1.21.0 (June 2013). Predates several documented CVEs. mdev_main @ 0x77bdc.",
+  "cves": [
+    {
+      "id": "CVE-2013-1813-mdev",
+      "function": "mdev_main",
+      "kind": "Unsupported",
+      "source": "argv (or sysfs path)",
+      "sink": "path-traversal",
+      "expected_reachable": false,
+      "notes": "CVE-2013-1813: mdev applet handles relative paths from kernel uevent / sysfs sysfs strings without path normalization, allowing /../ escapes. The vuln is path-canonicalization, not a libc-sink shape; rsleigh has no SinkKind for path-traversal-class CVEs. Documented FN. v22+ work: add Path/PathTraversal SinkKind + symbolic-string-canon SAT model."
+    }
+  ]
+}

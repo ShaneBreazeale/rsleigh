@@ -1983,7 +1983,104 @@ fn build_binary_summaries_scoped(
     let symbol_addrs: std::collections::HashSet<u64> =
         symbols.iter().map(|(a, _)| *a).collect();
     let reachable: Option<std::collections::HashSet<u64>> = if scope_addrs.is_empty() {
-        None
+        // v21: whole-binary mode — seed reachable with funcs that
+        // call any libc Source or Sink directly. Walking the call
+        // graph forward from those gives us only funcs that could
+        // contribute non-empty summaries; funcs whose summary
+        // would be empty (no relevant calls in their transitive
+        // closure) get skipped, saving SSA/region inference cost
+        // on hundreds of helpers per binary.
+        use rsleigh_decompile::smt_explore::{DEFAULT_SINKS, DEFAULT_SOURCES};
+        let mut libc_touch: std::collections::HashSet<u64> =
+            std::collections::HashSet::new();
+        let libc_addrs: std::collections::HashSet<u64> = imports
+            .iter()
+            .filter_map(|(a, n)| {
+                let nn = n.trim_start_matches('_');
+                let nn = nn.split('@').next().unwrap_or(nn);
+                let nn = nn.strip_suffix("_chk").unwrap_or(nn);
+                if DEFAULT_SOURCES.iter().any(|s| s.name == nn)
+                    || DEFAULT_SINKS.iter().any(|s| s.name == nn)
+                {
+                    Some(*a)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        // First pass: per-function check for any BL/Call to a libc addr.
+        for (addr, _) in symbols {
+            let insts = decode_func(*addr, symbols, segs, data, dec);
+            'outer: for (_, inst) in &insts {
+                for op in &inst.ops {
+                    if let pcode_ir::PcodeOp::Call { dest } = op {
+                        if libc_addrs.contains(&dest.offset) {
+                            libc_touch.insert(*addr);
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+        }
+        if libc_touch.is_empty() {
+            None
+        } else {
+            eprintln!(
+                "[summaries] libc-touch seed: {} / {} symbols",
+                libc_touch.len(),
+                symbols.len()
+            );
+            // v21: closure in BOTH directions:
+            //   - Reverse: callers of libc-touch get summaries
+            //     because their summary inherits inter-proc Source/
+            //     Sink emissions via propagate_callee_summaries.
+            //   - Forward: callees of libc-touch get summaries
+            //     because they may contain TaintedStore sinks
+            //     (synthetic, not detected via BL-target match).
+            //     Without forward inclusion, copy_until_zero-style
+            //     helpers get skipped and v9 TaintedStore detection
+            //     silently breaks.
+            let mut set = libc_touch.clone();
+            let mut grow = true;
+            const MAX_PASSES: usize = 32;
+            let mut pass = 0;
+            while grow && pass < MAX_PASSES {
+                grow = false;
+                pass += 1;
+                for (addr, _) in symbols {
+                    let in_set = set.contains(addr);
+                    let insts = decode_func(*addr, symbols, segs, data, dec);
+                    for (_, inst) in &insts {
+                        for op in &inst.ops {
+                            if let pcode_ir::PcodeOp::Call { dest } = op {
+                                if in_set {
+                                    // forward: pull callee in.
+                                    if symbol_addrs.contains(&dest.offset)
+                                        && set.insert(dest.offset)
+                                    {
+                                        grow = true;
+                                    }
+                                } else if set.contains(&dest.offset) {
+                                    // reverse: pull caller in.
+                                    set.insert(*addr);
+                                    grow = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if !in_set && set.contains(addr) {
+                            break;
+                        }
+                    }
+                }
+            }
+            eprintln!(
+                "[summaries] reverse-closure: {} / {} symbols",
+                set.len(),
+                symbols.len()
+            );
+            Some(set)
+        }
     } else {
         let mut set: std::collections::HashSet<u64> =
             scope_addrs.iter().copied().collect();
