@@ -1482,6 +1482,13 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
     }
     let smt_candidates = args.iter().any(|a| a == "--smt-candidates");
     if smt_candidates {
+        // v11.B: top-N + dedup flags
+        let top_n: Option<usize> = args
+            .iter()
+            .position(|a| a == "--smt-candidates-top")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|s| s.parse().ok());
+        let no_dedup = args.iter().any(|a| a == "--smt-candidates-no-dedup");
         // v7.W4: optional per-fn scope. If positional func args are
         // present, restrict the sweep to those addresses; otherwise
         // dump every symbol.
@@ -1507,7 +1514,9 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
             .and_then(|i| args.get(i + 1))
             .and_then(|s| s.parse().ok())
             .unwrap_or(256);
-        run_smt_candidates(&data, arch, &symbols, &segs, &mut dec, &scope_addrs, cap);
+        run_smt_candidates(
+            &data, arch, &symbols, &segs, &mut dec, &scope_addrs, cap, top_n, no_dedup,
+        );
         return;
     }
     let inter_proc_summaries = if (smt_explore || smt_explore_all) && smt_summaries {
@@ -2449,6 +2458,8 @@ fn run_smt_candidates(
     dec: &mut rsleigh_api::Decoder,
     scope_addrs: &[u64],
     per_fn_cap: usize,
+    top_n: Option<usize>,
+    no_dedup: bool,
 ) {
     use rsleigh_decompile::callgraph::FuncId;
     use rsleigh_decompile::smt_explore::{
@@ -2477,8 +2488,12 @@ fn run_smt_candidates(
     };
 
     let scope_set: std::collections::HashSet<u64> = scope_addrs.iter().copied().collect();
-    let mut total_emitted = 0usize;
     let mut total_capped = 0usize;
+    // v11.B: collect-then-rank instead of stream. Holds records in
+    // memory bounded by per_fn_cap × num_funcs, which is also the
+    // pre-v11 behaviour (each path generated a record).
+    let mut collected: Vec<(serde_json::Value, u32, usize, String)> = Vec::new();
+    // (json, score, call_chain_len, dedup_key)
     for (addr, name) in symbols {
         if name.is_empty() || name.starts_with("dyld") {
             continue;
@@ -2670,22 +2685,88 @@ fn run_smt_candidates(
                 "source_expr":   source_expr,
                 "sink_var":      sink_var.map(|v| v.0),
                 "sink_expr":     sink_expr,
-                "call_chain":    call_chain,
+                "call_chain":    call_chain.clone(),
                 "trigger":       trigger,
                 "events":        event_records,
             });
-            // NDJSON: one record per line. Compact form keeps each
-            // record on a single line so jq / grep can stream.
-            let _ = writeln!(out, "{}", serde_json::to_string(&payload).unwrap());
-            let _ = out.flush();
+            // v11.B: score per record. Higher = more likely to be
+            // a real CVE candidate worth analyst attention.
+            //   - Reachable verdict gets a big bump (Z3 actually
+            //     proved feasibility) over NotReachable/Unsupported.
+            //   - Source kind: recv-class > read > fgets > getenv.
+            //   - Sink kind: Command (RCE) > FormatArg (RCE) >
+            //     StackBuffer (BOF) > TaintedStore (loop-BOF) >
+            //     LengthArg (length-BOF).
+            //   - Shorter call_chain = simpler, more direct flow.
+            let source_score = match path.source.name {
+                "recv" | "recvfrom" | "recvmsg" => 100,
+                "read" | "fread" => 70,
+                "fgets" | "gets" => 60,
+                "scanf" | "sscanf" | "fscanf" => 50,
+                "getenv" => 30,
+                "argv" => 20,
+                _ => 10,
+            };
+            let kind_score = match path.sink.kind {
+                SinkKind::Command => 100,
+                SinkKind::FormatArg => 90,
+                SinkKind::StackBuffer => 80,
+                SinkKind::TaintedStore => 60,
+                SinkKind::LengthArg => 50,
+            };
+            let verdict_score = match verdict_str {
+                "Reachable" => 200,
+                "NotReachable" => 50,
+                _ => 0,
+            };
+            let chain_penalty = (call_chain.len() as u32).saturating_mul(5);
+            let score = source_score + kind_score + verdict_score - chain_penalty.min(50);
+            let dedup_key = format!(
+                "{}|{}|{}|{}",
+                name, path.source.name, path.sink.name, kind
+            );
+            collected.push((payload, score, call_chain.len(), dedup_key));
             per_fn_emitted += 1;
-            total_emitted += 1;
         }
         let _ = FuncId(*addr);
     }
+    // v11.B: dedup (highest score per dedup_key wins) + sort.
+    if !no_dedup {
+        let mut by_key: std::collections::HashMap<String, (serde_json::Value, u32, usize)> =
+            std::collections::HashMap::new();
+        for (json, score, len, key) in collected.drain(..) {
+            match by_key.entry(key) {
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert((json, score, len));
+                }
+                std::collections::hash_map::Entry::Occupied(mut o) => {
+                    if score > o.get().1 {
+                        o.insert((json, score, len));
+                    }
+                }
+            }
+        }
+        collected = by_key
+            .into_iter()
+            .map(|(k, (j, s, l))| (j, s, l, k))
+            .collect();
+    }
+    // Sort: score desc, then call_chain_len asc.
+    collected.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)));
+    if let Some(n) = top_n {
+        collected.truncate(n);
+    }
+    let final_count = collected.len();
+    for (json, _, _, _) in &collected {
+        let _ = writeln!(out, "{}", serde_json::to_string(json).unwrap());
+    }
+    let _ = out.flush();
     eprintln!(
-        "[smt-candidates] total emitted: {}, total capped: {}",
-        total_emitted, total_capped
+        "[smt-candidates] emitted: {}, capped: {}, dedup={} top_n={:?}",
+        final_count,
+        total_capped,
+        !no_dedup,
+        top_n
     );
 }
 

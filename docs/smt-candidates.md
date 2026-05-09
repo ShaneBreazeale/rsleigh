@@ -23,6 +23,19 @@ rsleigh /path/to/binary --smt-candidates 0x1ba3c       > candidates.ndjson
 # with pathological config-parser functions that explode candidate
 # generation. Cap of 0 disables (legacy behaviour).
 rsleigh /path/to/binary --smt-candidates --smt-candidates-cap 16 > candidates.ndjson
+
+# v11.B: dedup is on by default. Records sharing
+# (function, source, sink, sink_kind) collapse to the highest-
+# scoring instance. Disable with:
+rsleigh /path/to/binary --smt-candidates --smt-candidates-no-dedup
+
+# v11.B: top-N filter. After dedup + sort, emit only the highest
+# N records. Score formula:
+#   source kind: recv-class > read > fgets > getenv
+#   sink kind:   Command > FormatArg > StackBuffer > TaintedStore > LengthArg
+#   verdict:     Reachable > NotReachable > Unsupported (200 / 50 / 0 bonus)
+#   call-chain:  shorter is better (5 pts/hop penalty, capped at 50)
+rsleigh /path/to/binary --smt-candidates --smt-candidates-top 10
 ```
 
 Output is **NDJSON** (one record per line, terminated by `\n`).
