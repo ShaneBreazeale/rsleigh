@@ -153,6 +153,28 @@ fn tainted_store_loop_reachable_via_summary() {
 }
 
 #[test]
+fn bounded_loop_not_reachable_v11a() {
+    // v11.A null-terminator-loop filter: copy_bounded uses
+    // `for (i=0; i<16; i++)` not `while (*src)`, so the function
+    // has no `Load(_) == 0` CBranch. detect_tainted_store rejects
+    // → no path → NoSinkFound.
+    let Some(bin) = fixture("bounded_loop") else { return };
+    let out = Command::new(RSLEIGH_BIN)
+        .args([&bin, "--smt-explore", "safe_handler", "--smt-summaries"])
+        .output()
+        .expect("rsleigh invocation");
+    let stdout = String::from_utf8(out.stdout).expect("utf-8");
+    if stdout.contains("smt feature not enabled at build time") {
+        eprintln!("[skip-no-smt] bounded_loop");
+        return;
+    }
+    assert!(
+        !stdout.contains("REACHABLE"),
+        "bounded_loop should NOT be REACHABLE under v11.A null-term filter:\n{stdout}"
+    );
+}
+
+#[test]
 fn fgets_printf_format_string_reachable() {
     let Some(bin) = fixture("fgets_printf") else { return };
     let out = run_explore(&bin, "vuln_fgets_printf");

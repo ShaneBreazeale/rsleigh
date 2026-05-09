@@ -89,6 +89,13 @@ pub fn build_function_summary(
 
     // v9: region inference for TaintedStore detection.
     let regions = crate::region::infer_regions(ssa);
+    // v11.A: TaintedStore SAT model assumes the loop is bounded by
+    // a null-terminator on the source (`while (*src) *out++ = ...`).
+    // If the function has no `Load(_) == 0` / `!= 0` style CBranch,
+    // the copy is bounded by something else (a Const counter, a
+    // length-arg cap, etc.) and isn't a Heartbleed-shape OOB.
+    // Gate TaintedStore detection on the presence of such a guard.
+    let has_null_terminator_loop = function_has_null_terminator_loop(ssa);
 
     for block in &ssa.blocks {
         for stmt in &block.stmts {
@@ -109,6 +116,7 @@ pub fn build_function_summary(
             // helper), record a synthetic TaintedStore sink so the
             // caller's path collection sees a sink lift even when
             // there's no libc memcpy/strncpy in the body.
+            if has_null_terminator_loop {
             if let Stmt::Store { addr, val } = stmt {
                 if let Some(slots) = detect_tainted_store(*addr, *val, ssa, &regions) {
                     summary.sinks.push(SinkInvocation {
@@ -117,6 +125,7 @@ pub fn build_function_summary(
                         tainted_caller_slots: slots,
                     });
                 }
+            }
             }
         }
         if let SsaTerminator::Call { target, args, .. } = &block.terminator {
@@ -286,6 +295,142 @@ fn find_load_src_param_slots(
     }
     out.retain(|s| matches!(s, AbiSlot::Arg(_)));
     out
+}
+
+/// v11.A: function-level signal that the body contains a `Load(_)
+/// {==,!=} 0` loop guard — the canonical "while (*src) ..." or
+/// "while (*p++) ..." null-terminator pattern that drives the
+/// extract_name / Heartbleed-shape OOB write. Functions without
+/// any such CBranch are bounded by something else (a Const counter,
+/// a length-arg cap, etc.) and don't fit the SAT model.
+fn function_has_null_terminator_loop(ssa: &crate::ir::SsaCfg) -> bool {
+    use crate::ir::SsaTerminator;
+    for block in &ssa.blocks {
+        if let SsaTerminator::CBranch { cond, .. } = &block.terminator {
+            if cond_is_null_check(*cond, ssa, &mut std::collections::HashSet::new(), 0) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn cond_is_null_check(
+    v: VarId,
+    ssa: &crate::ir::SsaCfg,
+    visited: &mut std::collections::HashSet<u32>,
+    depth: u32,
+) -> bool {
+    use crate::ir::{BinOpKind, Expr};
+    if depth > 16 || !visited.insert(v.0) {
+        return false;
+    }
+    let Some(def) = ssa.vars.get(v.0 as usize) else { return false };
+    match &def.expr {
+        Expr::Var(inner) => cond_is_null_check(*inner, ssa, visited, depth + 1),
+        Expr::UnaryOp(_, a) => cond_is_null_check(*a, ssa, visited, depth + 1),
+        Expr::BinOp(BinOpKind::Eq | BinOpKind::NotEq, a, b) => {
+            let traces_load = |v: VarId| -> bool {
+                let mut vv: std::collections::HashSet<u32> =
+                    std::collections::HashSet::new();
+                let mut st = vec![v];
+                while let Some(c) = st.pop() {
+                    if !vv.insert(c.0) || vv.len() > 16 {
+                        continue;
+                    }
+                    let Some(d) = ssa.vars.get(c.0 as usize) else { continue };
+                    match &d.expr {
+                        Expr::Load(_) | Expr::FieldAccess(_, _) => return true,
+                        Expr::Var(inner) => st.push(*inner),
+                        Expr::UnaryOp(_, x) => st.push(*x),
+                        _ => {}
+                    }
+                }
+                false
+            };
+            let zero_const = |v: VarId| {
+                matches!(
+                    ssa.vars.get(v.0 as usize).map(|d| &d.expr),
+                    Some(Expr::Const(0, _))
+                )
+            };
+            (traces_load(*a) && zero_const(*b)) || (traces_load(*b) && zero_const(*a))
+        }
+        Expr::BinOp(_, a, b) => {
+            cond_is_null_check(*a, ssa, visited, depth + 1)
+                || cond_is_null_check(*b, ssa, visited, depth + 1)
+        }
+        _ => false,
+    }
+}
+
+/// v11.A: detect Const-bounded indexed-write loops. Walks `addr`'s
+/// expression tree; returns true if any subexpr is a Phi with both
+///   - a Const seed input (loop-entry initialiser, e.g. 0), and
+///   - a BinOp(Add, _, Const) self-increment input (loop back-edge).
+/// This is the canonical SSA shape of `for (i = 0; i < N; i++)
+/// dst[i] = ...` after fold. The matching loop guard (i < Const)
+/// caps iteration count statically, so the resulting copy is
+/// length-bounded regardless of attacker input.
+///
+/// Pointer-increment loops (`*out++ = byte`) don't carry this
+/// shape — the spill-reload of the pointer routes the increment
+/// through stack memory, leaving the addr expression a plain
+/// Var/Load chain. Those still surface as TaintedStore candidates.
+fn store_addr_uses_bounded_index(addr: VarId, ssa: &crate::ir::SsaCfg) -> bool {
+    use crate::ir::{BinOpKind, Expr};
+    let mut visited: std::collections::HashSet<u32> =
+        std::collections::HashSet::new();
+    let mut stack = vec![addr];
+    while let Some(cur) = stack.pop() {
+        if !visited.insert(cur.0) || visited.len() > 32 {
+            continue;
+        }
+        let Some(def) = ssa.vars.get(cur.0 as usize) else { continue };
+        match &def.expr {
+            Expr::Phi(inputs) => {
+                let has_const = inputs.iter().any(|v| {
+                    matches!(
+                        ssa.vars.get(v.0 as usize).map(|d| &d.expr),
+                        Some(Expr::Const(_, _))
+                    )
+                });
+                let has_inc = inputs.iter().any(|v| {
+                    let Some(d) = ssa.vars.get(v.0 as usize) else {
+                        return false;
+                    };
+                    if let Expr::BinOp(BinOpKind::Add, a, b) = &d.expr {
+                        let a_const = matches!(
+                            ssa.vars.get(a.0 as usize).map(|d| &d.expr),
+                            Some(Expr::Const(_, _))
+                        );
+                        let b_const = matches!(
+                            ssa.vars.get(b.0 as usize).map(|d| &d.expr),
+                            Some(Expr::Const(_, _))
+                        );
+                        return a_const || b_const;
+                    }
+                    false
+                });
+                if has_const && has_inc {
+                    return true;
+                }
+                for v in inputs {
+                    stack.push(*v);
+                }
+            }
+            Expr::BinOp(_, a, b) => {
+                stack.push(*a);
+                stack.push(*b);
+            }
+            Expr::Var(inner) => stack.push(*inner),
+            Expr::UnaryOp(_, a) => stack.push(*a),
+            Expr::Load(addr) => stack.push(*addr),
+            Expr::FieldAccess(base, _) => stack.push(*base),
+            _ => {}
+        }
+    }
+    false
 }
 
 /// v9: address-canon-key → set of caller arg slots ever stored at
