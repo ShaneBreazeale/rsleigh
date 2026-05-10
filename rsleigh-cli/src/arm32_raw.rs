@@ -41,6 +41,21 @@ pub struct PcLiteralLoad {
     pub value: u32,
 }
 
+/// One PC-relative `ADR` (alias for `ADD Rd, PC, #imm` or
+/// `SUB Rd, PC, #imm`) — produces an address constant in Rd.
+/// On Thumb firmware this is the dominant pattern for loading
+/// nearby string literals (e.g. `add r0, pc, #680` to load a
+/// printf format string in the same code page).
+#[derive(Debug, Clone, Copy)]
+pub struct AdrSite {
+    /// VA of the ADR instruction.
+    pub addr: u64,
+    /// Destination register (0..=7 for T1, 0..=15 for T2/T3).
+    pub rd: u8,
+    /// Computed target VA (PC-aligned + signed imm).
+    pub target: u64,
+}
+
 /// Discover function entry points in a raw ARM32 / Cortex-M blob.
 ///
 /// Combines three sources:
@@ -291,6 +306,73 @@ pub fn find_pc_literal_loads(data: &[u8], base: u64) -> Vec<PcLiteralLoad> {
         i += 2;
     }
     loads
+}
+
+/// Scan for Thumb ADR-style PC-relative address loads:
+///   T1: `ADD Rd, PC, #imm8*4` (Rd in r0..r7) → encoded `1010_0ddd_iiiiiiii`
+///   T2: `SUB Rd, PC, #imm12` (wide) → `f2af 0?dd ddii iiii iiii`
+///   T3: `ADD Rd, PC, #imm12` (wide) → `f20f 0?dd ddii iiii iiii`
+/// PC for the address calc is `(instr_addr + 4) & ~0x3`.
+pub fn find_adr_sites(data: &[u8], base: u64) -> Vec<AdrSite> {
+    let mut sites = Vec::new();
+    let mut i = 0;
+    while i + 2 <= data.len() {
+        let hw1 = u16::from_le_bytes([data[i], data[i + 1]]) as u32;
+
+        // T1 ADR: 1010_0ddd_iiiiiiii (0xA000..=0xA7FF)
+        if (hw1 & 0xF800) == 0xA000 {
+            let rd = ((hw1 >> 8) & 0x7) as u8;
+            let imm8 = hw1 & 0xFF;
+            let pc_aligned = (base + i as u64 + 4) & !0x3;
+            let target = pc_aligned + (imm8 as u64) * 4;
+            sites.push(AdrSite {
+                addr: base + i as u64,
+                rd,
+                target,
+            });
+            i += 2;
+            continue;
+        }
+
+        // T2/T3 ADR (wide): need 4 bytes. Encoding is
+        //   T3 (ADD): 1111 0 i 1 0000 0 1111  0 iii dddd iiiiiiii
+        //   T2 (SUB): 1111 0 i 1 0101 0 1111  0 iii dddd iiiiiiii
+        // (Rn = 1111 = PC, S = 0, op = ADD/SUB plain.)
+        if i + 4 <= data.len() {
+            let hw2 = u16::from_le_bytes([data[i + 2], data[i + 3]]) as u32;
+            let i_bit = (hw1 >> 10) & 0x1;
+            let op = (hw1 >> 4) & 0x1F; // bits 8-4 of hw1: 5-bit op block
+            let rn = hw1 & 0xF;
+            let top5 = hw1 & 0xFBF0;
+            let is_add_imm12 = top5 == 0xF20F; // ADR (T3): ADD Rd, PC, #imm12
+            let is_sub_imm12 = top5 == 0xF2AF; // ADR (T2): SUB Rd, PC, #imm12
+            let _ = (op, rn);
+            if is_add_imm12 || is_sub_imm12 {
+                // (hw2 >> 15) bit must be 0 (S=0 for plain ADR variants).
+                if (hw2 & 0x8000) == 0 {
+                    let imm3 = (hw2 >> 12) & 0x7;
+                    let rd = ((hw2 >> 8) & 0xF) as u8;
+                    let imm8 = hw2 & 0xFF;
+                    let imm12 = (i_bit << 11) | (imm3 << 8) | imm8;
+                    let pc_aligned = (base + i as u64 + 4) & !0x3;
+                    let target = if is_add_imm12 {
+                        pc_aligned + imm12 as u64
+                    } else {
+                        pc_aligned.wrapping_sub(imm12 as u64)
+                    };
+                    sites.push(AdrSite {
+                        addr: base + i as u64,
+                        rd,
+                        target,
+                    });
+                    i += 4;
+                    continue;
+                }
+            }
+        }
+        i += 2;
+    }
+    sites
 }
 
 fn read_u32_at(data: &[u8], base: u64, va: u64) -> Option<u32> {

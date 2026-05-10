@@ -7200,43 +7200,55 @@ fn run_xrefs_raw(
         return;
     }
     let call_sites = arm32_raw::find_call_sites(data, base, target);
-    println!("// Direct call sites (BL/BLX) targeting {:#x}:", target);
-    if call_sites.is_empty() {
-        println!("//   (none — likely reached via function-pointer table or vector)");
-    } else {
-        for site in &call_sites {
-            println!("//   {:#x}", site);
-        }
-    }
     let pairs = arm32_raw::find_movw_movt_pairs(data, base);
     let pair_hits: Vec<_> = pairs
         .iter()
         .filter(|p| p.value as u64 == target || p.value as u64 == canon)
         .collect();
-    if !pair_hits.is_empty() {
-        println!(
-            "// MOVW/MOVT immediate-load sites loading {:#x}:",
-            target
-        );
-        for p in pair_hits {
-            println!("//   {:#x}  → r{}", p.addr, p.rd);
-        }
-    }
     let lits = arm32_raw::find_pc_literal_loads(data, base);
     let lit_hits: Vec<_> = lits
         .iter()
         .filter(|l| l.value as u64 == target || l.value as u64 == canon)
         .collect();
+    let adrs = arm32_raw::find_adr_sites(data, base);
+    let adr_hits: Vec<_> = adrs
+        .iter()
+        .filter(|a| a.target == target || a.target == canon)
+        .collect();
+
+    let any_data_ref = !pair_hits.is_empty() || !lit_hits.is_empty() || !adr_hits.is_empty();
+
+    println!("// Direct call sites (BL/BLX) targeting {:#x}:", target);
+    if call_sites.is_empty() {
+        if any_data_ref {
+            println!("//   (none — but data references exist, see below)");
+        } else {
+            println!("//   (none — likely reached via function-pointer table or vector)");
+        }
+    } else {
+        for site in &call_sites {
+            println!("//   {:#x}", site);
+        }
+    }
+    if !pair_hits.is_empty() {
+        println!("// MOVW/MOVT immediate-load sites loading {:#x}:", target);
+        for p in &pair_hits {
+            println!("//   {:#x}  → r{}", p.addr, p.rd);
+        }
+    }
     if !lit_hits.is_empty() {
-        println!(
-            "// PC-relative literal-pool LDRs loading {:#x}:",
-            target
-        );
-        for l in lit_hits {
+        println!("// PC-relative literal-pool LDRs loading {:#x}:", target);
+        for l in &lit_hits {
             println!(
                 "//   {:#x}  LDR r{}, [pc, #...] → literal at {:#x}",
                 l.addr, l.rt, l.literal_addr
             );
+        }
+    }
+    if !adr_hits.is_empty() {
+        println!("// ADR (PC-relative ADD/SUB) sites computing {:#x}:", target);
+        for a in &adr_hits {
+            println!("//   {:#x}  ADR r{}, #{:#x}", a.addr, a.rd, a.target);
         }
     }
 }
@@ -7259,7 +7271,13 @@ fn run_search_raw(
     json_output: bool,
 ) {
     if !const_mode {
-        eprintln!("--search raw mode currently only implements --const");
+        // Treat as a string search: find every occurrence of the
+        // query bytes in `data`, then xref each hit through ADR /
+        // MOVW-MOVT / literal-pool LDR / raw u32 sites. This is the
+        // common firmware-RE workflow ("which function references
+        // string X?") and avoids forcing the user to look up the
+        // string offset by hand.
+        run_string_search_raw(data, arch, base, query, json_output);
         return;
     }
     let Some(value) = parse_hex_addr(query) else {
@@ -7276,6 +7294,7 @@ fn run_search_raw(
     }
     let mut pair_hits: Vec<(u64, u8)> = Vec::new();
     let mut lit_hits: Vec<(u64, u8, u64)> = Vec::new();
+    let mut adr_hits: Vec<(u64, u8)> = Vec::new();
     if matches!(arch, rsleigh_api::Architecture::ARM32) {
         for p in arm32_raw::find_movw_movt_pairs(data, base) {
             if p.value == v32 {
@@ -7285,6 +7304,11 @@ fn run_search_raw(
         for l in arm32_raw::find_pc_literal_loads(data, base) {
             if l.value == v32 {
                 lit_hits.push((l.addr, l.rt, l.literal_addr));
+            }
+        }
+        for a in arm32_raw::find_adr_sites(data, base) {
+            if a.target == value {
+                adr_hits.push((a.addr, a.rd));
             }
         }
     }
@@ -7343,6 +7367,151 @@ fn run_search_raw(
         );
         for (a, rt, la) in &lit_hits {
             println!("//   {:#x}  LDR r{}, [pc, #...] → literal@{:#x}", a, rt, la);
+        }
+        println!(
+            "// ADR (PC-relative ADD/SUB) sites computing {:#x}: {}",
+            value,
+            adr_hits.len()
+        );
+        for (a, rd) in &adr_hits {
+            println!("//   {:#x}  ADR r{}", a, rd);
+        }
+    }
+}
+
+/// Find every ASCII occurrence of `query` inside `data`, then for each
+/// hit run the same xref scan as `--xrefs <addr>` (BL/BLX, MOVW/MOVT,
+/// literal pool, ADR). Caps output to keep terminal sane.
+fn run_string_search_raw(
+    data: &[u8],
+    arch: rsleigh_api::Architecture,
+    base: u64,
+    query: &str,
+    json_output: bool,
+) {
+    let needle = query.as_bytes();
+    if needle.is_empty() {
+        eprintln!("--search: empty query");
+        return;
+    }
+    let mut hits: Vec<u64> = Vec::new();
+    let mut i = 0;
+    while i + needle.len() <= data.len() {
+        if &data[i..i + needle.len()] == needle {
+            hits.push(base + i as u64);
+            i += needle.len();
+        } else {
+            i += 1;
+        }
+    }
+    if hits.is_empty() {
+        if json_output {
+            println!("{{\"query\": {:?}, \"hits\": []}}", query);
+        } else {
+            println!("// String search for {:?}: no matches", query);
+        }
+        return;
+    }
+
+    // For ARM32 raw mode, precompute the data-ref tables once and
+    // intersect each hit address against them.
+    let (pairs, lits, adrs) = if matches!(arch, rsleigh_api::Architecture::ARM32) {
+        (
+            arm32_raw::find_movw_movt_pairs(data, base),
+            arm32_raw::find_pc_literal_loads(data, base),
+            arm32_raw::find_adr_sites(data, base),
+        )
+    } else {
+        (Vec::new(), Vec::new(), Vec::new())
+    };
+
+    if json_output {
+        let mut out = String::from("{\n");
+        out.push_str(&format!("  \"query\": {:?},\n", query));
+        out.push_str("  \"hits\": [\n");
+        for (k, &h) in hits.iter().enumerate() {
+            if k > 0 {
+                out.push_str(",\n");
+            }
+            out.push_str(&format!("    {{\"string_at\": \"{:#x}\", \"refs\": [", h));
+            let mut first = true;
+            for p in pairs.iter().filter(|p| p.value as u64 == h) {
+                if !first {
+                    out.push_str(", ");
+                }
+                first = false;
+                out.push_str(&format!(
+                    "{{\"kind\": \"movw_movt\", \"addr\": \"{:#x}\", \"rd\": {}}}",
+                    p.addr, p.rd
+                ));
+            }
+            for l in lits.iter().filter(|l| l.value as u64 == h) {
+                if !first {
+                    out.push_str(", ");
+                }
+                first = false;
+                out.push_str(&format!(
+                    "{{\"kind\": \"ldr_lit\", \"addr\": \"{:#x}\", \"rt\": {}}}",
+                    l.addr, l.rt
+                ));
+            }
+            for a in adrs.iter().filter(|a| a.target == h) {
+                if !first {
+                    out.push_str(", ");
+                }
+                first = false;
+                out.push_str(&format!(
+                    "{{\"kind\": \"adr\", \"addr\": \"{:#x}\", \"rd\": {}}}",
+                    a.addr, a.rd
+                ));
+            }
+            out.push_str("]}");
+        }
+        out.push_str("\n  ]\n}");
+        println!("{}", out);
+        return;
+    }
+
+    println!(
+        "// String search for {:?}: {} match(es)",
+        query,
+        hits.len()
+    );
+    // String pointers in firmware often target the start of an
+    // enclosing line (e.g. printf format like "[tsk-ble]:FOO"),
+    // not the substring the user happened to search for. Tolerate
+    // a small offset window so e.g. searching "FOO" still surfaces
+    // refs to "[tsk-ble]:FOO" loaded as one address.
+    const REF_WINDOW: u64 = 64;
+    for h in &hits {
+        println!("// {:#x}  {:?}", h, query);
+        let lo = h.saturating_sub(REF_WINDOW);
+        let hi = *h + needle.len() as u64 + REF_WINDOW;
+        let in_window = |va: u64| va >= lo && va <= hi;
+        let pair_refs: Vec<_> = pairs.iter().filter(|p| in_window(p.value as u64)).collect();
+        let lit_refs: Vec<_> = lits.iter().filter(|l| in_window(l.value as u64)).collect();
+        let adr_refs: Vec<_> = adrs.iter().filter(|a| in_window(a.target)).collect();
+        if pair_refs.is_empty() && lit_refs.is_empty() && adr_refs.is_empty() {
+            println!("//   (no static references found within ±{} bytes)", REF_WINDOW);
+            continue;
+        }
+        for p in pair_refs {
+            println!(
+                "//   ref via MOVW/MOVT  at {:#x}  → r{}  (loads {:#x})",
+                p.addr, p.rd, p.value
+            );
+        }
+        for l in lit_refs {
+            println!(
+                "//   ref via LDR literal at {:#x}  → r{}  (pool@{:#x} = {:#x})",
+                l.addr, l.rt, l.literal_addr, l.value
+            );
+        }
+        for a in adr_refs {
+            println!(
+                "//   ref via ADR        at {:#x}  → r{}  (loads {:#x})",
+                a.addr, a.rd, a.target
+            );
         }
     }
 }
