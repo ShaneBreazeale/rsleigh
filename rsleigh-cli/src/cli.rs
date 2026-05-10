@@ -8,6 +8,7 @@
 //!   rsleigh <binary> <func> --json      # decompile as JSON
 //!   rsleigh <binary> --disasm <func>    # disassemble (P-code)
 
+use crate::arm32_raw;
 use crate::wasm;
 
 use std::path::Path;
@@ -570,7 +571,11 @@ pub fn entrypoint() {
                         .and_then(|i| args_clone.get(i + 1))
                         .cloned()
                         .unwrap_or_default();
-                    run_xrefs(&bp, &data, &target);
+                    if let Some((arch, base)) = parse_raw_arch_base(&args_clone) {
+                        run_xrefs_raw(&data, arch, base, &target);
+                    } else {
+                        run_xrefs(&bp, &data, &target);
+                    }
                 } else if vulnscan_mode {
                     run_vulnscan(&bp, &data);
                 } else if ioc_mode {
@@ -615,16 +620,27 @@ pub fn entrypoint() {
                         eprintln!("       rsleigh <binary> --search <query> --decompile");
                         return;
                     }
-                    run_search(
-                        &bp,
-                        &data,
-                        &query,
-                        api_mode,
-                        const_mode,
-                        tag_mode,
-                        decompile_results,
-                        json_output,
-                    );
+                    if let Some((arch, base)) = parse_raw_arch_base(&args_clone) {
+                        run_search_raw(
+                            &data,
+                            arch,
+                            base,
+                            &query,
+                            const_mode,
+                            json_output,
+                        );
+                    } else {
+                        run_search(
+                            &bp,
+                            &data,
+                            &query,
+                            api_mode,
+                            const_mode,
+                            tag_mode,
+                            decompile_results,
+                            json_output,
+                        );
+                    }
                 }
             })
             .unwrap();
@@ -7124,6 +7140,221 @@ fn generate_yara_rule(binary_path: &str, data: &[u8]) {
 fn chrono_date() -> String {
     // Simple date without chrono dependency
     "2026-04-13".to_string()
+}
+
+/// Detect `--raw <arch> [--base <addr>]` in argv. Returns the parsed
+/// arch + base, or `None` if not in raw mode.
+fn parse_raw_arch_base(args: &[String]) -> Option<(rsleigh_api::Architecture, u64)> {
+    let raw_idx = args.iter().position(|a| a == "--raw")?;
+    let arch_str = args.get(raw_idx + 1).map(|s| s.as_str())?;
+    let arch = match arch_str {
+        "x86-64" | "x86_64" | "x64" => rsleigh_api::Architecture::X86_64,
+        "x86-32" | "x86" | "i386" => rsleigh_api::Architecture::X86_32,
+        "arm32" | "arm" | "ARM32" => rsleigh_api::Architecture::ARM32,
+        "aarch64" | "arm64" | "AArch64" => rsleigh_api::Architecture::AArch64,
+        "mips32" | "mips" | "MIPS32" => rsleigh_api::Architecture::MIPS32,
+        "riscv64" | "riscv" | "RISCV64" => rsleigh_api::Architecture::RiscV64,
+        _ => return None,
+    };
+    let base = args
+        .iter()
+        .position(|a| a == "--base")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| {
+            if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+                u64::from_str_radix(hex, 16).ok()
+            } else {
+                s.parse::<u64>().ok()
+            }
+        })
+        .unwrap_or(0);
+    Some((arch, base))
+}
+
+/// Raw-mode `--xrefs <addr>`. Parses target as hex VA, then enumerates
+/// every BL/BLX call site whose target equals it. Also reports any
+/// MOVW/MOVT pair or PC-relative literal-pool LDR that loads the
+/// address as an immediate (data-flow xref). ARM32 only — silently
+/// returns for other archs because the value-load idioms differ.
+fn run_xrefs_raw(
+    data: &[u8],
+    arch: rsleigh_api::Architecture,
+    base: u64,
+    target_name: &str,
+) {
+    if !matches!(arch, rsleigh_api::Architecture::ARM32) {
+        eprintln!("--xrefs raw mode currently only supports --raw arm");
+        return;
+    }
+    let Some(target) = parse_hex_addr(target_name) else {
+        eprintln!("--xrefs raw mode requires a hex address (e.g. 0x080143A3)");
+        return;
+    };
+    let code_end = base + data.len() as u64;
+    let canon = target & !1;
+    if canon < base || canon >= code_end {
+        eprintln!(
+            "Address {:#x} out of range [{:#x}, {:#x})",
+            target, base, code_end
+        );
+        return;
+    }
+    let call_sites = arm32_raw::find_call_sites(data, base, target);
+    println!("// Direct call sites (BL/BLX) targeting {:#x}:", target);
+    if call_sites.is_empty() {
+        println!("//   (none — likely reached via function-pointer table or vector)");
+    } else {
+        for site in &call_sites {
+            println!("//   {:#x}", site);
+        }
+    }
+    let pairs = arm32_raw::find_movw_movt_pairs(data, base);
+    let pair_hits: Vec<_> = pairs
+        .iter()
+        .filter(|p| p.value as u64 == target || p.value as u64 == canon)
+        .collect();
+    if !pair_hits.is_empty() {
+        println!(
+            "// MOVW/MOVT immediate-load sites loading {:#x}:",
+            target
+        );
+        for p in pair_hits {
+            println!("//   {:#x}  → r{}", p.addr, p.rd);
+        }
+    }
+    let lits = arm32_raw::find_pc_literal_loads(data, base);
+    let lit_hits: Vec<_> = lits
+        .iter()
+        .filter(|l| l.value as u64 == target || l.value as u64 == canon)
+        .collect();
+    if !lit_hits.is_empty() {
+        println!(
+            "// PC-relative literal-pool LDRs loading {:#x}:",
+            target
+        );
+        for l in lit_hits {
+            println!(
+                "//   {:#x}  LDR r{}, [pc, #...] → literal at {:#x}",
+                l.addr, l.rt, l.literal_addr
+            );
+        }
+    }
+}
+
+/// Raw-mode `--search`. Currently implements only `--const <hex>`
+/// (other modes — api/tag/string-query — fall through with a hint).
+/// Searches three sources for ARM32 raw blobs:
+///   1. Raw u32 LE words equal to the constant (covers data tables,
+///      function pointers, GATT attribute IDs, etc.).
+///   2. MOVW/MOVT pairs that build the constant as an immediate.
+///   3. PC-relative literal-pool LDRs whose loaded value equals the
+///      constant.
+/// Falls back to a u32 byte-stream scan only on non-ARM raw modes.
+fn run_search_raw(
+    data: &[u8],
+    arch: rsleigh_api::Architecture,
+    base: u64,
+    query: &str,
+    const_mode: bool,
+    json_output: bool,
+) {
+    if !const_mode {
+        eprintln!("--search raw mode currently only implements --const");
+        return;
+    }
+    let Some(value) = parse_hex_addr(query) else {
+        eprintln!("--search --const expects a hex value (e.g. 0xDEADBEEF)");
+        return;
+    };
+    let v32 = value as u32;
+    let mut data_hits: Vec<u64> = Vec::new();
+    let bytes_le = v32.to_le_bytes();
+    for i in 0..data.len().saturating_sub(3) {
+        if data[i..i + 4] == bytes_le {
+            data_hits.push(base + i as u64);
+        }
+    }
+    let mut pair_hits: Vec<(u64, u8)> = Vec::new();
+    let mut lit_hits: Vec<(u64, u8, u64)> = Vec::new();
+    if matches!(arch, rsleigh_api::Architecture::ARM32) {
+        for p in arm32_raw::find_movw_movt_pairs(data, base) {
+            if p.value == v32 {
+                pair_hits.push((p.addr, p.rd));
+            }
+        }
+        for l in arm32_raw::find_pc_literal_loads(data, base) {
+            if l.value == v32 {
+                lit_hits.push((l.addr, l.rt, l.literal_addr));
+            }
+        }
+    }
+    if json_output {
+        let mut out = String::from("{\n");
+        out.push_str(&format!("  \"query\": \"{:#x}\",\n", value));
+        out.push_str("  \"data_hits\": [");
+        for (k, h) in data_hits.iter().enumerate() {
+            if k > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&format!("\"{:#x}\"", h));
+        }
+        out.push_str("],\n  \"movw_movt\": [");
+        for (k, (a, rd)) in pair_hits.iter().enumerate() {
+            if k > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&format!("{{\"addr\": \"{:#x}\", \"rd\": {}}}", a, rd));
+        }
+        out.push_str("],\n  \"literal_loads\": [");
+        for (k, (a, rt, la)) in lit_hits.iter().enumerate() {
+            if k > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&format!(
+                "{{\"addr\": \"{:#x}\", \"rt\": {}, \"literal_at\": \"{:#x}\"}}",
+                a, rt, la
+            ));
+        }
+        out.push_str("]\n}");
+        println!("{}", out);
+        return;
+    }
+    println!("// Constant search for {:#x} ({} bytes)", value, data.len());
+    println!(
+        "// raw u32 LE matches: {} ({} shown)",
+        data_hits.len(),
+        data_hits.len().min(64)
+    );
+    for h in data_hits.iter().take(64) {
+        println!("//   {:#x}", h);
+    }
+    if data_hits.len() > 64 {
+        println!("//   ... and {} more", data_hits.len() - 64);
+    }
+    if matches!(arch, rsleigh_api::Architecture::ARM32) {
+        println!("// MOVW/MOVT pairs building {:#x}: {}", value, pair_hits.len());
+        for (a, rd) in &pair_hits {
+            println!("//   {:#x}  → r{}", a, rd);
+        }
+        println!(
+            "// PC-relative literal-pool LDRs loading {:#x}: {}",
+            value,
+            lit_hits.len()
+        );
+        for (a, rt, la) in &lit_hits {
+            println!("//   {:#x}  LDR r{}, [pc, #...] → literal@{:#x}", a, rt, la);
+        }
+    }
+}
+
+/// Parse `0x...` / decimal hex address. Used by raw-mode --xrefs and
+/// --search.
+fn parse_hex_addr(s: &str) -> Option<u64> {
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).ok()
+    } else {
+        s.parse::<u64>().ok()
+    }
 }
 
 fn run_raw(
