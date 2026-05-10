@@ -182,6 +182,21 @@ impl Decoder {
         self.arch
     }
 
+    /// For ARM32: set the Thumb-mode context bit before decoding.
+    /// Cortex-M is Thumb-only; classic ARM uses LSB of branch target to
+    /// indicate Thumb. Caller passes `addr & 1 == 1` to switch to Thumb.
+    /// No-op for non-ARM32 decoders.
+    pub fn set_arm_thumb(&mut self, thumb: bool) {
+        if let DecoderInner::ARM32 {
+            context,
+            global_set,
+        } = &mut self.inner
+        {
+            context.write_TMode(if thumb { 1 } else { 0 });
+            *global_set = arm32_root::GlobalSet::new(*context);
+        }
+    }
+
     /// Decode a single instruction from `bytes` at virtual address `addr`.
     ///
     /// Returns the decoded instruction with optimized P-code, or an error

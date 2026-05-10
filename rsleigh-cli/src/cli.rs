@@ -7187,10 +7187,10 @@ fn run_raw(
             }
         }
         rsleigh_api::Architecture::ARM32 => {
+            // ARM-mode BL (cond=any, op=101L): word & 0x0F000000 == 0x0B000000
             for i in (0..data.len().saturating_sub(3)).step_by(4) {
                 let word = u32::from_le_bytes(data[i..i + 4].try_into().unwrap_or([0; 4]));
                 if (word & 0x0F000000) == 0x0B000000 {
-                    // BL
                     let imm24 = word & 0x00FFFFFF;
                     let offset = if imm24 & 0x800000 != 0 {
                         ((imm24 | 0xFF000000) as i32) << 2
@@ -7201,6 +7201,44 @@ fn run_raw(
                     if target >= base && target < code_end {
                         found.insert(target);
                     }
+                }
+            }
+            // Thumb-2 BL pair (Cortex-M): hw1 in 0xF000..0xF7FF, hw2 in 0xD000..0xFFFF
+            // with hw2 & 0xD000 == 0xD000 for BL, == 0xC000 for BLX.
+            // Halfword-aligned scan; targets reported with Thumb LSB set (|1) for BL
+            // and aligned to 4 bytes for BLX.
+            for i in (0..data.len().saturating_sub(3)).step_by(2) {
+                let hw1 = u16::from_le_bytes([data[i], data[i + 1]]) as u32;
+                let hw2 = u16::from_le_bytes([data[i + 2], data[i + 3]]) as u32;
+                if (hw1 & 0xF800) != 0xF000 {
+                    continue;
+                }
+                let is_bl = (hw2 & 0xD000) == 0xD000;
+                let is_blx = (hw2 & 0xD000) == 0xC000;
+                if !is_bl && !is_blx {
+                    continue;
+                }
+                let s = (hw1 >> 10) & 1;
+                let j1 = (hw2 >> 13) & 1;
+                let j2 = (hw2 >> 11) & 1;
+                let i1 = (!(j1 ^ s)) & 1;
+                let i2 = (!(j2 ^ s)) & 1;
+                let imm10 = hw1 & 0x3FF;
+                let imm11 = hw2 & 0x7FF;
+                let mut offset: i32 = ((i1 << 23) | (i2 << 22) | (imm10 << 12) | (imm11 << 1)) as i32;
+                if s != 0 {
+                    offset |= 0xFF00_0000u32 as i32; // sign-extend bit 24
+                }
+                let pc = base as i64 + i as i64 + 4;
+                let raw_target = (pc + offset as i64) as u64;
+                let target = if is_blx {
+                    raw_target & !0x3 // BLX → ARM mode, 4-byte aligned
+                } else {
+                    raw_target | 1 // BL → Thumb, LSB set
+                };
+                let canon = target & !1; // address space check uses cleared LSB
+                if canon >= base && canon < code_end {
+                    found.insert(target);
                 }
             }
         }
@@ -7218,7 +7256,7 @@ fn run_raw(
         _ => {}
     }
 
-    let symbols: Vec<(u64, String)> = found
+    let mut symbols: Vec<(u64, String)> = found
         .into_iter()
         .map(|addr| (addr, format!("FUN_{:08x}", addr)))
         .collect();
@@ -7244,23 +7282,66 @@ fn run_raw(
         .map(|(_, a)| a.as_str())
         .collect();
 
+    // Inject explicit hex addresses (0x... on cmdline) into the symbol set
+    // even if static discovery missed them. Required for sparse Thumb-2 /
+    // function-pointer-table dispatch where most callees are never reached
+    // by direct BL scanning. Address must lie within [base, code_end);
+    // Thumb LSB is normalized away for the lookup.
+    let parse_hex_addr = |s: &str| -> Option<u64> {
+        let stripped = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
+        u64::from_str_radix(stripped, 16).ok()
+    };
+    for &arg in &func_args {
+        if let Some(addr) = parse_hex_addr(arg) {
+            let canon = addr & !1; // strip Thumb LSB for range check
+            if canon < base || canon >= code_end {
+                continue;
+            }
+            if !symbols.iter().any(|(a, _)| (*a & !1) == canon) {
+                symbols.push((addr, format!("FUN_{:08x}", addr)));
+            }
+        }
+    }
+    symbols.sort_by_key(|(a, _)| *a);
+
     if func_args.is_empty() && !all_mode {
         eprintln!("{} functions:", symbols.len());
         for (addr, name) in &symbols {
             println!("  0x{:08x}  {}", addr, name);
         }
     } else {
+        // Match by either symbol name (FUN_xxx) or by raw hex address.
+        // Lookup compares with Thumb LSB stripped, so 0x080143a3 and
+        // 0x080143a2 both resolve to the same Cortex-M function.
         let to_decompile: Vec<&(u64, String)> = if all_mode {
             symbols.iter().collect()
         } else {
             symbols
                 .iter()
-                .filter(|(_, n)| func_args.iter().any(|a| n == a))
+                .filter(|(addr, n)| {
+                    func_args.iter().any(|a| {
+                        if n == a {
+                            return true;
+                        }
+                        if let Some(want) = parse_hex_addr(a) {
+                            (*addr & !1) == (want & !1)
+                        } else {
+                            false
+                        }
+                    })
+                })
                 .collect()
         };
         let path = std::path::Path::new("raw.bin");
         for (addr, name) in to_decompile {
-            let off = (*addr - base) as usize;
+            // ARM32: LSB of address is the Thumb flag, not part of the byte
+            // offset. Strip it for memory access; set decoder Thumb mode.
+            let thumb = matches!(arch, rsleigh_api::Architecture::ARM32) && (*addr & 1) == 1;
+            let canonical_addr = if thumb { *addr & !1 } else { *addr };
+            if matches!(arch, rsleigh_api::Architecture::ARM32) {
+                dec.set_arm_thumb(thumb);
+            }
+            let off = (canonical_addr - base) as usize;
             let max = 4096.min(data.len().saturating_sub(off));
             if max < 4 {
                 continue;
@@ -7270,26 +7351,26 @@ fn run_raw(
             let mut insts = Vec::new();
             let next_func = symbols
                 .iter()
-                .filter(|(a, _)| *a > *addr)
-                .map(|(a, _)| *a)
+                .filter(|(a, _)| (*a & !1) > canonical_addr)
+                .map(|(a, _)| *a & !1)
                 .min()
-                .unwrap_or(*addr + max as u64);
-            let decode_max = ((next_func - *addr) as usize).min(max);
+                .unwrap_or(canonical_addr + max as u64);
+            let decode_max = ((next_func - canonical_addr) as usize).min(max);
             while pos < decode_max {
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    dec.decode(&bytes[pos..], *addr + pos as u64)
+                    dec.decode(&bytes[pos..], canonical_addr + pos as u64)
                 })) {
                     Ok(Ok(inst)) => {
                         let l = inst.len as usize;
                         if l == 0 {
-                            pos += 4;
+                            pos += if thumb { 2 } else { 4 };
                             continue;
                         }
-                        insts.push((*addr + pos as u64, inst));
+                        insts.push((canonical_addr + pos as u64, inst));
                         pos += l;
                     }
                     Ok(Err(_)) | Err(_) => {
-                        pos += 4;
+                        pos += if thumb { 2 } else { 4 };
                     }
                 }
             }
