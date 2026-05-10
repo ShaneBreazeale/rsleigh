@@ -7187,6 +7187,36 @@ fn run_raw(
             }
         }
         rsleigh_api::Architecture::ARM32 => {
+            // Cortex-M vector-table seeding. First word is initial SP (data),
+            // subsequent u32 LE words are exception/IRQ handler VAs with
+            // Thumb LSB set. Most ISRs are unreachable from direct BL — only
+            // entries 0x04..0x400 are scanned (covers Cortex-M0/M3/M4/M7
+            // with up to ~240 external IRQs). Entries with LSB clear, zero,
+            // or out-of-range targets are skipped. Heuristic: only run when
+            // first word looks like a plausible RAM SP (>= 0x20000000).
+            // Harmless on non-firmware ARM blobs (rejected by SP check or
+            // LSB filter).
+            if data.len() >= 8 {
+                let sp_word = u32::from_le_bytes(data[0..4].try_into().unwrap_or([0; 4]));
+                let looks_like_cortex_m = (sp_word & 0xFF00_0000) == 0x2000_0000;
+                if looks_like_cortex_m {
+                    let scan_end = 0x400.min(data.len() & !3);
+                    for i in (4..scan_end).step_by(4) {
+                        if i + 4 > data.len() {
+                            break;
+                        }
+                        let entry = u32::from_le_bytes(data[i..i + 4].try_into().unwrap_or([0; 4]));
+                        if (entry & 1) == 0 {
+                            continue; // not a Thumb code address
+                        }
+                        let target = entry as u64;
+                        let canon = target & !1;
+                        if canon >= base && canon < code_end {
+                            found.insert(target);
+                        }
+                    }
+                }
+            }
             // ARM-mode BL (cond=any, op=101L): word & 0x0F000000 == 0x0B000000
             for i in (0..data.len().saturating_sub(3)).step_by(4) {
                 let word = u32::from_le_bytes(data[i..i + 4].try_into().unwrap_or([0; 4]));
