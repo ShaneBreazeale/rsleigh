@@ -32,7 +32,7 @@ rsleigh /path/to/binary --smt-candidates --smt-candidates-no-dedup
 # v11.B: top-N filter. After dedup + sort, emit only the highest
 # N records. Score formula:
 #   source kind: recv-class > read > fgets > getenv
-#   sink kind:   Command > FormatArg > StackBuffer > TaintedStore > LengthArg
+#   sink kind:   Command > FormatArg > StackBuffer > TaintedStore > CStringRead > LengthArg
 #   verdict:     Reachable > NotReachable > Unsupported (200 / 50 / 0 bonus)
 #   call-chain:  shorter is better (5 pts/hop penalty, capped at 50)
 rsleigh /path/to/binary --smt-candidates --smt-candidates-top 10
@@ -59,7 +59,7 @@ A summary line is written to stderr at the end:
   "address":        "0x1ba3c",             // function entry VA
   "source":         "read",                // libc source name (DEFAULT_SOURCES)
   "sink":           "memcpy",              // libc sink name (DEFAULT_SINKS)
-  "sink_kind":      "LengthArg",           // StackBuffer | FormatArg | Command | LengthArg
+  "sink_kind":      "LengthArg",           // StackBuffer | FormatArg | Command | LengthArg | TaintedStore | CStringRead
   "verdict":        "NotReachable",        // Reachable | NotReachable | Unsupported
   "filter_reasons": [                      // why solve_diag classified the path this way
     "LengthArg lineage bounded by wrapper return (1 bounded VarIds: [539])"
@@ -127,10 +127,15 @@ A summary line is written to stderr at the end:
    ```bash
    jq '[.[] | select(.sink_kind == "LengthArg" and (.events[] | .name? // "" | startswith("recv")))]' candidates.json
    ```
+   For parser OOB-read candidates from unterminated packet buffers:
+   ```bash
+   jq 'select(.sink_kind == "CStringRead" and (.source == "recv" or .source == "read"))' candidates.ndjson
+   ```
 2. **Read the events array** to see how the source bytes flow into the sink. Each event's `args[*].region` tells the LLM which memory location is touched.
 3. **Audit each `filter_reasons`** entry against the actual binary semantics:
    - "bounded by wrapper return" → check whether the wrapper really caps the value (e.g. `read(_, _, ATTACKER_CONTROLLED_COUNT, _)` would be a v7 false-negative if rsleigh classified the count as Const).
    - "dst region not StackFrame" → check whether the dst is actually a stack alloca that v4 region inference missed.
+   - `CStringRead` → confirm the watched pointer references a finite packet/body buffer and that the code does not guarantee NUL termination before the string API call.
 4. **Use `trigger` bytes** as PoC seed when verdict is Reachable.
 
 ## Companion modes

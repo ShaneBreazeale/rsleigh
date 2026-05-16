@@ -56,6 +56,11 @@ pub enum SinkKind {
     /// is deferred (v10); v9 surfaces these in the candidate dump
     /// for LLM triage with verdict Unsupported.
     TaintedStore,
+    /// Unbounded C-string readers (`strlen`, `strcmp`, `strchr`,
+    /// etc.) scan memory until a NUL byte. When fed a non-terminated
+    /// attacker-controlled packet buffer, they are an OOB-read class
+    /// primitive common in protocol parser CVEs.
+    CStringRead,
 }
 
 /// Attacker-controlled API. The function returns or fills a buffer
@@ -123,6 +128,16 @@ pub const DEFAULT_SINKS: &[SinkSpec] = &[
     SinkSpec { name: "execve",  watched: AbiSlot::Arg(0), kind: SinkKind::Command     },
     SinkSpec { name: "execlp",  watched: AbiSlot::Arg(0), kind: SinkKind::Command     },
     SinkSpec { name: "execvp",  watched: AbiSlot::Arg(0), kind: SinkKind::Command     },
+    SinkSpec { name: "strlen",  watched: AbiSlot::Arg(0), kind: SinkKind::CStringRead },
+    SinkSpec { name: "strnlen", watched: AbiSlot::Arg(0), kind: SinkKind::CStringRead },
+    SinkSpec { name: "strcmp",  watched: AbiSlot::Arg(0), kind: SinkKind::CStringRead },
+    SinkSpec { name: "strncmp", watched: AbiSlot::Arg(0), kind: SinkKind::CStringRead },
+    SinkSpec { name: "strcasecmp",  watched: AbiSlot::Arg(0), kind: SinkKind::CStringRead },
+    SinkSpec { name: "strncasecmp", watched: AbiSlot::Arg(0), kind: SinkKind::CStringRead },
+    SinkSpec { name: "strchr",  watched: AbiSlot::Arg(0), kind: SinkKind::CStringRead },
+    SinkSpec { name: "strrchr", watched: AbiSlot::Arg(0), kind: SinkKind::CStringRead },
+    SinkSpec { name: "strstr",  watched: AbiSlot::Arg(0), kind: SinkKind::CStringRead },
+    SinkSpec { name: "strcasestr", watched: AbiSlot::Arg(0), kind: SinkKind::CStringRead },
 ];
 
 /// v9: synthetic sink spec for compiler-emitted Store loops. Used
@@ -1454,6 +1469,18 @@ pub fn solve_diag(
                 solver.assert(&nz);
             }
         }
+        SinkKind::CStringRead => {
+            // SAT model for unbounded string readers. If the first
+            // symbolic input window contains no NUL, libc string
+            // walkers can read beyond packet/body bounds when the
+            // caller failed to terminate the buffer. This is an
+            // evidence generator, so candidate consumers must still
+            // confirm the allocation/length boundary in context.
+            for b in &bytes {
+                let nz = b._eq(&BV::from_u64(&ctx, 0, 8)).not();
+                solver.assert(&nz);
+            }
+        }
         SinkKind::LengthArg => {
             // v5.W2.D2b: Reachable iff
             //   (a) tainted lineage from src reaches the length
@@ -1615,7 +1642,7 @@ mod tests {
             assert!(src_names.contains(must), "missing source `{must}`");
         }
         let sink_names: Vec<_> = DEFAULT_SINKS.iter().map(|s| s.name).collect();
-        for must in &["strcpy", "sprintf", "memcpy", "system", "popen", "execve"] {
+        for must in &["strcpy", "sprintf", "memcpy", "system", "popen", "execve", "strlen"] {
             assert!(sink_names.contains(must), "missing sink `{must}`");
         }
     }
@@ -1639,6 +1666,11 @@ mod tests {
         let system = DEFAULT_SINKS.iter().find(|s| s.name == "system").unwrap();
         assert_eq!(system.watched, AbiSlot::Arg(0));
         assert_eq!(system.kind, SinkKind::Command);
+
+        // strlen(const char *s) — an unbounded NUL scan over arg 0.
+        let strlen = DEFAULT_SINKS.iter().find(|s| s.name == "strlen").unwrap();
+        assert_eq!(strlen.watched, AbiSlot::Arg(0));
+        assert_eq!(strlen.kind, SinkKind::CStringRead);
     }
 
     #[test]

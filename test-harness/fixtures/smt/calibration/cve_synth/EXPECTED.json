@@ -24,13 +24,13 @@
       "notes": "strcat into 64-byte stack buffer via argv[2]. v13 argv-injection surfaces the candidate on main (the path-collecting function); verdict currently FOUND-but-unproven because region inference doesn't bridge Load(stack_spill_of_argv) back to Param(1) region. v14 follow-up."
     },
     {
-      "id": "CVE-2015-3294-like-known-FN",
+      "id": "CVE-2015-3294-like",
       "function": "tftp_request_like",
-      "kind": "Unsupported",
+      "kind": "CStringRead",
       "source": "read",
-      "sink": "strlen-OOB",
-      "expected_reachable": false,
-      "notes": "OOB read via strlen-past-end. strlen is not in DEFAULT_SINKS; this CVE pattern is below current static analysis ceiling. Documented FN."
+      "sink": "strlen",
+      "expected_reachable": true,
+      "notes": "OOB read via strlen-past-end. CStringRead sinks now surface unterminated packet-buffer scans; analyst must still confirm the packet length boundary in the caller/context."
     },
     {
       "id": "negative-control",

@@ -2549,6 +2549,7 @@ fn run_smt_diag(
                     SinkKind::Command => "Command",
                     SinkKind::LengthArg => "LengthArg",
                     SinkKind::TaintedStore => "TaintedStore",
+                    SinkKind::CStringRead => "CStringRead",
                 };
                 *by_kind.entry(kind_name).or_default() += 1;
                 match solve_with_imports(path, &ssa, &imports) {
@@ -2744,6 +2745,7 @@ fn run_smt_candidates(
                 SinkKind::Command => "Command",
                 SinkKind::LengthArg => "LengthArg",
                 SinkKind::TaintedStore => "TaintedStore",
+                SinkKind::CStringRead => "CStringRead",
             };
 
             let source_event = &path.events[path.source_event];
@@ -2897,6 +2899,7 @@ fn run_smt_candidates(
                 SinkKind::FormatArg => 90,
                 SinkKind::StackBuffer => 80,
                 SinkKind::TaintedStore => 60,
+                SinkKind::CStringRead => 55,
                 SinkKind::LengthArg => 50,
             };
             let verdict_score = match verdict_str {
