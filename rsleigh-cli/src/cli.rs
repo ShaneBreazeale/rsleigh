@@ -16,6 +16,31 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static ANNOTATE_CRYPTO: AtomicBool = AtomicBool::new(false);
 
+/// Parse a goblin Object tolerating PEs whose attribute-certificate table
+/// extends past EOF — happens when a PE was carved from an installer overlay
+/// without its signature blob. Standard `Object::parse` rejects those with
+/// "End of attribute certificates table is after the end of the PE binary".
+pub(crate) fn parse_object_lenient(data: &[u8]) -> goblin::error::Result<goblin::Object<'_>> {
+    match goblin::Object::parse(data) {
+        Ok(o) => Ok(o),
+        Err(e) => {
+            // Retry as PE with cert-table parsing disabled.
+            if matches!(goblin::peek(&mut std::io::Cursor::new(data)),
+                        Ok(goblin::Hint::PE))
+            {
+                let opts = goblin::pe::options::ParseOptions {
+                    resolve_rva: true,
+                    parse_attribute_certificates: false,
+                };
+                let pe = goblin::pe::PE::parse_with_opts(data, &opts)?;
+                Ok(goblin::Object::PE(pe))
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
 fn maybe_annotate_crypto(s: String) -> String {
     if ANNOTATE_CRYPTO.load(Ordering::Relaxed) {
         rsleigh_decompile::crypto_constants::rewrite_text(&s)
@@ -240,7 +265,7 @@ pub fn entrypoint() {
                 std::process::exit(1);
             }
         };
-        let obj = match goblin::Object::parse(&data) {
+        let obj = match parse_object_lenient(&data) {
             Ok(o) => o,
             Err(e) => {
                 eprintln!("Error: cannot parse binary: {}", e);
@@ -403,7 +428,7 @@ pub fn entrypoint() {
         // .rdata, and the prologue / CALL-descent passes that run in
         // `discover_pe_functions`.
         let result = rsleigh_decompile::seh_static::smc_fixpoint(&data, 16, |img| {
-            let Ok(obj) = goblin::Object::parse(img) else {
+            let Ok(obj) = parse_object_lenient(img) else {
                 return vec![];
             };
             let Some((arch, segs, mut symbols)) = parse_binary(&obj, img) else {
@@ -868,7 +893,7 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
     }
 
     let path = Path::new(binary_path);
-    let obj = match goblin::Object::parse(&data) {
+    let obj = match parse_object_lenient(&data) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("Error: cannot parse binary: {}", e);
@@ -1072,17 +1097,24 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
         }
     }
 
-    // For stripped PE binaries: discover functions from entry point + CALL targets
-    if symbols.is_empty() {
-        if let goblin::Object::PE(pe) = &obj {
-            let base = pe.image_base as u64;
-            let entry = base
-                + pe.header
-                    .optional_header
-                    .unwrap()
-                    .standard_fields
-                    .address_of_entry_point as u64;
-            symbols = discover_pe_functions(entry, &segs, &data, arch);
+    // Always supplement PE symbol table with discovery — exports alone
+    // miss the bulk of internal functions (a DLL with 3 exports may still
+    // have hundreds of static functions reachable via CALL descent and
+    // prologue scanning).
+    if let goblin::Object::PE(pe) = &obj {
+        let base = pe.image_base as u64;
+        let entry = base
+            + pe.header
+                .optional_header
+                .unwrap()
+                .standard_fields
+                .address_of_entry_point as u64;
+        let existing: std::collections::BTreeSet<u64> =
+            symbols.iter().map(|(a, _)| *a).collect();
+        for (addr, name) in discover_pe_functions(entry, &segs, &data, arch) {
+            if !existing.contains(&addr) {
+                symbols.push((addr, name));
+            }
         }
     }
 
@@ -3427,7 +3459,7 @@ fn diff_binaries(old_path: &str, new_path: &str, func_filter: &[String]) {
                 return BTreeMap::new();
             }
         };
-        let obj = match goblin::Object::parse(&data) {
+        let obj = match parse_object_lenient(&data) {
             Ok(o) => o,
             Err(e) => {
                 eprintln!("Error parsing {}: {}", path, e);
@@ -3681,7 +3713,7 @@ fn build_import_map(obj: &goblin::Object, data: &[u8]) -> std::collections::Hash
 /// Generate a one-line summary per function for AI-assisted triage.
 /// Shows: function name, calls made, strings referenced, patterns detected.
 fn run_summary(binary_path: &str, data: &[u8]) {
-    let obj = match goblin::Object::parse(data) {
+    let obj = match parse_object_lenient(data) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("Error: {}", e);
@@ -3695,17 +3727,24 @@ fn run_summary(binary_path: &str, data: &[u8]) {
             return;
         }
     };
-    // Discover functions for stripped binaries
-    if symbols.is_empty() {
-        if let goblin::Object::PE(pe) = &obj {
-            let base = pe.image_base as u64;
-            let entry = base
-                + pe.header
-                    .optional_header
-                    .unwrap()
-                    .standard_fields
-                    .address_of_entry_point as u64;
-            symbols = discover_pe_functions(entry, &segs, data, arch);
+    // Always supplement PE symbol table with discovery — exports alone
+    // miss the bulk of internal functions (a DLL with 3 exports may still
+    // have hundreds of static functions reachable via CALL descent and
+    // prologue scanning).
+    if let goblin::Object::PE(pe) = &obj {
+        let base = pe.image_base as u64;
+        let entry = base
+            + pe.header
+                .optional_header
+                .unwrap()
+                .standard_fields
+                .address_of_entry_point as u64;
+        let existing: std::collections::BTreeSet<u64> =
+            symbols.iter().map(|(a, _)| *a).collect();
+        for (addr, name) in discover_pe_functions(entry, &segs, data, arch) {
+            if !existing.contains(&addr) {
+                symbols.push((addr, name));
+            }
         }
     }
     let is_elf_stripped = if let goblin::Object::Elf(elf) = &obj {
@@ -3918,7 +3957,7 @@ fn run_xrefs(binary_path: &str, data: &[u8], target_name: &str) {
         return;
     }
 
-    let obj = match goblin::Object::parse(data) {
+    let obj = match parse_object_lenient(data) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("Error: {}", e);
@@ -4193,7 +4232,7 @@ fn run_search(
     decompile_results: bool,
     json_output: bool,
 ) {
-    let obj = match goblin::Object::parse(data) {
+    let obj = match parse_object_lenient(data) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("Error: {}", e);
@@ -4621,7 +4660,7 @@ fn output_search_results(
 
 /// Scan for common vulnerability patterns in decompiled output.
 fn run_section_scan(binary_path: &str, data: &[u8]) {
-    let obj = match goblin::Object::parse(data) {
+    let obj = match parse_object_lenient(data) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("Error: {}", e);
@@ -4728,7 +4767,7 @@ fn run_section_scan(binary_path: &str, data: &[u8]) {
 }
 
 fn run_vulnscan(binary_path: &str, data: &[u8]) {
-    let obj = match goblin::Object::parse(data) {
+    let obj = match parse_object_lenient(data) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("Error: {}", e);
@@ -6360,7 +6399,7 @@ fn resources_parse(data: &[u8]) -> Option<Vec<ResEntry>> {
 
 /// Export full call graph as JSON.
 fn run_callgraph(binary_path: &str, data: &[u8]) {
-    let obj = match goblin::Object::parse(data) {
+    let obj = match parse_object_lenient(data) {
         Ok(o) => o,
         Err(e) => {
             eprintln!("Error: {}", e);
@@ -6741,7 +6780,7 @@ fn compute_sha256(data: &[u8]) -> String {
 /// Spec: github.com/mandiant/pefile (imphash()).
 fn compute_imphash(data: &[u8]) -> Option<String> {
     use md5::{Digest, Md5};
-    let obj = goblin::Object::parse(data).ok()?;
+    let obj = parse_object_lenient(data).ok()?;
     let pe = match obj {
         goblin::Object::PE(pe) => pe,
         _ => return None,
@@ -6908,7 +6947,7 @@ fn generate_yara_rule(binary_path: &str, data: &[u8]) {
     }
 
     // 3. Extract imports (PE + ELF)
-    if let Ok(obj) = goblin::Object::parse(data) {
+    if let Ok(obj) = parse_object_lenient(data) {
         match &obj {
             goblin::Object::PE(pe) => {
                 for imp in &pe.imports {
@@ -6968,7 +7007,7 @@ fn generate_yara_rule(binary_path: &str, data: &[u8]) {
     }
 
     // 5. Extract unique byte patterns from entry point / first function
-    if let Ok(obj) = goblin::Object::parse(data) {
+    if let Ok(obj) = parse_object_lenient(data) {
         let entry_bytes = match &obj {
             goblin::Object::PE(pe) => {
                 let entry_rva = pe
@@ -8238,7 +8277,7 @@ fn discover_pe_functions(
     }
 
     // Phase 2a: Parse .pdata exception directory for PE64 (gives exact function boundaries)
-    if let Ok(obj) = goblin::Object::parse(data) {
+    if let Ok(obj) = parse_object_lenient(data) {
         if let goblin::Object::PE(pe) = &obj {
             if pe.is_64 {
                 let base = pe.image_base as u64;
@@ -8521,7 +8560,7 @@ fn discover_pe_functions(
 
     // Phase 3: Thunk discovery — find JMP [rip+disp] import thunks at function boundaries.
     // Only for PE64 — PE32 thunks are already found by the prologue scanner or import resolution.
-    let is_pe64 = goblin::Object::parse(data)
+    let is_pe64 = parse_object_lenient(data)
         .ok()
         .and_then(|o| {
             if let goblin::Object::PE(pe) = o {
@@ -8568,7 +8607,7 @@ fn discover_pe_functions(
     // Vtable entries, C++ exception handler tables, and callback registrations point to
     // code addresses that aren't reached by CALL descent.
     // Only for PE64 — PE32 has too many false positives from 32-bit values that look like pointers.
-    if let Ok(obj) = goblin::Object::parse(data) {
+    if let Ok(obj) = parse_object_lenient(data) {
         if let goblin::Object::PE(pe) = &obj {
             if !pe.is_64 { /* skip PE32 */
             } else {
@@ -8720,7 +8759,7 @@ fn discover_pe_functions(
 ///
 /// Returns a list of (function_va, method_name) for each discovered method.
 fn scan_pymethoddef(segs: &[(u64, u64, u64)], data: &[u8]) -> Vec<(u64, String)> {
-    let obj = match goblin::Object::parse(data) {
+    let obj = match parse_object_lenient(data) {
         Ok(o) => o,
         Err(_) => return vec![],
     };
