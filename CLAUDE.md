@@ -206,6 +206,20 @@ Fixture: `test-harness/fixtures/crackmev3.pyd` (PyVMProtect v4).
 - Master HEAD has v0..v21 merged. Branches alive: `feat/smt-backend`, `v18-real-cve-corpus`, `v19-v21-followups`
 - v22+ filed in `.opt/failed.md`: FilePipe-write SinkKind (dropbear x11setauth FN), PathTraversal SinkKind (busybox mdev FN), pointer-arith OOB SinkKind (dnsmasq extract_name FN), LAVA-M docker pipeline
 
+## ARM raw-mode discovery (post 9455a60)
+
+- `--raw arm32`: prologue-validation pass culls BL-pattern false positives (~78% on real fw). ARM BLX(imm) now scanned for ARM→Thumb calls.
+- Thumb LSB convention: address with `|1` = Thumb mode; even = ARM. `--disasm 0x26acd1` switches to Thumb.
+- Arg order matters: `rsleigh <binary> --raw arm32 --disasm ...` (binary FIRST, --raw is a flag).
+- Thumb-2 decompile still produces garbled output for high-density code (e.g. Sony BIONZ X firmware). Discovery + xref reliable; decompile lags.
+- New helper `parse_object_lenient` retries with `parse_attribute_certificates: false` for carved PEs with cert-table past EOF.
+
+## Python 3.14 quirks (macOS)
+
+- `telnetlib` removed; roll your own via socket+select (see a7r2-sdk `tools/flash_camera.py`).
+- `distutils` removed; some legacy packages (keystone-engine) need `setuptools` shim.
+- `uv pip install --system --break-system-packages` to override PEP 668 guard.
+
 ## License
 
 Apache 2.0
