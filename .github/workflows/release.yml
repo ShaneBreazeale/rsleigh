@@ -25,10 +25,12 @@ jobs:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             archive: tar.gz
+            build_args: --jobs 1
             rustflags: -C link-arg=-fuse-ld=lld
           - os: ubuntu-22.04
             target: aarch64-unknown-linux-gnu
             archive: tar.gz
+            build_args: --jobs 1
             cross: true
           - os: macos-14
             target: aarch64-apple-darwin
@@ -65,14 +67,14 @@ jobs:
 
       - name: Build (native)
         if: matrix.cross != true
-        run: cargo build --release -p rsleigh-cli --target "$TARGET"
+        run: cargo build --release -p rsleigh-cli --target "$TARGET" ${{ matrix.build_args }}
         shell: bash
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
 
       - name: Build (cross)
         if: matrix.cross == true
-        run: cross build --release -p rsleigh-cli --target "$TARGET"
+        run: cross build --release -p rsleigh-cli --target "$TARGET" ${{ matrix.build_args }}
         shell: bash
 
       - name: Package (unix)
