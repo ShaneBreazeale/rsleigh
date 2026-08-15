@@ -11786,12 +11786,19 @@ fn post_process(
             let mut brace_depth: i32 = 0;
             for j in (i + 1)..lines.len() {
                 let l2 = &lines[j];
+                let close_indent = l2.len() - l2.trim_start().len();
                 // Update brace depth *before* treating `}` as end-of-function,
                 // so only the outermost closer triggers the end condition.
                 let opens = l2.matches('{').count() as i32;
                 let closes = l2.matches('}').count() as i32;
                 let was_depth = brace_depth;
                 brace_depth += opens - closes;
+                // Do not carry DCE facts across an if/else or loop boundary.
+                // A write in one arm can feed a Phi after the merge even when
+                // the other arm writes the same textual variable name.
+                if closes > 0 && close_indent < leading.len() {
+                    break;
+                }
                 // End-of-function: pre-update depth was 0 and closes > 0.
                 if was_depth <= 0 && closes > 0 && !l2.trim_start().starts_with("} else") {
                     next_is_write = true;
@@ -13139,6 +13146,35 @@ fn post_process(
                 && tok.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
                 && !tok.chars().next().unwrap().is_ascii_digit()
         };
+        let rhs_has_call = |rhs: &str| -> bool {
+            rhs.char_indices().any(|(open, c)| {
+                if c != '(' || open == 0 {
+                    return false;
+                }
+                let before = &rhs[..open];
+                let start = before
+                    .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'))
+                    .map_or(0, |i| i + 1);
+                let callee = &before[start..];
+                !callee.is_empty()
+                    && !matches!(
+                        callee,
+                        "bool"
+                            | "char"
+                            | "double"
+                            | "float"
+                            | "int"
+                            | "long"
+                            | "short"
+                            | "uint"
+                            | "uint8_t"
+                            | "uint16_t"
+                            | "uint32_t"
+                            | "uint64_t"
+                            | "void"
+                    )
+            })
+        };
         let is_safe_ident =
             |tok: &str, assigned: &std::collections::HashSet<String>, lhs: &str| -> bool {
                 assigned.contains(tok)
@@ -13178,6 +13214,7 @@ fn post_process(
                 if let Some(eq) = t.find(" = ") {
                     let lhs = t[..eq].trim();
                     let rhs = &t[eq + 3..t.len() - 1];
+                    let call_rhs = rhs_has_call(rhs);
                     let mut all_uninit = true;
                     let mut any_ident = false;
                     let mut buf = String::new();
@@ -13198,7 +13235,7 @@ fn post_process(
                         }
                     }
                     push(&mut buf, &mut any_ident, &mut all_uninit);
-                    if any_ident && all_uninit {
+                    if any_ident && all_uninit && !call_rhs {
                         lines.remove(j);
                         dropped = true;
                     }

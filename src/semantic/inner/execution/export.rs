@@ -54,11 +54,12 @@ pub enum Export {
         table_id: TableId,
     },
 
-    /// const, NOTE const zext or lsb_trunk the inner value
+    /// const, extending or lsb-truncating the inner value as needed
     Const {
         bytes: NumberNonZeroUnsigned,
         // TODO delete this, is just the len of value
         input_len: FieldSize,
+        signed: bool,
         value: Expr,
     },
 
@@ -241,9 +242,36 @@ impl Export {
         size: crate::syntax::block::execution::op::ByteRangeLsb,
         src: Span,
     ) -> Result<Self, Box<ExecutionError>> {
+        let signed = match read_scope {
+            ReadScope::TokenField(id) => {
+                use crate::semantic::token::TokenFieldAttach;
+
+                let field = sleigh.token_field(id);
+                match field.attach {
+                    None => field.print_flags.signed_set,
+                    Some(TokenFieldAttach::NoAttach(fmt)) => fmt.signed,
+                    Some(TokenFieldAttach::Number(_, values)) => {
+                        sleigh.attach_number(values).is_signed()
+                    }
+                    Some(TokenFieldAttach::Varnode(_) | TokenFieldAttach::Literal(_)) => false,
+                }
+            }
+            ReadScope::Context(id) => {
+                use crate::semantic::varnode::ContextAttach;
+
+                let field = sleigh.context(id);
+                match field.attach {
+                    None => field.print_flags.signed_set,
+                    Some(ContextAttach::NoAttach(fmt)) => fmt.signed,
+                    Some(ContextAttach::Varnode(_) | ContextAttach::Literal(_)) => false,
+                }
+            }
+            _ => false,
+        };
         let value = ExprValue::from_read_scope(sleigh, read_scope);
         Ok(Self::Const {
             input_len: value.size(sleigh, execution),
+            signed,
             value: Expr::Value(ExprElement::Value {
                 location: src.clone(),
                 value,
@@ -408,6 +436,7 @@ impl Export {
                 bytes: _,
                 value,
                 input_len,
+                signed: _,
             } => {
                 if hack_export_simple_disassembly_value(value, sleigh, execution) {
                     solved.i_did_a_thing();
@@ -440,19 +469,23 @@ impl Export {
             Self::Const {
                 bytes,
                 input_len,
+                signed,
                 value,
             } => {
                 let value_bits = input_len.possible_value().unwrap_or(32.try_into().unwrap());
                 let bits = bytes.get() * 8;
                 if bits > value_bits.get() {
-                    // if export is bigger then the value, zext it
+                    // Preserve the declared signedness when widening an exported constant.
+                    let op = if signed {
+                        crate::semantic::execution::Unary::Sext(bits.try_into().unwrap())
+                    } else {
+                        crate::semantic::execution::Unary::Zext(bits.try_into().unwrap())
+                    };
                     FinalExport::Value(crate::semantic::execution::Expr::Value(
                         crate::semantic::execution::ExprElement::Op(
                             crate::semantic::execution::ExprUnaryOp {
                                 location: value.src().clone(),
-                                op: crate::semantic::execution::Unary::Zext(
-                                    bits.try_into().unwrap(),
-                                ),
+                                op,
                                 input: Box::new(value.convert()),
                             },
                         ),

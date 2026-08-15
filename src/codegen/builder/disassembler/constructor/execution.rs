@@ -129,18 +129,20 @@ impl<'a> ExecutionGenerator<'a> {
                         let target_tf = self.disassembler.sleigh.token_field(*tf_id);
                         let target_bits = (target_tf.bits.start(), target_tf.bits.end());
                         let mut found = None;
-                        let mut found_id = None;
                         for (other_id, other_name) in &self.constructor.ass_fields {
                             let other_tf = self.disassembler.sleigh.token_field(*other_id);
                             let other_bits = (other_tf.bits.start(), other_tf.bits.end());
                             if other_bits == target_bits {
                                 found = Some(other_name.clone());
-                                found_id = Some(*other_id);
                                 break;
                             }
                         }
-                        match (found, found_id) {
-                            (Some(n), Some(id)) => self.token_field_as_u64(&id, &n),
+                        match found {
+                            // Read the raw bits from the stored alias, but interpret
+                            // them using the requested field's signedness. Aliases
+                            // such as `imm8` and `simm8` share a bit range and the
+                            // HashMap iteration order must not change semantics.
+                            Some(n) => self.token_field_as_u64(tf_id, &n),
                             _ => quote! { 0u64 },
                         }
                     }

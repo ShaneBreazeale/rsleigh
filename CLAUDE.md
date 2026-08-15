@@ -15,9 +15,10 @@ Testing: `docs/TESTING.md`. SEH: `docs/pe64-seh-pipeline.md`.
 ## Build
 
 ```bash
-make test                           # generate + build + test
+make test                           # generate + debug test-harness (may stack-overflow on some hosts)
 cargo run -p rsleigh-generate       # parse slaspecs (~30s)
-cargo test -p test-harness          # compile + run all tests
+cargo test --release -p test-harness             # CI-style regression suite
+cargo test --release -p rsleigh-decompile --lib  # decompiler unit tests / fast inner loop
 ```
 
 Rust 2021 stable, make.
@@ -48,7 +49,10 @@ rsleigh <binary> --yara                # generate YARA
 rsleigh <binary> --diff <binary2>      # side-by-side diff
 rsleigh <binary> --taint <func>        # taint analysis
 rsleigh <binary> --vulnscan            # 27 vuln patterns
+rsleigh <binary> --imphash             # Mandiant imphash for PE
+rsleigh <binary> --hashes              # sha256, md5, imphash, size
 rsleigh <binary> --ioc [--json]        # IOC extraction (URLs/IPs/paths/registry/mutexes/secrets); see docs/cli-triage.md
+rsleigh <binary> --xor-strings [--json] # brute single-byte XOR string recovery
 rsleigh <binary> --sigcheck [--json]   # Authenticode signer/issuer/timestamp/chain; see docs/cli-triage.md
 rsleigh <binary> --resources [--dump DIR] [--json]  # PE resource walk + extraction; see docs/cli-triage.md
 rsleigh <binary> --callgraph           # JSON + behavioral tags
@@ -62,7 +66,8 @@ rsleigh <binary> --vm-classify-handlers <addrs>  # opcode handler classifier
 rsleigh <binary> --tag-dispatch <addrs>          # CMP r8/JZ chain extractor
 rsleigh <binary> --summarise-handlers <addrs>    # IAT-API + stack-pop signature
 rsleigh <binary> --vm-bytecode <bc_va>:<size> --vm-handlers <path.json>  # VM bytecode disasm
-rsleigh --raw <arch> <binary>          # raw firmware blob
+rsleigh <binary> --seh-fixpoint        # SEH-driven SMC patch fixpoint
+rsleigh <binary> --raw <arch>          # raw firmware blob
 ```
 
 ## Layout
@@ -115,7 +120,7 @@ See `docs/decompiler-passes.md` for full pass list. Hotspots:
 
 - **`SigType` variant touches 3 match sites.** `c_str()` + `to_inferred()` in `rsleigh-decompile/src/signatures.rs`, `sigtype_to_cast()` in `rsleigh-decompile/src/printer.rs`. Missing third = non-exhaustive-match compile error.
 - **248 Python C API sigs** in `signatures_python.rs`. Variants: `PyObjectPtr`, `ConstPyObjectPtr`, `PyObjectPtrPtr`, `PyTypeObjectPtr`, `PyFrameObjectPtr`, `PySsizeT`, `PyHashT`, `PyCFunction`, `PyRichCmpOp`.
-- **PyMethodDef scanner** in `rsleigh-cli/src/main.rs::scan_pymethoddef` ALWAYS runs for PE64 (not gated on empty symbols). Validates: name→ASCII ident, meth→.text range, flags<0x1000, doc→NULL/printable. Scans by section characteristics (works with obfuscated section names like PyVMProtect `.424um`).
+- **PyMethodDef scanner** in `rsleigh-cli/src/cli.rs::scan_pymethoddef` ALWAYS runs for PE64 (not gated on empty symbols). Validates: name→ASCII ident, meth→.text range, flags<0x1000, doc→NULL/printable. Scans by section characteristics (works with obfuscated section names like PyVMProtect `.424um`).
 - **`segs` in `discover_pe_functions` is executable-only.** Data scans need separate `all_segs` over readable sections.
 - **Underscore filter** hides `_dl_*`, `__do_global*`, `__libc_*`, `__pthread_*`, `_GLOBAL__sub_I_`, plus `_init`/`_fini`/`_start`/`_DYNAMIC`/`_GLOBAL_OFFSET_TABLE_`. NOT blanket `_`-prefix — Python methods start with `_`.
 
@@ -153,9 +158,9 @@ Fixture: `test-harness/fixtures/crackmev3.pyd` (PyVMProtect v4).
 - Apple `c++filt` strips leading `_` by default → use `c++filt -n` for Itanium `_Z...`
 - No `timeout` cmd → `gtimeout` (brew coreutils) or Bash `run_in_background`
 - `pip3` aliased to `uv` → `uv pip install --system` or venv
-- `cargo test -p test-harness` pre-existing stack overflow in unit tests; iterate via `cargo test -p rsleigh-decompile --release`
+- `cargo test -p test-harness` has a pre-existing stack overflow in some debug test runs; use `cargo test --release -p test-harness` for CI parity, and iterate via `cargo test --release -p rsleigh-decompile --lib`
 - **rtk caches aggressively.** If `cargo build` reports `0 crates compiled` when clearly changed → use `/opt/homebrew/bin/cargo` directly + `cargo clean -p <crate>`
-- **`test-harness/examples/*.rs` includes stale files.** `probe_check2_ssa` has pre-existing non-exhaustive match on `Expr::UserOp`. Use `cargo test -p <crate> --release --lib` to skip examples
+- Use `cargo test -p <crate> --release --lib` when you explicitly want to skip example builds.
 - `.DS_Store` sneaks into initial commits → `.gitignore` first
 
 ## Debugging fold/structure

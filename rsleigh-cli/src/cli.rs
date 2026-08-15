@@ -1126,7 +1126,17 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
             let mut seen: std::collections::HashSet<u64> =
                 symbols.iter().map(|(a, _)| *a).collect();
             for (addr, name) in scan_pymethoddef(&segs, &data) {
-                if seen.insert(addr) {
+                if let Some((_, existing_name)) = symbols.iter_mut().find(|(a, _)| *a == addr) {
+                    // Registration metadata is more authoritative than a
+                    // heuristic discovery name. Function discovery runs first
+                    // and may already have labeled the method as FUN_<addr>.
+                    if existing_name.starts_with("FUN_")
+                        || existing_name.starts_with("func_")
+                        || existing_name.starts_with("sub_")
+                    {
+                        *existing_name = name;
+                    }
+                } else if seen.insert(addr) {
                     symbols.push((addr, name));
                 }
             }

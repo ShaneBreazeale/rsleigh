@@ -121,16 +121,15 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                 PcodeOp::CBranch { dest, cond } if dest.space == AddressSpaceId::Ram => {
                     let target = dest.offset;
                     ops.pop();
-                    match (
-                        leader_to_block.get(&target).copied(),
-                        leader_to_block.get(&next_inst_addr).copied(),
-                    ) {
+                    let taken = leader_to_block.get(&target).copied();
+                    let fallthrough = leader_to_block.get(&next_inst_addr).copied();
+                    match (taken, fallthrough) {
                         (Some(taken), Some(fallthrough)) => Terminator::CBranch {
                             cond,
                             taken,
                             fallthrough,
                         },
-                        _ => {
+                        (taken, fallthrough) => {
                             diagnostics.push(Diagnostic {
                                 severity: Severity::Warn,
                                 kind: DiagKind::UnresolvedBranchTarget,
@@ -140,7 +139,19 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                                     target, next_inst_addr
                                 ),
                             });
-                            Terminator::Indirect(dest)
+                            // A caller may provide a bounded instruction window
+                            // that excludes one edge (for example, a stack-canary
+                            // failure block just past the function's RET). Keep
+                            // traversing the edge that is present so an in-range
+                            // return or body is not discarded with the missing
+                            // edge. The diagnostic above preserves the loss of
+                            // control-flow information for consumers.
+                            match (taken, fallthrough) {
+                                (Some(taken), None) => Terminator::Branch(taken),
+                                (None, Some(fallthrough)) => Terminator::Fallthrough(fallthrough),
+                                (None, None) => Terminator::Indirect(dest),
+                                (Some(_), Some(_)) => unreachable!(),
+                            }
                         }
                     }
                 }
@@ -787,7 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn conditional_branch_to_non_instruction_target_is_indirect() {
+    fn conditional_branch_preserves_in_range_fallthrough() {
         let cfg = build_cfg(&[
             (
                 0x1000,
@@ -805,7 +816,11 @@ mod tests {
 
         assert!(matches!(
             cfg.blocks[0].terminator,
-            Terminator::Indirect(v) if v == Varnode::ram(0x1006, 8)
+            Terminator::Fallthrough(BlockId(1))
         ));
+        assert!(cfg
+            .diagnostics
+            .iter()
+            .any(|d| d.kind == DiagKind::UnresolvedBranchTarget));
     }
 }

@@ -8,7 +8,7 @@
 # Prereqs:
 #   cargo login <token>  (one-time)
 #
-# Order (12 crates total — collapsed from 43):
+# Order (13 crates total — collapsed from 43):
 #   1. pcode-ir
 #   2. generated/<arch> × 6   (each: leaf, only pcode-ir)
 #   3. rsleigh-api            (needs all 6 generated)
