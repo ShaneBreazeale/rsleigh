@@ -15,7 +15,11 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
+    env:
+      # Generated decoder crates are large enough that parallel rustc processes
+      # can exceed the hosted runner's memory limit (exit 143).
+      CARGO_BUILD_JOBS: 1
     steps:
       - uses: actions/checkout@v7
 
