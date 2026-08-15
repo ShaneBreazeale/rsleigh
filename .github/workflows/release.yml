@@ -45,7 +45,7 @@ jobs:
       REF_NAME: ${{ github.event.inputs.tag || github.ref_name }}
       TARGET: ${{ matrix.target }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
@@ -96,7 +96,7 @@ jobs:
           (Get-FileHash -Algorithm SHA256 "$name.zip").Hash > "$name.zip.sha256"
 
       - name: Upload artifacts to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           generate_release_notes: true
