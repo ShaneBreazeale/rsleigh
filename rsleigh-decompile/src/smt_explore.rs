@@ -1773,6 +1773,440 @@ mod tests {
         }
     }
 
+    // I2c is a test-only, source-pinned differential between the legacy
+    // region-keyed memory map and the typed store inventory.  Keep this oracle
+    // structurally aligned with legacy commit 6c0ed62: both key emissions and
+    // the two-chain intersection are load-bearing parts of the comparison.
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    enum LegacyAliasKey {
+        Vn(Varnode),
+        Region(crate::region::Region, crate::region::OffsetClass),
+    }
+
+    type LegacyMemMap = HashMap<
+        (crate::region::Region, crate::region::OffsetClass),
+        VarId,
+    >;
+
+    fn legacy_const_value(v: VarId, vars: &[VarDef]) -> Option<i64> {
+        let mut current = v;
+        for _ in 0..16 {
+            let definition = vars.get(current.0 as usize)?;
+            match &definition.expr {
+                Expr::Const(value, _) => return Some(*value as i64),
+                Expr::Var(inner) => current = *inner,
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    fn legacy_classify_offset(
+        address: VarId,
+        vars: &[VarDef],
+    ) -> crate::region::OffsetClass {
+        use crate::ir::BinOpKind;
+        use crate::region::OffsetClass;
+
+        let Some(definition) = vars.get(address.0 as usize) else {
+            return OffsetClass::ConstOffset(0);
+        };
+        match &definition.expr {
+            Expr::FieldAccess(_, offset) => OffsetClass::ConstOffset(*offset as i64),
+            Expr::BinOp(BinOpKind::Add, left, right) => {
+                if let Some(value) = legacy_const_value(*left, vars) {
+                    return OffsetClass::ConstOffset(value);
+                }
+                if let Some(value) = legacy_const_value(*right, vars) {
+                    return OffsetClass::ConstOffset(value);
+                }
+                OffsetClass::Symbolic
+            }
+            Expr::BinOp(BinOpKind::Sub, left, right) => {
+                if let Some(value) = legacy_const_value(*right, vars) {
+                    if let Some(left_value) = legacy_const_value(*left, vars) {
+                        return OffsetClass::ConstOffset(left_value.wrapping_sub(value));
+                    }
+                    return OffsetClass::ConstOffset(-value);
+                }
+                OffsetClass::Symbolic
+            }
+            Expr::Var(inner) => legacy_classify_offset(*inner, vars),
+            Expr::Const(value, _) => OffsetClass::ConstOffset(*value as i64),
+            _ => OffsetClass::ConstOffset(0),
+        }
+    }
+
+    fn legacy_mem_key(
+        address: VarId,
+        vars: &[VarDef],
+        regions: &crate::region::RegionMap,
+    ) -> (crate::region::Region, crate::region::OffsetClass) {
+        (
+            regions.region_of(address),
+            legacy_classify_offset(address, vars),
+        )
+    }
+
+    fn legacy_build_mem_map(
+        events: &[TaintEvent<'_>],
+        vars: &[VarDef],
+        regions: &crate::region::RegionMap,
+    ) -> LegacyMemMap {
+        let mut memory = LegacyMemMap::new();
+        for event in events {
+            if let TaintEventKind::Store { addr, val } = event.kind {
+                memory.insert(legacy_mem_key(addr, vars, regions), val);
+            }
+        }
+        memory
+    }
+
+    fn legacy_chain_keys(
+        start: VarId,
+        vars: &[VarDef],
+        memory: &LegacyMemMap,
+        regions: &crate::region::RegionMap,
+        follow_memory: bool,
+    ) -> Vec<LegacyAliasKey> {
+        use crate::region::{AllocSite, OffsetClass};
+
+        let mut output = Vec::new();
+        let mut visited = std::collections::HashSet::<u32>::new();
+        let mut stack = vec![start];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current.0) {
+                continue;
+            }
+            if visited.len() > 64 {
+                break;
+            }
+            let Some(definition) = vars.get(current.0 as usize) else {
+                continue;
+            };
+            let space_aliases = !matches!(
+                definition.varnode.space,
+                pcode_ir::AddressSpaceId::Register
+            ) && !definition.call_return;
+            if space_aliases {
+                output.push(LegacyAliasKey::Vn(definition.varnode));
+            }
+            let region = regions.region_of(current);
+            if let Some(site) = regions.site_of(region) {
+                if !matches!(site, AllocSite::Unknown(_)) {
+                    output.push(LegacyAliasKey::Region(
+                        region,
+                        legacy_classify_offset(current, vars),
+                    ));
+                }
+            }
+            match &definition.expr {
+                Expr::Var(inner) => stack.push(*inner),
+                Expr::Load(address) if follow_memory => {
+                    let key = legacy_mem_key(*address, vars, regions);
+                    if let Some(stored) = memory.get(&key).copied() {
+                        stack.push(stored);
+                    } else if let Some(stored) = memory
+                        .get(&(key.0, OffsetClass::Symbolic))
+                        .copied()
+                    {
+                        stack.push(stored);
+                    }
+                }
+                Expr::Load(_) => {}
+                Expr::BinOp(_, left, right) => {
+                    stack.push(*left);
+                    stack.push(*right);
+                }
+                Expr::UnaryOp(_, inner) => stack.push(*inner),
+                Expr::FieldAccess(base, _) => stack.push(*base),
+                Expr::Phi(inputs) => stack.extend(inputs.iter().copied()),
+                _ => {}
+            }
+        }
+        output
+    }
+
+    fn legacy_lineage_eq(
+        left: VarId,
+        right: VarId,
+        vars: &[VarDef],
+        memory: &LegacyMemMap,
+        regions: &crate::region::RegionMap,
+    ) -> bool {
+        if left == right {
+            return true;
+        }
+        let left_keys = legacy_chain_keys(left, vars, memory, regions, true);
+        let right_keys = legacy_chain_keys(right, vars, memory, regions, true);
+        left_keys
+            .iter()
+            .any(|left_key| right_keys.iter().any(|right_key| left_key == right_key))
+    }
+
+    fn i2c_var(
+        vars: &mut Vec<VarDef>,
+        expr: Expr,
+        varnode: Varnode,
+        param_name: Option<&str>,
+    ) -> VarId {
+        let id = VarId(vars.len() as u32);
+        vars.push(VarDef {
+            id,
+            varnode,
+            expr,
+            size: 8,
+            use_count: 1,
+            param_name: param_name.map(str::to_owned),
+            call_return: false,
+            inferred_type: InferredType::Unknown,
+            display_type: None,
+        });
+        id
+    }
+
+    fn i2c_ssa(vars: Vec<VarDef>) -> SsaCfg {
+        cfg(
+            vars,
+            block_with_term(Vec::new(), SsaTerminator::Return(None)),
+        )
+    }
+
+    fn i2c_stores(stores: &[(VarId, VarId)]) -> Vec<TaintEvent<'static>> {
+        stores
+            .iter()
+            .enumerate()
+            .map(|(stmt_index, (address, value))| TaintEvent {
+                stmt_index,
+                kind: TaintEventKind::Store {
+                    addr: *address,
+                    val: *value,
+                },
+            })
+            .collect()
+    }
+
+    fn i2c_value(vars: &mut Vec<VarDef>, tag: u64, unique: u64) -> VarId {
+        i2c_var(
+            vars,
+            Expr::Const(tag, 8),
+            Varnode::unique(unique, 8),
+            None,
+        )
+    }
+
+    fn i2c_calls() -> CallReturnMap {
+        CallReturnMap::new()
+    }
+
+    fn i2c_sorted_legacy_keys(keys: Vec<LegacyAliasKey>) -> Vec<String> {
+        let mut rendered: Vec<_> = keys.into_iter().map(|key| format!("{key:?}")).collect();
+        rendered.sort();
+        rendered
+    }
+
+    fn i2c_sorted_values(memory: &MemMap) -> Vec<u32> {
+        let mut values: Vec<_> = memory.iter().map(|definition| definition.value.0).collect();
+        values.sort_unstable();
+        values
+    }
+
+    fn i2c_assert_isolated(
+        value: VarId,
+        probe: VarId,
+        vars: &[VarDef],
+        regions: &crate::region::RegionMap,
+    ) -> serde_json::Value {
+        let empty = LegacyMemMap::new();
+        let value_keys = legacy_chain_keys(value, vars, &empty, regions, false);
+        let probe_keys = legacy_chain_keys(probe, vars, &empty, regions, false);
+        assert_ne!(regions.region_of(value), regions.region_of(probe));
+        assert!(value_keys
+            .iter()
+            .all(|value_key| !probe_keys.iter().any(|probe_key| value_key == probe_key)));
+        serde_json::json!({
+            "isolated": true,
+            "value_region": regions.region_of(value).0,
+            "probe_region": regions.region_of(probe).0,
+            "value_keys": i2c_sorted_legacy_keys(value_keys),
+            "probe_pre_memory_keys": i2c_sorted_legacy_keys(probe_keys),
+        })
+    }
+
+    fn i2c_alias_evidence(result: &crate::memory_effect::AliasResult) -> serde_json::Value {
+        fn side(evidence: &crate::memory_effect::AddressEvidence) -> serde_json::Value {
+            serde_json::json!({
+                "address": evidence.address.0,
+                "base": evidence.base.map(|value| value.0),
+                "displacement": evidence.displacement.to_string(),
+                "offset": format!("{:?}", evidence.offset),
+                "region": evidence.region.0,
+                "site": format!("{:?}", evidence.site),
+                "width": evidence.width,
+            })
+        }
+        serde_json::json!({"left":side(&result.left),"right":side(&result.right)})
+    }
+
+    fn i2c_record(value: serde_json::Value) {
+        println!("I2C_RECORD {}", serde_json::to_string(&value).unwrap());
+    }
+
+    fn alias_i2c_p1() {
+        use crate::memory_effect::{query_alias_vars, AliasClass, AliasReason, MemoryAccess};
+        let mut vars = Vec::new();
+        let param0 = i2c_var(&mut vars, Expr::Unknown, Varnode::register(0, 8), Some("param_0"));
+        let param1 = i2c_var(&mut vars, Expr::Unknown, Varnode::register(8, 8), Some("param_1"));
+        let value = i2c_value(&mut vars, 0xa101, 0x1010);
+        let load = i2c_var(&mut vars, Expr::Load(param1), Varnode::unique(0x1020, 8), None);
+        let ssa = i2c_ssa(vars);
+        let regions = crate::region::infer_regions(&ssa);
+        let events = i2c_stores(&[(param0, value)]);
+        let legacy = legacy_build_mem_map(&events, &ssa.vars, &regions);
+        let typed = build_mem_map(&events, &ssa.vars, &regions);
+        let result = query_alias_vars(
+            &ssa.vars,
+            &regions,
+            MemoryAccess { address: param1, displacement: 0, width: 8 },
+            MemoryAccess { address: param0, displacement: 0, width: 8 },
+        );
+        let isolation = i2c_assert_isolated(value, load, &ssa.vars, &regions);
+        let old = legacy_lineage_eq(value, load, &ssa.vars, &legacy, &regions);
+        let new = varid_lineage_eq(value, load, &ssa.vars, &typed, &i2c_calls(), &regions);
+        assert!(!old && new);
+        assert_eq!((result.class, result.reason), (AliasClass::MayAlias, AliasReason::PotentialParameterAlias));
+        i2c_record(serde_json::json!({"id":"P1","expected":"false->true","isolation":isolation,"legacy":old,"typed":new,"class":format!("{:?}",result.class),"reason":format!("{:?}",result.reason),"evidence":i2c_alias_evidence(&result),"legacy_keys":i2c_sorted_legacy_keys(legacy_chain_keys(load,&ssa.vars,&legacy,&regions,true)),"typed_inventory":i2c_sorted_values(&typed)}));
+    }
+
+    fn alias_i2c_p2() {
+        use crate::memory_effect::{query_alias_vars, AliasClass, AliasReason, MemoryAccess};
+        let mut vars = Vec::new();
+        let base = i2c_var(&mut vars, Expr::Unknown, Varnode::register(0, 8), None);
+        let four = i2c_var(&mut vars, Expr::Const(4, 8), Varnode::constant(4, 8), None);
+        let plus4 = i2c_var(&mut vars, Expr::BinOp(crate::ir::BinOpKind::Add, base, four), Varnode::unique(0x2010, 8), None);
+        let value = i2c_value(&mut vars, 0xa202, 0x2020);
+        let load = i2c_var(&mut vars, Expr::Load(plus4), Varnode::unique(0x2030, 8), None);
+        let ssa = i2c_ssa(vars);
+        let regions = crate::region::infer_regions(&ssa);
+        assert_eq!(legacy_classify_offset(base, &ssa.vars), crate::region::OffsetClass::ConstOffset(0));
+        assert_eq!(legacy_classify_offset(plus4, &ssa.vars), crate::region::OffsetClass::ConstOffset(4));
+        let events = i2c_stores(&[(base, value)]);
+        let legacy = legacy_build_mem_map(&events, &ssa.vars, &regions);
+        let typed = build_mem_map(&events, &ssa.vars, &regions);
+        let result = query_alias_vars(&ssa.vars, &regions, MemoryAccess { address: plus4, displacement: 0, width: 8 }, MemoryAccess { address: base, displacement: 0, width: 8 });
+        let isolation = i2c_assert_isolated(value, load, &ssa.vars, &regions);
+        let old = legacy_lineage_eq(value, load, &ssa.vars, &legacy, &regions);
+        let new = varid_lineage_eq(value, load, &ssa.vars, &typed, &i2c_calls(), &regions);
+        assert!(!old && new);
+        assert_eq!((result.class,result.reason),(AliasClass::MayAlias,AliasReason::PartialOverlap));
+        i2c_record(serde_json::json!({"id":"P2","expected":"false->true","isolation":isolation,"legacy":old,"typed":new,"class":format!("{:?}",result.class),"reason":format!("{:?}",result.reason),"evidence":i2c_alias_evidence(&result),"legacy_keys":i2c_sorted_legacy_keys(legacy_chain_keys(load,&ssa.vars,&legacy,&regions,true)),"typed_inventory":i2c_sorted_values(&typed)}));
+    }
+
+    fn alias_i2c_p3() {
+        use crate::memory_effect::{query_alias_vars, AliasClass, AliasReason, MemoryAccess};
+        let mut vars = Vec::new();
+        let base0 = i2c_var(&mut vars, Expr::Unknown, Varnode::register(0, 8), None);
+        let base1 = i2c_var(&mut vars, Expr::Unknown, Varnode::register(8, 8), None);
+        let value_a = i2c_value(&mut vars, 0xa303, 0x3010);
+        let value_b = i2c_value(&mut vars, 0xb303, 0x3020);
+        let load = i2c_var(&mut vars, Expr::Load(base0), Varnode::unique(0x3030, 8), None);
+        let ssa = i2c_ssa(vars);
+        let regions = crate::region::infer_regions(&ssa);
+        assert_eq!(legacy_mem_key(base0,&ssa.vars,&regions),legacy_mem_key(base1,&ssa.vars,&regions));
+        let events = i2c_stores(&[(base0,value_a),(base1,value_b)]);
+        let legacy = legacy_build_mem_map(&events,&ssa.vars,&regions);
+        let typed = build_mem_map(&events,&ssa.vars,&regions);
+        let result = query_alias_vars(&ssa.vars,&regions,MemoryAccess{address:base0,displacement:0,width:8},MemoryAccess{address:base1,displacement:0,width:8});
+        let isolation_a=i2c_assert_isolated(value_a,load,&ssa.vars,&regions);
+        let isolation_b=i2c_assert_isolated(value_b,load,&ssa.vars,&regions);
+        let old_a=legacy_lineage_eq(value_a,load,&ssa.vars,&legacy,&regions);
+        let old_b=legacy_lineage_eq(value_b,load,&ssa.vars,&legacy,&regions);
+        let new_a=varid_lineage_eq(value_a,load,&ssa.vars,&typed,&i2c_calls(),&regions);
+        let new_b=varid_lineage_eq(value_b,load,&ssa.vars,&typed,&i2c_calls(),&regions);
+        assert_eq!((old_a,old_b,new_a,new_b),(false,true,true,true));
+        assert_eq!((result.class,result.reason),(AliasClass::MayAlias,AliasReason::NonSingletonRegion));
+        i2c_record(serde_json::json!({"id":"P3","expected":"(false,true)->(true,true)","isolation_a":isolation_a,"isolation_b":isolation_b,"legacy_a":old_a,"legacy_b":old_b,"typed_a":new_a,"typed_b":new_b,"class":format!("{:?}",result.class),"reason":format!("{:?}",result.reason),"evidence":i2c_alias_evidence(&result),"legacy_keys":i2c_sorted_legacy_keys(legacy_chain_keys(load,&ssa.vars,&legacy,&regions,true)),"typed_inventory":i2c_sorted_values(&typed)}));
+    }
+
+    fn alias_i2c_p4() {
+        use crate::memory_effect::{query_alias_vars, AliasClass, AliasReason, MemoryAccess};
+        let mut vars=Vec::new();
+        let param0=i2c_var(&mut vars,Expr::Unknown,Varnode::register(0,8),Some("param_0"));
+        let param1=i2c_var(&mut vars,Expr::Unknown,Varnode::register(8,8),Some("param_1"));
+        let value=i2c_value(&mut vars,0xa404,0x4010);
+        let phi=i2c_var(&mut vars,Expr::Phi(vec![param1,param0]),Varnode::unique(0x4020,8),None);
+        let load=i2c_var(&mut vars,Expr::Load(phi),Varnode::unique(0x4030,8),None);
+        let ssa=i2c_ssa(vars); let regions=crate::region::infer_regions(&ssa);
+        assert_eq!(regions.region_of(phi),regions.region_of(param1));
+        assert_eq!(legacy_classify_offset(phi,&ssa.vars),crate::region::OffsetClass::ConstOffset(0));
+        let events=i2c_stores(&[(param0,value)]); let legacy=legacy_build_mem_map(&events,&ssa.vars,&regions); let typed=build_mem_map(&events,&ssa.vars,&regions);
+        let result=query_alias_vars(&ssa.vars,&regions,MemoryAccess{address:phi,displacement:0,width:8},MemoryAccess{address:param0,displacement:0,width:8});
+        let isolation=i2c_assert_isolated(value,load,&ssa.vars,&regions);
+        let old=legacy_lineage_eq(value,load,&ssa.vars,&legacy,&regions); let new=varid_lineage_eq(value,load,&ssa.vars,&typed,&i2c_calls(),&regions);
+        assert!(!old&&new); assert_eq!((result.class,result.reason),(AliasClass::MayAlias,AliasReason::SymbolicOffset));
+        i2c_record(serde_json::json!({"id":"P4","expected":"false->true","isolation":isolation,"legacy":old,"typed":new,"class":format!("{:?}",result.class),"reason":format!("{:?}",result.reason),"evidence":i2c_alias_evidence(&result),"legacy_keys":i2c_sorted_legacy_keys(legacy_chain_keys(load,&ssa.vars,&legacy,&regions,true)),"typed_inventory":i2c_sorted_values(&typed)}));
+    }
+
+    fn alias_i2c_p5() {
+        use crate::memory_effect::{query_alias_vars, AliasClass, AliasReason, MemoryAccess};
+        let mut vars=Vec::new(); let base=i2c_var(&mut vars,Expr::Unknown,Varnode::register(0,8),None); let four=i2c_var(&mut vars,Expr::Const(4,8),Varnode::constant(4,8),None);
+        let plus4=i2c_var(&mut vars,Expr::BinOp(crate::ir::BinOpKind::Add,base,four),Varnode::unique(0x5010,8),None); let value=i2c_value(&mut vars,0xa505,0x5020); let field=i2c_var(&mut vars,Expr::FieldAccess(base,4),Varnode::unique(0x5030,8),None);
+        let ssa=i2c_ssa(vars); let regions=crate::region::infer_regions(&ssa); let events=i2c_stores(&[(plus4,value)]); let legacy=legacy_build_mem_map(&events,&ssa.vars,&regions); let typed=build_mem_map(&events,&ssa.vars,&regions);
+        let result=query_alias_vars(&ssa.vars,&regions,MemoryAccess{address:base,displacement:4,width:8},MemoryAccess{address:plus4,displacement:0,width:8});
+        let isolation=i2c_assert_isolated(value,field,&ssa.vars,&regions); let old=legacy_lineage_eq(value,field,&ssa.vars,&legacy,&regions); let new=varid_lineage_eq(value,field,&ssa.vars,&typed,&i2c_calls(),&regions);
+        assert!(!old&&new); assert_eq!((result.class,result.reason),(AliasClass::MustAlias,AliasReason::SameSingletonBytes));
+        i2c_record(serde_json::json!({"id":"P5","expected":"false->true","isolation":isolation,"legacy":old,"typed":new,"class":format!("{:?}",result.class),"reason":format!("{:?}",result.reason),"evidence":i2c_alias_evidence(&result),"legacy_keys":i2c_sorted_legacy_keys(legacy_chain_keys(field,&ssa.vars,&legacy,&regions,true)),"typed_inventory":i2c_sorted_values(&typed)}));
+    }
+
+    fn alias_i2c_c1() {
+        use crate::memory_effect::{query_alias_vars, AliasClass, AliasReason, MemoryAccess};
+        let mut vars=Vec::new(); let base=i2c_var(&mut vars,Expr::Unknown,Varnode::register(0,8),None); let zero0=i2c_var(&mut vars,Expr::Const(0,8),Varnode::constant(0,8),None); let zero1=i2c_var(&mut vars,Expr::Const(0,8),Varnode::constant(0,8),None);
+        let addr0=i2c_var(&mut vars,Expr::BinOp(crate::ir::BinOpKind::Add,base,zero0),Varnode::unique(0x6010,8),None); let addr1=i2c_var(&mut vars,Expr::BinOp(crate::ir::BinOpKind::Add,base,zero1),Varnode::unique(0x6020,8),None);
+        let value_a=i2c_value(&mut vars,0xa606,0x6030); let value_b=i2c_value(&mut vars,0xb606,0x6040); let load=i2c_var(&mut vars,Expr::Load(addr0),Varnode::unique(0x6050,8),None);
+        let ssa=i2c_ssa(vars); assert_eq!((ssa.vars[value_a.0 as usize].size,ssa.vars[value_b.0 as usize].size),(8,8)); let regions=crate::region::infer_regions(&ssa); let events=i2c_stores(&[(addr0,value_a),(addr1,value_b)]); let legacy=legacy_build_mem_map(&events,&ssa.vars,&regions); let typed=build_mem_map(&events,&ssa.vars,&regions);
+        let result=query_alias_vars(&ssa.vars,&regions,MemoryAccess{address:addr0,displacement:0,width:8},MemoryAccess{address:addr1,displacement:0,width:8});
+        let isolation_a=i2c_assert_isolated(value_a,load,&ssa.vars,&regions); let isolation_b=i2c_assert_isolated(value_b,load,&ssa.vars,&regions);
+        let old_a=legacy_lineage_eq(value_a,load,&ssa.vars,&legacy,&regions); let old_b=legacy_lineage_eq(value_b,load,&ssa.vars,&legacy,&regions); let new_a=varid_lineage_eq(value_a,load,&ssa.vars,&typed,&i2c_calls(),&regions); let new_b=varid_lineage_eq(value_b,load,&ssa.vars,&typed,&i2c_calls(),&regions);
+        assert_eq!((old_a,old_b,new_a,new_b),(false,true,false,true)); assert_eq!((result.class,result.reason),(AliasClass::MustAlias,AliasReason::SameSingletonBytes));
+        i2c_record(serde_json::json!({"id":"C1","expected":"agreement:(false,true)","isolation_a":isolation_a,"isolation_b":isolation_b,"legacy_a":old_a,"legacy_b":old_b,"typed_a":new_a,"typed_b":new_b,"class":format!("{:?}",result.class),"reason":format!("{:?}",result.reason),"evidence":i2c_alias_evidence(&result),"legacy_keys":i2c_sorted_legacy_keys(legacy_chain_keys(load,&ssa.vars,&legacy,&regions,true)),"typed_inventory":i2c_sorted_values(&typed)}));
+    }
+
+    fn alias_i2c_c2() {
+        use crate::memory_effect::{query_alias_vars, AliasClass, AliasReason, MemoryAccess};
+        let mut vars=Vec::new(); let base=i2c_var(&mut vars,Expr::Unknown,Varnode::register(0,8),None); let sixteen=i2c_var(&mut vars,Expr::Const(16,8),Varnode::constant(16,8),None); let addr16=i2c_var(&mut vars,Expr::BinOp(crate::ir::BinOpKind::Add,base,sixteen),Varnode::unique(0x7010,8),None);
+        let value_a=i2c_value(&mut vars,0xa707,0x7020); let value_b=i2c_value(&mut vars,0xb707,0x7030); let load=i2c_var(&mut vars,Expr::Load(base),Varnode::unique(0x7040,8),None); let ssa=i2c_ssa(vars); let regions=crate::region::infer_regions(&ssa); let events=i2c_stores(&[(base,value_a),(addr16,value_b)]); let legacy=legacy_build_mem_map(&events,&ssa.vars,&regions); let typed=build_mem_map(&events,&ssa.vars,&regions);
+        let result=query_alias_vars(&ssa.vars,&regions,MemoryAccess{address:base,displacement:0,width:8},MemoryAccess{address:addr16,displacement:0,width:8}); let old_a=legacy_lineage_eq(value_a,load,&ssa.vars,&legacy,&regions); let old_b=legacy_lineage_eq(value_b,load,&ssa.vars,&legacy,&regions); let new_a=varid_lineage_eq(value_a,load,&ssa.vars,&typed,&i2c_calls(),&regions); let new_b=varid_lineage_eq(value_b,load,&ssa.vars,&typed,&i2c_calls(),&regions);
+        let isolation_a=i2c_assert_isolated(value_a,load,&ssa.vars,&regions); let isolation_b=i2c_assert_isolated(value_b,load,&ssa.vars,&regions);
+        assert_eq!((old_a,old_b,new_a,new_b),(true,false,true,false)); assert_eq!((result.class,result.reason),(AliasClass::NoAlias,AliasReason::DisjointSingletonRanges));
+        i2c_record(serde_json::json!({"id":"C2","expected":"agreement:(true,false)","isolation_a":isolation_a,"isolation_b":isolation_b,"legacy_a":old_a,"legacy_b":old_b,"typed_a":new_a,"typed_b":new_b,"class":format!("{:?}",result.class),"reason":format!("{:?}",result.reason),"evidence":i2c_alias_evidence(&result),"legacy_keys":i2c_sorted_legacy_keys(legacy_chain_keys(load,&ssa.vars,&legacy,&regions,true)),"typed_inventory":i2c_sorted_values(&typed)}));
+    }
+
+    fn alias_i2c_c3() {
+        use crate::memory_effect::{query_alias_vars, AliasClass, AliasReason, MemoryAccess};
+        let mut vars=Vec::new(); let base=i2c_var(&mut vars,Expr::Unknown,Varnode::register(0,8),None); let value=i2c_value(&mut vars,0xa808,0x8010); let load=i2c_var(&mut vars,Expr::Load(base),Varnode::unique(0x8020,8),None); let ssa=i2c_ssa(vars); let regions=crate::region::infer_regions(&ssa); let events=i2c_stores(&[(base,value)]); let legacy=legacy_build_mem_map(&events,&ssa.vars,&regions); let typed=build_mem_map(&events,&ssa.vars,&regions);
+        let result=query_alias_vars(&ssa.vars,&regions,MemoryAccess{address:base,displacement:0,width:8},MemoryAccess{address:base,displacement:0,width:8}); let isolation=i2c_assert_isolated(value,load,&ssa.vars,&regions); let old=legacy_lineage_eq(value,load,&ssa.vars,&legacy,&regions); let new=varid_lineage_eq(value,load,&ssa.vars,&typed,&i2c_calls(),&regions); assert!(old&&new); assert_eq!((result.class,result.reason),(AliasClass::MustAlias,AliasReason::SameAddressValue));
+        i2c_record(serde_json::json!({"id":"C3","expected":"agreement:true","isolation":isolation,"legacy":old,"typed":new,"class":format!("{:?}",result.class),"reason":format!("{:?}",result.reason),"evidence":i2c_alias_evidence(&result),"legacy_keys":i2c_sorted_legacy_keys(legacy_chain_keys(load,&ssa.vars,&legacy,&regions,true)),"typed_inventory":i2c_sorted_values(&typed)}));
+    }
+
+    fn alias_i2c_c4() {
+        use crate::memory_effect::{query_alias_vars, AliasClass, AliasReason, MemoryAccess};
+        let mut vars=Vec::new(); let base0=i2c_var(&mut vars,Expr::Unknown,Varnode::register(0,8),None); let base1=i2c_var(&mut vars,Expr::Unknown,Varnode::register(8,8),None); let value_a=i2c_value(&mut vars,0xa909,0x9010); let value_b=i2c_value(&mut vars,0xb909,0x9020); let ssa=i2c_ssa(vars); let regions=crate::region::infer_regions(&ssa); let events=i2c_stores(&[(base0,value_a),(base1,value_b)]); let legacy=legacy_build_mem_map(&events,&ssa.vars,&regions); let typed=build_mem_map(&events,&ssa.vars,&regions); let result=query_alias_vars(&ssa.vars,&regions,MemoryAccess{address:base0,displacement:0,width:8},MemoryAccess{address:base1,displacement:0,width:8}); let isolation_a0=i2c_assert_isolated(value_a,base0,&ssa.vars,&regions); let isolation_a1=i2c_assert_isolated(value_a,base1,&ssa.vars,&regions); let isolation_b0=i2c_assert_isolated(value_b,base0,&ssa.vars,&regions); let isolation_b1=i2c_assert_isolated(value_b,base1,&ssa.vars,&regions); assert_eq!(legacy.len(),1); assert_eq!(typed.len(),2); assert_eq!((result.class,result.reason),(AliasClass::MayAlias,AliasReason::NonSingletonRegion));
+        i2c_record(serde_json::json!({"id":"C4","expected":"legacy_inventory:1,typed_inventory:2","isolation":[isolation_a0,isolation_a1,isolation_b0,isolation_b1],"legacy_inventory":legacy.len(),"typed_inventory":i2c_sorted_values(&typed),"typed_lineage":"not_measured","class":format!("{:?}",result.class),"reason":format!("{:?}",result.reason),"evidence":i2c_alias_evidence(&result),"legacy_keys":{"base0":i2c_sorted_legacy_keys(legacy_chain_keys(base0,&ssa.vars,&legacy,&regions,false)),"base1":i2c_sorted_legacy_keys(legacy_chain_keys(base1,&ssa.vars,&legacy,&regions,false))}}));
+    }
+
+    #[test]
+    fn alias_i2c_matrix() {
+        alias_i2c_p1();
+        alias_i2c_p2();
+        alias_i2c_p3();
+        alias_i2c_p4();
+        alias_i2c_p5();
+        alias_i2c_c1();
+        alias_i2c_c2();
+        alias_i2c_c3();
+        alias_i2c_c4();
+    }
+
     fn imports_with(entries: &[(u64, &str)]) -> HashMap<u64, String> {
         entries
             .iter()
