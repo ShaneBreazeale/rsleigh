@@ -18,7 +18,8 @@
   ],
   "excludeFiles": [
     "CLAUDE.md",
-    "audit-gpt-5.5.md"
+    "audit-gpt-5.5.md",
+    "llms.txt"
   ],
   "rules": [
     "Use the rsleigh CLI for end-user reverse-engineering workflows and rsleigh-api when embedding decoders in Rust applications.",

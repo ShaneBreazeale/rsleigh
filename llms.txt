@@ -1,0 +1,36 @@
+# rsleigh
+
+> Pure-Rust SLEIGH decoder, P-code emitter, and reverse-engineering toolkit. Decodes PE, ELF, Mach-O, WebAssembly, and raw firmware to disassembly, P-code, SSA, xrefs, and C-like pseudocode without a Ghidra JVM.
+
+The decoder and P-code lifter are the stable core. Pseudocode is experimental. Treat P-code and decoded bytes as primary evidence.
+
+Context7 library ID: `/shanebreazeale/rsleigh`
+
+## Agent contract
+
+- Use the CLI for reverse-engineering workflows and `rsleigh-api` when embedding decoders in Rust.
+- Start with `--agent-brief`, then `--card --pcode`. Add `--decompile` only after the lift looks coherent.
+- Validate machine-readable output: reject a top-level `error`, require the documented `schema`, and read `warnings` and `limits`.
+- `rsleigh.finding/v1` is the shared finding envelope. Do not treat `severity` as confidence, or `confidence: "proved"` as a positive result without `verdict == "Reachable"`.
+- Raw firmware requires `--raw ARCH --base ADDR` on every command.
+
+## Docs
+
+- [README](https://github.com/ShaneBreazeale/rsleigh/blob/master/README.md): install, quickstart, triage, and documentation map
+- [Agent workflow](https://github.com/ShaneBreazeale/rsleigh/blob/master/docs/agent-workflow.md): artifact-by-question table, schema checks, reporting contract
+- [Agent contract](https://github.com/ShaneBreazeale/rsleigh/blob/master/docs/AGENTS-rsleigh.md): drop-in workspace instructions
+- [Architecture matrix](https://github.com/ShaneBreazeale/rsleigh/blob/master/docs/architectures.md): decode/lift/discovery/decompile support by ISA
+- [CLI triage](https://github.com/ShaneBreazeale/rsleigh/blob/master/docs/cli-triage.md): IOC, Authenticode, resources, vulnscan
+- [Findings NDJSON](https://github.com/ShaneBreazeale/rsleigh/blob/master/docs/findings-ndjson.md): `rsleigh.finding/v1` fields and ingestion
+- [SMT backend](https://github.com/ShaneBreazeale/rsleigh/blob/master/docs/smt-backend.md): optional Z3 reachability, not exploitability
+- [SMT candidates](https://github.com/ShaneBreazeale/rsleigh/blob/master/docs/smt-candidates.md): ranked source-to-sink candidates
+- [Decompiler passes](https://github.com/ShaneBreazeale/rsleigh/blob/master/docs/decompiler-passes.md): CFG, SSA, fold, structure, print
+- [Features](https://github.com/ShaneBreazeale/rsleigh/blob/master/docs/features.md): CLI and analysis surface
+- [Testing](https://github.com/ShaneBreazeale/rsleigh/blob/master/docs/TESTING.md): regression and oracle suite
+- [PE64 SEH pipeline](https://github.com/ShaneBreazeale/rsleigh/blob/master/docs/pe64-seh-pipeline.md): unwind, TLS, SMC fixpoint
+- [PyVMProtect walkthrough](https://github.com/ShaneBreazeale/rsleigh/blob/master/docs/showcase/crackme3-pyvmprotect.md): packed-code case study
+
+## Optional
+
+- [crates.io](https://crates.io/crates/rsleigh): `cargo install rsleigh`
+- [rsleigh-api](https://crates.io/crates/rsleigh-api): embeddable decoder

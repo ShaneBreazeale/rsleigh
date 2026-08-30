@@ -237,7 +237,7 @@ The CLI loads ELF32/64, PE32/64, Mach-O 64, WebAssembly, and raw blobs. See
 | IOC, signature, and resource extraction | [CLI triage](docs/cli-triage.md) |
 | Solver scope and interpretation | [SMT backend](docs/smt-backend.md) and [SMT candidates](docs/smt-candidates.md) |
 | Pipeline internals and validation | [Decompiler passes](docs/decompiler-passes.md) and [testing](docs/TESTING.md) |
-| Context7 library ID | `/ShaneBreazeale/rsleigh` |
+| Context7 library ID | `/shanebreazeale/rsleigh` |
 
 ## Rust API
 
