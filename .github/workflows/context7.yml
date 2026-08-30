@@ -41,4 +41,4 @@ jobs:
             --request POST https://context7.com/api/v1/refresh \
             --header "Content-Type: application/json" \
             --header "Authorization: Bearer $CONTEXT7_API_KEY" \
-            --data '{"libraryName":"/shanebreazeale/rsleigh"}'
+            --data "{\"libraryName\":\"/${{ github.repository }}\"}"

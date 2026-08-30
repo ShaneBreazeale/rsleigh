@@ -72,3 +72,32 @@ their human and legacy aggregate JSON formats unless `--findings-ndjson` is
 requested explicitly. VM recon helpers likewise preserve their concise human
 rendering by default and emit one shared-schema record per recovered artifact
 when the flag is present.
+
+## Safe model and pipeline ingestion
+
+Parse findings one line at a time and retain the original record. Do not merge
+records solely because their summaries look similar: `producer`, `kind`,
+`function`, `address`, and producer-specific evidence distinguish separate
+claims.
+
+```bash
+# Reject malformed or wrong-version records.
+jq -e 'select(.schema == "rsleigh.finding/v1")' findings.ndjson >/dev/null
+
+# Show positive solver-backed reachability results only.
+jq -c 'select(
+  .schema == "rsleigh.finding/v1" and
+  .stage == "prove" and
+  .confidence == "proved" and
+  .verdict == "Reachable"
+)' findings.ndjson
+
+# Keep lower-confidence leads separate for manual verification.
+jq -c 'select(.confidence == "pattern" or .confidence == "heuristic")' \
+  findings.ndjson
+```
+
+An LLM summary should cite the record's `producer`, `kind`, function/address,
+confidence, stage, and relevant evidence fields. It must not translate
+`severity: "HIGH"` into high confidence, or `confidence: "proved"` into a
+positive verdict without also checking `verdict`.

@@ -30,6 +30,10 @@ If pseudocode and P-code disagree, believe P-code and report the disagreement.
   enforces a hard maximum of 100 functions and 50 findings.
 - Use `rsleigh FILE --index DIR` once when repeated queries would otherwise
   rediscover and relift the same binary.
+- Validate machine-readable output before reasoning from it. Reject a top-level
+  `error`, require the documented `schema`, and check `warnings` and `limits`.
+- Do not assume a successful process status means an index was written; require
+  a non-empty `index.json` with `schema == "rsleigh.index/v1"`.
 
 ## Evidence ladder
 
@@ -82,3 +86,23 @@ rsleigh firmware.bin --raw arm32 --base 0x08000000 --disasm 0x08001234
 ```
 
 Do not guess the raw architecture or image base.
+
+## Required report format
+
+For every material conclusion, report:
+
+```text
+Question: <narrow question answered>
+Binary: <path> sha256=<hash> arch=<arch> image_base=<address>
+Function: <name> address=<address>
+Command: <exact invocation>
+Evidence: <specific instruction, P-code operation, or finding fields>
+Assessment: confirmed | provisional | unsupported
+Gaps: <warnings, truncation, unresolved calls, or unmodeled behavior>
+Next: <one smallest useful follow-up command>
+```
+
+Never silently convert an address, inferred name, heuristic function boundary,
+pattern match, or pseudocode expression into a confirmed fact. If the current
+artifact does not answer the question, say `unsupported` and request the next
+smallest evidence layer.

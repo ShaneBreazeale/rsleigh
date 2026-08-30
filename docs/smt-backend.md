@@ -1,7 +1,7 @@
 # SMT backend (`--features smt`)
 
-Branch: `feat/smt-backend`. Off by default. Pulls the `z3` crate
-which links libz3 (C++).
+The feature is off by default and pulls the `z3` crate, which links libz3
+(C++). Build the CLI with `--features smt` before using the SMT commands.
 
 ## Why
 
@@ -11,10 +11,12 @@ SMT backend lifts the SSA cone of a candidate sink into Z3
 bitvector terms and asks the solver: "is there an input byte stream
 that lands an attacker-controlled value at this sink slot?"
 
-If `SAT`: extract a model and emit it as a concrete trigger-input
-(byte offset → value). That's a CVE-class proof of reachability.
-If `UNSAT`: the sink is unreachable from the configured source
-under the path examined — a real false-positive cull.
+If `SAT`: extract a model for the operations, summaries, bounds, and path
+conditions represented by rsleigh. This is evidence of reachability within the
+model, not proof of exploitability and not by itself a CVE claim.
+If `UNSAT`: the configured source cannot reach the sink under the modeled path
+and assumptions. Unsupported operations, omitted paths, summaries, and bounds
+still limit the conclusion.
 
 The existing `rsleigh-decompile/src/opaque_pred.rs` already
 classifies branches with sampling-based reasoning. The SMT
@@ -29,16 +31,16 @@ System libz3 required.
 
 ```sh
 brew install z3
-BINDGEN_EXTRA_CLANG_ARGS="-I$(brew --prefix z3)/include" \
-RUSTFLAGS="-L $(brew --prefix z3)/lib" \
-  cargo build -p rsleigh-decompile --release --features smt
+CPATH=$(brew --prefix z3)/include \
+LIBRARY_PATH=$(brew --prefix z3)/lib \
+  cargo build -p rsleigh-cli --release --features smt
 ```
 
 ### Linux (apt)
 
 ```sh
 sudo apt install libz3-dev
-cargo build -p rsleigh-decompile --release --features smt
+cargo build -p rsleigh-cli --release --features smt
 ```
 
 System include + lib paths are picked up by default; no env
@@ -56,7 +58,7 @@ RUSTFLAGS="-L $(brew --prefix z3)/lib" \
 cargo test -p rsleigh-decompile --release --features smt --lib smt_verify
 ```
 
-Test surface (May 2026):
+Representative test surface:
 
 - `smt_verify` (5 tests) — opaque-pred verifier roundtrips,
   including the Themida `x*x - x*(x-1) - x == 0` identity, and the
@@ -69,7 +71,8 @@ Test surface (May 2026):
 - `smt_explore_integration` (3 CLI tests) — host-built C fixtures
   driven through the rsleigh binary, asserting `REACHABLE`.
 
-All green at the time of writing.
+Run these tests in the current checkout rather than relying on historical test
+counts as a compatibility guarantee.
 
 ## Public API
 

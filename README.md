@@ -15,6 +15,22 @@ The decoder and P-code lifter are the stable core. The decompiler and
 analysis passes are useful but experimental: verify important conclusions
 against the assembly, P-code, or another tool.
 
+## Contents
+
+- [A real-world solve](#a-real-world-solve)
+- [Capabilities](#capabilities)
+- [Installation](#installation)
+- [Quickstart](#quickstart)
+- [Triage workflow](#triage-workflow)
+- [Packed-code and custom-VM analysis](#packed-code-and-custom-vm-analysis)
+- [SMT-assisted analysis](#smt-assisted-analysis)
+- [Supported targets](#supported-targets)
+- [Rust API](#rust-api)
+- [Development and testing](#development-and-testing)
+- [Project status](#project-status)
+- [Contributing](#contributing)
+- [License](#license)
+
 ## A real-world solve
 
 rsleigh recovered `CTF{pyvm_r0cks}` from a PyVMProtect-packed PE64 Python
@@ -72,6 +88,23 @@ schemas and caps, then start with one capped JSON map:
 rsleigh ./sample.exe --agent-brief
 ```
 
+Choose the artifact that matches the question instead of asking for the largest
+possible dump:
+
+| Question | Start with | Escalate only when needed |
+|---|---|---|
+| What kind of sample is this? | `rsleigh FILE --agent-brief` | Complete `--ioc`, `--sigcheck`, or `--resources` producers |
+| Which functions matter? | `--agent-brief`, `--search`, or `--xrefs` | `--index DIR` for repeated queries |
+| What does one function do? | `FUNCTION --card --pcode` | Add `--decompile` after checking the lift |
+| What instruction semantics were lifted? | `--pcode-json FUNCTION` | `--ssa-json FUNCTION` for data-flow reasoning |
+| Is a source-to-sink path reachable? | `--vulnscan --findings-ndjson` | `--smt-candidates FUNCTION` with the optional `smt` build |
+| Is this raw firmware? | `--raw ARCH --base ADDR` | Keep both values explicit on every follow-up command |
+
+For model-assisted work, preserve the file hash, architecture, image base,
+function address, command, warnings, and truncation limits with every
+conclusion. The [agent workflow reference](docs/agent-workflow.md) defines the
+evidence and reporting contract.
+
 Start with discovered functions, then narrow the analysis:
 
 ```bash
@@ -115,7 +148,7 @@ Raw firmware accepts an architecture and optional base address:
 
 ```bash
 rsleigh ./firmware.bin --raw arm32 --base 0x08000000
-rsleigh ./firmware.bin --raw arm32 --disasm 0x08001234
+rsleigh ./firmware.bin --raw arm32 --base 0x08000000 --disasm 0x08001234
 ```
 
 ## Triage workflow
@@ -192,6 +225,19 @@ discovery, and decompile separately for each ISA/mode.
 
 The CLI loads ELF32/64, PE32/64, Mach-O 64, WebAssembly, and raw blobs. See
 [architecture support](docs/architectures.md) for discovery details and gaps.
+
+### Documentation map
+
+| Need | Reference |
+|---|---|
+| Bounded LLM/coding-agent loop | [Agent workflow](docs/agent-workflow.md) |
+| Drop-in workspace instructions | [Agent contract](docs/AGENTS-rsleigh.md) |
+| Finding fields and confidence semantics | [Findings NDJSON](docs/findings-ndjson.md) |
+| Decode/lift/discovery/decompile limits | [Architecture matrix](docs/architectures.md) |
+| IOC, signature, and resource extraction | [CLI triage](docs/cli-triage.md) |
+| Solver scope and interpretation | [SMT backend](docs/smt-backend.md) and [SMT candidates](docs/smt-candidates.md) |
+| Pipeline internals and validation | [Decompiler passes](docs/decompiler-passes.md) and [testing](docs/TESTING.md) |
+| Context7 library ID | `/ShaneBreazeale/rsleigh` |
 
 ## Rust API
 

@@ -43,3 +43,24 @@ vtable/function-pointer references, and ISA-specific branch patterns.
 
 Discovery success means the tool found a plausible function boundary. It does
 not upgrade that ISA's lift or decompile status.
+
+## Agent preflight
+
+Before interpreting output, record four independent facts: container, ISA/mode,
+endianness where applicable, and image base. Do not infer later-stage support
+from a successful decode.
+
+1. Read `file.arch`, `file.format`, `file.imagebase`, `warnings`, and `trust`
+   from `--agent-brief` for parsed PE, ELF, or Mach-O inputs.
+2. For raw images, supply `--raw ARCH --base ADDR` on every invocation. Treat
+   both values as analyst-provided assumptions until independently verified.
+3. Check this table at the stage used by the claim. A `tested` decode does not
+   make partial lifting or decompilation authoritative.
+4. If a function card reports unresolved indirect calls or truncation, include
+   that gap in the assessment; absence of a direct xref is not absence of a
+   runtime edge.
+
+When the required cell is `partial`, prefer instruction bytes and disassembly,
+then P-code if coherent. Mark pseudocode-only conclusions `provisional`. When
+the input mode or base is unknown, mark the conclusion `unsupported` rather
+than guessing.

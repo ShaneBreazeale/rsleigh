@@ -24,6 +24,22 @@ rsleigh sample.exe 0x140001000 --card --pcode
 rsleigh sample.exe 0x140001000 --card --pcode --decompile
 ```
 
+## Choose an artifact by question
+
+| Analyst question | Command or artifact | Evidence level | Important check |
+|---|---|---|---|
+| What is the file and where should I start? | `rsleigh FILE --agent-brief` | file + bounded navigation map | Reject a top-level `error`; inspect `warnings` and `limits`. |
+| Where is a string, API, constant, or behavior used? | `--search`, then `--xrefs FUNCTION` | discovery + direct references | Direct xrefs omit unresolved indirect calls. |
+| What are the lifted instruction semantics? | `FUNCTION --card --pcode` or `--pcode-json FUNCTION` | decode + lift | Check constructor provenance and architecture warnings. |
+| What does the function probably do? | `FUNCTION --card --pcode --decompile` | experimental reconstruction | Verify important claims against P-code or disassembly. |
+| Which leads should be investigated? | `--ioc`, `--vulnscan`, or VM helpers with `--findings-ndjson` | pattern or heuristic | Confidence is evidence quality, not severity or truth. |
+| Is a named flow reachable in the model? | `--smt-candidates FUNCTION` | solver result over modeled paths | Require `verdict == "Reachable"`; review unsupported operations and bounds. |
+| Will analysis span several turns? | `--index DIR` | reusable bounded map | Confirm the index hash matches the current binary. |
+| Is the input raw firmware? | `--raw ARCH --base ADDR` on every command | caller-supplied file context | Never infer the ISA, mode, endianness, or image base from output alone. |
+
+Do not use pseudocode to answer an instruction-semantics question when P-code
+is available. Do not use a bounded brief to claim that no other findings exist.
+
 The decoder and P-code are primary evidence. Pseudocode is an experimental
 hypothesis. IOC, vulnerability, and VM-helper output is a lead until verified.
 For SMT findings, `confidence == "proved"` means the solver established the
@@ -124,6 +140,30 @@ The agent brief and index currently support parsed PE, ELF, and Mach-O targets.
 Use the normal `--raw ARCH --base ADDR` workflow for raw firmware and the
 dedicated frontend for WebAssembly.
 
+### Validate machine-readable success
+
+Do not treat process completion alone as proof that analysis succeeded. Some
+unsupported analysis paths return a structured top-level `error`, while some
+index failures are diagnostic-only. Validate the expected schema and artifacts:
+
+```bash
+rsleigh FILE --agent-brief > brief.json
+jq -e '
+  .schema == "rsleigh.agent-brief/v1" and
+  (has("error") | not) and
+  (.functions | type == "array") and
+  (.warnings | type == "array") and
+  (.limits | type == "object")
+' brief.json >/dev/null
+
+rsleigh FILE --index out/
+test -s out/index.json
+jq -e '.schema == "rsleigh.index/v1"' out/index.json >/dev/null
+```
+
+Machine-readable records are written to stdout or files; diagnostics and
+progress may use stderr. Capture them separately when reproducibility matters.
+
 ## `--card`
 
 ```bash
@@ -174,6 +214,28 @@ jq '.functions[] | select(.called_by | length > 10)' out/xrefs.json
 jq 'select(.severity == "HIGH" or .severity == "CRIT")' out/findings.ndjson
 ```
 
+## LLM reporting contract
+
+Every conclusion should carry enough provenance for another analyst or model to
+reproduce it. Use this shape in prose or structured notes:
+
+```text
+Question: <the narrow behavior or reachability question>
+Binary: <path> sha256=<hash> arch=<architecture> image_base=<address>
+Function: <name> address=<address>
+Command: <exact rsleigh invocation>
+Evidence: <instruction/P-code/finding fields that support the claim>
+Assessment: confirmed | provisional | unsupported
+Gaps: <truncation, unresolved indirect calls, architecture warnings, missing paths>
+Next: <one smallest command that could resolve the main gap>
+```
+
+Use `confirmed` only for file facts, decoded bytes, coherent lifted semantics,
+or a solver verdict within its documented model. Pseudocode explanations and
+pattern matches are normally `provisional`. Use `unsupported` rather than
+guessing when the architecture, base, function boundary, or required semantics
+are unknown.
+
 ## Limits and evidence gaps
 
 - Direct-call xrefs do not prove the absence of indirect, virtual, or
@@ -185,3 +247,6 @@ jq 'select(.severity == "HIGH" or .severity == "CRIT")' out/findings.ndjson
   emitted address-specific commands instead of raising every budget at once.
 - The index contains analysis results, not a cache of decoded IR; changing the
   binary requires rebuilding the index.
+- A zero process status does not replace schema validation. Check top-level
+  `error`, expected arrays/objects, `warnings`, `limits`, and index files before
+  consuming output.

@@ -16,11 +16,11 @@ you need complete triage coverage rather than the brief's navigation budget.
 | `--sigcheck` | Authenticode signature parse (signer, issuer, timestamp, chain) | yes | — |
 | `--resources` | PE resource directory walk; payload extraction | yes | `--dump <DIR>` |
 
-All three are independent of the decoder/decompiler pipeline and run in
-constant time relative to binary size — they only walk file structure
-and string runs, never the SSA passes. Use them as the first call on
-any unknown sample before deciding which individual functions to inspect.
-Avoid whole-binary pseudocode dumps in agent workflows.
+All three are independent of the decoder/decompiler pipeline. They walk file
+structure and string runs without invoking the SSA passes, so they are suitable
+as an inexpensive first pass even though work still scales with input size. Use
+them before deciding which individual functions to inspect. Avoid whole-binary
+pseudocode dumps in agent workflows.
 
 ---
 
@@ -370,8 +370,10 @@ rsleigh sample.exe --vulnscan
 rsleigh sample.exe 0x401000 --disasm
 ```
 
-For pipeline ingestion, replace each command with `--json` and pipe
-into `jq` / your enrichment layer.
+For pipeline ingestion, add `--json` where the flag documents a JSON form and
+pipe it into `jq` or your enrichment layer. For IOC and vulnerability findings
+that must share one evidence vocabulary, prefer `--findings-ndjson` and the
+[shared schema](findings-ndjson.md). Preserve stderr separately from stdout.
 
 ## See also
 

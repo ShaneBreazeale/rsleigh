@@ -3,13 +3,18 @@
   "projectTitle": "rsleigh",
   "description": "Pure-Rust SLEIGH decoder, P-code emitter, and reverse-engineering toolkit with multi-architecture decompilation.",
   "branch": "master",
-  "folders": [],
+  "folders": [
+    "docs"
+  ],
   "excludeFolders": [
     ".github",
+    ".opt",
+    ".claude",
     "generated",
     "target",
+    "results",
     "docs/superpowers",
-    "test-harness/fixtures"
+    "test-harness"
   ],
   "excludeFiles": [
     "CLAUDE.md",
@@ -19,9 +24,13 @@
     "Use the rsleigh CLI for end-user reverse-engineering workflows and rsleigh-api when embedding decoders in Rust applications.",
     "Check the documented target and analysis-stage support before selecting architecture-dependent features.",
     "Treat rsleigh.finding/v1 NDJSON records as the stable machine-readable finding envelope.",
-    "Prefer the bounded --agent-brief, --index, and --card modes for agent-driven reverse engineering."
+    "Prefer the bounded --agent-brief, --index, and --card modes for agent-driven reverse engineering.",
+    "Treat P-code and decoded bytes as primary evidence; treat decompiler pseudocode as experimental and verify important claims against P-code or disassembly."
   ],
   "previousVersions": [
+    {
+      "tag": "v0.4.3"
+    },
     {
       "tag": "v0.4.2"
     },
