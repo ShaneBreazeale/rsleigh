@@ -382,6 +382,53 @@ mod tests {
         });
     }
 
+    fn has_x86_64_parent_clear(ops: &[PcodeOp], expected_offset: u64) -> bool {
+        let expected = Varnode::register(expected_offset, 8);
+        ops.iter().any(|op| match op {
+            PcodeOp::IntZext { out, .. } => *out == expected,
+            PcodeOp::Copy { out, input } => *out == expected
+                && input.space == AddressSpaceId::Unique
+                && ops.iter().any(
+                    |candidate| matches!(candidate, PcodeOp::IntZext { out, .. } if out == input),
+                ),
+            _ => false,
+        })
+    }
+
+    #[test]
+    fn generated_x86_64_mov_r32_clears_the_destination_parent() {
+        with_decoder_stack(|| {
+            let cases: &[(&[u8], u64)] = &[
+                (&[0x89, 0xf9], 0x08),       // MOV ECX,EDI
+                (&[0x89, 0xfb], 0x18),       // MOV EBX,EDI
+                (&[0x89, 0xfe], 0x30),       // MOV ESI,EDI
+                (&[0x89, 0xff], 0x38),       // MOV EDI,EDI
+                (&[0x41, 0x89, 0xf8], 0x80), // MOV R8D,EDI
+                (&[0x41, 0x89, 0xf9], 0x88), // MOV R9D,EDI
+                (&[0x41, 0x89, 0xfa], 0x90), // MOV R10D,EDI
+                (&[0x41, 0x89, 0xfb], 0x98), // MOV R11D,EDI
+                (&[0x41, 0x89, 0xfc], 0xa0), // MOV R12D,EDI
+                (&[0x41, 0x89, 0xfd], 0xa8), // MOV R13D,EDI
+                (&[0x41, 0x89, 0xfe], 0xb0), // MOV R14D,EDI
+                (&[0x41, 0x89, 0xff], 0xb8), // MOV R15D,EDI
+            ];
+
+            let mut decoder = Decoder::new(Architecture::X86_64);
+            for &(bytes, expected_offset) in cases {
+                let instruction = decoder
+                    .decode_unoptimized(bytes, 0x1000)
+                    .unwrap_or_else(|error| panic!("decode {bytes:02x?}: {error:?}"));
+                assert!(
+                    has_x86_64_parent_clear(&instruction.ops, expected_offset),
+                    "bytes={bytes:02x?} expected={:?} ops={:#?}",
+                    Varnode::register(expected_offset, 8),
+                    instruction.ops
+                );
+                assert!(instruction.constructor.is_some());
+            }
+        });
+    }
+
     #[test]
     fn diagnostic_decode_preserves_pre_optimization_pcode() {
         with_decoder_stack(|| {
@@ -422,6 +469,61 @@ mod tests {
                 inst.ops
             );
             assert!(inst.constructor.is_some());
+        });
+    }
+
+    #[test]
+    fn arm32_bx_lr_emits_mode_switch_state() {
+        with_decoder_stack(|| {
+            let mut decoder = Decoder::new(Architecture::ARM32);
+            let instruction = decoder
+                .decode_unoptimized(&[0x1e, 0xff, 0x2f, 0xe1], 0x1000)
+                .expect("decode ARM32 BX LR");
+
+            let mode_value = instruction
+                .ops
+                .iter()
+                .find_map(|op| match op {
+                    PcodeOp::IntNotEq { out, .. } => Some(out.clone()),
+                    _ => None,
+                })
+                .expect("BX LR computes the next instruction-set mode");
+            let mut source = Varnode::register(0x78, 1);
+            for _ in 0..instruction.ops.len() {
+                if source == mode_value {
+                    break;
+                }
+                source = instruction
+                    .ops
+                    .iter()
+                    .find_map(|op| match op {
+                        PcodeOp::Copy { out, input } if *out == source => Some(input.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| panic!("ISAModeSwitch copy chain: {:#?}", instruction.ops));
+            }
+            assert_eq!(source, mode_value, "{:#?}", instruction.ops);
+            assert!(
+                instruction.ops.iter().any(|op| {
+                    matches!(
+                        op,
+                        PcodeOp::Copy { out, input }
+                            if *out == Varnode::register(0x69, 1)
+                                && *input == Varnode::register(0x78, 1)
+                    )
+                }),
+                "{:#?}",
+                instruction.ops
+            );
+            assert!(
+                instruction
+                    .ops
+                    .iter()
+                    .any(|op| matches!(op, PcodeOp::CallOther { .. })),
+                "{:#?}",
+                instruction.ops
+            );
+            assert!(instruction.constructor.is_some());
         });
     }
 }

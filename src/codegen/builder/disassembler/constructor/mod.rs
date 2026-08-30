@@ -54,6 +54,12 @@ impl ConstructorStruct {
         }
     }
 
+    fn collect_dynamic_token_field(value: &DynamicValueType, out: &mut Vec<crate::TokenFieldId>) {
+        if let DynamicValueType::TokenField(token_field) = value {
+            out.push(*token_field);
+        }
+    }
+
     fn collect_expr_contexts(expr: &Expr, out: &mut Vec<crate::ContextId>) {
         match expr {
             Expr::Value(element) => Self::collect_expr_element_contexts(element, out),
@@ -101,6 +107,56 @@ impl ConstructorStruct {
         }
     }
 
+    fn collect_expr_token_fields(expr: &Expr, out: &mut Vec<crate::TokenFieldId>) {
+        match expr {
+            Expr::Value(element) => Self::collect_expr_element_token_fields(element, out),
+            Expr::Op(op) => {
+                Self::collect_expr_token_fields(&op.left, out);
+                Self::collect_expr_token_fields(&op.right, out);
+            }
+        }
+    }
+
+    fn collect_expr_element_token_fields(
+        element: &ExprElement,
+        out: &mut Vec<crate::TokenFieldId>,
+    ) {
+        match element {
+            ExprElement::Value { value, .. } => Self::collect_expr_value_token_fields(value, out),
+            ExprElement::UserCall(call) => {
+                for param in call.params.iter() {
+                    Self::collect_expr_token_fields(param, out);
+                }
+            }
+            ExprElement::Reference(_) => {}
+            ExprElement::Op(op) => Self::collect_expr_token_fields(&op.input, out),
+            ExprElement::New(new_expr) => {
+                Self::collect_expr_token_fields(&new_expr.first, out);
+                if let Some(second) = &new_expr.second {
+                    Self::collect_expr_token_fields(second, out);
+                }
+            }
+            ExprElement::CPool(cpool) => {
+                for param in cpool.params.iter() {
+                    Self::collect_expr_token_fields(param, out);
+                }
+            }
+        }
+    }
+
+    fn collect_expr_value_token_fields(value: &ExprValue, out: &mut Vec<crate::TokenFieldId>) {
+        match value {
+            ExprValue::TokenField(token_field) => out.push(token_field.id),
+            ExprValue::IntDynamic(dynamic) => {
+                Self::collect_dynamic_token_field(&dynamic.attach_value, out);
+            }
+            ExprValue::VarnodeDynamic(dynamic) => {
+                Self::collect_dynamic_token_field(&dynamic.attach_value, out);
+            }
+            _ => {}
+        }
+    }
+
     fn collect_dis_expr_contexts(expr: &crate::disassembly::Expr, out: &mut Vec<crate::ContextId>) {
         use crate::disassembly::{Expr as DisExpr, ExprElement as DisElement, ReadScope};
         match expr {
@@ -130,6 +186,7 @@ impl ConstructorStruct {
         //let mut calc_fields = IndexMap::new();
         let mut ass_fields: IndexMap<_, _> = IndexMap::new();
         let mut context_ids = Vec::new();
+        let mut execution_token_fields = Vec::new();
         //tables are always included to the struct, used or not
         let table_fields = constructor
             .pattern
@@ -221,6 +278,10 @@ impl ConstructorStruct {
                     match statement {
                         Statement::Assignment(assignment) => {
                             Self::collect_expr_contexts(&assignment.right, &mut context_ids);
+                            Self::collect_expr_token_fields(
+                                &assignment.right,
+                                &mut execution_token_fields,
+                            );
                             match &assignment.var {
                                 AssignmentWrite::Variable { value, .. } => {
                                     if let AssignmentWriteVariable::DynVarnode {
@@ -228,39 +289,60 @@ impl ConstructorStruct {
                                     } = value
                                     {
                                         Self::collect_dynamic_context(value_id, &mut context_ids);
+                                        Self::collect_dynamic_token_field(
+                                            value_id,
+                                            &mut execution_token_fields,
+                                        );
                                     }
                                 }
                                 AssignmentWrite::Memory { addr, .. } => {
                                     Self::collect_expr_contexts(addr, &mut context_ids);
+                                    Self::collect_expr_token_fields(
+                                        addr,
+                                        &mut execution_token_fields,
+                                    );
                                 }
                                 AssignmentWrite::TableExport { .. } => {}
                             }
                         }
                         Statement::CpuBranch(branch) => {
                             Self::collect_expr_contexts(&branch.dst, &mut context_ids);
+                            Self::collect_expr_token_fields(
+                                &branch.dst,
+                                &mut execution_token_fields,
+                            );
                             if let Some(cond) = &branch.cond {
                                 Self::collect_expr_contexts(cond, &mut context_ids);
+                                Self::collect_expr_token_fields(cond, &mut execution_token_fields);
                             }
                         }
                         Statement::LocalGoto(goto) => {
                             if let Some(cond) = &goto.cond {
                                 Self::collect_expr_contexts(cond, &mut context_ids);
+                                Self::collect_expr_token_fields(cond, &mut execution_token_fields);
                             }
                         }
                         Statement::UserCall(call) => {
                             for param in call.params.iter() {
                                 Self::collect_expr_contexts(param, &mut context_ids);
+                                Self::collect_expr_token_fields(param, &mut execution_token_fields);
                             }
                         }
                         Statement::Export(export) => match export {
                             Export::Reference { addr, .. } => {
                                 Self::collect_expr_contexts(addr, &mut context_ids);
+                                Self::collect_expr_token_fields(addr, &mut execution_token_fields);
                             }
                             Export::Value(addr) => {
                                 Self::collect_expr_contexts(addr, &mut context_ids);
+                                Self::collect_expr_token_fields(addr, &mut execution_token_fields);
                             }
                             Export::AttachVarnode { attach_value, .. } => {
                                 Self::collect_dynamic_context(attach_value, &mut context_ids);
+                                Self::collect_dynamic_token_field(
+                                    attach_value,
+                                    &mut execution_token_fields,
+                                );
                             }
                             Export::Table { .. } => {}
                         },
@@ -268,6 +350,28 @@ impl ConstructorStruct {
                     }
                 }
             }
+        }
+
+        execution_token_fields.sort_by_key(|token_field| token_field.0);
+        execution_token_fields.dedup();
+        let produced_token_fields: Vec<_> = constructor
+            .pattern
+            .produced_token_fields()
+            .map(|field| field.field)
+            .collect();
+        for token_field in execution_token_fields {
+            // A constructor can combine alternatives whose execution blocks use
+            // different token fields. Only retain fields produced by the outer
+            // pattern: those are guaranteed to be available after every match.
+            // Alternative-local fields keep the execution generator's existing
+            // constant/alias fallback behavior.
+            if !produced_token_fields.contains(&token_field) {
+                continue;
+            }
+            ass_fields.entry(token_field).or_insert_with(|| {
+                let token_field = sleigh.token_field(token_field);
+                format_ident!("{}", from_sleigh(token_field.name()))
+            });
         }
 
         context_ids.sort_by_key(|context| context.0);

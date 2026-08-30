@@ -514,17 +514,17 @@ const KNOWN_DIVERGENCES: &[(&str, &str, OracleScore)] = &[
     ),
     (
         "arm32/bx_lr.ghidra.json",
-        "ARM32 lifter omits the BX-LR thumb-mode state switch ops \
-         (INT_AND/INT_NOTEQUAL/COPY into TB/ISAModeSwitch + CALLOTHER \
-         pcodeop) that Ghidra emits; rsleigh produces 5 ops vs Ghidra 6.",
+        "ARM32 BX-LR now emits Ghidra's complete mode-switch sequence; the \
+         remaining mismatch is only CALLOTHER's selector varnode width \
+         (rsleigh normalization uses 8 bytes, Ghidra ARM uses 4).",
         OracleScore {
             instructions: 1,
             decode_failures: 0,
             missing_constructors: 0,
             length_mismatches: 0,
-            missing_ops: 1,
+            missing_ops: 0,
             extra_ops: 0,
-            op_mismatches: 4,
+            op_mismatches: 1,
             destination_mismatches: 0,
         },
     ),
@@ -577,8 +577,7 @@ const KNOWN_DIVERGENCES: &[(&str, &str, OracleScore)] = &[
     (
         "x86_64/pseudocode_dispatch_o2_text.ghidra.json",
         "x86 PUSH/POP omit Ghidra's value temporaries, while 32-bit MOV \
-         subregister clearing is emitted in a different order (and ECX's \
-         clear currently targets the RAX parent register).",
+         subregister clearing is emitted in a different order.",
         OracleScore {
             instructions: 13,
             decode_failures: 0,
@@ -650,7 +649,7 @@ const RAW_SCORE_BASELINES: &[(&str, OracleScore)] = &[
             missing_constructors: 0,
             length_mismatches: 0,
             missing_ops: 0,
-            extra_ops: 3,
+            extra_ops: 4,
             op_mismatches: 5,
             destination_mismatches: 0,
         },
