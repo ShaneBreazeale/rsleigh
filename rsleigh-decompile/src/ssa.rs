@@ -56,9 +56,9 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
         .filter(|edge| edge.kind == CfgEdgeKind::Back)
         .map(|edge| (edge.from, edge.to))
         .collect();
-    let forward_edges: HashSet<(BlockId, BlockId)> = classified_edges
+    let acyclic_edges: HashSet<(BlockId, BlockId)> = classified_edges
         .iter()
-        .filter(|edge| matches!(edge.kind, CfgEdgeKind::Tree | CfgEdgeKind::Forward))
+        .filter(|edge| edge.kind != CfgEdgeKind::Back)
         .map(|edge| (edge.from, edge.to))
         .collect();
 
@@ -76,10 +76,13 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
     // Track which blocks have STORES (not inherited) for each slot key.
     let mut slot_store_blocks: HashMap<SlotKey, Vec<usize>> = HashMap::new();
 
-    // Iterative dataflow: re-process blocks until exit vars stabilize (max 4 passes)
+    // Iterative dataflow: re-process blocks until exit vars stabilize (max 4 passes).
+    // Track the blocks changed by the previous complete pass. Comparing a
+    // snapshot with the live map at the start of the next pass misses changes
+    // made by predecessors that appear later in storage/layout order.
+    let mut changed_blocks: HashSet<BlockId> = HashSet::new();
     for iteration in 0..4u32 {
-        let prev_exit_vars: Vec<HashMap<Varnode, VarId>> = block_exit_vars.clone();
-        let mut changed = false;
+        let changed_last_iteration = std::mem::take(&mut changed_blocks);
 
         for (block_idx, block) in cfg.blocks.iter().enumerate() {
             let block_preds = &preds[block.id.0];
@@ -94,13 +97,7 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                 }
                 let any_pred_changed = block_preds
                     .iter()
-                    .any(|pred| prev_exit_vars[pred.0] != block_exit_vars[pred.0]);
-                // Also check if any predecessor has new keys not in our current entry state
-                let any_new_keys = block_preds.iter().any(|pred| {
-                    block_exit_vars[pred.0]
-                        .keys()
-                        .any(|k| !prev_exit_vars[pred.0].contains_key(k))
-                });
+                    .any(|pred| changed_last_iteration.contains(pred));
                 // Self-loop blocks (block is its own predecessor) must be re-processed
                 // on iteration 1 so that early Phi nodes can be created for loop accumulators.
                 // Without this, the skip condition prevents the block from ever seeing its
@@ -108,7 +105,7 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                 let has_back_edge = block_preds
                     .iter()
                     .any(|pred| back_edges.contains(&(*pred, block.id)));
-                if !any_pred_changed && !any_new_keys && !(has_back_edge && iteration == 1) {
+                if !any_pred_changed && !(has_back_edge && iteration == 1) {
                     continue;
                 }
             }
@@ -122,16 +119,14 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
             // per block; cross-block extension is future work.
             let mut local_global: GlobalMap = HashMap::new();
 
-            // Inherit from the first already-processed tree/forward predecessor.
+            // Inherit from the first already-processed acyclic predecessor.
             // DFS edge classification, rather than block layout order, identifies
             // loop-carried inputs. Back-edge values are merged via Phi nodes below.
             if !block_preds.is_empty() {
-                // First try the DFS tree/forward predecessors that establish
-                // the block's acyclic input state. Cross edges, like back
-                // edges, are merged below instead of seeding the state; using
-                // them here can make cyclic expression DAGs depend on layout.
+                // Tree, forward, and cross edges all establish acyclic input
+                // state. Only a DFS back edge is loop-carried.
                 for pred in block_preds {
-                    if forward_edges.contains(&(*pred, block.id))
+                    if acyclic_edges.contains(&(*pred, block.id))
                         && !block_exit_vars[pred.0].is_empty()
                     {
                         current = block_exit_vars[pred.0].clone();
@@ -369,11 +364,12 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
             let terminator =
                 convert_terminator(&mut ssa, &mut current, &block.terminator, cc, &mut stmts);
 
-            // Build exit stack: inherit from forward predecessor + local stores
+            // Build exit stack: inherit from an acyclic predecessor + local stores.
+            // Block IDs are layout only; a lower-ID predecessor may be a latch.
             let mut exit_stack: StackMap = if !block_preds.is_empty() {
                 block_preds
                     .iter()
-                    .find(|p| p.0 < block.id.0)
+                    .find(|p| acyclic_edges.contains(&(**p, block.id)))
                     .map(|p| block_exit_stack[p.0].clone())
                     .unwrap_or_default()
             } else {
@@ -387,7 +383,7 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
             let mut exit_global: GlobalMap = if !block_preds.is_empty() {
                 block_preds
                     .iter()
-                    .find(|p| p.0 < block.id.0)
+                    .find(|p| acyclic_edges.contains(&(**p, block.id)))
                     .map(|p| block_exit_global[p.0].clone())
                     .unwrap_or_default()
             } else {
@@ -401,7 +397,7 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                 || block_exit_stack[block.id.0] != exit_stack
                 || block_exit_global[block.id.0] != exit_global
             {
-                changed = true;
+                changed_blocks.insert(block.id);
             }
             block_exit_vars[block.id.0] = current;
             block_exit_stack[block.id.0] = exit_stack;
@@ -421,7 +417,7 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
             }
         }
 
-        if iteration > 0 && !changed {
+        if iteration > 0 && changed_blocks.is_empty() {
             break;
         }
     }
@@ -477,11 +473,11 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
             for stmt in &phi_stmts {
                 if let Stmt::Assign(phi_vid) = stmt {
                     if let Expr::Phi(_inputs) = &ssa.vars[phi_vid.0 as usize].expr {
-                        // The first input is typically the forward-predecessor value.
-                        // Find which inputs come from forward preds (pred.0 < bid).
+                        // Relink values from every acyclic predecessor. Cross
+                        // edges are ordinary join inputs, not loop-carried values.
                         let phi_vn = ssa.vars[phi_vid.0 as usize].varnode;
                         for &pred_id in block_preds {
-                            if pred_id.0 < bid {
+                            if acyclic_edges.contains(&(pred_id, BlockId(bid))) {
                                 if let Some(&fwd_var) = block_exit_vars[pred_id.0].get(&phi_vn) {
                                     relink.insert(fwd_var, *phi_vid);
                                 }
@@ -500,7 +496,7 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                     if let Expr::Phi(_inputs) = &ssa.vars[phi_vid.0 as usize].expr {
                         let phi_vn = ssa.vars[phi_vid.0 as usize].varnode;
                         for &pred_id in block_preds {
-                            if pred_id.0 >= bid {
+                            if back_edges.contains(&(pred_id, BlockId(bid))) {
                                 if let Some(&back_var) = block_exit_vars[pred_id.0].get(&phi_vn) {
                                     back_relink.insert(back_var, *phi_vid);
                                 }

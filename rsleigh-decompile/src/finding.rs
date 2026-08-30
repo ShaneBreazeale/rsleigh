@@ -99,7 +99,7 @@ mod tests {
     #[test]
     fn schema_is_flat_and_confidence_is_explicit() {
         let record = FindingRecord::new(
-            "taint_flow",
+            "vulnerability.taint_flow",
             "smt-candidates",
             FindingConfidence::Proved,
             FindingStage::Prove,

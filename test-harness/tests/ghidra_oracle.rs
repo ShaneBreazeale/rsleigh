@@ -5,8 +5,7 @@
 //!
 //! Comparison policy is documented in `test-harness/fixtures/oracle/README.md`.
 //!
-//! Skips silently if no fixtures are present so the test is no-op until a
-//! Ghidra install regenerates oracle JSONs.
+//! `manifest.tsv` is authoritative; missing or unlisted fixture pairs fail.
 
 use pcode_ir::{AddressSpaceId, PcodeOp, Varnode};
 use rsleigh_api::{Architecture, Decoder};
@@ -32,6 +31,7 @@ struct OracleInstr {
     addr: u64,
     len: u32,
     bytes: String,
+    disasm: String,
     pcode: Vec<OracleOp>,
 }
 
@@ -426,10 +426,41 @@ fn fixtures_root() -> PathBuf {
 
 fn discover_oracles() -> Vec<PathBuf> {
     let root = fixtures_root();
-    let mut out = Vec::new();
-    if !root.exists() {
-        return out;
-    }
+    let manifest_path = root.join("manifest.tsv");
+    let manifest = std::fs::read_to_string(&manifest_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", manifest_path.display()));
+    let mut out: Vec<PathBuf> = manifest
+        .lines()
+        .enumerate()
+        .filter_map(|(line_no, line)| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let (input, _language) = line.split_once('\t').unwrap_or_else(|| {
+                panic!(
+                    "{}:{}: expected tab-separated input and Ghidra language",
+                    manifest_path.display(),
+                    line_no + 1
+                )
+            });
+            let input_path = root.join(input);
+            assert!(
+                input_path.is_file(),
+                "manifest input does not exist: {}",
+                input_path.display()
+            );
+            let oracle_path = input_path.with_extension("ghidra.json");
+            assert!(
+                oracle_path.is_file(),
+                "manifest oracle does not exist: {}",
+                oracle_path.display()
+            );
+            Some(oracle_path)
+        })
+        .collect();
+
+    let mut on_disk = Vec::new();
     for arch_dir in std::fs::read_dir(&root).into_iter().flatten().flatten() {
         let p = arch_dir.path();
         if !p.is_dir() {
@@ -440,10 +471,16 @@ fn discover_oracles() -> Vec<PathBuf> {
             if f.extension().and_then(|s| s.to_str()) == Some("json")
                 && f.to_string_lossy().ends_with(".ghidra.json")
             {
-                out.push(f);
+                on_disk.push(f);
             }
         }
     }
+    out.sort();
+    on_disk.sort();
+    assert_eq!(
+        out, on_disk,
+        "manifest.tsv must list every oracle JSON exactly once"
+    );
     out
 }
 
@@ -459,6 +496,22 @@ fn parse_hex(s: &str) -> Vec<u8> {
 /// as `divergence` instead of `fail`; the test panics if a listed fixture
 /// unexpectedly *passes* so the list cannot rot in the green direction.
 const KNOWN_DIVERGENCES: &[(&str, &str, OracleScore)] = &[
+    (
+        "aarch64/bounded_loop_copy_text.ghidra.json",
+        "AArch64 byte loads/stores use fewer address/value temporaries than \
+         Ghidra and materialize STRB's byte value with SUBPIECE instead of \
+         Ghidra's size-aliased COPY chain.",
+        OracleScore {
+            instructions: 24,
+            decode_failures: 0,
+            missing_constructors: 0,
+            length_mismatches: 0,
+            missing_ops: 2,
+            extra_ops: 0,
+            op_mismatches: 4,
+            destination_mismatches: 0,
+        },
+    ),
     (
         "arm32/bx_lr.ghidra.json",
         "ARM32 lifter omits the BX-LR thumb-mode state switch ops \
@@ -505,6 +558,38 @@ const KNOWN_DIVERGENCES: &[(&str, &str, OracleScore)] = &[
             destination_mismatches: 0,
         },
     ),
+    (
+        "arm32/tdpserver_crypto_prefix_text.ghidra.json",
+        "ARM32 block-transfer memory/update ops are ordered differently, \
+         immediate flag helpers are folded, and rotate-right complements are \
+         constants instead of Ghidra's explicit INT_SUB helpers.",
+        OracleScore {
+            instructions: 64,
+            decode_failures: 0,
+            missing_constructors: 0,
+            length_mismatches: 0,
+            missing_ops: 9,
+            extra_ops: 0,
+            op_mismatches: 71,
+            destination_mismatches: 0,
+        },
+    ),
+    (
+        "x86_64/pseudocode_dispatch_o2_text.ghidra.json",
+        "x86 PUSH/POP omit Ghidra's value temporaries, while 32-bit MOV \
+         subregister clearing is emitted in a different order (and ECX's \
+         clear currently targets the RAX parent register).",
+        OracleScore {
+            instructions: 13,
+            decode_failures: 0,
+            missing_constructors: 0,
+            length_mismatches: 0,
+            missing_ops: 3,
+            extra_ops: 0,
+            op_mismatches: 8,
+            destination_mismatches: 0,
+        },
+    ),
 ];
 
 fn known_divergence_for(path: &Path) -> Option<(&'static str, OracleScore)> {
@@ -527,7 +612,184 @@ struct OracleScore {
     destination_mismatches: usize,
 }
 
-fn normalized_ops(decoded: &[PcodeOp], oracle: &[OracleOp]) -> (Vec<NormOp>, Vec<NormOp>) {
+/// Raw generated-lift baselines, before rsleigh's peephole optimizer. Keeping
+/// these separate from `KNOWN_DIVERGENCES` makes optimizer-only changes visible
+/// without relabeling them as generated-lifter regressions.
+const RAW_SCORE_BASELINES: &[(&str, OracleScore)] = &[
+    (
+        "aarch64/bounded_loop_copy_text.ghidra.json",
+        OracleScore {
+            instructions: 24,
+            decode_failures: 0,
+            missing_constructors: 0,
+            length_mismatches: 0,
+            missing_ops: 0,
+            extra_ops: 58,
+            op_mismatches: 63,
+            destination_mismatches: 0,
+        },
+    ),
+    (
+        "arm32/mov_r0_imm.ghidra.json",
+        OracleScore {
+            instructions: 1,
+            decode_failures: 0,
+            missing_constructors: 0,
+            length_mismatches: 0,
+            missing_ops: 0,
+            extra_ops: 5,
+            op_mismatches: 11,
+            destination_mismatches: 0,
+        },
+    ),
+    (
+        "arm32/bx_lr.ghidra.json",
+        OracleScore {
+            instructions: 1,
+            decode_failures: 0,
+            missing_constructors: 0,
+            length_mismatches: 0,
+            missing_ops: 0,
+            extra_ops: 3,
+            op_mismatches: 5,
+            destination_mismatches: 0,
+        },
+    ),
+    (
+        "aarch64/ret.ghidra.json",
+        OracleScore {
+            instructions: 1,
+            decode_failures: 0,
+            missing_constructors: 0,
+            length_mismatches: 0,
+            missing_ops: 0,
+            extra_ops: 0,
+            op_mismatches: 0,
+            destination_mismatches: 0,
+        },
+    ),
+    (
+        "aarch64/csel.ghidra.json",
+        OracleScore {
+            instructions: 4,
+            decode_failures: 0,
+            missing_constructors: 0,
+            length_mismatches: 0,
+            missing_ops: 0,
+            extra_ops: 13,
+            op_mismatches: 21,
+            destination_mismatches: 0,
+        },
+    ),
+    (
+        "arm32/tdpserver_crypto_prefix_text.ghidra.json",
+        OracleScore {
+            instructions: 64,
+            decode_failures: 0,
+            missing_constructors: 0,
+            length_mismatches: 0,
+            missing_ops: 0,
+            extra_ops: 226,
+            op_mismatches: 244,
+            destination_mismatches: 0,
+        },
+    ),
+    (
+        "x86_64/ret_imm16.ghidra.json",
+        OracleScore {
+            instructions: 1,
+            decode_failures: 0,
+            missing_constructors: 0,
+            length_mismatches: 0,
+            missing_ops: 0,
+            extra_ops: 3,
+            op_mismatches: 4,
+            destination_mismatches: 0,
+        },
+    ),
+    (
+        "x86_64/partial_reg.ghidra.json",
+        OracleScore {
+            instructions: 3,
+            decode_failures: 0,
+            missing_constructors: 0,
+            length_mismatches: 0,
+            missing_ops: 0,
+            extra_ops: 2,
+            op_mismatches: 3,
+            destination_mismatches: 0,
+        },
+    ),
+    (
+        "x86_64/pseudocode_dispatch_o2_text.ghidra.json",
+        OracleScore {
+            instructions: 13,
+            decode_failures: 0,
+            missing_constructors: 0,
+            length_mismatches: 0,
+            missing_ops: 0,
+            extra_ops: 24,
+            op_mismatches: 35,
+            destination_mismatches: 0,
+        },
+    ),
+    (
+        "x86_64/simm8_back.ghidra.json",
+        OracleScore {
+            instructions: 1,
+            decode_failures: 0,
+            missing_constructors: 0,
+            length_mismatches: 0,
+            missing_ops: 0,
+            extra_ops: 0,
+            op_mismatches: 0,
+            destination_mismatches: 0,
+        },
+    ),
+];
+
+fn raw_score_baseline_for(path: &Path) -> Option<OracleScore> {
+    let needle = path.to_string_lossy().replace('\\', "/");
+    RAW_SCORE_BASELINES
+        .iter()
+        .find(|(suffix, _)| needle.ends_with(suffix))
+        .map(|(_, score)| *score)
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct OracleScores {
+    raw: OracleScore,
+    optimized: OracleScore,
+}
+
+fn score_ops(score: &mut OracleScore, rs_norm: &[NormOp], gh_norm: &[NormOp]) {
+    score.extra_ops += rs_norm.len().saturating_sub(gh_norm.len());
+    score.missing_ops += gh_norm.len().saturating_sub(rs_norm.len());
+    for (rs_op, gh_op) in rs_norm.iter().zip(gh_norm) {
+        if rs_op != gh_op {
+            score.op_mismatches += 1;
+        }
+        if rs_op.mnemonic == gh_op.mnemonic
+            && matches!(rs_op.mnemonic, "Branch" | "Call")
+            && rs_op.inputs != gh_op.inputs
+        {
+            score.destination_mismatches += 1;
+        }
+    }
+}
+
+fn raw_normalized_ops(decoded: &[PcodeOp], oracle: &[OracleOp]) -> (Vec<NormOp>, Vec<NormOp>) {
+    let mut rs_norm: Vec<NormOp> = decoded.iter().map(rsleigh_op_to_norm).collect();
+    let mut gh_norm: Vec<NormOp> = oracle.iter().filter_map(oracle_op_to_norm).collect();
+    normalize_uniques(&mut rs_norm);
+    normalize_uniques(&mut gh_norm);
+    (rs_norm, gh_norm)
+}
+
+fn optimized_normalized_ops(
+    decoded: &[PcodeOp],
+    oracle: &[OracleOp],
+) -> (Vec<NormOp>, Vec<NormOp>) {
     let mut rs_norm: Vec<NormOp> = decoded.iter().map(rsleigh_op_to_norm).collect();
     let mut gh_norm: Vec<NormOp> = oracle.iter().filter_map(oracle_op_to_norm).collect();
     propagate_const_unique_copies(&mut rs_norm);
@@ -540,45 +802,79 @@ fn normalized_ops(decoded: &[PcodeOp], oracle: &[OracleOp]) -> (Vec<NormOp>, Vec
 }
 
 /// Aggregate a per-instruction lift diff without stopping at the first gap.
-fn score_oracle(path: &Path) -> OracleScore {
+fn score_oracle(path: &Path) -> OracleScores {
     let raw = std::fs::read_to_string(path).expect("read oracle json");
     let oracle: Oracle = serde_json::from_str(&raw).expect("parse oracle json");
     let arch = arch_from_string(&oracle.arch).expect("mapped Ghidra architecture");
     let mut decoder = Decoder::new(arch);
-    let mut score = OracleScore::default();
+    let mut scores = OracleScores::default();
 
     for function in &oracle.functions {
         for instruction in &function.instructions {
-            score.instructions += 1;
+            scores.raw.instructions += 1;
+            scores.optimized.instructions += 1;
             let bytes = parse_hex(&instruction.bytes);
-            let Ok(decoded) = decoder.decode(&bytes, instruction.addr) else {
-                score.decode_failures += 1;
+            let Ok(raw) = decoder.decode_unoptimized(&bytes, instruction.addr) else {
+                scores.raw.decode_failures += 1;
+                scores.optimized.decode_failures += 1;
                 continue;
             };
-            if decoded.constructor.is_none() {
-                score.missing_constructors += 1;
+            if raw.constructor.is_none() {
+                scores.raw.missing_constructors += 1;
+                scores.optimized.missing_constructors += 1;
             }
-            if decoded.len as u32 != instruction.len {
-                score.length_mismatches += 1;
+            if raw.len as u32 != instruction.len {
+                scores.raw.length_mismatches += 1;
+                scores.optimized.length_mismatches += 1;
             }
 
-            let (rs_norm, gh_norm) = normalized_ops(&decoded.ops, &instruction.pcode);
-            score.extra_ops += rs_norm.len().saturating_sub(gh_norm.len());
-            score.missing_ops += gh_norm.len().saturating_sub(rs_norm.len());
-            for (rs_op, gh_op) in rs_norm.iter().zip(&gh_norm) {
-                if rs_op != gh_op {
-                    score.op_mismatches += 1;
-                }
-                if rs_op.mnemonic == gh_op.mnemonic
-                    && matches!(rs_op.mnemonic, "Branch" | "Call")
-                    && rs_op.inputs != gh_op.inputs
-                {
-                    score.destination_mismatches += 1;
-                }
+            let (rs_raw, gh_raw) = raw_normalized_ops(&raw.ops, &instruction.pcode);
+            score_ops(&mut scores.raw, &rs_raw, &gh_raw);
+
+            let mut optimized_ops = raw.ops;
+            pcode_ir::optimize(&mut optimized_ops);
+            let (rs_optimized, gh_optimized) =
+                optimized_normalized_ops(&optimized_ops, &instruction.pcode);
+            score_ops(&mut scores.optimized, &rs_optimized, &gh_optimized);
+        }
+    }
+    scores
+}
+
+fn report_optimized_differences(path: &Path) {
+    let raw = std::fs::read_to_string(path).expect("read oracle json");
+    let oracle: Oracle = serde_json::from_str(&raw).expect("parse oracle json");
+    let arch = arch_from_string(&oracle.arch).expect("mapped Ghidra architecture");
+    let mut decoder = Decoder::new(arch);
+
+    for function in &oracle.functions {
+        for instruction in &function.instructions {
+            let bytes = parse_hex(&instruction.bytes);
+            let Ok(decoded) = decoder.decode(&bytes, instruction.addr) else {
+                continue;
+            };
+            let (rs_norm, gh_norm) = optimized_normalized_ops(&decoded.ops, &instruction.pcode);
+            if rs_norm != gh_norm {
+                let rs_ops: Vec<_> = rs_norm.iter().map(|op| op.mnemonic).collect();
+                let gh_ops: Vec<_> = gh_norm.iter().map(|op| op.mnemonic).collect();
+                let differing_positions: Vec<_> = rs_norm
+                    .iter()
+                    .zip(&gh_norm)
+                    .enumerate()
+                    .filter_map(|(index, (rs, gh))| (rs != gh).then_some(index))
+                    .collect();
+                eprintln!(
+                    "oracle diff: {}@{:#x} {}\n  rsleigh: {:?}\n  ghidra:  {:?}\n  differing positions: {:?}",
+                    path.display(),
+                    instruction.addr,
+                    instruction.disasm,
+                    rs_ops,
+                    gh_ops,
+                    differing_positions
+                );
             }
         }
     }
-    score
 }
 
 fn check_oracle(path: &Path) {
@@ -635,7 +931,7 @@ fn check_oracle(path: &Path) {
                 ins.len
             );
 
-            let (rs_norm, gh_norm) = normalized_ops(&decoded.ops, &ins.pcode);
+            let (rs_norm, gh_norm) = optimized_normalized_ops(&decoded.ops, &ins.pcode);
             // Match rsleigh's pcode peephole: constant-propagate
             // Copy{Unique, Const} into downstream reads, then strip the
             // resulting dead Copies. Apply to both sides so AArch64 csel
@@ -692,21 +988,45 @@ fn ghidra_oracle_parity() {
 
 fn ghidra_oracle_parity_inner() {
     let oracles = discover_oracles();
-    if oracles.is_empty() {
-        eprintln!(
-            "no oracle fixtures present under {}; skipping",
-            fixtures_root().display()
+    assert!(
+        !oracles.is_empty(),
+        "oracle manifest is empty under {}",
+        fixtures_root().display()
+    );
+    let record_scores = std::env::var_os("RSLEIGH_ORACLE_RECORD_SCORES").is_some();
+    if !record_scores {
+        assert_eq!(
+            RAW_SCORE_BASELINES.len(),
+            oracles.len(),
+            "every manifest oracle must have exactly one raw score baseline"
         );
-        return;
     }
     for path in oracles {
-        let score = score_oracle(&path);
-        eprintln!("oracle score: {} {score:?}", path.display());
-        if let Some((reason, expected_score)) = known_divergence_for(&path) {
+        let scores = score_oracle(&path);
+        eprintln!(
+            "oracle scores: {} raw={:?} optimized={:?}",
+            path.display(),
+            scores.raw,
+            scores.optimized
+        );
+        if record_scores {
+            report_optimized_differences(&path);
+            continue;
+        }
+        let expected_raw = raw_score_baseline_for(&path)
+            .unwrap_or_else(|| panic!("missing raw score baseline for {}", path.display()));
+        assert_eq!(
+            scores.raw,
+            expected_raw,
+            "raw oracle score changed for {}; this isolates a generated-lifter \
+             change from optimizer-only differences",
+            path.display()
+        );
+        if let Some((reason, expected_optimized)) = known_divergence_for(&path) {
             eprintln!("known divergence: {}\n  reason: {}", path.display(), reason);
             assert_eq!(
-                score,
-                expected_score,
+                scores.optimized,
+                expected_optimized,
                 "known-divergence score changed for {}; either a regression landed \
                  or the gap improved and its baseline should be updated",
                 path.display()

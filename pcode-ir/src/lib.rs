@@ -105,7 +105,8 @@ pub struct Instruction {
     pub len: u64,
     /// Human-readable disassembly (e.g. "MOV RAX,RBX").
     pub disassembly: String,
-    /// P-code operations (peephole-optimized).
+    /// P-code operations. Stable decoder entry points return these
+    /// peephole-optimized; diagnostic raw-lift APIs may not.
     pub ops: Vec<PcodeOp>,
     /// Optional SLEIGH constructor that emitted this instruction.
     /// Default `None` for backward compatibility with generated crates

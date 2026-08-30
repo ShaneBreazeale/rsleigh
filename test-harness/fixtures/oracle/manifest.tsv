@@ -2,7 +2,10 @@
 x86_64/ret_imm16.bin	x86:LE:64:default
 x86_64/partial_reg.bin	x86:LE:64:default
 x86_64/simm8_back.bin	x86:LE:64:default
+x86_64/pseudocode_dispatch_o2_text.bin	x86:LE:64:default
 aarch64/ret.bin	AARCH64:LE:64:v8A
 aarch64/csel.bin	AARCH64:LE:64:v8A
+aarch64/bounded_loop_copy_text.bin	AARCH64:LE:64:v8A
 arm32/mov_r0_imm.bin	ARM:LE:32:v7
 arm32/bx_lr.bin	ARM:LE:32:v7
+arm32/tdpserver_crypto_prefix_text.bin	ARM:LE:32:v7

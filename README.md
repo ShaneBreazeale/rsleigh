@@ -142,7 +142,6 @@ rsleigh ./packed.exe --vm-bytecode 0x180063858:0x400 \
 
 Add `--findings-ndjson` to any VM helper to emit the shared confidence-bearing
 schema documented in [Findings NDJSON](docs/findings-ndjson.md).
-```
 
 These are pattern-based recon tools, not a general virtualization deobfuscator.
 See the [feature notes](docs/features.md) and

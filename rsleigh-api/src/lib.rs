@@ -206,6 +206,22 @@ impl Decoder {
     /// possible instruction (15 for x86, 4 for fixed-width ISAs). Extra bytes
     /// are ignored.
     pub fn decode(&mut self, bytes: &[u8], addr: u64) -> Result<Instruction, DecodeError> {
+        let mut instruction = self.decode_unoptimized(bytes, addr)?;
+        pcode_ir::optimize(&mut instruction.ops);
+        Ok(instruction)
+    }
+
+    /// Decode a single instruction without the P-code peephole optimizer.
+    ///
+    /// This diagnostic API lets oracle tooling distinguish generated-lifter
+    /// differences from intentional optimizer folds. It is not part of the
+    /// crate's stable embedding surface; normal consumers should use
+    /// [`Decoder::decode`].
+    pub fn decode_unoptimized(
+        &mut self,
+        bytes: &[u8],
+        addr: u64,
+    ) -> Result<Instruction, DecodeError> {
         // Each instruction gets a fresh copy of context. SLEIGH context changes
         // during pattern matching (e.g. REX prefix bits) are local to each
         // instruction and must not leak to the next decode call. Only globalset
@@ -216,10 +232,9 @@ impl Decoder {
                 global_set,
             } => {
                 let mut ctx = *context;
-                if let Some((inst_next, display, mut ops, constructor)) =
+                if let Some((inst_next, display, ops, constructor)) =
                     x86_root::parse_instruction_with_constructor(bytes, &mut ctx, addr, global_set)
                 {
-                    pcode_ir::optimize(&mut ops);
                     Ok(Instruction {
                         len: inst_next - addr,
                         disassembly: format_display(&display),
@@ -236,12 +251,11 @@ impl Decoder {
             } => {
                 let mut ctx = *context;
                 let addr32 = addr as u32;
-                let (inst_next, display, mut ops, constructor) =
+                let (inst_next, display, ops, constructor) =
                     x86_32_root::parse_instruction_with_constructor(
                         bytes, &mut ctx, addr32, global_set,
                     )
                     .ok_or(DecodeError::UnknownInstruction)?;
-                pcode_ir::optimize(&mut ops);
                 Ok(Instruction {
                     len: (inst_next - addr32) as u64,
                     disassembly: format_display(&display),
@@ -254,12 +268,11 @@ impl Decoder {
                 global_set,
             } => {
                 let mut ctx = *context;
-                let (inst_next, display, mut ops, constructor) =
+                let (inst_next, display, ops, constructor) =
                     aarch64_root::parse_instruction_with_constructor(
                         bytes, &mut ctx, addr, global_set,
                     )
                     .ok_or(DecodeError::UnknownInstruction)?;
-                pcode_ir::optimize(&mut ops);
                 Ok(Instruction {
                     len: inst_next - addr,
                     disassembly: format_display(&display),
@@ -273,12 +286,11 @@ impl Decoder {
             } => {
                 let mut ctx = *context;
                 let addr32 = addr as u32;
-                let (inst_next, display, mut ops, constructor) =
+                let (inst_next, display, ops, constructor) =
                     arm32_root::parse_instruction_with_constructor(
                         bytes, &mut ctx, addr32, global_set,
                     )
                     .ok_or(DecodeError::UnknownInstruction)?;
-                pcode_ir::optimize(&mut ops);
                 Ok(Instruction {
                     len: (inst_next - addr32) as u64,
                     disassembly: format_display(&display),
@@ -292,12 +304,11 @@ impl Decoder {
             } => {
                 let mut ctx = *context;
                 let addr32 = addr as u32;
-                let (inst_next, display, mut ops, constructor) =
+                let (inst_next, display, ops, constructor) =
                     mips_root::parse_instruction_with_constructor(
                         bytes, &mut ctx, addr32, global_set,
                     )
                     .ok_or(DecodeError::UnknownInstruction)?;
-                pcode_ir::optimize(&mut ops);
                 Ok(Instruction {
                     len: (inst_next - addr32) as u64,
                     disassembly: format_display(&display),
@@ -310,12 +321,11 @@ impl Decoder {
                 global_set,
             } => {
                 let mut ctx = *context;
-                let (inst_next, display, mut ops, constructor) =
+                let (inst_next, display, ops, constructor) =
                     riscv_root::parse_instruction_with_constructor(
                         bytes, &mut ctx, addr, global_set,
                     )
                     .ok_or(DecodeError::UnknownInstruction)?;
-                pcode_ir::optimize(&mut ops);
                 Ok(Instruction {
                     len: inst_next - addr,
                     disassembly: format_display(&display),
@@ -347,6 +357,8 @@ mod tests {
 
     #[test]
     fn generated_x86_64_decodes_mov_r12d_rsp_disp32() {
+        // This SIB encoding must be handled by the generated matcher. There is
+        // intentionally no hand-written Rust fallback for [RSP+disp32].
         with_decoder_stack(|| {
             let mut dec = Decoder::new(Architecture::X86_64);
             let inst = dec
@@ -367,6 +379,26 @@ mod tests {
             }));
             let span = inst.constructor.expect("generated constructor provenance");
             assert!(span.source.contains("slaspec/x86/"), "{}", span.source);
+        });
+    }
+
+    #[test]
+    fn diagnostic_decode_preserves_pre_optimization_pcode() {
+        with_decoder_stack(|| {
+            let bytes = [0xc2, 0x08, 0x00]; // RET 8
+            let raw = Decoder::new(Architecture::X86_64)
+                .decode_unoptimized(&bytes, 0x1000)
+                .expect("raw decode RET 8");
+            let optimized = Decoder::new(Architecture::X86_64)
+                .decode(&bytes, 0x1000)
+                .expect("optimized decode RET 8");
+
+            assert!(
+                raw.ops.len() > optimized.ops.len(),
+                "raw={:?} optimized={:?}",
+                raw.ops,
+                optimized.ops
+            );
         });
     }
 

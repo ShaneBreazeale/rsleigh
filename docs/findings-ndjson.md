@@ -36,6 +36,11 @@ Required fields on every line:
 is flattened into the same object so existing filters such as
 `select(.sink_kind == "Command")` remain valid.
 
+`proved` describes solver-backed evidence, not a positive vulnerability result.
+Both `Reachable` and `NotReachable` SMT records have `confidence: "proved"`.
+Dashboards looking for actionable flows must filter `verdict == "Reachable"`
+and the producer-specific `kind`/`sink_kind`, rather than confidence alone.
+
 Current emitters:
 
 ```bash
