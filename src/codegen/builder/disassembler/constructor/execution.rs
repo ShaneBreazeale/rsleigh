@@ -440,16 +440,22 @@ impl<'a> ExecutionGenerator<'a> {
                     }
                     ReadScope::TokenField(tf) => match self.constructor.ass_fields.get(tf) {
                         Some(n) => {
-                            // Check if the token field is signed — if so, cast to
-                            // signed type before widening to i128 for correct sign extension
+                            // Sign-extend from the field's actual width. Casting a
+                            // 24-bit field through i32 does not sign-extend it and
+                            // turns ARM32 backward BL destinations into addresses
+                            // tagged with a spurious bit 26 (4 * 0x0100_0000).
                             let token_field = self.disassembler.sleigh.token_field(*tf);
                             let bits = token_field.bits.len().get();
                             if token_field.raw_value_is_signed() {
                                 match bits {
-                                    1..=8 => quote! { i128::from(self.#n as i8) },
-                                    9..=16 => quote! { i128::from(self.#n as i16) },
-                                    17..=32 => quote! { i128::from(self.#n as i32) },
-                                    _ => quote! { i128::from(self.#n as i64) },
+                                    8 => quote! { i128::from(self.#n as i8) },
+                                    16 => quote! { i128::from(self.#n as i16) },
+                                    32 => quote! { i128::from(self.#n as i32) },
+                                    64 => quote! { i128::from(self.#n as i64) },
+                                    _ => {
+                                        let shift = 128u64 - bits;
+                                        quote! { ((i128::from(self.#n) << #shift) >> #shift) }
+                                    }
                                 }
                             } else {
                                 quote! { i128::from(self.#n) }

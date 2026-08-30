@@ -53,8 +53,18 @@ A summary line is written to stderr at the end:
 
 ## Record schema
 
+SMT candidates use the shared [`rsleigh.finding/v1`](findings-ndjson.md)
+envelope. Taint-specific evidence remains flattened at the top level.
+
 ```jsonc
 {
+  "schema":         "rsleigh.finding/v1",
+  "kind":           "vulnerability.taint_flow",
+  "producer":       "smt-candidates",
+  "confidence":     "proved",             // proved for SAT/UNSAT; heuristic when unsupported
+  "stage":          "prove",
+  "severity":       "LOW",
+  "summary":        "LengthArg flow from read to memcpy (NotReachable)",
   "function":       "FUN_0001ba3c",        // function name (or stub)
   "address":        "0x1ba3c",             // function entry VA
   "source":         "read",                // libc source name (DEFAULT_SOURCES)

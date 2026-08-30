@@ -9,7 +9,8 @@
 #![allow(unused_imports, dead_code)]
 
 use rsleigh_api::{
-    AddressSpaceId, Architecture, DecodeError, Decoder, Instruction, PcodeOp, Varnode,
+    AddressSpaceId, Architecture, ConstructorSpan, DecodeError, Decoder, Instruction, PcodeOp,
+    Varnode,
 };
 
 /// Compile-time proof that the documented architecture variants are
@@ -36,32 +37,36 @@ fn _pcode_re_exports() {
     let _: Option<Varnode> = None;
     let _: Option<AddressSpaceId> = None;
     let _: Option<Instruction> = None;
+    let _: Option<ConstructorSpan> = None;
     let _: Result<(), DecodeError> = Ok(());
 }
 
 #[test]
 fn stable_surface_smoke() {
-    let mut dec = Decoder::new(Architecture::X86_64);
-    let inst = dec
-        .decode(&[0x48, 0x89, 0xd8], 0x1000)
-        .expect("MOV RAX,RBX");
-    assert_eq!(inst.len, 3);
-    assert!(inst.disassembly.contains("MOV"));
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            let mut dec = Decoder::new(Architecture::X86_64);
+            let inst = dec
+                .decode(&[0x48, 0x89, 0xd8], 0x1000)
+                .expect("MOV RAX,RBX");
+            assert_eq!(inst.len, 3);
+            assert!(inst.disassembly.contains("MOV"));
 
-    // addr_size / register_name on Architecture are part of the
-    // stable surface.
-    assert_eq!(Architecture::X86_64.addr_size(), 8);
-    assert_eq!(Architecture::ARM32.addr_size(), 4);
-    assert!(Architecture::X86_64.register_name(0, 8).is_some());
+            // addr_size / register_name on Architecture are part of the
+            // stable surface.
+            assert_eq!(Architecture::X86_64.addr_size(), 8);
+            assert_eq!(Architecture::ARM32.addr_size(), 4);
+            assert!(Architecture::X86_64.register_name(0, 8).is_some());
 
-    // Decoder::architecture returns the configured arch.
-    assert_eq!(dec.architecture(), Architecture::X86_64);
+            // Decoder::architecture returns the configured arch.
+            assert_eq!(dec.architecture(), Architecture::X86_64);
 
-    // Audit P2 #3 — Instruction.constructor is part of the surface.
-    // Generated crates do not yet populate it; the field must default
-    // to None so it doesn't break legacy callers.
-    assert!(
-        inst.constructor.is_none(),
-        "constructor span should default to None until codegen wiring lands"
-    );
+            // Audit P2 #3 — generated decoders identify the exact SLEIGH rule.
+            let span = inst.constructor.expect("generated constructor provenance");
+            assert!(span.source.contains("slaspec/x86/"));
+        })
+        .expect("spawn stable surface test")
+        .join()
+        .expect("stable surface test panicked");
 }

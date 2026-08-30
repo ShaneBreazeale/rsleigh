@@ -182,32 +182,7 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
                 }
                 PcodeOp::Call { dest } => {
                     let target = if dest.space == AddressSpaceId::Ram {
-                        // ARM32-generated Pcode emits Call dest varnodes
-                        // with an extra 0x04000000 set in the offset (the
-                        // codegen-side bug puts a 1 into bit 26 of every
-                        // ram-space address). Disasm rendering happens to
-                        // strip it; the SSA Call target keeps it, so the
-                        // imports-map lookup fails on every PLT call. Mask
-                        // to 28 bits — a no-op for legitimate <28-bit code
-                        // addresses, recovers the right target for the
-                        // ARM32 case. Filed for proper codegen-layer fix.
-                        // ARM32 generated codegen ORs a spurious 0x04000000
-                        // (bit 26) into every Ram-space Call dest offset.
-                        // Disasm rendering happens to strip it; SSA keeps
-                        // it, so the imports-map lookup misses every PLT
-                        // call and downstream --search/--xrefs/--smt-
-                        // explore can't recognise libc sources or sinks.
-                        // Strip the tag only when the resulting address
-                        // would still fit in a realistic text segment
-                        // (raw < 0x10000000) — leaves legitimate >64MB
-                        // text addresses untouched.
-                        let raw = dest.offset;
-                        let masked = if raw & 0x0400_0000 != 0 && raw & 0xF000_0000 == 0 {
-                            raw & !0x0400_0000
-                        } else {
-                            raw
-                        };
-                        CallTarget::Direct(masked)
+                        CallTarget::Direct(dest.offset)
                     } else {
                         CallTarget::Indirect(dest)
                     };
@@ -760,6 +735,85 @@ impl Cfg {
         }
         preds
     }
+
+    /// Classify every edge with a deterministic depth-first traversal.
+    ///
+    /// Block IDs describe storage/layout order only. In particular, `from.id >=
+    /// to.id` is not a valid test for a loop edge when a compiler lays out the
+    /// latch before the header or when the graph is irreducible.
+    pub fn classified_edges(&self) -> Vec<CfgEdge> {
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Color {
+            White,
+            Gray,
+            Black,
+        }
+
+        fn visit(
+            cfg: &Cfg,
+            block: BlockId,
+            colors: &mut [Color],
+            discovered: &mut [usize],
+            clock: &mut usize,
+            edges: &mut Vec<CfgEdge>,
+        ) {
+            colors[block.0] = Color::Gray;
+            discovered[block.0] = *clock;
+            *clock += 1;
+
+            for successor in cfg.successors(block) {
+                if successor.0 >= colors.len() {
+                    continue;
+                }
+                let kind = match colors[successor.0] {
+                    Color::White => CfgEdgeKind::Tree,
+                    Color::Gray => CfgEdgeKind::Back,
+                    Color::Black if discovered[block.0] < discovered[successor.0] => {
+                        CfgEdgeKind::Forward
+                    }
+                    Color::Black => CfgEdgeKind::Cross,
+                };
+                edges.push(CfgEdge {
+                    from: block,
+                    to: successor,
+                    kind,
+                });
+                if kind == CfgEdgeKind::Tree {
+                    visit(cfg, successor, colors, discovered, clock, edges);
+                }
+            }
+            colors[block.0] = Color::Black;
+        }
+
+        let mut colors = vec![Color::White; self.blocks.len()];
+        let mut discovered = vec![usize::MAX; self.blocks.len()];
+        let mut clock = 0usize;
+        let mut edges = Vec::new();
+
+        if self.entry.0 < self.blocks.len() {
+            visit(
+                self,
+                self.entry,
+                &mut colors,
+                &mut discovered,
+                &mut clock,
+                &mut edges,
+            );
+        }
+        for block in &self.blocks {
+            if colors[block.id.0] == Color::White {
+                visit(
+                    self,
+                    block.id,
+                    &mut colors,
+                    &mut discovered,
+                    &mut clock,
+                    &mut edges,
+                );
+            }
+        }
+        edges
+    }
 }
 
 #[cfg(test)]
@@ -822,5 +876,92 @@ mod tests {
             .diagnostics
             .iter()
             .any(|d| d.kind == DiagKind::UnresolvedBranchTarget));
+    }
+
+    #[test]
+    fn dfs_classifies_layout_reversed_loop_edge() {
+        // Traversal is B0 -> B2 -> B1 -> B2. The latch has a lower block ID
+        // than the header, so the former `pred.id < block.id` rule called the
+        // loop-carried edge forward.
+        let cfg = Cfg {
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    addr: 0x1000,
+                    ops: vec![],
+                    terminator: Terminator::Branch(BlockId(2)),
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    addr: 0x1004,
+                    ops: vec![],
+                    terminator: Terminator::Branch(BlockId(2)),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    addr: 0x1008,
+                    ops: vec![],
+                    terminator: Terminator::Branch(BlockId(1)),
+                },
+            ],
+            entry: BlockId(0),
+            diagnostics: vec![],
+        };
+
+        let edges = cfg.classified_edges();
+        assert!(edges.iter().any(|edge| {
+            edge.from == BlockId(1) && edge.to == BlockId(2) && edge.kind == CfgEdgeKind::Back
+        }));
+        assert!(!edges.iter().any(|edge| {
+            edge.from == BlockId(2) && edge.to == BlockId(1) && edge.kind == CfgEdgeKind::Back
+        }));
+    }
+
+    #[test]
+    fn dfs_distinguishes_all_edge_kinds() {
+        let cfg = Cfg {
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    addr: 0x1000,
+                    ops: vec![],
+                    terminator: Terminator::CBranch {
+                        cond: Varnode::constant(1, 1),
+                        taken: BlockId(1),
+                        fallthrough: BlockId(2),
+                    },
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    addr: 0x1004,
+                    ops: vec![],
+                    terminator: Terminator::Branch(BlockId(2)),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    addr: 0x1008,
+                    ops: vec![],
+                    terminator: Terminator::Branch(BlockId(1)),
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    addr: 0x100c,
+                    ops: vec![],
+                    terminator: Terminator::Branch(BlockId(2)),
+                },
+            ],
+            entry: BlockId(0),
+            diagnostics: vec![],
+        };
+
+        let edges = cfg.classified_edges();
+        for kind in [
+            CfgEdgeKind::Tree,
+            CfgEdgeKind::Back,
+            CfgEdgeKind::Forward,
+            CfgEdgeKind::Cross,
+        ] {
+            assert!(edges.iter().any(|edge| edge.kind == kind), "{kind:?}");
+        }
     }
 }

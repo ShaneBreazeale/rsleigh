@@ -30,7 +30,7 @@
 //! - [`Architecture`] (variants may be added; existing variants stay)
 //! - [`Architecture::addr_size`], [`Architecture::register_name`]
 //! - Re-exports from `pcode-ir`: `Instruction`, `PcodeOp`, `Varnode`,
-//!   `AddressSpaceId`, `DecodeError`
+//!   `ConstructorSpan`, `AddressSpaceId`, `DecodeError`
 //!
 //! Anything else in this crate (helper functions, internal context
 //! types, generated-crate re-exports) is implementation detail.
@@ -39,7 +39,7 @@
 //! stability promise — pin a specific patch version if you depend on
 //! their shape.
 
-pub use pcode_ir::{AddressSpaceId, DecodeError, Instruction, PcodeOp, Varnode};
+pub use pcode_ir::{AddressSpaceId, ConstructorSpan, DecodeError, Instruction, PcodeOp, Varnode};
 
 /// Supported CPU architectures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -215,20 +215,16 @@ impl Decoder {
                 context,
                 global_set,
             } => {
-                if let Some(inst) = fallback_x86_64_mov_from_rsp_sib(bytes, addr) {
-                    return Ok(inst);
-                }
-
                 let mut ctx = *context;
-                if let Some((inst_next, display, mut ops)) =
-                    x86_root::parse_instruction(bytes, &mut ctx, addr, global_set)
+                if let Some((inst_next, display, mut ops, constructor)) =
+                    x86_root::parse_instruction_with_constructor(bytes, &mut ctx, addr, global_set)
                 {
                     pcode_ir::optimize(&mut ops);
                     Ok(Instruction {
                         len: inst_next - addr,
                         disassembly: format_display(&display),
                         ops,
-                        constructor: None,
+                        constructor: Some(constructor),
                     })
                 } else {
                     Err(DecodeError::UnknownInstruction)
@@ -240,15 +236,17 @@ impl Decoder {
             } => {
                 let mut ctx = *context;
                 let addr32 = addr as u32;
-                let (inst_next, display, mut ops) =
-                    x86_32_root::parse_instruction(bytes, &mut ctx, addr32, global_set)
-                        .ok_or(DecodeError::UnknownInstruction)?;
+                let (inst_next, display, mut ops, constructor) =
+                    x86_32_root::parse_instruction_with_constructor(
+                        bytes, &mut ctx, addr32, global_set,
+                    )
+                    .ok_or(DecodeError::UnknownInstruction)?;
                 pcode_ir::optimize(&mut ops);
                 Ok(Instruction {
                     len: (inst_next - addr32) as u64,
                     disassembly: format_display(&display),
                     ops,
-                    constructor: None,
+                    constructor: Some(constructor),
                 })
             }
             DecoderInner::AArch64 {
@@ -256,15 +254,17 @@ impl Decoder {
                 global_set,
             } => {
                 let mut ctx = *context;
-                let (inst_next, display, mut ops) =
-                    aarch64_root::parse_instruction(bytes, &mut ctx, addr, global_set)
-                        .ok_or(DecodeError::UnknownInstruction)?;
+                let (inst_next, display, mut ops, constructor) =
+                    aarch64_root::parse_instruction_with_constructor(
+                        bytes, &mut ctx, addr, global_set,
+                    )
+                    .ok_or(DecodeError::UnknownInstruction)?;
                 pcode_ir::optimize(&mut ops);
                 Ok(Instruction {
                     len: inst_next - addr,
                     disassembly: format_display(&display),
                     ops,
-                    constructor: None,
+                    constructor: Some(constructor),
                 })
             }
             DecoderInner::ARM32 {
@@ -273,15 +273,17 @@ impl Decoder {
             } => {
                 let mut ctx = *context;
                 let addr32 = addr as u32;
-                let (inst_next, display, mut ops) =
-                    arm32_root::parse_instruction(bytes, &mut ctx, addr32, global_set)
-                        .ok_or(DecodeError::UnknownInstruction)?;
+                let (inst_next, display, mut ops, constructor) =
+                    arm32_root::parse_instruction_with_constructor(
+                        bytes, &mut ctx, addr32, global_set,
+                    )
+                    .ok_or(DecodeError::UnknownInstruction)?;
                 pcode_ir::optimize(&mut ops);
                 Ok(Instruction {
                     len: (inst_next - addr32) as u64,
                     disassembly: format_display(&display),
                     ops,
-                    constructor: None,
+                    constructor: Some(constructor),
                 })
             }
             DecoderInner::MIPS32 {
@@ -290,15 +292,17 @@ impl Decoder {
             } => {
                 let mut ctx = *context;
                 let addr32 = addr as u32;
-                let (inst_next, display, mut ops) =
-                    mips_root::parse_instruction(bytes, &mut ctx, addr32, global_set)
-                        .ok_or(DecodeError::UnknownInstruction)?;
+                let (inst_next, display, mut ops, constructor) =
+                    mips_root::parse_instruction_with_constructor(
+                        bytes, &mut ctx, addr32, global_set,
+                    )
+                    .ok_or(DecodeError::UnknownInstruction)?;
                 pcode_ir::optimize(&mut ops);
                 Ok(Instruction {
                     len: (inst_next - addr32) as u64,
                     disassembly: format_display(&display),
                     ops,
-                    constructor: None,
+                    constructor: Some(constructor),
                 })
             }
             DecoderInner::RiscV64 {
@@ -306,138 +310,20 @@ impl Decoder {
                 global_set,
             } => {
                 let mut ctx = *context;
-                let (inst_next, display, mut ops) =
-                    riscv_root::parse_instruction(bytes, &mut ctx, addr, global_set)
-                        .ok_or(DecodeError::UnknownInstruction)?;
+                let (inst_next, display, mut ops, constructor) =
+                    riscv_root::parse_instruction_with_constructor(
+                        bytes, &mut ctx, addr, global_set,
+                    )
+                    .ok_or(DecodeError::UnknownInstruction)?;
                 pcode_ir::optimize(&mut ops);
                 Ok(Instruction {
                     len: inst_next - addr,
                     disassembly: format_display(&display),
                     ops,
-                    constructor: None,
+                    constructor: Some(constructor),
                 })
             }
         }
-    }
-}
-
-fn fallback_x86_64_mov_from_rsp_sib(bytes: &[u8], addr: u64) -> Option<Instruction> {
-    let mut pos = 0usize;
-    let mut rex = 0u8;
-    if bytes
-        .first()
-        .copied()
-        .is_some_and(|b| (0x40..=0x4f).contains(&b))
-    {
-        rex = bytes[0];
-        pos += 1;
-    }
-    if bytes.get(pos).copied()? != 0x8b {
-        return None;
-    }
-    pos += 1;
-
-    let modrm = bytes.get(pos).copied()?;
-    pos += 1;
-    let mode = modrm >> 6;
-    let reg = ((modrm >> 3) & 7) | ((rex & 0x04) << 1);
-    let rm = modrm & 7;
-    if rm != 4 || !matches!(mode, 1 | 2) {
-        return None;
-    }
-
-    let sib = bytes.get(pos).copied()?;
-    pos += 1;
-    let index = (sib >> 3) & 7;
-    let base = (sib & 7) | ((rex & 0x01) << 3);
-    if index != 4 || (rex & 0x02) != 0 || !matches!(base, 4 | 12) {
-        return None;
-    }
-
-    let disp = match mode {
-        1 => {
-            let d = *bytes.get(pos)? as i8 as i64;
-            pos += 1;
-            d
-        }
-        2 => {
-            let raw = bytes.get(pos..pos + 4)?;
-            pos += 4;
-            i32::from_le_bytes(raw.try_into().ok()?) as i64
-        }
-        _ => return None,
-    };
-
-    let size = if rex & 0x08 != 0 { 8 } else { 4 };
-    let dest = x86_reg_varnode(reg, size)?;
-    let base_vn = x86_reg_varnode(base, 8)?;
-    let size_name = if size == 8 { "qword" } else { "dword" };
-    let disassembly = if disp == 0 {
-        format!(
-            "MOV {},{} ptr [{}]",
-            x86_reg_name(reg, size)?,
-            size_name,
-            x86_reg_name(base, 8)?,
-        )
-    } else {
-        format!(
-            "MOV {},{} ptr [{} {} {:#x}]",
-            x86_reg_name(reg, size)?,
-            size_name,
-            x86_reg_name(base, 8)?,
-            if disp < 0 { "-" } else { "+" },
-            disp.unsigned_abs()
-        )
-    };
-
-    let mut ops = Vec::new();
-    let ptr = if disp == 0 {
-        base_vn
-    } else {
-        let ptr = Varnode::unique((addr << 16).wrapping_add(0x8000), 8);
-        ops.push(PcodeOp::IntAdd {
-            out: ptr,
-            left: base_vn,
-            right: Varnode::constant(disp as u64, 8),
-        });
-        ptr
-    };
-    ops.push(PcodeOp::Load {
-        out: dest,
-        space: pcode_ir::AddressSpaceId::Ram,
-        ptr,
-    });
-
-    Some(Instruction {
-        len: pos as u64,
-        disassembly,
-        ops,
-        constructor: None,
-    })
-}
-
-fn x86_reg_varnode(reg: u8, size: u32) -> Option<Varnode> {
-    let offset = match reg {
-        0..=7 => u64::from(reg) * 8,
-        8..=15 => 0x80 + (u64::from(reg) - 8) * 8,
-        _ => return None,
-    };
-    Some(Varnode::register(offset, size))
-}
-
-fn x86_reg_name(reg: u8, size: u32) -> Option<&'static str> {
-    const R32: [&str; 16] = [
-        "EAX", "ECX", "EDX", "EBX", "ESP", "EBP", "ESI", "EDI", "R8D", "R9D", "R10D", "R11D",
-        "R12D", "R13D", "R14D", "R15D",
-    ];
-    const R64: [&str; 16] = [
-        "RAX", "RCX", "RDX", "RBX", "RSP", "RBP", "RSI", "RDI", "R8", "R9", "R10", "R11", "R12",
-        "R13", "R14", "R15",
-    ];
-    match size {
-        4 => R32.get(reg as usize).copied(),
-        8 => R64.get(reg as usize).copied(),
-        _ => None,
     }
 }
 
@@ -450,24 +336,60 @@ fn format_display(elements: &[impl core::fmt::Display]) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn x86_64_fallback_decodes_mov_r12d_rsp_disp32() {
-        let mut dec = Decoder::new(Architecture::X86_64);
-        let inst = dec
-            .decode(&[0x44, 0x8b, 0xa4, 0x24, 0x88, 0x00, 0x00, 0x00], 0x1000)
-            .expect("decode MOV R12D,[RSP+0x88]");
+    fn with_decoder_stack(test: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(test)
+            .expect("spawn decoder test")
+            .join()
+            .expect("decoder test panicked");
+    }
 
-        assert_eq!(inst.len, 8);
-        assert!(inst.disassembly.contains("R12D"), "{}", inst.disassembly);
-        assert!(inst.ops.iter().any(|op| {
-            matches!(
-                op,
-                PcodeOp::Load {
-                    out,
-                    space: pcode_ir::AddressSpaceId::Ram,
-                    ..
-                } if *out == Varnode::register(0xa0, 4)
-            )
-        }));
+    #[test]
+    fn generated_x86_64_decodes_mov_r12d_rsp_disp32() {
+        with_decoder_stack(|| {
+            let mut dec = Decoder::new(Architecture::X86_64);
+            let inst = dec
+                .decode(&[0x44, 0x8b, 0xa4, 0x24, 0x88, 0x00, 0x00, 0x00], 0x1000)
+                .expect("decode MOV R12D,[RSP+0x88]");
+
+            assert_eq!(inst.len, 8);
+            assert!(inst.disassembly.contains("R12D"), "{}", inst.disassembly);
+            assert!(inst.ops.iter().any(|op| {
+                matches!(
+                    op,
+                    PcodeOp::Load {
+                        out,
+                        space: pcode_ir::AddressSpaceId::Ram,
+                        ..
+                    } if *out == Varnode::register(0xa0, 4)
+                )
+            }));
+            let span = inst.constructor.expect("generated constructor provenance");
+            assert!(span.source.contains("slaspec/x86/"), "{}", span.source);
+        });
+    }
+
+    #[test]
+    fn arm32_backward_bl_has_no_spurious_call_tag() {
+        with_decoder_stack(|| {
+            let mut dec = Decoder::new(Architecture::ARM32);
+            let inst = dec
+                .decode(&[0xfe, 0xff, 0xff, 0xeb], 0x1000)
+                .expect("decode ARM32 BL to self");
+
+            assert!(
+                inst.ops.iter().any(|op| {
+                    matches!(
+                        op,
+                        PcodeOp::Call { dest }
+                            if dest.space == AddressSpaceId::Ram && dest.offset == 0x1000
+                    )
+                }),
+                "{:?}",
+                inst.ops
+            );
+            assert!(inst.constructor.is_some());
+        });
     }
 }

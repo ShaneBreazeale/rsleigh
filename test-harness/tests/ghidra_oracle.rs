@@ -458,19 +458,127 @@ fn parse_hex(s: &str) -> Vec<u8> {
 /// Listed by basename of the .ghidra.json file. Entries here are reported
 /// as `divergence` instead of `fail`; the test panics if a listed fixture
 /// unexpectedly *passes* so the list cannot rot in the green direction.
-const KNOWN_DIVERGENCES: &[(&str, &str)] = &[(
-    "arm32/bx_lr.ghidra.json",
-    "ARM32 lifter omits the BX-LR thumb-mode state switch ops \
+const KNOWN_DIVERGENCES: &[(&str, &str, OracleScore)] = &[
+    (
+        "arm32/bx_lr.ghidra.json",
+        "ARM32 lifter omits the BX-LR thumb-mode state switch ops \
          (INT_AND/INT_NOTEQUAL/COPY into TB/ISAModeSwitch + CALLOTHER \
          pcodeop) that Ghidra emits; rsleigh produces 5 ops vs Ghidra 6.",
-)];
+        OracleScore {
+            instructions: 1,
+            decode_failures: 0,
+            missing_constructors: 0,
+            length_mismatches: 0,
+            missing_ops: 1,
+            extra_ops: 0,
+            op_mismatches: 4,
+            destination_mismatches: 0,
+        },
+    ),
+    (
+        "arm32/mov_r0_imm.ghidra.json",
+        "rsleigh optimizes the immediate MOV flag calculation more aggressively \
+         than Ghidra's raw per-instruction P-code (7 ops vs 12).",
+        OracleScore {
+            instructions: 1,
+            decode_failures: 0,
+            missing_constructors: 0,
+            length_mismatches: 0,
+            missing_ops: 5,
+            extra_ops: 0,
+            op_mismatches: 7,
+            destination_mismatches: 0,
+        },
+    ),
+    (
+        "aarch64/csel.ghidra.json",
+        "rsleigh folds Ghidra's INT_2COMP(const 1) helper into the all-ones \
+         multiplier used by CSETM (4 ops vs 5).",
+        OracleScore {
+            instructions: 4,
+            decode_failures: 0,
+            missing_constructors: 0,
+            length_mismatches: 0,
+            missing_ops: 2,
+            extra_ops: 0,
+            op_mismatches: 3,
+            destination_mismatches: 0,
+        },
+    ),
+];
 
-fn known_divergence_for(path: &Path) -> Option<&'static str> {
+fn known_divergence_for(path: &Path) -> Option<(&'static str, OracleScore)> {
     let needle = path.to_string_lossy().replace('\\', "/");
     KNOWN_DIVERGENCES
         .iter()
-        .find(|(suffix, _)| needle.ends_with(suffix))
-        .map(|(_, reason)| *reason)
+        .find(|(suffix, _, _)| needle.ends_with(suffix))
+        .map(|(_, reason, score)| (*reason, *score))
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct OracleScore {
+    instructions: usize,
+    decode_failures: usize,
+    missing_constructors: usize,
+    length_mismatches: usize,
+    missing_ops: usize,
+    extra_ops: usize,
+    op_mismatches: usize,
+    destination_mismatches: usize,
+}
+
+fn normalized_ops(decoded: &[PcodeOp], oracle: &[OracleOp]) -> (Vec<NormOp>, Vec<NormOp>) {
+    let mut rs_norm: Vec<NormOp> = decoded.iter().map(rsleigh_op_to_norm).collect();
+    let mut gh_norm: Vec<NormOp> = oracle.iter().filter_map(oracle_op_to_norm).collect();
+    propagate_const_unique_copies(&mut rs_norm);
+    propagate_const_unique_copies(&mut gh_norm);
+    drop_dead_const_unique_inits(&mut rs_norm);
+    drop_dead_const_unique_inits(&mut gh_norm);
+    normalize_uniques(&mut rs_norm);
+    normalize_uniques(&mut gh_norm);
+    (rs_norm, gh_norm)
+}
+
+/// Aggregate a per-instruction lift diff without stopping at the first gap.
+fn score_oracle(path: &Path) -> OracleScore {
+    let raw = std::fs::read_to_string(path).expect("read oracle json");
+    let oracle: Oracle = serde_json::from_str(&raw).expect("parse oracle json");
+    let arch = arch_from_string(&oracle.arch).expect("mapped Ghidra architecture");
+    let mut decoder = Decoder::new(arch);
+    let mut score = OracleScore::default();
+
+    for function in &oracle.functions {
+        for instruction in &function.instructions {
+            score.instructions += 1;
+            let bytes = parse_hex(&instruction.bytes);
+            let Ok(decoded) = decoder.decode(&bytes, instruction.addr) else {
+                score.decode_failures += 1;
+                continue;
+            };
+            if decoded.constructor.is_none() {
+                score.missing_constructors += 1;
+            }
+            if decoded.len as u32 != instruction.len {
+                score.length_mismatches += 1;
+            }
+
+            let (rs_norm, gh_norm) = normalized_ops(&decoded.ops, &instruction.pcode);
+            score.extra_ops += rs_norm.len().saturating_sub(gh_norm.len());
+            score.missing_ops += gh_norm.len().saturating_sub(rs_norm.len());
+            for (rs_op, gh_op) in rs_norm.iter().zip(&gh_norm) {
+                if rs_op != gh_op {
+                    score.op_mismatches += 1;
+                }
+                if rs_op.mnemonic == gh_op.mnemonic
+                    && matches!(rs_op.mnemonic, "Branch" | "Call")
+                    && rs_op.inputs != gh_op.inputs
+                {
+                    score.destination_mismatches += 1;
+                }
+            }
+        }
+    }
+    score
 }
 
 fn check_oracle(path: &Path) {
@@ -503,6 +611,19 @@ fn check_oracle(path: &Path) {
             let decoded = decoder
                 .decode(&bytes, ins.addr)
                 .unwrap_or_else(|e| panic!("rsleigh decode failed at {:#x}: {:?}", ins.addr, e));
+            let constructor = decoded.constructor.as_ref().unwrap_or_else(|| {
+                panic!(
+                    "{}@{:#x}: decoded instruction lacks constructor provenance",
+                    path.display(),
+                    ins.addr
+                )
+            });
+            assert!(
+                !constructor.source.is_empty(),
+                "{}@{:#x}",
+                path.display(),
+                ins.addr
+            );
 
             assert_eq!(
                 decoded.len as u32,
@@ -514,19 +635,11 @@ fn check_oracle(path: &Path) {
                 ins.len
             );
 
-            let mut rs_norm: Vec<NormOp> = decoded.ops.iter().map(rsleigh_op_to_norm).collect();
-            let mut gh_norm: Vec<NormOp> = ins.pcode.iter().filter_map(oracle_op_to_norm).collect();
+            let (rs_norm, gh_norm) = normalized_ops(&decoded.ops, &ins.pcode);
             // Match rsleigh's pcode peephole: constant-propagate
             // Copy{Unique, Const} into downstream reads, then strip the
             // resulting dead Copies. Apply to both sides so AArch64 csel
             // family / similar SLEIGH macro patterns agree on shape.
-            propagate_const_unique_copies(&mut rs_norm);
-            propagate_const_unique_copies(&mut gh_norm);
-            drop_dead_const_unique_inits(&mut rs_norm);
-            drop_dead_const_unique_inits(&mut gh_norm);
-            normalize_uniques(&mut rs_norm);
-            normalize_uniques(&mut gh_norm);
-
             assert_eq!(
                 rs_norm.len(),
                 gh_norm.len(),
@@ -557,6 +670,11 @@ fn check_oracle(path: &Path) {
         "{}: oracle has functions but zero instructions",
         path.display()
     );
+    eprintln!(
+        "oracle parity: {} instruction(s), zero length/op/varnode mismatches: {}",
+        total_instructions,
+        path.display()
+    );
 }
 
 #[test]
@@ -581,26 +699,23 @@ fn ghidra_oracle_parity_inner() {
         );
         return;
     }
-    let mut unexpected_passes: Vec<String> = Vec::new();
     for path in oracles {
-        if let Some(reason) = known_divergence_for(&path) {
+        let score = score_oracle(&path);
+        eprintln!("oracle score: {} {score:?}", path.display());
+        if let Some((reason, expected_score)) = known_divergence_for(&path) {
             eprintln!("known divergence: {}\n  reason: {}", path.display(), reason);
-            // If the divergence is gone, fail loudly so the list gets pruned.
-            let result = std::panic::catch_unwind(|| check_oracle(&path));
-            if result.is_ok() {
-                unexpected_passes.push(path.display().to_string());
-            }
+            assert_eq!(
+                score,
+                expected_score,
+                "known-divergence score changed for {}; either a regression landed \
+                 or the gap improved and its baseline should be updated",
+                path.display()
+            );
             continue;
         }
         eprintln!("checking {}", path.display());
         check_oracle(&path);
     }
-    assert!(
-        unexpected_passes.is_empty(),
-        "fixtures listed as known divergences now pass — remove from \
-         KNOWN_DIVERGENCES: {:#?}",
-        unexpected_passes
-    );
 }
 
 #[test]

@@ -155,6 +155,7 @@ pub fn entrypoint() {
         eprintln!("  rsleigh <binary> --vulnscan          Scan for vulnerability patterns");
         eprintln!("  rsleigh <binary> --smt-explore <func> [--smt-summaries] [--json]  SMT taint-flow CVE proof (requires --features smt; --smt-summaries enables inter-procedural V2)");
         eprintln!("  rsleigh <binary> --ioc [--json]      Extract IOCs (URLs, IPs, paths, registry keys)");
+        eprintln!("  rsleigh <binary> <finding mode> --findings-ndjson  Emit shared finding records");
         eprintln!("  rsleigh <binary> --xor-strings [--json]  Brute single-byte XOR string recovery");
         eprintln!("  rsleigh <binary> --sigcheck [--json] Parse Authenticode signature (signer, timestamp, chain)");
         eprintln!("  rsleigh <binary> --resources [--dump DIR] [--json]  Walk PE resource directory; --dump extracts blobs");
@@ -185,6 +186,7 @@ pub fn entrypoint() {
     let search_mode = args.iter().any(|a| a == "--search");
     let vulnscan_mode = args.iter().any(|a| a == "--vulnscan");
     let ioc_mode = args.iter().any(|a| a == "--ioc");
+    let findings_ndjson = args.iter().any(|a| a == "--findings-ndjson");
     let xor_strings_mode = args.iter().any(|a| a == "--xor-strings");
     let sigcheck_mode = args.iter().any(|a| a == "--sigcheck");
     let resources_mode = args.iter().any(|a| a == "--resources");
@@ -284,6 +286,25 @@ pub fn entrypoint() {
         if let Some(arg) = vm_classify_arg.as_ref() {
             let addrs = parse_addrs(arg);
             let encs = rsleigh_decompile::vm_handler_classify::classify_all(&obj, &data, &addrs);
+            if findings_ndjson {
+                for encoding in encs {
+                    let mut record = rsleigh_decompile::finding::FindingRecord::new(
+                        "vm.handler_encoding",
+                        "vm-classify-handlers",
+                        rsleigh_decompile::finding::FindingConfidence::Pattern,
+                        rsleigh_decompile::finding::FindingStage::Lift,
+                        format!("VM handler consumes {} byte(s)", encoding.instr_len),
+                    )
+                    .with_evidence(serde_json::json!({
+                        "binary": binary_path,
+                        "instruction_length": encoding.instr_len,
+                        "operand_offsets": encoding.operand_offsets,
+                    }));
+                    record.address = Some(format!("0x{:x}", encoding.addr));
+                    println!("{}", serde_json::to_string(&record).unwrap());
+                }
+                return;
+            }
             for line in rsleigh_decompile::vm_handler_classify::render(&encs) {
                 println!("{}", line);
             }
@@ -293,6 +314,30 @@ pub fn entrypoint() {
             let addrs = parse_addrs(arg);
             for &a in &addrs {
                 let cases = rsleigh_decompile::tag_dispatch::scan_function(&obj, &data, a);
+                if findings_ndjson {
+                    for case in cases {
+                        let branch = match case.dir {
+                            rsleigh_decompile::tag_dispatch::BranchDir::Take => "take",
+                            rsleigh_decompile::tag_dispatch::BranchDir::Skip => "skip",
+                        };
+                        let mut record = rsleigh_decompile::finding::FindingRecord::new(
+                            "vm.tag_dispatch",
+                            "tag-dispatch",
+                            rsleigh_decompile::finding::FindingConfidence::Pattern,
+                            rsleigh_decompile::finding::FindingStage::Discover,
+                            format!("tag 0x{:02x} dispatches to 0x{:x}", case.tag, case.target_va),
+                        )
+                        .with_evidence(serde_json::json!({
+                            "binary": binary_path,
+                            "tag": case.tag,
+                            "target": format!("0x{:x}", case.target_va),
+                            "branch": branch,
+                        }));
+                        record.address = Some(format!("0x{:x}", case.cmp_va));
+                        println!("{}", serde_json::to_string(&record).unwrap());
+                    }
+                    continue;
+                }
                 println!("=== {:#x} — {} cases ===", a, cases.len());
                 for line in rsleigh_decompile::tag_dispatch::render(&cases) {
                     println!("  {}", line);
@@ -303,6 +348,29 @@ pub fn entrypoint() {
         if let Some(arg) = summarise_arg.as_ref() {
             let addrs = parse_addrs(arg);
             let summaries = rsleigh_decompile::handler_summary::summarise_all(&obj, &data, &addrs);
+            if findings_ndjson {
+                for handler in summaries {
+                    let mut record = rsleigh_decompile::finding::FindingRecord::new(
+                        "vm.handler_summary",
+                        "summarise-handlers",
+                        rsleigh_decompile::finding::FindingConfidence::Heuristic,
+                        rsleigh_decompile::finding::FindingStage::Decompile,
+                        format!(
+                            "VM handler has {} stack pop(s) and {} API call(s)",
+                            handler.pop_count,
+                            handler.apis.len()
+                        ),
+                    )
+                    .with_evidence(serde_json::json!({
+                        "binary": binary_path,
+                        "pop_count": handler.pop_count,
+                        "apis": handler.apis,
+                    }));
+                    record.address = Some(format!("0x{:x}", handler.addr));
+                    println!("{}", serde_json::to_string(&record).unwrap());
+                }
+                return;
+            }
             for line in rsleigh_decompile::handler_summary::render(&summaries) {
                 println!("{}", line);
             }
@@ -313,10 +381,31 @@ pub fn entrypoint() {
             for &a in &addrs {
                 if let Some(info) = rsleigh_decompile::vm_dispatch_extract::extract(&obj, &data, a)
                 {
+                    if findings_ndjson {
+                        let mut record = rsleigh_decompile::finding::FindingRecord::new(
+                            "vm.dispatcher",
+                            "vm-dispatch",
+                            rsleigh_decompile::finding::FindingConfidence::Heuristic,
+                            rsleigh_decompile::finding::FindingStage::Discover,
+                            format!("VM dispatcher references {} data slot(s)", info.data_slots.len()),
+                        )
+                        .with_evidence(serde_json::json!({
+                            "binary": binary_path,
+                            "data_slots": info.data_slots.iter()
+                                .map(|slot| format!("0x{slot:x}"))
+                                .collect::<Vec<_>>(),
+                            "trampoline_slot": info.trampoline_slot
+                                .map(|slot| format!("0x{slot:x}")),
+                            "opcode_mask": info.opcode_mask,
+                        }));
+                        record.address = Some(format!("0x{:x}", info.dispatcher_va));
+                        println!("{}", serde_json::to_string(&record).unwrap());
+                        continue;
+                    }
                     for line in rsleigh_decompile::vm_dispatch_extract::render(&info) {
                         println!("{}", line);
                     }
-                } else {
+                } else if !findings_ndjson {
                     println!("dispatcher @ {:#x}: extraction failed", a);
                 }
             }
@@ -406,6 +495,28 @@ pub fn entrypoint() {
             };
             let insts =
                 rsleigh_decompile::vm_bytecode_disasm::disassemble(bytecode, bc_va, &vtable);
+            if findings_ndjson {
+                for instruction in insts {
+                    let mut record = rsleigh_decompile::finding::FindingRecord::new(
+                        "vm.bytecode_instruction",
+                        "vm-bytecode",
+                        rsleigh_decompile::finding::FindingConfidence::Pattern,
+                        rsleigh_decompile::finding::FindingStage::Lift,
+                        instruction.mnemonic.clone(),
+                    )
+                    .with_evidence(serde_json::json!({
+                        "binary": binary_path,
+                        "opcode": instruction.opcode,
+                        "mnemonic": instruction.mnemonic,
+                        "operands": instruction.operands,
+                        "handler": instruction.handler_va
+                            .map(|handler| format!("0x{handler:x}")),
+                    }));
+                    record.address = Some(format!("0x{:x}", instruction.bc_va));
+                    println!("{}", serde_json::to_string(&record).unwrap());
+                }
+                return;
+            }
             for line in rsleigh_decompile::vm_bytecode_disasm::render(&insts) {
                 println!("{}", line);
             }
@@ -602,10 +713,10 @@ pub fn entrypoint() {
                         run_xrefs(&bp, &data, &target);
                     }
                 } else if vulnscan_mode {
-                    run_vulnscan(&bp, &data);
+                    run_vulnscan(&bp, &data, findings_ndjson);
                 } else if ioc_mode {
                     let json = args_clone.iter().any(|a| a == "--json");
-                    run_ioc(&bp, &data, json);
+                    run_ioc(&bp, &data, json, findings_ndjson);
                 } else if xor_strings_mode {
                     let json = args_clone.iter().any(|a| a == "--json");
                     run_xor_strings(&bp, &data, json);
@@ -1622,6 +1733,11 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                             "address":     format!("0x{:x}", a),
                             "disassembly": inst.disassembly,
                             "length":      inst.len,
+                            "constructor": inst.constructor.as_ref().map(|span| serde_json::json!({
+                                "table_id":       span.table_id,
+                                "constructor_id": span.constructor_id,
+                                "source":         span.source,
+                            })),
                             "ops":         inst.ops.iter()
                                 .map(|op| serde_json::json!({ "op": format!("{:?}", op) }))
                                 .collect::<Vec<_>>(),
@@ -2902,9 +3018,7 @@ fn run_smt_candidates(
                 event_records.push(rec);
             }
 
-            let payload = serde_json::json!({
-                "function":      name,
-                "address":       format!("0x{:x}", addr),
+            let evidence = serde_json::json!({
                 "source":        path.source.name,
                 "sink":          path.sink.name,
                 "sink_kind":     kind,
@@ -2918,6 +3032,31 @@ fn run_smt_candidates(
                 "trigger":       trigger,
                 "events":        event_records,
             });
+            let confidence = match verdict {
+                SmtFinding::Reachable { .. } | SmtFinding::NotReachable => {
+                    rsleigh_decompile::finding::FindingConfidence::Proved
+                }
+                SmtFinding::Unsupported(_) => {
+                    rsleigh_decompile::finding::FindingConfidence::Heuristic
+                }
+            };
+            let severity = match path.sink.kind {
+                SinkKind::Command | SinkKind::FormatArg => "HIGH",
+                SinkKind::StackBuffer | SinkKind::TaintedStore => "MED",
+                SinkKind::CStringRead | SinkKind::LengthArg => "LOW",
+            };
+            let mut record = rsleigh_decompile::finding::FindingRecord::new(
+                "vulnerability.taint_flow",
+                "smt-candidates",
+                confidence,
+                rsleigh_decompile::finding::FindingStage::Prove,
+                format!("{} flow from {} to {} ({})", kind, path.source.name, path.sink.name, verdict_str),
+            )
+            .with_evidence(evidence);
+            record.severity = Some(severity.to_string());
+            record.function = Some(name.clone());
+            record.address = Some(format!("0x{:x}", addr));
+            let payload = serde_json::to_value(record).expect("serialize finding record");
             // v11.B: score per record. Higher = more likely to be
             // a real CVE candidate worth analyst attention.
             //   - Reachable verdict gets a big bump (Z3 actually
@@ -4776,7 +4915,7 @@ fn run_section_scan(binary_path: &str, data: &[u8]) {
     }
 }
 
-fn run_vulnscan(binary_path: &str, data: &[u8]) {
+fn run_vulnscan(binary_path: &str, data: &[u8], findings_ndjson: bool) {
     let obj = match parse_object_lenient(data) {
         Ok(o) => o,
         Err(e) => {
@@ -4944,11 +5083,21 @@ fn run_vulnscan(binary_path: &str, data: &[u8]) {
         ("mysql_query(", "MED", "potential SQL injection"),
     ];
 
-    eprintln!(
-        "Scanning {} functions for vulnerability patterns...",
-        symbols.len()
-    );
-    let mut findings: Vec<(String, u64, String, String, String)> = Vec::new(); // (severity, addr, name, vuln, context)
+    if !findings_ndjson {
+        eprintln!(
+            "Scanning {} functions for vulnerability patterns...",
+            symbols.len()
+        );
+    }
+    let mut findings: Vec<(
+        String,
+        u64,
+        String,
+        String,
+        String,
+        rsleigh_decompile::finding::FindingConfidence,
+        rsleigh_decompile::finding::FindingStage,
+    )> = Vec::new();
 
     for (func_addr, func_name) in &symbols {
         let off = segs.iter().find_map(|(va, sz, fo)| {
@@ -4995,6 +5144,8 @@ fn run_vulnscan(binary_path: &str, data: &[u8]) {
                     func_name.clone(),
                     description.to_string(),
                     context,
+                    rsleigh_decompile::finding::FindingConfidence::Pattern,
+                    rsleigh_decompile::finding::FindingStage::Decompile,
                 ));
             }
         }
@@ -5011,6 +5162,8 @@ fn run_vulnscan(binary_path: &str, data: &[u8]) {
                 func_name.clone(),
                 "missing stack cookie in large function".to_string(),
                 String::new(),
+                rsleigh_decompile::finding::FindingConfidence::Heuristic,
+                rsleigh_decompile::finding::FindingStage::Decompile,
             ));
         }
     }
@@ -5079,7 +5232,15 @@ fn run_vulnscan(binary_path: &str, data: &[u8]) {
     }
     let sec_findings = rsleigh_decompile::analysis::scan_section_anomalies(&sec_list, overlay);
     for f in sec_findings {
-        findings.push((f.severity, f.address, f.function, f.description, f.context));
+        findings.push((
+            f.severity,
+            f.address,
+            f.function,
+            f.description,
+            f.context,
+            rsleigh_decompile::finding::FindingConfidence::Heuristic,
+            rsleigh_decompile::finding::FindingStage::File,
+        ));
     }
 
     // Sort by severity
@@ -5091,6 +5252,27 @@ fn run_vulnscan(binary_path: &str, data: &[u8]) {
         _ => 4,
     };
     findings.sort_by(|a, b| severity_order(&a.0).cmp(&severity_order(&b.0)));
+
+    if findings_ndjson {
+        for (severity, addr, name, vuln, context, confidence, stage) in &findings {
+            let mut record = rsleigh_decompile::finding::FindingRecord::new(
+                "vulnerability.pattern",
+                "vulnscan",
+                *confidence,
+                *stage,
+                vuln.clone(),
+            )
+            .with_evidence(serde_json::json!({
+                "binary": binary_path,
+                "context": context,
+            }));
+            record.severity = Some(severity.clone());
+            record.function = Some(name.clone());
+            record.address = Some(format!("0x{:x}", addr));
+            println!("{}", serde_json::to_string(&record).unwrap());
+        }
+        return;
+    }
 
     // Output
     println!(
@@ -5112,7 +5294,7 @@ fn run_vulnscan(binary_path: &str, data: &[u8]) {
         findings.len()
     );
     println!();
-    for (severity, addr, name, vuln, context) in &findings {
+    for (severity, addr, name, vuln, context, _, _) in &findings {
         let color = match severity.as_str() {
             "CRIT" => "\x1b[91m",
             "HIGH" => "\x1b[31m",
@@ -5209,7 +5391,7 @@ fn run_xor_strings(binary_path: &str, data: &[u8], json: bool) {
     }
 }
 
-fn run_ioc(binary_path: &str, data: &[u8], json: bool) {
+fn run_ioc(binary_path: &str, data: &[u8], json: bool, findings_ndjson: bool) {
     use std::collections::BTreeSet;
 
     // ASCII pass: extract once at min len 4 (to catch short arch
@@ -5580,6 +5762,68 @@ fn run_ioc(binary_path: &str, data: &[u8], json: bool) {
         }
     }
 
+    let family = rsleigh_decompile::iot_family::classify_bytes(data);
+    let caps = rsleigh_decompile::iot_capabilities::classify_bytes(data);
+
+    if findings_ndjson {
+        for (category, values) in [
+            ("url", &urls),
+            ("ipv4", &ips),
+            ("domain", &domains),
+            ("path", &paths),
+            ("registry", &registry),
+            ("mutex", &mutexes),
+            ("secret", &secrets),
+        ] {
+            for value in values {
+                let record = rsleigh_decompile::finding::FindingRecord::new(
+                    format!("ioc.{category}"),
+                    "ioc",
+                    rsleigh_decompile::finding::FindingConfidence::Pattern,
+                    rsleigh_decompile::finding::FindingStage::File,
+                    format!("{category}: {value}"),
+                )
+                .with_evidence(serde_json::json!({
+                    "binary": binary_path,
+                    "value": value,
+                }));
+                println!("{}", serde_json::to_string(&record).unwrap());
+            }
+        }
+        if let Some(fam) = &family {
+            let record = rsleigh_decompile::finding::FindingRecord::new(
+                "malware.family",
+                "ioc",
+                rsleigh_decompile::finding::FindingConfidence::Heuristic,
+                rsleigh_decompile::finding::FindingStage::File,
+                format!("family: {}", fam.label),
+            )
+            .with_evidence(serde_json::json!({
+                "binary": binary_path,
+                "family_id": fam.id,
+                "variant": fam.variant,
+                "evidence": fam.evidence,
+            }));
+            println!("{}", serde_json::to_string(&record).unwrap());
+        }
+        for cap in &caps {
+            let record = rsleigh_decompile::finding::FindingRecord::new(
+                "malware.capability",
+                "ioc",
+                rsleigh_decompile::finding::FindingConfidence::Heuristic,
+                rsleigh_decompile::finding::FindingStage::File,
+                format!("capability: {}", cap.label),
+            )
+            .with_evidence(serde_json::json!({
+                "binary": binary_path,
+                "capability_id": cap.id,
+                "evidence": cap.evidence,
+            }));
+            println!("{}", serde_json::to_string(&record).unwrap());
+        }
+        return;
+    }
+
     if json {
         let payload = serde_json::json!({
             "binary": binary_path,
@@ -5590,15 +5834,14 @@ fn run_ioc(binary_path: &str, data: &[u8], json: bool) {
             "registry": registry.iter().collect::<Vec<_>>(),
             "mutexes":  mutexes.iter().collect::<Vec<_>>(),
             "secrets":  secrets.iter().collect::<Vec<_>>(),
-            "family": rsleigh_decompile::iot_family::classify_bytes(data)
+            "family": family.as_ref()
                 .map(|f| serde_json::json!({
                     "id": f.id,
                     "label": f.label,
                     "variant": f.variant,
                     "evidence": f.evidence,
                 })),
-            "capabilities": rsleigh_decompile::iot_capabilities::classify_bytes(data)
-                .iter()
+            "capabilities": caps.iter()
                 .map(|c| serde_json::json!({
                     "id": c.id,
                     "label": c.label,
@@ -5628,7 +5871,7 @@ fn run_ioc(binary_path: &str, data: &[u8], json: bool) {
     print_section("Mutexes/Named Objects", &mutexes);
     print_section("Secret-like strings", &secrets);
 
-    if let Some(fam) = rsleigh_decompile::iot_family::classify_bytes(data) {
+    if let Some(fam) = &family {
         let variant = fam
             .variant
             .as_ref()
@@ -5640,7 +5883,6 @@ fn run_ioc(binary_path: &str, data: &[u8], json: bool) {
         }
     }
 
-    let caps = rsleigh_decompile::iot_capabilities::classify_bytes(data);
     if !caps.is_empty() {
         println!("\nCapabilities ({})", caps.len());
         for c in &caps {

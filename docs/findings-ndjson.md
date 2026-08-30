@@ -1,0 +1,56 @@
+# Findings NDJSON
+
+Recon emitters share one line-oriented schema: `rsleigh.finding/v1`. This lets
+an analyst or model concatenate pattern matches, heuristic classifications, and
+solver results without guessing which confidence vocabulary each flag uses.
+
+```json
+{
+  "schema": "rsleigh.finding/v1",
+  "kind": "vulnerability.taint_flow",
+  "producer": "smt-candidates",
+  "confidence": "proved",
+  "stage": "prove",
+  "severity": "HIGH",
+  "function": "main",
+  "address": "0x401000",
+  "summary": "Command flow from recv to system (Reachable)",
+  "source": "recv",
+  "sink": "system",
+  "verdict": "Reachable"
+}
+```
+
+Required fields on every line:
+
+| Field | Values / meaning |
+|---|---|
+| `schema` | Always `rsleigh.finding/v1`. |
+| `kind` | Namespaced finding class such as `ioc.url`, `malware.capability`, or `vulnerability.taint_flow`. |
+| `producer` | Emitter that made the record (`ioc`, `vulnscan`, `smt-candidates`, …). |
+| `confidence` | `pattern`, `heuristic`, or `proved`. This describes evidence quality, not severity. |
+| `stage` | `file`, `discover`, `lift`, `decompile`, or `prove`. |
+| `summary` | Short human-readable statement. |
+
+`severity`, `function`, and `address` are optional. Producer-specific evidence
+is flattened into the same object so existing filters such as
+`select(.sink_kind == "Command")` remain valid.
+
+Current emitters:
+
+```bash
+rsleigh sample --ioc --findings-ndjson
+rsleigh sample --vulnscan --findings-ndjson
+rsleigh sample --smt-candidates
+rsleigh packed.exe --vm-classify-handlers 0x401000 --findings-ndjson
+rsleigh packed.exe --tag-dispatch 0x402000 --findings-ndjson
+rsleigh packed.exe --summarise-handlers 0x403000 --findings-ndjson
+rsleigh packed.exe --vm-dispatch 0x404000 --findings-ndjson
+rsleigh packed.exe --vm-bytecode 0x405000:0x400 --vm-handlers handlers.json --findings-ndjson
+```
+
+`--smt-candidates` always emits this NDJSON schema. IOC and vulnscan preserve
+their human and legacy aggregate JSON formats unless `--findings-ndjson` is
+requested explicitly. VM recon helpers likewise preserve their concise human
+rendering by default and emit one shared-schema record per recovered artifact
+when the flag is present.

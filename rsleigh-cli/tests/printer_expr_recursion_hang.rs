@@ -1,10 +1,9 @@
-//! Regression for printer::expr_has_tracked_reg unmemoized recursion.
+//! Regression for repeated printer traversal and expansion of an SSA DAG.
 //!
-//! Pre-fix: `expr_has_tracked_reg` recurses into `Expr::BinOp`'s left
-//! and right operands by VarId without a visited set or memo, so a
-//! shared-subexpression DAG (typical of unrolled crypto rounds — long
-//! arithmetic chains where each result feeds multiple successors)
-//! produces an exponential walk that hangs the printer indefinitely.
+//! Pre-fix: the tracked-register probe rebuilt its visited set for every
+//! expression level, while rendering expanded the DAG into multi-megabyte
+//! C expressions. The repeated traversal and downstream text cleanup made
+//! an unrolled crypto round exceed the raw-ARM budget.
 //!
 //! Surfaced via M2 firmware triage: function at 0x0001591c in
 //! tdpServer (TP-Link AX6000 v2) is an unrolled crypto round. The
@@ -76,7 +75,7 @@ fn printer_does_not_hang_on_crypto_round_dag() {
                     let _ = child.wait();
                     panic!(
                         "rsleigh hung > {}s on tdpserver crypto-round fixture — \
-                         expr_has_tracked_reg unmemoized recursion regressed",
+                         SSA DAG printer bounds regressed",
                         budget.as_secs()
                     );
                 }

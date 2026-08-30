@@ -212,6 +212,22 @@ impl Disassembler {
                 inst_start: #addr_type,
                 global_set: &mut #globalset_struct,
             ) -> Option<(#inst_work_type, Vec<#display_data_type>, Vec<pcode_ir::PcodeOp>)> {
+                parse_instruction_with_constructor(tokens, context, inst_start, global_set)
+                    .map(|(inst_next, display, pcode, _)| (inst_next, display, pcode))
+            }
+
+            #[inline(never)]
+            pub fn parse_instruction_with_constructor(
+                tokens: &[u8],
+                context: &mut #context_struct,
+                inst_start: #addr_type,
+                global_set: &mut #globalset_struct,
+            ) -> Option<(
+                #inst_work_type,
+                Vec<#display_data_type>,
+                Vec<pcode_ir::PcodeOp>,
+                pcode_ir::ConstructorSpan,
+            )> {
                 let (inst_len, instruction) =
                     #instr_mod_name::#instruction_table_name::#instruction_table_parse(
                         tokens,
@@ -219,6 +235,7 @@ impl Disassembler {
                         inst_start,
                 )?;
                 let inst_next = inst_start + inst_len;
+                let constructor = instruction.constructor_span();
                 let mut display = vec![];
                 instruction.#instruction_table_display(
                     &mut display,
@@ -228,7 +245,7 @@ impl Disassembler {
                     global_set,
                 );
                 let (pcode, _export, _ref) = instruction.lift(inst_start, inst_next);
-                Some((inst_next, display, pcode))
+                Some((inst_next, display, pcode, constructor))
             }
         };
         root.push_str(&parse_fn.to_string());
@@ -275,6 +292,22 @@ impl ToTokens for Disassembler {
                 inst_start: #addr_type,
                 global_set: &mut #globalset_struct,
             ) -> Option<(#inst_work_type, Vec<#display_data_type>, Vec<pcode_ir::PcodeOp>)> {
+                parse_instruction_with_constructor(tokens, context, inst_start, global_set)
+                    .map(|(inst_next, display, pcode, _)| (inst_next, display, pcode))
+            }
+
+            #[inline(never)]
+            pub fn parse_instruction_with_constructor(
+                tokens: &[u8],
+                context: &mut #context_struct,
+                inst_start: #addr_type,
+                global_set: &mut #globalset_struct,
+            ) -> Option<(
+                #inst_work_type,
+                Vec<#display_data_type>,
+                Vec<pcode_ir::PcodeOp>,
+                pcode_ir::ConstructorSpan,
+            )> {
                 let (inst_len, instruction) =
                     #instruction_table_name::#instruction_table_parse(
                         tokens,
@@ -282,6 +315,7 @@ impl ToTokens for Disassembler {
                         inst_start,
                 )?;
                 let inst_next = inst_start + inst_len;
+                let constructor = instruction.constructor_span();
                 let mut display = vec![];
                 instruction.#instruction_table_display(
                     &mut display,
@@ -291,7 +325,7 @@ impl ToTokens for Disassembler {
                     global_set,
                 );
                 let (pcode, _export, _ref) = instruction.lift(inst_start, inst_next);
-                Some((inst_next, display, pcode))
+                Some((inst_next, display, pcode, constructor))
             }
         });
     }

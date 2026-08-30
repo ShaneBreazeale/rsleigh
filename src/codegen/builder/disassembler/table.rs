@@ -83,6 +83,43 @@ impl TableEnum {
         (batches, enum_tokens)
     }
 
+    fn constructor_span_method(&self, disassembler: &Disassembler) -> TokenStream {
+        if self.table_id != disassembler.sleigh.instruction_table() {
+            return TokenStream::new();
+        }
+
+        let table_id = self.table_id.0 as u32;
+        let variants = self
+            .constructors
+            .iter()
+            .map(|constructor| &constructor.enum_name);
+        let constructor_ids = self
+            .constructors
+            .iter()
+            .map(|constructor| constructor.constructor_id.0 as u32);
+        let sources = self.constructors.iter().map(|constructor| {
+            disassembler
+                .sleigh
+                .table(self.table_id)
+                .constructor(constructor.constructor_id)
+                .location
+                .to_string()
+        });
+
+        quote! {
+            #[inline(never)]
+            pub fn constructor_span(&self) -> pcode_ir::ConstructorSpan {
+                match self {
+                    #(Self::#variants(_) => pcode_ir::ConstructorSpan {
+                        constructor_id: #constructor_ids,
+                        table_id: #table_id,
+                        source: #sources,
+                    }),*
+                }
+            }
+        }
+    }
+
     fn emit_enum_only(&self, tokens: &mut TokenStream, disassembler: &Disassembler) {
         let Self {
             name: enum_name,
@@ -164,6 +201,7 @@ impl TableEnum {
         let addr_type = &disassembler.addr_type;
         let context_struct = &disassembler.context.name;
         let globalset_struct = &disassembler.context.globalset.name;
+        let constructor_span_method = self.constructor_span_method(disassembler);
         tokens.extend(quote! {
             #[derive(Clone, Debug)]
             pub enum #enum_name {
@@ -193,6 +231,7 @@ impl TableEnum {
                         #(Self::#variant_lift_names(x) => x.lift(inst_start, inst_next)),*
                     }
                 }
+                #constructor_span_method
                 pub fn #parse_fun(
                     tokens_param: &[u8],
                     context_param: &mut #context_struct,
@@ -300,6 +339,7 @@ impl TableEnum {
         let addr_type = &disassembler.addr_type;
         let context_struct = &disassembler.context.name;
         let globalset_struct = &disassembler.context.globalset.name;
+        let constructor_span_method = self.constructor_span_method(disassembler);
         for constructor in constructors_structs {
             constructor.to_tokens(tokens, disassembler);
         }
@@ -336,6 +376,7 @@ impl TableEnum {
                         #(Self::#variant_lift_names(x) => x.lift(inst_start, inst_next)),*
                     }
                 }
+                #constructor_span_method
                 pub fn #parse_fun(
                     tokens_param: &[u8],
                     context_param: &mut #context_struct,

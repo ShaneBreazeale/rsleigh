@@ -106,6 +106,7 @@ Lightweight file-structure and string scans are good first passes:
 ```bash
 rsleigh ./sample.exe --hashes
 rsleigh ./sample.exe --ioc --json
+rsleigh ./sample.exe --ioc --findings-ndjson > findings.ndjson
 rsleigh ./sample.exe --sigcheck --json
 rsleigh ./sample.exe --resources --dump extracted/
 rsleigh ./sample.exe --xor-strings --json
@@ -115,7 +116,7 @@ rsleigh ./sample.exe --sections
 Then move into semantic analysis:
 
 ```bash
-rsleigh ./sample.exe --vulnscan
+rsleigh ./sample.exe --vulnscan --findings-ndjson >> findings.ndjson
 rsleigh ./sample.exe --yara
 rsleigh old.exe --diff new.exe
 rsleigh ./sample.exe --classes --json
@@ -139,6 +140,10 @@ rsleigh ./packed.exe --vm-bytecode 0x180063858:0x400 \
   --vm-handlers handlers.json
 ```
 
+Add `--findings-ndjson` to any VM helper to emit the shared confidence-bearing
+schema documented in [Findings NDJSON](docs/findings-ndjson.md).
+```
+
 These are pattern-based recon tools, not a general virtualization deobfuscator.
 See the [feature notes](docs/features.md) and
 [PyVMProtect walkthrough](docs/showcase/crackme3-pyvmprotect.md).
@@ -157,20 +162,15 @@ CPATH=$(brew --prefix z3)/include LIBRARY_PATH=$(brew --prefix z3)/lib \
 target/release/rsleigh ./binary --smt-candidates main > candidates.ndjson
 ```
 
-See [SMT backend](docs/smt-backend.md) for setup and scope, and
-[SMT candidates](docs/smt-candidates.md) for the output schema.
+See [SMT backend](docs/smt-backend.md) for setup and scope,
+[SMT candidates](docs/smt-candidates.md) for taint evidence, and the shared
+[findings NDJSON schema](docs/findings-ndjson.md) used across recon emitters.
 
 ## Supported targets
 
-| Target | Decoder/decompiler notes |
-|---|---|
-| x86-64 | SysV and Windows x64 conventions |
-| x86-32 | Protected mode with cdecl/thiscall heuristics |
-| AArch64 | AAPCS64-oriented analysis |
-| ARM32 | ARMv7 and Thumb; raw Cortex-M discovery supported |
-| MIPS32 | Big-endian decoding with PIC-oriented call resolution |
-| RISC-V 64 | RV64-oriented decoding |
-| WebAssembly | Native stack-machine parser rather than SLEIGH |
+Decode coverage is not the same as lift or decompile coverage. The public
+[architecture support matrix](docs/architectures.md) reports decode, lift,
+discovery, and decompile separately for each ISA/mode.
 
 The CLI loads ELF32/64, PE32/64, Mach-O 64, WebAssembly, and raw blobs. See
 [architecture support](docs/architectures.md) for discovery details and gaps.

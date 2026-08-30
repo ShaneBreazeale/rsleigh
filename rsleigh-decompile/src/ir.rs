@@ -79,6 +79,25 @@ pub struct BasicBlock {
     pub terminator: Terminator,
 }
 
+/// DFS classification of a concrete CFG edge.
+///
+/// Unlike block-number comparisons, this remains meaningful when blocks are
+/// laid out in reverse order or a function contains irreducible control flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CfgEdgeKind {
+    Tree,
+    Back,
+    Forward,
+    Cross,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CfgEdge {
+    pub from: BlockId,
+    pub to: BlockId,
+    pub kind: CfgEdgeKind,
+}
+
 #[derive(Debug, Clone)]
 pub enum Terminator {
     Fallthrough(BlockId),

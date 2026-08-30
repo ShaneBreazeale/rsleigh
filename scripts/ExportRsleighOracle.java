@@ -29,7 +29,6 @@ import ghidra.program.model.pcode.Varnode;
 
 import java.io.FileWriter;
 import java.io.PrintWriter;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -169,9 +168,8 @@ public class ExportRsleighOracle extends GhidraScript {
     }
 
     private String programSha256() throws Exception {
-        byte[] all = currentProgram.getMemory().getExecuteSet().toString().getBytes();
-        MessageDigest md = MessageDigest.getInstance("SHA-256");
-        return hex(md.digest(all));
+        String imported = currentProgram.getExecutableSHA256();
+        return imported == null ? "" : imported.toLowerCase();
     }
 
     private static String hex(byte[] b) {

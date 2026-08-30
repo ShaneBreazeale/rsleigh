@@ -50,6 +50,17 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
     };
 
     let preds = cfg.predecessors();
+    let classified_edges = cfg.classified_edges();
+    let back_edges: HashSet<(BlockId, BlockId)> = classified_edges
+        .iter()
+        .filter(|edge| edge.kind == CfgEdgeKind::Back)
+        .map(|edge| (edge.from, edge.to))
+        .collect();
+    let forward_edges: HashSet<(BlockId, BlockId)> = classified_edges
+        .iter()
+        .filter(|edge| matches!(edge.kind, CfgEdgeKind::Tree | CfgEdgeKind::Forward))
+        .map(|edge| (edge.from, edge.to))
+        .collect();
 
     // Per-block: map from varnode -> VarId at block exit
     let mut block_exit_vars: Vec<HashMap<Varnode, VarId>> = vec![HashMap::new(); cfg.blocks.len()];
@@ -94,8 +105,9 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                 // on iteration 1 so that early Phi nodes can be created for loop accumulators.
                 // Without this, the skip condition prevents the block from ever seeing its
                 // own back-edge exit vars.
-                let _is_self_loop = block_preds.iter().any(|pred| pred.0 == block.id.0);
-                let has_back_edge = block_preds.iter().any(|pred| pred.0 >= block.id.0);
+                let has_back_edge = block_preds
+                    .iter()
+                    .any(|pred| back_edges.contains(&(*pred, block.id)));
                 if !any_pred_changed && !any_new_keys && !(has_back_edge && iteration == 1) {
                     continue;
                 }
@@ -110,20 +122,23 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
             // per block; cross-block extension is future work.
             let mut local_global: GlobalMap = HashMap::new();
 
-            // Inherit from the first already-processed FORWARD predecessor.
-            // A forward predecessor has a lower block ID (comes before in CFG order).
-            // Back-edge predecessors (higher block ID, from loop back-edges) are excluded
-            // to prevent loop-contaminated register values from leaking into the loop
-            // header's initial state. Back-edge values are properly merged via Phi nodes.
+            // Inherit from the first already-processed tree/forward predecessor.
+            // DFS edge classification, rather than block layout order, identifies
+            // loop-carried inputs. Back-edge values are merged via Phi nodes below.
             if !block_preds.is_empty() {
-                // First try forward predecessors only
+                // First try the DFS tree/forward predecessors that establish
+                // the block's acyclic input state. Cross edges, like back
+                // edges, are merged below instead of seeding the state; using
+                // them here can make cyclic expression DAGs depend on layout.
                 for pred in block_preds {
-                    if pred.0 < block.id.0 && !block_exit_vars[pred.0].is_empty() {
+                    if forward_edges.contains(&(*pred, block.id))
+                        && !block_exit_vars[pred.0].is_empty()
+                    {
                         current = block_exit_vars[pred.0].clone();
                         break;
                     }
                 }
-                // Fallback: if no forward predecessor has data (entry block or unreachable),
+                // Fallback: if no acyclic predecessor has data (entry or unreachable),
                 // use any predecessor
                 if current.is_empty() {
                     for pred in block_preds {

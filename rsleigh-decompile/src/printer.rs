@@ -15224,14 +15224,14 @@ fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTrac
                         .get_expr_str(lv.varnode.offset, lv.varnode.size)
                         .is_some()))
                 || (lv.varnode.space == AddressSpaceId::Unique
-                    && expr_has_tracked_reg(&lv.expr, ssa, tracker));
+                    && var_has_tracked_reg(*left, ssa, tracker));
             let r_tracked = (rv.varnode.space == AddressSpaceId::Register
                 && (tracker.get(rv.varnode.offset, rv.varnode.size).is_some()
                     || tracker
                         .get_expr_str(rv.varnode.offset, rv.varnode.size)
                         .is_some()))
                 || (rv.varnode.space == AddressSpaceId::Unique
-                    && expr_has_tracked_reg(&rv.expr, ssa, tracker));
+                    && var_has_tracked_reg(*right, ssa, tracker));
             if l_tracked || r_tracked {
                 let l = format_var_tracked(*left, ssa, ctx, tracker);
                 let r = format_var_tracked(*right, ssa, ctx, tracker);
@@ -15325,66 +15325,70 @@ fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTrac
     format_var(id, ssa, ctx)
 }
 
-/// Recursively check if an expression tree references any tracked register.
-fn expr_has_tracked_reg(expr: &Expr, ssa: &SsaCfg, tracker: &RegTracker) -> bool {
-    let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    expr_has_tracked_reg_rec(expr, ssa, tracker, &mut visited)
+/// Recursively check if a variable's expression references any tracked register.
+/// Results are memoized for the current rendered root because the same SSA DAG
+/// nodes are probed at every level of a large arithmetic expression.
+fn var_has_tracked_reg(id: VarId, ssa: &SsaCfg, tracker: &RegTracker) -> bool {
+    let mut visiting = std::collections::HashSet::new();
+    let mut memo = HashMap::new();
+    var_has_tracked_reg_rec(id, ssa, tracker, &mut visiting, &mut memo)
 }
 
-fn expr_has_tracked_reg_rec(
-    expr: &Expr,
+fn var_has_tracked_reg_rec(
+    id: VarId,
     ssa: &SsaCfg,
     tracker: &RegTracker,
-    visited: &mut std::collections::HashSet<u32>,
+    visiting: &mut std::collections::HashSet<u32>,
+    memo: &mut HashMap<u32, bool>,
 ) -> bool {
-    match expr {
-        Expr::Var(inner) => {
-            if !visited.insert(inner.0) {
-                return false;
-            }
-            let iv = ssa.var(*inner);
-            if iv.varnode.space == AddressSpaceId::Register {
-                return tracker.get(iv.varnode.offset, iv.varnode.size).is_some()
-                    || tracker
-                        .get_expr_str(iv.varnode.offset, iv.varnode.size)
-                        .is_some();
-            }
-            if iv.varnode.space == AddressSpaceId::Unique {
-                return expr_has_tracked_reg_rec(&iv.expr, ssa, tracker, visited);
-            }
-            false
-        }
-        Expr::UnaryOp(_, inner) => {
-            if !visited.insert(inner.0) {
-                return false;
-            }
-            let iv = ssa.var(*inner);
-            if iv.varnode.space == AddressSpaceId::Register {
-                return tracker.get(iv.varnode.offset, iv.varnode.size).is_some()
-                    || tracker
-                        .get_expr_str(iv.varnode.offset, iv.varnode.size)
-                        .is_some();
-            }
-            if iv.varnode.space == AddressSpaceId::Unique {
-                return expr_has_tracked_reg_rec(&iv.expr, ssa, tracker, visited);
-            }
-            false
-        }
-        Expr::BinOp(_, left, right) => {
-            if visited.insert(left.0)
-                && expr_has_tracked_reg_rec(&ssa.var(*left).expr, ssa, tracker, visited)
-            {
-                return true;
-            }
-            if visited.insert(right.0)
-                && expr_has_tracked_reg_rec(&ssa.var(*right).expr, ssa, tracker, visited)
-            {
-                return true;
-            }
-            false
-        }
-        _ => false,
+    if let Some(result) = memo.get(&id.0) {
+        return *result;
     }
+    let session_result = FORMAT_VARDEF_STATE.with(|state| {
+        let state = state.borrow();
+        (state.depth > 0)
+            .then(|| state.tracked_cache.get(&id.0).copied())
+            .flatten()
+    });
+    if let Some(result) = session_result {
+        return result;
+    }
+    if !visiting.insert(id.0) {
+        return false;
+    }
+
+    let vdef = ssa.var(id);
+    let result = if vdef.varnode.space == AddressSpaceId::Register {
+        tracker
+            .get(vdef.varnode.offset, vdef.varnode.size)
+            .is_some()
+            || tracker
+                .get_expr_str(vdef.varnode.offset, vdef.varnode.size)
+                .is_some()
+    } else if vdef.varnode.space == AddressSpaceId::Unique {
+        match &vdef.expr {
+            Expr::Var(inner) | Expr::UnaryOp(_, inner) => {
+                var_has_tracked_reg_rec(*inner, ssa, tracker, visiting, memo)
+            }
+            Expr::BinOp(_, left, right) => {
+                var_has_tracked_reg_rec(*left, ssa, tracker, visiting, memo)
+                    || var_has_tracked_reg_rec(*right, ssa, tracker, visiting, memo)
+            }
+            _ => false,
+        }
+    } else {
+        false
+    };
+
+    visiting.remove(&id.0);
+    memo.insert(id.0, result);
+    FORMAT_VARDEF_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if state.depth > 0 {
+            state.tracked_cache.insert(id.0, result);
+        }
+    });
+    result
 }
 
 /// Resolve a stack variable name through the alias chain.
@@ -15613,6 +15617,32 @@ fn simplify_msvc_name(name: &str) -> String {
 /// Format a VarDef's expression, respecting param_name for stack parameters.
 /// Use this instead of format_expr_tracked when you have the VarDef available.
 fn format_vardef_expr(vdef: &VarDef, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> String {
+    let mut guard = match FormatVardefGuard::enter(vdef.id) {
+        FormatVardefEnter::Fresh(guard) => guard,
+        FormatVardefEnter::Cached(rendered) => return rendered,
+        FormatVardefEnter::Recursive => return vardef_reference(vdef, ctx),
+    };
+
+    let rendered = format_vardef_expr_uncached(vdef, ssa, ctx, tracker);
+    // Rendering a DAG as a tree can make the textual result exponentially
+    // larger than the SSA that produced it. Keep normal expressions intact,
+    // but retain a stable SSA reference once an individual expression exceeds
+    // the printer's useful output budget.
+    let rendered = if rendered.len() > FORMAT_VAR_MAX_RENDERED_BYTES {
+        vardef_reference(vdef, ctx)
+    } else {
+        rendered
+    };
+    guard.cache(&rendered);
+    rendered
+}
+
+fn format_vardef_expr_uncached(
+    vdef: &VarDef,
+    ssa: &SsaCfg,
+    ctx: &PrintCtx,
+    tracker: &RegTracker,
+) -> String {
     // If this variable is a named parameter (e.g., x86-32 stack param from [EBP+8]),
     // return the param name directly — don't render the Load as a pointer deref.
     if let Some(ref name) = vdef.param_name {
@@ -15639,6 +15669,12 @@ fn format_vardef_expr(vdef: &VarDef, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &Reg
         }
     }
     result
+}
+
+fn vardef_reference(vdef: &VarDef, ctx: &PrintCtx) -> String {
+    vdef.param_name
+        .clone()
+        .unwrap_or_else(|| var_name(&vdef.varnode, ctx))
 }
 
 fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> String {
@@ -17350,9 +17386,87 @@ fn format_call_target(target: &CallTarget, _ssa: &SsaCfg, ctx: &PrintCtx) -> Str
 
 thread_local! {
     static FORMAT_VAR_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static FORMAT_VARDEF_STATE: std::cell::RefCell<FormatVardefState> =
+        std::cell::RefCell::new(FormatVardefState::default());
 }
 
 const FORMAT_VAR_MAX_DEPTH: u32 = 256;
+// A single C expression longer than this is no longer useful to a reader and
+// makes the text-level cleanup passes scan megabytes of repeated arithmetic.
+const FORMAT_VAR_MAX_RENDERED_BYTES: usize = 512;
+
+#[derive(Default)]
+struct FormatVardefState {
+    depth: u32,
+    expanded: u32,
+    active: std::collections::HashSet<u32>,
+    cache: HashMap<u32, String>,
+    tracked_cache: HashMap<u32, bool>,
+}
+
+enum FormatVardefEnter {
+    Fresh(FormatVardefGuard),
+    Cached(String),
+    Recursive,
+}
+
+struct FormatVardefGuard {
+    id: u32,
+}
+
+impl FormatVardefGuard {
+    fn enter(id: VarId) -> FormatVardefEnter {
+        FORMAT_VARDEF_STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            if state.depth == 0 {
+                state.expanded = 0;
+                state.active.clear();
+                state.cache.clear();
+                state.tracked_cache.clear();
+            }
+            if let Some(rendered) = state.cache.get(&id.0) {
+                return FormatVardefEnter::Cached(rendered.clone());
+            }
+            // The depth cap alone only bounds a chain. A wide expression tree
+            // can contain thousands of distinct VarIds below that depth, so
+            // also bound total expansion work for one rendered root.
+            if state.depth >= FORMAT_VAR_MAX_DEPTH
+                || state.expanded >= FORMAT_VAR_MAX_DEPTH
+                || !state.active.insert(id.0)
+            {
+                return FormatVardefEnter::Recursive;
+            }
+            state.depth += 1;
+            state.expanded += 1;
+            FormatVardefEnter::Fresh(FormatVardefGuard { id: id.0 })
+        })
+    }
+
+    fn cache(&mut self, rendered: &str) {
+        FORMAT_VARDEF_STATE.with(|state| {
+            state
+                .borrow_mut()
+                .cache
+                .insert(self.id, rendered.to_string());
+        });
+    }
+}
+
+impl Drop for FormatVardefGuard {
+    fn drop(&mut self) {
+        FORMAT_VARDEF_STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            state.active.remove(&self.id);
+            state.depth = state.depth.saturating_sub(1);
+            if state.depth == 0 {
+                state.expanded = 0;
+                state.active.clear();
+                state.cache.clear();
+                state.tracked_cache.clear();
+            }
+        });
+    }
+}
 
 struct FormatVarGuard;
 

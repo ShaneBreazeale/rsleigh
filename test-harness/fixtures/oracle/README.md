@@ -42,6 +42,9 @@ test-harness/fixtures/oracle/
 ## Regenerate
 
 ```bash
+GHIDRA_INSTALL_DIR=/opt/ghidra scripts/ghidra-refresh-oracles.sh
+
+# Or refresh one fixture directly:
 GHIDRA_INSTALL_DIR=/opt/ghidra \
   scripts/ghidra-export-oracle.sh \
     test-harness/fixtures/oracle/x86_64/ret_imm16.bin \
@@ -50,6 +53,10 @@ GHIDRA_INSTALL_DIR=/opt/ghidra \
 ```
 
 CI does not run Ghidra. Commit JSON; regenerate manually when fixtures change.
+`manifest.tsv` is the exact public corpus. Add deterministic random-byte samples
+or slices copied from a real executable's `.text` section there; the parity test
+then scores every decoded instruction for length, op count, and varnode/target
+agreement. The exporter records Ghidra's imported-file SHA-256 in each JSON.
 
 ## Comparison policy
 
@@ -59,3 +66,9 @@ CI does not run Ghidra. Commit JSON; regenerate manually when fixtures change.
 - **Normalized:** `unique` space offsets remapped to first-def order per
   function; raw values are not comparable.
 - **Fuzzy:** disasm spelling, function names.
+
+The test prints an `OracleScore` for every fixture: decode failures, missing
+constructor provenance, length mismatches, missing/extra operations, normalized
+operation/varnode mismatches, and direct branch/call destination mismatches.
+Known semantic gaps have exact score baselines, so either a regression or an
+improvement fails until the baseline and explanation are reviewed.
