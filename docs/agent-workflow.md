@@ -34,7 +34,7 @@ rsleigh sample.exe 0x140001000 --card --pcode --decompile
 | What does the function probably do? | `FUNCTION --card --pcode --decompile` | experimental reconstruction | Verify important claims against P-code or disassembly. |
 | Which leads should be investigated? | `--ioc`, `--vulnscan`, or VM helpers with `--findings-ndjson` | pattern or heuristic | Confidence is evidence quality, not severity or truth. |
 | Is a named flow reachable in the model? | `--smt-candidates FUNCTION` | solver result over modeled paths | Require `verdict == "Reachable"`; review unsupported operations and bounds. |
-| Will analysis span several turns? | `--index DIR` | reusable bounded map | Confirm the index hash matches the current binary. |
+| Will analysis span several turns? | `--index DIR` | reusable bounded map | Record an external binary hash and rebuild the index when the input changes. |
 | Is the input raw firmware? | `--raw ARCH --base ADDR` on every command | caller-supplied file context | Never infer the ISA, mode, endianness, or image base from output alone. |
 
 Do not use pseudocode to answer an instruction-semantics question when P-code
