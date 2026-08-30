@@ -1,0 +1,44 @@
+name: Refresh Context7 Docs
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - README.md
+      - CHANGELOG.md
+      - docs/**
+      - context7.json
+      - .github/workflows/context7.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Context7 API key
+        id: api-key
+        env:
+          CONTEXT7_API_KEY: ${{ secrets.CONTEXT7_API_KEY }}
+        shell: bash
+        run: |
+          if [[ -z "$CONTEXT7_API_KEY" ]]; then
+            echo "::notice::CONTEXT7_API_KEY is not configured; skipping refresh."
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trigger Context7 refresh
+        if: steps.api-key.outputs.configured == 'true'
+        env:
+          CONTEXT7_API_KEY: ${{ secrets.CONTEXT7_API_KEY }}
+        run: |
+          curl --fail-with-body --silent --show-error \
+            --request POST https://context7.com/api/v1/refresh \
+            --header "Content-Type: application/json" \
+            --header "Authorization: Bearer $CONTEXT7_API_KEY" \
+            --data '{"libraryName":"/shanebreazeale/rsleigh"}'
