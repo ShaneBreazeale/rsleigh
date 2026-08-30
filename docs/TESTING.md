@@ -71,6 +71,25 @@ Validates that all 5 architecture decoders (x86-64, AArch64, ARM32, MIPS32, RISC
 
 This test runs random byte sequences through both the decoder and the decompiler, asserting zero panics across all architectures.
 
+### Agent interface contract
+
+`rsleigh-cli/tests/agent_interface.rs` builds a minimal PE fixture and invokes
+the real CLI binary. It verifies that:
+
+- `--agent-brief --limit 1` emits `rsleigh.agent-brief/v1`, contains trust and
+  evidence labels, obeys caps, suggests three follow-up commands, and includes
+  no pseudocode;
+- `--card --pcode --decompile` exposes the bounded disassembly, P-code, and
+  pseudocode sections plus constructor provenance and `warnings[]`;
+- `--index DIR --limit 1` writes every documented artifact and valid
+  `rsleigh.finding/v1` NDJSON records.
+
+Run only this contract suite with:
+
+```bash
+cargo test -p rsleigh-cli --test agent_interface
+```
+
 ---
 
 ## Layer 3: Decompiler Validation

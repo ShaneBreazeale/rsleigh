@@ -54,6 +54,19 @@ rsleigh packed.exe --vm-dispatch 0x404000 --findings-ndjson
 rsleigh packed.exe --vm-bytecode 0x405000:0x400 --vm-handlers handlers.json --findings-ndjson
 ```
 
+The agent-facing aggregators preserve this record unchanged:
+
+```bash
+rsleigh sample --agent-brief             # records embedded in the `findings` JSON array
+rsleigh sample --index out/              # records written to out/findings.ndjson
+```
+
+`--agent-brief` returns at most 50 findings. `--index` writes at most 5,000.
+Both report returned, total, and cap counts in their `limits` object. These are
+bounded navigation artifacts, not replacements for running each complete
+producer. See the [agent workflow reference](agent-workflow.md) for the exact
+subset and ranking behavior.
+
 `--smt-candidates` always emits this NDJSON schema. IOC and vulnscan preserve
 their human and legacy aggregate JSON formats unless `--findings-ndjson` is
 requested explicitly. VM recon helpers likewise preserve their concise human

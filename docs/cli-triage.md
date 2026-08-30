@@ -5,6 +5,11 @@ decompiler. Each works on PE32 / PE32+ / ELF / Mach-O where applicable
 and is usable both interactively (human-readable output) and from
 pipelines (`--json`).
 
+For an LLM or coding-agent session, start with the bounded
+[`--agent-brief`](agent-workflow.md#--agent-brief). It includes a capped subset
+of file findings and a ranked function map. Run the flags below directly when
+you need complete triage coverage rather than the brief's navigation budget.
+
 | Flag | Purpose | JSON | Aux flag |
 |------|---------|------|----------|
 | `--ioc` | Indicators of compromise (URLs, IPs, paths, registry, mutexes, secrets) | yes | — |
@@ -14,8 +19,8 @@ pipelines (`--json`).
 All three are independent of the decoder/decompiler pipeline and run in
 constant time relative to binary size — they only walk file structure
 and string runs, never the SSA passes. Use them as the first call on
-any unknown sample before deciding whether to invest in `--all`
-decompilation.
+any unknown sample before deciding which individual functions to inspect.
+Avoid whole-binary pseudocode dumps in agent workflows.
 
 ---
 

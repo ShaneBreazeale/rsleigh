@@ -33,10 +33,21 @@ Implementation under `rsleigh-decompile/` + `rsleigh-cli/`. See `docs/decompiler
 
 ## Output
 
+- Agent brief (`--agent-brief [--limit N]`): capped JSON map with file hashes,
+  ranked functions, shared-schema findings, trust labels, architecture warnings,
+  enforced limits, and address-filled follow-up commands
+- Reusable index (`--index DIR [--limit N]`): `functions.json`, `xrefs.json`,
+  `findings.ndjson`, `imports.json`, and an `index.json` manifest
+- Function evidence card (`FUNCTION --card [--pcode] [--decompile]`): first 40
+  instructions, optional first 120 P-code ops, optional 4,096-byte pseudocode,
+  constructor provenance, and `warnings[]`
 - Compact (`--compact`, -24%), brief (`--brief`, -35%), `--min-complexity N`
 - `--brief --min-complexity 5` = -40% tokens for LLM workflows
 - `--summary` (one-line per func), `--xrefs`, `--search` by string/API/const
 - Raw firmware (`--raw <arch>`)
+
+See the [coding-agent workflow](agent-workflow.md) for schemas, ranking, caps,
+trust semantics, and limitations.
 
 ## Triage
 

@@ -63,6 +63,15 @@ The optional Z3-backed SMT analysis requires a source build; see
 
 ## Quickstart
 
+Using rsleigh from a coding agent? Copy the bounded workflow contract in
+[docs/AGENTS-rsleigh.md](docs/AGENTS-rsleigh.md) into the target-analysis
+workspace, see the [agent workflow reference](docs/agent-workflow.md) for
+schemas and caps, then start with one capped JSON map:
+
+```bash
+rsleigh ./sample.exe --agent-brief
+```
+
 Start with discovered functions, then narrow the analysis:
 
 ```bash
@@ -78,9 +87,19 @@ rsleigh ./sample.exe --ssa-json main         # post-fold SSA
 For a large binary, generate a compact map first:
 
 ```bash
+rsleigh ./sample.exe --agent-brief              # capped JSON + trust labels + next commands
 rsleigh ./sample.exe --summary
 rsleigh ./sample.exe --callgraph > callgraph.json
 rsleigh ./sample.exe --all --brief --min-complexity 10 > sample.brief.txt
+rsleigh ./sample.exe --index sample-index/      # reusable functions/xrefs/findings/imports
+```
+
+Inspect one function without allowing an unbounded dump:
+
+```bash
+rsleigh ./sample.exe 0x140001000 --card
+rsleigh ./sample.exe 0x140001000 --card --pcode
+rsleigh ./sample.exe 0x140001000 --card --pcode --decompile
 ```
 
 Search modes pivot directly to interesting functions:
