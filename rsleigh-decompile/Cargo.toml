@@ -24,8 +24,8 @@ experimental = []
 smt = ["dep:z3"]
 
 [dependencies]
-pcode-ir = { path = "../pcode-ir", version = "0.4.2" }
-rsleigh-api = { path = "../rsleigh-api", version = "0.4.2" }
+pcode-ir = { path = "../pcode-ir", version = "0.4.3" }
+rsleigh-api = { path = "../rsleigh-api", version = "0.4.3" }
 goblin = "0.9"
 gimli = "0.31"
 object = "0.36"

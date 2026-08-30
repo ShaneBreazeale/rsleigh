@@ -10,4 +10,4 @@ keywords = ["sleigh", "codegen", "disassembler", "ghidra", "parser-generator"]
 categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
-rsleigh = { path = "..", version = "0.4.2", default-features = false }
+rsleigh = { path = "..", version = "0.4.3", default-features = false }

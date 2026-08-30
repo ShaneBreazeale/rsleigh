@@ -2,6 +2,37 @@
 
 All notable user-facing changes to rsleigh are documented here.
 
+## [0.4.3] - 2026-08-30
+
+### Added
+
+- Bounded agent-oriented reverse-engineering workflows with `--agent-brief`,
+  `--index`, and `--card` output modes for fast triage, symbol lookup, and
+  compact per-function analysis.
+- A shared `rsleigh.finding/v1` finding schema across IOC, vulnerability,
+  SMT, and VM-helper output, including confidence and analysis-stage metadata.
+- Constructor and source-span provenance for decoded instructions, exposed
+  through the stable API and P-code JSON output.
+- Strict Ghidra-oracle fixtures, provenance manifests, and raw/optimized score
+  baselines for real x86-64, AArch64, and ARM32 text slices.
+
+### Changed
+
+- Hardened decompilation analysis with recursion and output budgets, clearer
+  diagnostics, and more accurate architecture capability reporting by stage.
+- Reworked the README around practical reverse-engineering and agent workflows.
+- Updated CI and release jobs for current action runtimes and bounded build
+  memory on hosted runners.
+
+### Fixed
+
+- Corrected SSA edge classification and changed-block propagation so cross
+  edges remain acyclic while only true back edges carry loop state.
+- Aligned generated x86 and ARM P-code behavior with Ghidra, including ARM
+  flag and condition handling.
+- Closed decompiler and oracle-audit gaps that could hide provenance or
+  analysis regressions.
+
 ## [0.4.2] - 2026-08-15
 
 ### Added
@@ -42,4 +73,5 @@ All notable user-facing changes to rsleigh are documented here.
 - Reduced false-positive ARM function discovery and added ARM-to-Thumb call
   discovery.
 
+[0.4.3]: https://github.com/ShaneBreazeale/rsleigh/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/ShaneBreazeale/rsleigh/compare/v0.4.1...v0.4.2
