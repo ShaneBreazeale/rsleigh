@@ -12,6 +12,7 @@ pub mod api_resolver;
 #[cfg(feature = "experimental")]
 pub mod cpp_class;
 pub mod crypto_constants;
+pub mod deflatten;
 pub mod dominators;
 pub mod dwarf;
 pub mod eh_frame;
