@@ -231,6 +231,13 @@ impl Decoder {
                 context,
                 global_set,
             } => {
+                if is_generated_x86_prefixed_3dnow_escape(bytes, true) {
+                    return Err(DecodeError::UnknownInstruction);
+                }
+
+                if is_generated_x86_3dnow_escape(bytes) {
+                    return Err(DecodeError::UnknownInstruction);
+                }
                 let mut ctx = *context;
                 if let Some((inst_next, display, ops, constructor)) =
                     x86_root::parse_instruction_with_constructor(bytes, &mut ctx, addr, global_set)
@@ -249,6 +256,14 @@ impl Decoder {
                 context,
                 global_set,
             } => {
+                if is_generated_x86_prefixed_3dnow_escape(bytes, false) {
+                    return Err(DecodeError::UnknownInstruction);
+                }
+
+                if is_generated_x86_3dnow_escape(bytes) {
+                    return Err(DecodeError::UnknownInstruction);
+                }
+
                 let mut ctx = *context;
                 let addr32 = addr as u32;
                 let (inst_next, display, ops, constructor) =
@@ -337,6 +352,40 @@ impl Decoder {
     }
 }
 
+/// The retained generated x86 parsers recursively re-enter their top-level
+/// instruction table for the 3DNow escape and do not exclude the pre-parser on
+/// re-entry. Reject the whole escape family until generated decoding can honor
+/// its `instrPhase` transition.
+fn is_generated_x86_3dnow_escape(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0x0f, 0x0f])
+}
+
+fn is_generated_x86_prefixed_3dnow_escape(bytes: &[u8], allow_rex_prefix: bool) -> bool {
+    const MAX_X86_INSTRUCTION_BYTES: usize = 15;
+
+    let limit = bytes.len().min(MAX_X86_INSTRUCTION_BYTES);
+    let mut pos = 0usize;
+
+    while pos < limit {
+        let byte = bytes[pos];
+        let is_legacy_prefix = matches!(
+            byte,
+            0xf0 | 0xf2 | 0xf3
+                | 0x2e | 0x36 | 0x3e | 0x26 | 0x64 | 0x65
+                | 0x66 | 0x67
+        );
+        let is_rex_prefix = allow_rex_prefix && (0x40..=0x4f).contains(&byte);
+
+        if !is_legacy_prefix && !is_rex_prefix {
+            break;
+        }
+        pos += 1;
+    }
+
+    pos > 0
+        && pos + 2 <= limit
+        && bytes[pos..limit].starts_with(&[0x0f, 0x0f])
+}
 /// Format display elements into a disassembly string.
 fn format_display(elements: &[impl core::fmt::Display]) -> String {
     elements.iter().map(|d| format!("{}", d)).collect()
