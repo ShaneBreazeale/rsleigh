@@ -448,9 +448,7 @@ fn resolve_dispatch_target_for_state(
                 if next == info.predispatcher {
                     return None;
                 }
-                if next == info.dispatcher
-                    || is_dispatch_chain_block(ssa, next, state_var, info)
-                {
+                if next == info.dispatcher || is_dispatch_chain_block(ssa, next, state_var, info) {
                     current = next;
                 } else {
                     return Some(next);
@@ -460,8 +458,7 @@ fn resolve_dispatch_target_for_state(
                 if *next == info.predispatcher {
                     return None;
                 }
-                if *next == info.dispatcher
-                    || is_dispatch_chain_block(ssa, *next, state_var, info)
+                if *next == info.dispatcher || is_dispatch_chain_block(ssa, *next, state_var, info)
                 {
                     current = *next;
                 } else {
@@ -596,11 +593,7 @@ fn apply_const_unop(
     output_size: u32,
 ) -> Option<u64> {
     let input_mask = const_size_mask(input_size);
-    let bits = if input_size >= 8 {
-        64
-    } else {
-        input_size * 8
-    };
+    let bits = if input_size >= 8 { 64 } else { input_size * 8 };
     let sign_bit = if bits == 0 { 0 } else { 1u64 << (bits - 1) };
 
     Some(match kind {

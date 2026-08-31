@@ -86,8 +86,5 @@ fn legacy_prefixed_3dnow_fails_closed_256m() {
         return;
     }
 
-    run_child(
-        "legacy_prefixed_3dnow_fails_closed_256m",
-        "prefixed-3dnow",
-    );
+    run_child("legacy_prefixed_3dnow_fails_closed_256m", "prefixed-3dnow");
 }

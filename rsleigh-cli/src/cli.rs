@@ -892,10 +892,12 @@ const ALIAS_LINEAGE_OBSERVATIONS_PER_FUNCTION: usize = 64;
 const ALIAS_LINEAGE_OBSERVATIONS_PER_BINARY: usize = 4096;
 
 fn required_option(args: &[String], name: &str) -> Result<String, String> {
-    args.iter().position(|arg| arg == name)
+    args.iter()
+        .position(|arg| arg == name)
         .and_then(|index| args.get(index + 1))
         .filter(|value| !value.starts_with("--"))
-        .cloned().ok_or_else(|| format!("missing required {name} value"))
+        .cloned()
+        .ok_or_else(|| format!("missing required {name} value"))
 }
 
 fn alias_lineage_classification_manifest() -> serde_json::Value {
@@ -941,17 +943,18 @@ fn classify_alias_lineage_observation(
         (true, true) => "agreement-true",
         (false, false) => "agreement-false",
         (false, true) => "reconstructed-legacy-only-retention",
-        (true, false) if observation.pre_memory_isolated =>
-            match (observation.alias_class.as_str(), observation.alias_reason.as_str(),
-                   observation.same_region) {
-                ("MayAlias", "PotentialParameterAlias", false)
-                | ("MayAlias", "PartialOverlap", true)
-                | ("MayAlias", "NonSingletonRegion", true)
-                | ("MayAlias", "SymbolicOffset", false)
-                | ("MustAlias", "SameSingletonBytes", true) =>
-                    "expected-conservative-retention",
-                _ => "unresolved",
-            },
+        (true, false) if observation.pre_memory_isolated => match (
+            observation.alias_class.as_str(),
+            observation.alias_reason.as_str(),
+            observation.same_region,
+        ) {
+            ("MayAlias", "PotentialParameterAlias", false)
+            | ("MayAlias", "PartialOverlap", true)
+            | ("MayAlias", "NonSingletonRegion", true)
+            | ("MayAlias", "SymbolicOffset", false)
+            | ("MustAlias", "SameSingletonBytes", true) => "expected-conservative-retention",
+            _ => "unresolved",
+        },
         _ => "unresolved",
     }
 }
@@ -973,14 +976,12 @@ fn run_alias_lineage_observation(binary_path: &str, args: &[String]) -> Result<(
         .stack_size(256 * 1024 * 1024)
         .spawn(move || run_alias_lineage_observation_inner(&binary_path, &args))
         .map_err(|error| format!("failed to spawn alias-lineage worker: {error}"))?;
-    worker.join()
+    worker
+        .join()
         .map_err(|_| "alias-lineage worker panicked".to_string())?
 }
 
-fn run_alias_lineage_observation_inner(
-    binary_path: &str,
-    args: &[String],
-) -> Result<(), String> {
+fn run_alias_lineage_observation_inner(binary_path: &str, args: &[String]) -> Result<(), String> {
     use sha2::{Digest, Sha256};
     use std::io::{BufWriter, Write};
     let output_path = required_option(args, "--alias-lineage-observe")?;
@@ -992,17 +993,24 @@ fn run_alias_lineage_observation_inner(
     let goblin::Object::PE(pe) = &object else {
         return Err("observation surface accepts PE inputs only".to_string());
     };
-    if !pe.is_64 { return Err("observation surface accepts PE64 inputs only".to_string()); }
+    if !pe.is_64 {
+        return Err("observation surface accepts PE64 inputs only".to_string());
+    }
     let image_base = pe.image_base as u64;
-    let entry = image_base + pe.header.optional_header
-        .ok_or_else(|| "PE optional header is absent".to_string())?
-        .standard_fields.address_of_entry_point as u64;
-    let (architecture, segments, mut symbols) = parse_binary(&object, &data)
-        .ok_or_else(|| "unsupported PE architecture".to_string())?;
+    let entry = image_base
+        + pe.header
+            .optional_header
+            .ok_or_else(|| "PE optional header is absent".to_string())?
+            .standard_fields
+            .address_of_entry_point as u64;
+    let (architecture, segments, mut symbols) =
+        parse_binary(&object, &data).ok_or_else(|| "unsupported PE architecture".to_string())?;
     let mut known: std::collections::BTreeSet<u64> =
         symbols.iter().map(|(address, _)| *address).collect();
     for (address, name) in discover_pe_functions(entry, &segments, &data, architecture) {
-        if known.insert(address) { symbols.push((address, name)); }
+        if known.insert(address) {
+            symbols.push((address, name));
+        }
     }
     symbols.sort_by_key(|(address, _)| *address);
     symbols.dedup_by_key(|(address, _)| *address);
@@ -1026,46 +1034,78 @@ fn run_alias_lineage_observation_inner(
 
     for (function_index, (function_address, _)) in symbols.iter().enumerate() {
         lift_attempts += 1;
-        let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
-            decode_func(*function_address, &symbols, &segments, &data, &mut decoder)));
+        let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            decode_func(*function_address, &symbols, &segments, &data, &mut decoder)
+        }));
         let instructions = match decoded {
             Ok(instructions) if !instructions.is_empty() => instructions,
-            Ok(_) => { lift_failures.decode_error += 1; continue; }
-            Err(_) => { lift_failures.internal_error += 1; continue; }
+            Ok(_) => {
+                lift_failures.decode_error += 1;
+                continue;
+            }
+            Err(_) => {
+                lift_failures.internal_error += 1;
+                continue;
+            }
         };
         let lifted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let cfg = rsleigh_decompile::cfg::build_cfg(&instructions);
-            if cfg.blocks.is_empty() { return None; }
+            if cfg.blocks.is_empty() {
+                return None;
+            }
             let mut ssa = rsleigh_decompile::ssa::build_ssa_with_cc(&cfg, calling_convention);
             rsleigh_decompile::fold::fold_with_cc(&mut ssa, calling_convention);
             Some(rsleigh_decompile::smt_explore::observe_alias_lineage(
-                &ssa, ALIAS_LINEAGE_OBSERVATIONS_PER_FUNCTION))
+                &ssa,
+                ALIAS_LINEAGE_OBSERVATIONS_PER_FUNCTION,
+            ))
         }));
         let (observations, pair_count_before_cap) = match lifted {
             Ok(Some(result)) => result,
-            Ok(None) => { lift_failures.unsupported_semantics += 1; continue; }
-            Err(_) => { lift_failures.internal_error += 1; continue; }
+            Ok(None) => {
+                lift_failures.unsupported_semantics += 1;
+                continue;
+            }
+            Err(_) => {
+                lift_failures.internal_error += 1;
+                continue;
+            }
         };
-        if pair_count_before_cap == 0 { continue; }
+        if pair_count_before_cap == 0 {
+            continue;
+        }
         functions_eligible_before_cap += 1;
-        if functions_admitted_after_cap >= ALIAS_LINEAGE_FUNCTION_CAP { continue; }
+        if functions_admitted_after_cap >= ALIAS_LINEAGE_FUNCTION_CAP {
+            continue;
+        }
         functions_admitted_after_cap += 1;
         let function_rva = function_address.saturating_sub(image_base);
-        let function_size = symbols.get(function_index + 1)
+        let function_size = symbols
+            .get(function_index + 1)
             .map(|(next, _)| next.saturating_sub(*function_address))
-            .unwrap_or_else(|| instructions.last().map(|(address, instruction)|
-                address.saturating_add(u64::from(instruction.len))
-                    .saturating_sub(*function_address)).unwrap_or(0));
-        let available = ALIAS_LINEAGE_OBSERVATIONS_PER_BINARY
-            .saturating_sub(observations_admitted);
+            .unwrap_or_else(|| {
+                instructions
+                    .last()
+                    .map(|(address, instruction)| {
+                        address
+                            .saturating_add(u64::from(instruction.len))
+                            .saturating_sub(*function_address)
+                    })
+                    .unwrap_or(0)
+            });
+        let available = ALIAS_LINEAGE_OBSERVATIONS_PER_BINARY.saturating_sub(observations_admitted);
         let admitted_here = observations.len().min(available);
         for observation in observations.into_iter().take(admitted_here) {
             let block_rva = observation.block_addr.saturating_sub(image_base);
             let store_block_rva = observation.store_block_addr.saturating_sub(image_base);
-            let site_id = format!("f{function_rva:016x}-b{block_rva:016x}-s{:08x}-v{:08x}",
-                observation.statement_index, observation.load_var_id);
-            let pair_id = format!("{site_id}-sb{store_block_rva:016x}-ss{:08x}-sv{:08x}",
-                observation.store_statement_index, observation.store_value_var_id);
+            let site_id = format!(
+                "f{function_rva:016x}-b{block_rva:016x}-s{:08x}-v{:08x}",
+                observation.statement_index, observation.load_var_id
+            );
+            let pair_id = format!(
+                "{site_id}-sb{store_block_rva:016x}-ss{:08x}-sv{:08x}",
+                observation.store_statement_index, observation.store_value_var_id
+            );
             let classification = classify_alias_lineage_observation(&observation);
             records.push(serde_json::json!({
                 "record_type": "observation",
@@ -11610,17 +11650,29 @@ fn resolve_plt_name(elf: &goblin::elf::Elf, addr: u64) -> Option<String> {
 mod alias_lineage_observation_tests {
     use super::*;
 
-    fn observation(typed: bool, reconstructed_legacy: bool,
-                   class: &str, reason: &str, isolated: bool, same_region: bool)
-        -> rsleigh_decompile::smt_explore::AliasLineageObservation {
+    fn observation(
+        typed: bool,
+        reconstructed_legacy: bool,
+        class: &str,
+        reason: &str,
+        isolated: bool,
+        same_region: bool,
+    ) -> rsleigh_decompile::smt_explore::AliasLineageObservation {
         rsleigh_decompile::smt_explore::AliasLineageObservation {
-            block_addr: 0, statement_index: 0, load_var_id: 0,
-            store_block_addr: 0, store_statement_index: 0,
-            store_value_var_id: 1, typed, reconstructed_legacy,
-            alias_class: class.to_string(), alias_reason: reason.to_string(),
+            block_addr: 0,
+            statement_index: 0,
+            load_var_id: 0,
+            store_block_addr: 0,
+            store_statement_index: 0,
+            store_value_var_id: 1,
+            typed,
+            reconstructed_legacy,
+            alias_class: class.to_string(),
+            alias_reason: reason.to_string(),
             typed_inventory_cardinality: 1,
             reconstructed_legacy_inventory_cardinality: 1,
-            load_region: if same_region { 1 } else { 2 }, store_region: 1,
+            load_region: if same_region { 1 } else { 2 },
+            store_region: 1,
             same_region,
             pre_memory_isolated: isolated,
         }
@@ -11628,15 +11680,39 @@ mod alias_lineage_observation_tests {
 
     #[test]
     fn classification_is_schema_only_and_defaults_unresolved() {
-        assert_eq!(classify_alias_lineage_observation(&observation(
-            true, true, "NoAlias", "DisjointSingletonRanges", false, false)),
-            "agreement-true");
-        assert_eq!(classify_alias_lineage_observation(&observation(
-            false, false, "NoAlias", "DisjointSingletonRanges", false, false)),
-            "agreement-false");
-        assert_eq!(classify_alias_lineage_observation(&observation(
-            false, true, "MayAlias", "SymbolicOffset", true, false)),
-            "reconstructed-legacy-only-retention");
+        assert_eq!(
+            classify_alias_lineage_observation(&observation(
+                true,
+                true,
+                "NoAlias",
+                "DisjointSingletonRanges",
+                false,
+                false
+            )),
+            "agreement-true"
+        );
+        assert_eq!(
+            classify_alias_lineage_observation(&observation(
+                false,
+                false,
+                "NoAlias",
+                "DisjointSingletonRanges",
+                false,
+                false
+            )),
+            "agreement-false"
+        );
+        assert_eq!(
+            classify_alias_lineage_observation(&observation(
+                false,
+                true,
+                "MayAlias",
+                "SymbolicOffset",
+                true,
+                false
+            )),
+            "reconstructed-legacy-only-retention"
+        );
         for (class, reason, same_region) in [
             ("MayAlias", "PotentialParameterAlias", false),
             ("MayAlias", "PartialOverlap", true),
@@ -11644,36 +11720,77 @@ mod alias_lineage_observation_tests {
             ("MayAlias", "SymbolicOffset", false),
             ("MustAlias", "SameSingletonBytes", true),
         ] {
-            assert_eq!(classify_alias_lineage_observation(&observation(
-                true, false, class, reason, true, same_region)),
-                "expected-conservative-retention");
-            assert_eq!(classify_alias_lineage_observation(&observation(
-                true, false, class, reason, true, !same_region)),
-                "unresolved");
+            assert_eq!(
+                classify_alias_lineage_observation(&observation(
+                    true,
+                    false,
+                    class,
+                    reason,
+                    true,
+                    same_region
+                )),
+                "expected-conservative-retention"
+            );
+            assert_eq!(
+                classify_alias_lineage_observation(&observation(
+                    true,
+                    false,
+                    class,
+                    reason,
+                    true,
+                    !same_region
+                )),
+                "unresolved"
+            );
         }
-        assert_eq!(classify_alias_lineage_observation(&observation(
-            true, false, "NoAlias", "DisjointSingletonRanges", true, true)),
-            "unresolved");
-        assert_eq!(alias_lineage_classification_manifest()["default"], "unresolved");
+        assert_eq!(
+            classify_alias_lineage_observation(&observation(
+                true,
+                false,
+                "NoAlias",
+                "DisjointSingletonRanges",
+                true,
+                true
+            )),
+            "unresolved"
+        );
+        assert_eq!(
+            alias_lineage_classification_manifest()["default"],
+            "unresolved"
+        );
     }
 
     fn reject_forbidden_observation_keys(value: &serde_json::Value) {
         const FORBIDDEN: &[&str] = &[
-            "bytes", "code_bytes", "disassembly", "decompiled_text",
-            "import", "imports", "symbol", "symbol_name", "path",
-            "file_path", "filesystem_locator", "game_asset", "username",
+            "bytes",
+            "code_bytes",
+            "disassembly",
+            "decompiled_text",
+            "import",
+            "imports",
+            "symbol",
+            "symbol_name",
+            "path",
+            "file_path",
+            "filesystem_locator",
+            "game_asset",
+            "username",
             "user",
         ];
         match value {
             serde_json::Value::Object(fields) => {
                 for (key, child) in fields {
-                    assert!(!FORBIDDEN.contains(&key.as_str()),
-                        "forbidden canonical field: {key}");
+                    assert!(
+                        !FORBIDDEN.contains(&key.as_str()),
+                        "forbidden canonical field: {key}"
+                    );
                     reject_forbidden_observation_keys(child);
                 }
             }
             serde_json::Value::Array(values) => {
-                for child in values { reject_forbidden_observation_keys(child); }
+                for child in values {
+                    reject_forbidden_observation_keys(child);
+                }
             }
             _ => {}
         }
@@ -11684,10 +11801,12 @@ mod alias_lineage_observation_tests {
     fn tiny_pe_runner_is_byte_stable_and_schema_bounded() {
         use std::path::PathBuf;
 
-        let fixture = std::env::var("RSLEIGH_I2C_TINY_PE64")
-            .expect("RSLEIGH_I2C_TINY_PE64 is required");
-        let evidence = PathBuf::from(std::env::var("RSLEIGH_I2C_EVIDENCE_ROOT")
-            .expect("RSLEIGH_I2C_EVIDENCE_ROOT is required"));
+        let fixture =
+            std::env::var("RSLEIGH_I2C_TINY_PE64").expect("RSLEIGH_I2C_TINY_PE64 is required");
+        let evidence = PathBuf::from(
+            std::env::var("RSLEIGH_I2C_EVIDENCE_ROOT")
+                .expect("RSLEIGH_I2C_EVIDENCE_ROOT is required"),
+        );
         let first_stream = evidence.join("tiny-alias-run-1.jsonl");
         let second_stream = evidence.join("tiny-alias-run-2.jsonl");
         let first_manifest = evidence.join("tiny-alias-classification-1.json");
@@ -11695,13 +11814,16 @@ mod alias_lineage_observation_tests {
 
         let run = |stream: &std::path::Path, manifest: &std::path::Path| {
             let args = vec![
-                "rsleigh".to_string(), fixture.clone(),
+                "rsleigh".to_string(),
+                fixture.clone(),
                 "--alias-lineage-observe".to_string(),
                 stream.to_string_lossy().into_owned(),
                 "--alias-lineage-classification".to_string(),
                 manifest.to_string_lossy().into_owned(),
-                "--corpus-id".to_string(), "tiny-pe64-v1".to_string(),
-                "--runner-id".to_string(), "sprint1-g8-runner".to_string(),
+                "--corpus-id".to_string(),
+                "tiny-pe64-v1".to_string(),
+                "--runner-id".to_string(),
+                "sprint1-g8-runner".to_string(),
             ];
             run_alias_lineage_observation(&fixture, &args).unwrap();
         };
@@ -11711,9 +11833,11 @@ mod alias_lineage_observation_tests {
         let first = std::fs::read(&first_stream).unwrap();
         let second = std::fs::read(&second_stream).unwrap();
         assert_eq!(first, second, "canonical JSONL replay drift");
-        assert_eq!(std::fs::read(&first_manifest).unwrap(),
+        assert_eq!(
+            std::fs::read(&first_manifest).unwrap(),
             std::fs::read(&second_manifest).unwrap(),
-            "classification-manifest replay drift");
+            "classification-manifest replay drift"
+        );
 
         let mut observations = 0u64;
         let mut non_default_classifications = 0u64;
@@ -11724,14 +11848,29 @@ mod alias_lineage_observation_tests {
             match record["record_type"].as_str().unwrap() {
                 "observation" => {
                     observations += 1;
-                    for field in ["schema_version", "classification_manifest_id",
-                        "comparison", "corpus_id", "binary_digest_id", "runner_id",
-                        "function_rva", "function_size", "site_id", "pair_id",
-                        "typed", "reconstructed_legacy", "alias_class", "alias_reason",
+                    for field in [
+                        "schema_version",
+                        "classification_manifest_id",
+                        "comparison",
+                        "corpus_id",
+                        "binary_digest_id",
+                        "runner_id",
+                        "function_rva",
+                        "function_size",
+                        "site_id",
+                        "pair_id",
+                        "typed",
+                        "reconstructed_legacy",
+                        "alias_class",
+                        "alias_reason",
                         "typed_inventory_cardinality",
-                        "reconstructed_legacy_inventory_cardinality", "region_witness",
-                        "isolation_witness", "eligibility_counters",
-                        "truncation_counters", "classification"] {
+                        "reconstructed_legacy_inventory_cardinality",
+                        "region_witness",
+                        "isolation_witness",
+                        "eligibility_counters",
+                        "truncation_counters",
+                        "classification",
+                    ] {
                         assert!(record.get(field).is_some(), "missing field: {field}");
                     }
                     if record["classification"] != "unresolved" {
@@ -11744,25 +11883,41 @@ mod alias_lineage_observation_tests {
                     let enumerated = coverage["total_functions_enumerated"].as_u64().unwrap();
                     let attempts = coverage["lift_attempts"].as_u64().unwrap();
                     let failures = &coverage["lift_failures"];
-                    let failure_total: u64 = ["decode_error", "unsupported_semantics",
-                        "resource_limit", "internal_error", "other"].iter()
-                        .map(|bucket| failures[*bucket].as_u64().unwrap()).sum();
+                    let failure_total: u64 = [
+                        "decode_error",
+                        "unsupported_semantics",
+                        "resource_limit",
+                        "internal_error",
+                        "other",
+                    ]
+                    .iter()
+                    .map(|bucket| failures[*bucket].as_u64().unwrap())
+                    .sum();
                     let eligible = coverage["functions_eligible_before_cap"].as_u64().unwrap();
                     let admitted = coverage["functions_admitted_after_cap"].as_u64().unwrap();
                     assert_eq!(enumerated, attempts);
                     assert!(failure_total <= attempts);
                     assert!(eligible <= attempts - failure_total);
                     assert!(admitted <= eligible);
-                    assert!(record["selection_counters"]["observations_admitted"]
-                        .as_u64().unwrap() <= ALIAS_LINEAGE_OBSERVATIONS_PER_BINARY as u64);
+                    assert!(
+                        record["selection_counters"]["observations_admitted"]
+                            .as_u64()
+                            .unwrap()
+                            <= ALIAS_LINEAGE_OBSERVATIONS_PER_BINARY as u64
+                    );
                 }
                 other => panic!("unexpected record type: {other}"),
             }
         }
         assert!(observations > 0, "fixture produced no admitted observation");
-        assert!(non_default_classifications > 0,
-            "fixture did not exercise a schema-only classification");
+        assert!(
+            non_default_classifications > 0,
+            "fixture did not exercise a schema-only classification"
+        );
         assert_eq!(summaries, 1);
-        assert_eq!(alias_lineage_classification_manifest()["default"], "unresolved");
+        assert_eq!(
+            alias_lineage_classification_manifest()["default"],
+            "unresolved"
+        );
     }
 }

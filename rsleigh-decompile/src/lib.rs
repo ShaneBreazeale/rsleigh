@@ -27,6 +27,8 @@ pub mod iot_capabilities;
 pub mod iot_family;
 pub mod ir;
 pub mod jmp_rax_trampoline;
+pub mod memory_effect;
+pub mod memory_version;
 pub mod opaque_pred;
 pub mod pdb_info;
 pub mod peb_walk;

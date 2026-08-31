@@ -370,9 +370,7 @@ fn is_generated_x86_prefixed_3dnow_escape(bytes: &[u8], allow_rex_prefix: bool) 
         let byte = bytes[pos];
         let is_legacy_prefix = matches!(
             byte,
-            0xf0 | 0xf2 | 0xf3
-                | 0x2e | 0x36 | 0x3e | 0x26 | 0x64 | 0x65
-                | 0x66 | 0x67
+            0xf0 | 0xf2 | 0xf3 | 0x2e | 0x36 | 0x3e | 0x26 | 0x64 | 0x65 | 0x66 | 0x67
         );
         let is_rex_prefix = allow_rex_prefix && (0x40..=0x4f).contains(&byte);
 
@@ -382,9 +380,7 @@ fn is_generated_x86_prefixed_3dnow_escape(bytes: &[u8], allow_rex_prefix: bool) 
         pos += 1;
     }
 
-    pos > 0
-        && pos + 2 <= limit
-        && bytes[pos..limit].starts_with(&[0x0f, 0x0f])
+    pos > 0 && pos + 2 <= limit && bytes[pos..limit].starts_with(&[0x0f, 0x0f])
 }
 /// Format display elements into a disassembly string.
 fn format_display(elements: &[impl core::fmt::Display]) -> String {

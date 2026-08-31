@@ -256,9 +256,7 @@ fn masks_substituted_dispatch_state_to_declared_width() {
     };
     let mut narrow_substitution = flattened_ssa(VarId(7));
     narrow_substitution.vars[0] = var_sized(0, Expr::Unknown, 1);
-    narrow_substitution
-        .vars
-        .push(var(7, Expr::Const(0x100, 8)));
+    narrow_substitution.vars.push(var(7, Expr::Const(0x100, 8)));
     narrow_substitution.blocks[1].terminator = SsaTerminator::CBranch {
         cond: VarId(0),
         taken: BlockId(3),
