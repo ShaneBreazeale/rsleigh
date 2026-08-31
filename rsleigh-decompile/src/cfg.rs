@@ -342,7 +342,7 @@ fn resolve_callind_target(
                         // Load from memory — this is the function address source
                         PcodeOp::Load { ptr, .. } => {
                             if ptr.space == AddressSpaceId::Const {
-                                let addr = (ptr.offset as i64 + adjustment) as u64;
+                                let addr = ptr.offset.wrapping_add(adjustment as u64);
                                 return CallTarget::Direct(addr);
                             }
                             // MIPS PIC: ptr is GP + offset (Unique from IntAdd)
@@ -350,7 +350,7 @@ fn resolve_callind_target(
                                 if let Some(got_addr) =
                                     resolve_gp_relative_addr(ops, ptr, func_addr, all_ops)
                                 {
-                                    let addr = (got_addr as i64 + adjustment) as u64;
+                                    let addr = got_addr.wrapping_add(adjustment as u64);
                                     return CallTarget::Direct(addr);
                                 }
                             }
@@ -391,7 +391,7 @@ fn resolve_callind_target(
                         // Copy — follow through
                         PcodeOp::Copy { input, .. } => {
                             if input.space == AddressSpaceId::Const {
-                                let addr = (input.offset as i64 + adjustment) as u64;
+                                let addr = input.offset.wrapping_add(adjustment as u64);
                                 return CallTarget::Direct(addr);
                             }
                             target_vn = *input;
@@ -451,7 +451,7 @@ fn resolve_callind_via_all_ops(
                     match op {
                         PcodeOp::Load { ptr, .. } => {
                             if ptr.space == AddressSpaceId::Const {
-                                let addr = (ptr.offset as i64 + adjustment) as u64;
+                                let addr = ptr.offset.wrapping_add(adjustment as u64);
                                 return CallTarget::Direct(addr);
                             }
                             return CallTarget::Indirect(*dest);
@@ -486,7 +486,7 @@ fn resolve_callind_via_all_ops(
                         }
                         PcodeOp::Copy { input, .. } => {
                             if input.space == AddressSpaceId::Const {
-                                let addr = (input.offset as i64 + adjustment) as u64;
+                                let addr = input.offset.wrapping_add(adjustment as u64);
                                 return CallTarget::Direct(addr);
                             }
                             target_vn = *input;
@@ -536,7 +536,7 @@ fn resolve_gp_relative_addr(
                         let got_addr = if offset > 0x7FFFFFFF {
                             gp_val.wrapping_add(offset as u64 | 0xFFFFFFFF00000000)
                         } else {
-                            (gp_val as i64 + offset) as u64
+                            gp_val.wrapping_add(offset as u64)
                         };
                         return Some(got_addr);
                     }
@@ -577,7 +577,7 @@ fn trace_register_value(
                     && right.space == AddressSpaceId::Const =>
             {
                 if let Some(prev) = value {
-                    value = Some((prev as i64 + right.offset as i64) as u64);
+                    value = Some(prev.wrapping_add(right.offset));
                 }
             }
             // IntAdd with another register: reg = reg + other_reg (addu gp, gp, t9)
@@ -618,7 +618,7 @@ fn trace_register_value(
                 if left.space == AddressSpaceId::Register {
                     let left_val = trace_register_value_simple(ops, left);
                     if let Some(lv) = left_val {
-                        value = Some((lv as i64 + right.offset as i64) as u64);
+                        value = Some(lv.wrapping_add(right.offset));
                     }
                 }
             }
@@ -704,7 +704,7 @@ fn trace_register_value_simple(ops: &[(u64, PcodeOp)], reg: &pcode_ir::Varnode) 
                         .unwrap_or(0)],
                     reg,
                 ) {
-                    return Some((prev as i64 + right.offset as i64) as u64);
+                    return Some(prev.wrapping_add(right.offset));
                 }
             }
         }
@@ -963,5 +963,61 @@ mod tests {
         ] {
             assert!(edges.iter().any(|edge| edge.kind == kind), "{kind:?}");
         }
+    }
+
+    #[test]
+    fn gp_relative_address_wraps_across_signed_boundary_without_panicking() {
+        let gp = Varnode::register(112, 8);
+        let ptr = Varnode::unique(0x200, 8);
+        let ops = vec![
+            (
+                0x1000,
+                PcodeOp::Copy {
+                    out: gp,
+                    input: Varnode::constant(i64::MAX as u64, 8),
+                },
+            ),
+            (
+                0x1004,
+                PcodeOp::IntAdd {
+                    out: ptr,
+                    left: gp,
+                    right: Varnode::constant(1, 8),
+                },
+            ),
+        ];
+
+        assert_eq!(
+            resolve_gp_relative_addr(&ops, &ptr, 0, &ops),
+            Some(0x8000_0000_0000_0000)
+        );
+    }
+
+    #[test]
+    fn gp_relative_negative_adjustment_wraps_across_zero() {
+        let gp = Varnode::register(112, 8);
+        let ptr = Varnode::unique(0x200, 8);
+        let ops = vec![
+            (
+                0x1000,
+                PcodeOp::Copy {
+                    out: gp,
+                    input: Varnode::constant(0, 8),
+                },
+            ),
+            (
+                0x1004,
+                PcodeOp::IntAdd {
+                    out: ptr,
+                    left: gp,
+                    right: Varnode::constant(u64::MAX, 8),
+                },
+            ),
+        ];
+
+        assert_eq!(
+            resolve_gp_relative_addr(&ops, &ptr, 0, &ops),
+            Some(u64::MAX)
+        );
     }
 }
