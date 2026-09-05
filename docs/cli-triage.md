@@ -74,16 +74,15 @@ URLs (12)
 IPv4 (1)
   178.16.54.109
 
-Paths (3)
+Paths (2)
   %APPDATA%\2353253532535.txt
   %TEMP%\d3333333333333333333.txt
-  %s\%d%d.exe
 
 Mutexes/Named Objects (2)
   Global\WixWaitForEventFail
   Global\WixWaitForEventSucceed
 
-Total: 18 indicators
+Total: 17 indicators
 ```
 
 ### `--json` schema
@@ -340,9 +339,11 @@ For binaries without a resource directory:
   structures beyond TYPE/NAME/LANGUAGE (no real-world PE uses deeper).
 - No `RT_VERSION` field-by-field decode (no `FileVersion`,
   `ProductVersion` extraction yet); only a flattened printable preview.
-- `--dump` filenames replace nothing; if a named ID contains a path
-  separator (rare), the file write may fail. Sanitize the dump dir
-  before re-running on different binaries.
+- `--dump` filenames include unsanitized resource type and ID names. A name
+  containing a separator can change the output path or cause a write failure.
+  Inspect resource names first, use a dedicated output directory, and check
+  diagnostics and actual files; a listing or completion message does not
+  establish that every blob was written.
 
 ---
 
@@ -365,9 +366,9 @@ for blob in /tmp/sample-rsrc/*.bin; do
   rsleigh "$blob" --sigcheck --json
 done
 
-# 5. Decompile the suspicious ones.
-rsleigh sample.exe --vulnscan
-rsleigh sample.exe 0x401000 --disasm
+# 5. Gather leads, then inspect one verified function address.
+rsleigh sample.exe --vulnscan --findings-ndjson
+rsleigh sample.exe 0x401000 --card --pcode
 ```
 
 For pipeline ingestion, add `--json` where the flag documents a JSON form and
@@ -377,7 +378,9 @@ that must share one evidence vocabulary, prefer `--findings-ndjson` and the
 
 ## See also
 
-- `docs/features.md` — broader analysis catalog
-- `docs/decompiler-passes.md` — pipeline internals
-- `docs/architectures.md` — supported architectures and binary formats
-- `docs/TESTING.md` — running the test harness and benchmarks
+- [Command guide](cli-reference.md) — mode selection and modifiers
+- [Output formats](output-formats.md) — ingestion and completion checks
+- [Features](features.md) — broader analysis catalog
+- [Decompiler passes](decompiler-passes.md) — pipeline internals
+- [Architectures](architectures.md) — supported architectures and binary formats
+- [Testing](TESTING.md) — test harness and benchmarks

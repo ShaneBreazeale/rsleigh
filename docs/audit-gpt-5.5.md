@@ -1,5 +1,9 @@
 # rsleigh Engineering Audit — GPT-5.5
 
+> Historical engineering audit. Findings and counts describe the audited
+> revision, not the current CLI contract. Start at the [documentation hub](README.md)
+> for current usage and support guidance.
+
 ## 1. Executive Summary
 
 - **Strong:** This is a serious systems project with real SLEIGH ingestion, generated Rust decoders, multi-arch P-code emission, a real CLI/API split, extensive regression tests, and honest README caveats.

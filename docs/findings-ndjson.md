@@ -36,10 +36,12 @@ Required fields on every line:
 is flattened into the same object so existing filters such as
 `select(.sink_kind == "Command")` remain valid.
 
-`proved` describes solver-backed evidence, not a positive vulnerability result.
-Both `Reachable` and `NotReachable` SMT records have `confidence: "proved"`.
-Dashboards looking for actionable flows must filter `verdict == "Reachable"`
-and the producer-specific `kind`/`sink_kind`, rather than confidence alone.
+`proved` is the current evidence label, not a positive vulnerability result.
+Both `Reachable` and `NotReachable` SMT records receive it. Some negative
+records are returned by static lineage/bounds filters before Z3 runs; inspect
+`filter_reasons` rather than inferring a solver proof from the label. Positive
+flow filters must check `verdict == "Reachable"` and the producer-specific
+`kind`/`sink_kind`. Even a positive result is relative to the analysis model.
 
 Current emitters:
 
@@ -62,7 +64,9 @@ rsleigh sample --index out/              # records written to out/findings.ndjso
 ```
 
 `--agent-brief` returns at most 50 findings. `--index` writes at most 5,000.
-Both report returned, total, and cap counts in their `limits` object. These are
+Both report returned, total, and cap counts in their `limits` object. Finding
+totals refer to collected findings for the analyzed subset, not a census of
+every possible finding in the binary. These are
 bounded navigation artifacts, not replacements for running each complete
 producer. See the [agent workflow reference](agent-workflow.md) for the exact
 subset and ranking behavior.
@@ -81,8 +85,9 @@ records solely because their summaries look similar: `producer`, `kind`,
 claims.
 
 ```bash
-# Reject malformed or wrong-version records.
-jq -e 'select(.schema == "rsleigh.finding/v1")' findings.ndjson >/dev/null
+# Reject malformed or wrong-version records; an empty stream is valid.
+jq -n -e 'all(inputs; type == "object" and
+  .schema == "rsleigh.finding/v1")' findings.ndjson >/dev/null
 
 # Show positive solver-backed reachability results only.
 jq -c 'select(
@@ -96,6 +101,11 @@ jq -c 'select(
 jq -c 'select(.confidence == "pattern" or .confidence == "heuristic")' \
   findings.ndjson
 ```
+
+The check above validates JSON and schema identity only. For required-field and
+vocabulary checks, use the [complete ingestion example](output-formats.md#validate-findings-without-silently-dropping-bad-records).
+An empty stream or valid partial file does not prove successful completion;
+retain process status and diagnostics.
 
 An LLM summary should cite the record's `producer`, `kind`, function/address,
 confidence, stage, and relevant evidence fields. It must not translate

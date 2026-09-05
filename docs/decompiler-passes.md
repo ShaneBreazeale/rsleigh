@@ -1,7 +1,10 @@
 # Decompiler passes
 
 5-pass pipeline: CFG → SSA → fold → structure recovery → C printer.
-Sources under `rsleigh-decompile/src/`.
+Sources under `rsleigh-decompile/src/`. This is an implementation reference;
+start with the [agent workflow](agent-workflow.md) and [CLI guide](cli-reference.md)
+for tool use. Internal passes and IR are experimental; verify behavior against
+the source revision being used.
 
 ## SSA builder (ssa.rs)
 
@@ -27,7 +30,7 @@ Algebraic simplification, single-use temp inlining, copy prop, dead flag elim (x
 
 - Condition recovery: compound Jcc → comparisons
 - ARM32 condition recovery: flag offsets 96/97/98/99 → CMP operand trace
-- Phi → Ternary at 2-way merges (`rewrite_conditional_phi_to_ternary`, after fold + sig prop). 3+ way compound merges skipped (parked `.opt/ideas.md`)
+- Phi → Ternary at 2-way merges (`rewrite_conditional_phi_to_ternary`, after fold + sig prop). 3+ way compound merges skipped
 - Collapses `Phi(x,x)` / `Ternary(c,x,x)` via VarId/varnode equivalence
 - x86 DF ABI-default seed: DF=0 on entry (SysV/Win64/Cdecl32/GoAmd64). REP STOSB/MOVSB expansion reads DF — without seed, `(uint8_t)DF` leaks
 - Call arg collection runs BEFORE fold (prevents DCE of arg regs). x86-64 SysV, Win64 (auto-detect from PE), x86-32 cdecl/thiscall

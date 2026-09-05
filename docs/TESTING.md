@@ -2,35 +2,22 @@
 
 rsleigh has a multi-layer test suite spanning unit tests, integration tests, real-binary validation, fuzz testing, and Spectra backend integration tests.
 
-**Total: 240 tests across 2 projects, ~7,200+ assertions, 0 failures.**
-
-```
-rsleigh test-harness ........  12 tests (~6,400 assertions)
-rsleigh quality regression ..   4 tests (~400 assertions)
-spectra native backend ......  10 tests
-spectra lib unit tests ...... 157 tests
-spectra integration tests ...  16 tests
-spectra triage tests ........  35 tests
-                              --------
-                              234 tests (+ ~6 inline unit tests)
-```
-
----
+Test counts and timings vary with source revision, feature flags, fixture
+availability, and host platform. Check the test runner's executed/skipped counts;
+historical totals are not a compatibility or coverage guarantee.
 
 ## Running Tests
 
 ```bash
-# rsleigh — full suite (recommended)
-make test                                    # generate + build + all tests
+# rsleigh — generated decoder harness
+make test                                    # generate + run test-harness
+
+# decompiler library and agent-facing CLI contracts
+cargo test -p rsleigh-decompile --release --lib
+cargo test -p rsleigh-cli --test agent_interface
 
 # rsleigh — test-harness only (fast, no codegen)
 cargo test -p test-harness
-
-# spectra — native backend integration tests
-cd ../spectra/src-tauri && cargo test --test native_backend_tests
-
-# spectra — all tests
-cd ../spectra/src-tauri && cargo test
 
 # benchmarks
 python3 scripts/benchmark.py                 # function count vs Ghidra baselines
@@ -164,6 +151,10 @@ These verify the rsleigh API surface that Spectra depends on:
 
 ## Layer 6: Spectra Native Backend Integration
 
+This section describes a separate Spectra checkout, not tests shipped in this
+repository. It is optional downstream integration context and is not required
+to use or validate rsleigh's CLI.
+
 **Location:** `spectra/src-tauri/tests/native_backend_tests.rs`
 
 These test the exact code paths Spectra uses when `analysis_backend = rsleigh`:
@@ -219,7 +210,9 @@ only applied to the deterministic source-built fixture.
 | ELF x86-64 | elf-Linux-x64-bash (stripped, 1,242 functions) |
 | Mach-O | Compiled test binaries |
 
-**Current score: rsleigh 15 — Ghidra 6** on function discovery across 21 compared binaries.
+A historical run reported **rsleigh 15 — Ghidra 6** on function discovery
+across 21 compared binaries. This is not a current parity or correctness claim;
+rerun comparisons for the revision and corpus under investigation.
 
 ---
 
@@ -249,3 +242,20 @@ make check       # quick compile check
 make release     # optimized CLI build
 make benchmark   # function count regression check
 ```
+
+## Documentation and agent contracts
+
+The existing `agent_interface` CLI tests build a minimal PE fixture and check
+brief caps/trust labels, function-card evidence sections, and index artifacts:
+
+```bash
+cargo test -p rsleigh-cli --test agent_interface
+```
+
+For documentation changes, also check the examples against the command routing
+in [`cli.rs`](../rsleigh-cli/src/cli.rs), run the relevant
+[artifact validators](output-formats.md), and check local Markdown links.
+Exercise malformed and mixed-version NDJSON as well as empty valid streams;
+filtering out invalid records is not validation. No JVM or Z3 is needed for
+these agent-interface checks. See [SMT tests](smt-backend.md#rust-implementation-and-tests)
+for optional solver validation.

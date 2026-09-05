@@ -64,3 +64,17 @@ When the required cell is `partial`, prefer instruction bytes and disassembly,
 then P-code if coherent. Mark pseudocode-only conclusions `provisional`. When
 the input mode or base is unknown, mark the conclusion `unsupported` rather
 than guessing.
+
+## CLI frontend coverage
+
+The ISA matrix describes pipeline capabilities; CLI modes also depend on the
+input frontend. Parsed PE/ELF/Mach-O support the native agent brief, index,
+function cards, and JSON inspection paths. Raw firmware and WASM do not
+implement those contracts.
+
+Raw function selection currently renders pseudocode even when `--disasm` is
+present. Raw `--xrefs` is ARM32-only. Raw MIPS discovery's endianness heuristic
+does not establish matching little-endian lift support. WASM lists functions
+and reconstructs a selected name or `func_N` through its dedicated frontend.
+See [raw/WASM command guidance](cli-reference.md#raw-firmware-and-webassembly)
+for examples and alternatives for instruction evidence.

@@ -220,10 +220,16 @@ For raw firmware, supply the architecture and image base on every command:
 
 ```bash
 rsleigh ./firmware.bin --raw arm32 --base 0x08000000
-rsleigh ./firmware.bin --raw arm32 --base 0x08000000 --disasm 0x08001234
+rsleigh ./firmware.bin --raw arm32 --base 0x08000000 0x08001235
 ```
 
+The second raw example selects a Thumb function for pseudocode. Raw firmware
+uses a separate frontend; see [raw workflow limits](docs/cli-reference.md#raw-firmware-and-webassembly).
+
 ## Documentation
+
+Start with the [documentation hub](docs/README.md),
+[command guide](docs/cli-reference.md), and [output format reference](docs/output-formats.md).
 
 | Topic | Reference |
 |---|---|

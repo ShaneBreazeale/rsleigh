@@ -3,7 +3,7 @@
   "url": "https://context7.com/shanebreazeale/rsleigh",
   "public_key": "pk_k6cH52areD2F2XGgC5xfA",
   "projectTitle": "rsleigh",
-  "description": "Pure-Rust SLEIGH decoder, P-code emitter, and reverse-engineering toolkit with multi-architecture decompilation.",
+  "description": "Rust reverse engineering framework without a JVM dependency, with bounded CLI artifacts for LLM workflows and embeddable decoder/lifter APIs.",
   "branch": "master",
   "folders": [
     "docs"
@@ -28,7 +28,13 @@
     "Check the documented target and analysis-stage support before selecting architecture-dependent features.",
     "Treat rsleigh.finding/v1 NDJSON records as the stable machine-readable finding envelope.",
     "Prefer the bounded --agent-brief, --index, and --card modes for agent-driven reverse engineering.",
-    "Treat P-code and decoded bytes as primary evidence; treat decompiler pseudocode as experimental and verify important claims against P-code or disassembly."
+    "Treat P-code and decoded bytes as primary evidence; treat decompiler pseudocode as experimental and verify important claims against P-code or disassembly.",
+    "Read docs/README.md for navigation, docs/cli-reference.md for command selection, and docs/output-formats.md for renderer-specific validation.",
+    "Use one primary mode per command. Cards are text; --json is not universal. P-code/SSA JSON contains debug strings, not a typed IR schema.",
+    "Native agent briefs, indexes, cards, and P-code/SSA JSON apply to parsed PE/ELF/Mach-O, not the raw or WebAssembly frontends. Raw --disasm currently renders pseudocode.",
+    "Output caps do not bound total runtime. Verify SMT scope addresses: unresolved names can cause whole-binary scans; top-N applies after collection.",
+    "Validate all index files in a fresh directory and retain an external input hash. Index writes are non-atomic and the manifest omits hashes.",
+    "Inspect SMT verdict and filter_reasons: NotReachable can come from a static filter before Z3 runs even when confidence is proved."
   ],
   "previousVersions": [
     {

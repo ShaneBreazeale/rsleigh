@@ -1,6 +1,10 @@
 # Feature catalog
 
-Implementation under `rsleigh-decompile/` + `rsleigh-cli/`. See `docs/decompiler-passes.md` for pipeline internals.
+This is a capability catalog. For runnable command selection, read the
+[CLI guide](cli-reference.md); for LLM workflows, read the
+[agent workflow](agent-workflow.md). Implementation lives in
+`rsleigh-decompile/` and `rsleigh-cli/`; see [decompiler passes](decompiler-passes.md)
+for internals. Capabilities remain subject to the [architecture matrix](architectures.md).
 
 ## Analysis
 
@@ -41,10 +45,12 @@ Implementation under `rsleigh-decompile/` + `rsleigh-cli/`. See `docs/decompiler
 - Function evidence card (`FUNCTION --card [--pcode] [--decompile]`): first 40
   instructions, optional first 120 P-code ops, optional 4,096-byte pseudocode,
   constructor provenance, and `warnings[]`
-- Compact (`--compact`, -24%), brief (`--brief`, -35%), `--min-complexity N`
-- `--brief --min-complexity 5` = -40% tokens for LLM workflows
+- Compact (`--compact`), brief (`--brief`), and `--min-complexity N` reduce
+  displayed pseudocode in supported paths. Savings depend on the binary and
+  tokenizer; use cards when an explicit evidence-section cap matters.
 - `--summary` (one-line per func), `--xrefs`, `--search` by string/API/const
-- Raw firmware (`--raw <arch>`)
+- Raw firmware (`--raw <arch> --base <addr>`) uses a separate text frontend;
+  native cards/indexes/JSON dumps do not apply. See [raw limits](cli-reference.md#raw-firmware-and-webassembly).
 
 See the [coding-agent workflow](agent-workflow.md) for schemas, ranking, caps,
 trust semantics, and limitations.
@@ -111,28 +117,17 @@ CDQ+IDIV simpl, Zext deferral, array base validation, call return tracking, form
 
 ## Ghidra comparison
 
-Current score: rsleigh 15 — Ghidra 6 on 21 PE/Mach-O/ELF/ARM32 binaries.
+Optional comparisons require a separate Ghidra/Java setup; normal rsleigh
+analysis does not. Benchmark results depend on the corpus, revision, and scoring
+method and are not a whole-ISA or semantic-equivalence guarantee.
 
-Install paths (bench-compare.sh auto-detects):
-- `~/tools/ghidra_11.4.3_PUBLIC/` ← Jython OK
-- `~/tools/ghidra_12.0.4_PUBLIC/` ← needs PyGhidra
+From a checkout, use the repository's comparison scripts with a locally
+configured Ghidra installation:
 
 ```bash
-export JAVA_HOME=$(brew --prefix openjdk@21)/libexec/openjdk.jdk/Contents/Home
-export PATH="$JAVA_HOME/bin:$PATH"
-export GHIDRA_HOME=~/tools/ghidra_11.4.3_PUBLIC
+scripts/bench-compare.sh ./sample.exe --sample 50
 ```
 
-Headless:
-```bash
-$GHIDRA_HOME/support/analyzeHeadless /tmp/ghidra_proj proj \
-  -import <binary> -postScript /tmp/CountFunctions.py -deleteProject
-```
-
-Bench:
-```bash
-scripts/bench-compare.sh <binary> [--sample N]
-scripts/bench-score.py --binary X --rsleigh Y --ghidra cached.json --sample 50 --out DIR
-```
-
-Composite score weights: discovery 25, cflow_similarity 25, leak_parity 20, line_parity 15 (elision-aware), empty_rate 15. `line_parity` full credit when rsleigh has fewer lines AND fewer leaks.
+See [testing](TESTING.md) for validation context. Published case studies and
+historical scores describe those runs, not the current tool's performance on
+an arbitrary target.
