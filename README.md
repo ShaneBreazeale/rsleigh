@@ -4,56 +4,54 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2021%20edition-orange.svg)](https://www.rust-lang.org)
 
-**A reverse engineering framework written in Rust. No JVM. Built for LLM workflows.**
+**Reverse engineering from your terminal, built for coding agents and scripts.**
 
-rsleigh turns binaries into evidence you can query: disassembly, P-code, SSA,
-C-like pseudocode, cross-references, call graphs, and structured findings.
-Use it from a terminal, give a coding agent a bounded view of a target, or
-embed the decoder and lifter in your own Rust tools.
+Map an unfamiliar binary, find the functions that matter, and inspect assembly,
+P-code, and C-like pseudocode. Give your coding agent bounded evidence with
+cross-references, confidence labels, and machine-readable output for the next
+question.
 
-The workflow is simple: map the binary, find the functions that matter, inspect
-their semantics, and carry the evidence into the next question. Compact output,
-explicit limits, and machine-readable artifacts keep that loop practical for
-LLMs and scripts.
+Written in Rust, with no JVM or Ghidra installation required. Use the CLI on
+its own, call it from an agent's shell tools, or embed the decoder and lifter
+in your own Rust tools.
+
+[Download rsleigh](#installation) · [Run your first analysis](#quickstart) ·
+[See real investigations](#in-practice)
 
 ## Contents
 
-[Features](#features) · [Installation](#installation) · [Quickstart](#quickstart) ·
+[Installation](#installation) · [Quickstart](#quickstart) · [Examples](#in-practice) ·
+[Features](#features) ·
 [LLM workflows](#built-for-llms-and-coding-agents) · [Framework](#under-the-hood) ·
 [Targets](#supported-targets) · [Documentation](#documentation) ·
 [Contributing](#contributing)
 
-## Features
-
-- **Rust throughout the core.** SLEIGH parsing, decoder generation, P-code
-  lifting, and the decompiler live in Rust. Analysis runs without a Ghidra
-  installation, Java runtime, or bindings to Ghidra's C++ decompiler.
-- **Designed around a context budget.** Ranked briefs and bounded function
-  cards let an agent inspect a few useful functions at a time. Reusable indexes
-  support follow-up queries across turns.
-- **Evidence at multiple levels.** Move from pseudocode to SSA, P-code, and
-  instruction bytes. Outputs expose confidence, analysis stage, warnings, and
-  truncation so a model can distinguish an observation from a hypothesis.
-- **Useful beyond decompilation.** Search strings and API calls, trace xrefs,
-  triage executables, identify library functions, and investigate packed code
-  or custom VMs.
-- **A framework you can embed.** Rust crates expose the decoder, intermediate
-  representation, function identification, and experimental analysis pipeline.
-
-The decoder and P-code lifter are the stable core. Decompilation, discovery,
-and higher-level analysis remain experimental; check important conclusions
-against the assembly and lifted semantics.
-
 ## Installation
 
-Install the CLI with a Rust toolchain:
+Download a prebuilt **v0.4.3** CLI for your platform—no Rust toolchain needed:
+
+| Platform | Download |
+|---|---|
+| macOS · Apple Silicon | [ARM64 `.tar.gz`](https://github.com/ShaneBreazeale/rsleigh/releases/download/v0.4.3/rsleigh-v0.4.3-aarch64-apple-darwin.tar.gz) |
+| macOS · Intel | [x86-64 `.tar.gz`](https://github.com/ShaneBreazeale/rsleigh/releases/download/v0.4.3/rsleigh-v0.4.3-x86_64-apple-darwin.tar.gz) |
+| Linux · x86-64 (glibc) | [x86-64 `.tar.gz`](https://github.com/ShaneBreazeale/rsleigh/releases/download/v0.4.3/rsleigh-v0.4.3-x86_64-unknown-linux-gnu.tar.gz) |
+| Linux · ARM64 (glibc) | [ARM64 `.tar.gz`](https://github.com/ShaneBreazeale/rsleigh/releases/download/v0.4.3/rsleigh-v0.4.3-aarch64-unknown-linux-gnu.tar.gz) |
+| Windows · x86-64 | [x86-64 `.zip`](https://github.com/ShaneBreazeale/rsleigh/releases/download/v0.4.3/rsleigh-v0.4.3-x86_64-pc-windows-msvc.zip) |
+
+Extract the archive and put `rsleigh` (Windows: `rsleigh.exe`) in a directory
+on your `PATH`. You can also run it directly from the extracted directory as
+`./rsleigh` on macOS/Linux or `.\rsleigh.exe` in PowerShell. Running it without
+arguments prints usage. [All releases and SHA-256 checksums](https://github.com/ShaneBreazeale/rsleigh/releases).
+
+**Prefer Cargo?** With a Rust toolchain, installation is one command:
 
 ```bash
 cargo install rsleigh
 ```
 
-The default build needs no JVM. Optional SMT analysis adds a native Z3
-dependency; see the [SMT setup and scope](docs/smt-backend.md).
+Both options install the CLI used below. Prebuilt releases use the default
+features; optional SMT solving requires a source build with native Z3. See
+[SMT setup and scope](docs/smt-backend.md).
 
 ## Quickstart
 
@@ -82,6 +80,27 @@ rsleigh ./sample.exe 0x140001000
 ```
 
 Use an address from your own target when symbols are unavailable.
+
+## Features
+
+- **Rust throughout the core.** SLEIGH parsing, decoder generation, P-code
+  lifting, and the decompiler live in Rust. Analysis runs without a Ghidra
+  installation, Java runtime, or bindings to Ghidra's C++ decompiler.
+- **Designed around a context budget.** Ranked briefs and bounded function
+  cards let an agent inspect a few useful functions at a time. Reusable indexes
+  support follow-up queries across turns.
+- **Evidence at multiple levels.** Move from pseudocode to SSA, P-code, and
+  instruction bytes. Outputs expose confidence, analysis stage, warnings, and
+  truncation so a model can distinguish an observation from a hypothesis.
+- **Useful beyond decompilation.** Search strings and API calls, trace xrefs,
+  triage executables, identify library functions, and investigate packed code
+  or custom VMs.
+- **A framework you can embed.** Rust crates expose the decoder, intermediate
+  representation, function identification, and experimental analysis pipeline.
+
+The decoder and P-code lifter are the stable core. Decompilation, discovery,
+and higher-level analysis remain experimental; check important conclusions
+against the assembly and lifted semantics.
 
 ## Built for LLMs and coding agents
 
@@ -142,19 +161,17 @@ source-to-sink candidates within its documented model.
 See the [feature catalog](docs/features.md), [triage reference](docs/cli-triage.md),
 and [SMT candidates](docs/smt-candidates.md) for the specialized workflows.
 
-### In practice: a PyVMProtect solve
+## In practice
 
-rsleigh helped recover `CTF{pyvm_r0cks}` from a packed PE64 Python extension
-through static analysis. The sample contained a 53-opcode custom VM, a
-117-stage initialization chain, PCG decryption, compressed bytecode, and
-anti-debug checks.
+| Investigation | What rsleigh contributed |
+|---|---|
+| [Sony α7R II camera firmware](docs/showcase/firmware-investigations.md#sony-α7r-ii-camera-firmware) | Improved mixed ARM/Thumb function discovery in BIONZ X firmware and recovered functions from carved Windows updater components. |
+| [TP-Link AX6000 v2 router firmware](docs/showcase/firmware-investigations.md#tp-link-ax6000-v2-router-firmware) | Resolved ARM32 network API imports in `tdpServer` and supported source-to-sink investigation across extracted router daemons. |
+| [PyVMProtect crackme](docs/showcase/crackme3-pyvmprotect.md) | Helped recover `CTF{pyvm_r0cks}` by locating the Python entry point, annotating crypto, and classifying custom-VM handlers; emulation and Python scripts completed the solve. |
 
-rsleigh found the real entry point, annotated crypto, classified VM handlers,
-and disassembled bytecode. A short Python decoder completed the solve—a
-concrete example of using the framework's evidence to build a focused tool.
-
-Read the [walkthrough](docs/showcase/crackme3-pyvmprotect.md) for the analysis
-and links to the full write-up.
+These investigations drove concrete improvements to the tool. The firmware
+notes link to the implementation history and describe remaining limits;
+SMT candidates are analysis leads, not confirmed vulnerabilities.
 
 ## Under the hood
 

@@ -31,7 +31,7 @@ links for details instead of loading all documentation into every model turn.
 | What does a finding's confidence or severity mean? | [Findings NDJSON](findings-ndjson.md) |
 | How do I build and use solver-assisted analysis? | [SMT backend](smt-backend.md) · [SMT candidate records](smt-candidates.md) |
 | What specialized analysis is available? | [Feature catalog](features.md) · [PE64 SEH pipeline](pe64-seh-pipeline.md) |
-| How has this been used on packed code? | [PyVMProtect case study](showcase/crackme3-pyvmprotect.md) |
+| How has this been used on real targets? | [Sony camera and TP-Link router firmware](showcase/firmware-investigations.md) · [PyVMProtect case study](showcase/crackme3-pyvmprotect.md) |
 | How do I embed the decoder? | [Rust API example](../README.md#embed-in-rust) |
 | How do the decompiler and tests work? | [Decompiler passes](decompiler-passes.md) · [Testing](TESTING.md) |
 

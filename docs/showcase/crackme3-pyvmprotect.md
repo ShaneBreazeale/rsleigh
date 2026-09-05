@@ -1,6 +1,7 @@
-# Showcase: crackme3 PyVMProtect — full static lift
+# Showcase: crackme3 PyVMProtect — analysis and flag recovery
 
-**Result:** `CTF{pyvm_r0cks}` — recovered end-to-end via static analysis with rsleigh, no runtime debugger, no JVM Ghidra.
+**Result:** `CTF{pyvm_r0cks}` — recovered with rsleigh analysis, targeted
+Unicorn emulation, and Python decoders, without a live debugger or Ghidra JVM.
 
 A reddit-shared "PyVMProtect" PE64 Python C-extension (`crackmev3.pyd`) packing a 53-opcode custom VM, direct syscalls, JIT string decryption, and anti-debug. Solved by lifting the entire decryption + dispatch chain to readable pseudocode and reimplementing each layer in Python.
 
@@ -32,7 +33,9 @@ rsleigh's `PyMethodDef` scanner ran for PE64 unconditionally and surfaced the re
 - `--annotate-crypto` rewrote PCG / Knuth / SHA-256 constants to symbolic names directly in pseudocode, making the two PCG keystream stages immediately recognizable.
 - `--vm-classify-handlers` + `--summarise-handlers` did the per-opcode triage (size class, IAT-API used, stack-pop signature) on the 58-handler table.
 - `--vm-bytecode <bc_va>:<size> --vm-handlers handlers.json` replayed the bytecode against the classified handler set after the sbox snapshot.
-- PE64 SEH/TLS static patch discovery surfaced the SMC patches up front so the disassembly matched runtime memory without a debugger.
+- SEH enumeration provides additional function-discovery evidence. The bundled
+  `crackmev3.pyd` is a zero-patch regression case; it does not validate
+  exception-driven code modification (see the [SEH pipeline](../pe64-seh-pipeline.md)).
 - ROR13 / DJB2 / DJB2a hash-resolver classifier (`peb_walk.rs`) immediately identified the API-hash imports, including the pyVMProtect-style PEB walk.
 
 ## Where pure static lift stalled (and how it was finished)
@@ -70,4 +73,5 @@ Same author shipped a v5 on 2026-04-25 — README literally says *"Version 4 was
 
 **Hash resolution status:** 33/36 init-time DJB2a hashes resolved as of 2026-04-26. tlhelp32 process/thread enum (`CreateToolhelp32Snapshot`, `Process32First/Next`, `Thread32First/Next`, `Module32First/Next`), raw `NtReadFile`/`NtOpenFile`, `GetModuleHandleExA`, and the v3-overlap APIs are all wired into `peb_walk.rs::API_SEEDS`. 3 hashes (`0x33bfa5f6`, `0x3ef073da`, `0x4d9faf9f`) still unresolved — likely require symbolic extraction from the resolver call site at `0x180013760` or a dynamic breakpoint.
 
-Solving v5 is in progress — see `docs/showcase/crackme5-pyvmprotect.md` once finished.
+The historical v5 investigation was incomplete at the time of these notes;
+no completed v5 walkthrough is bundled here.
