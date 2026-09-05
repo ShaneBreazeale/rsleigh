@@ -221,5 +221,11 @@ the user-visible `numpy.ndarray` surface — `ndim`, `shape`, `dtype`,
    fault address from R9 rather than the ExceptionRecord bypass the
    `reads_exception_info` signal.
 
-Those are fertile ground for v3 when a real SEH-SMC fixture lands in the
-corpus.
+This list describes the v2 baseline; subsequent code includes partial indirect
+branch resolution, concrete-source WriteProcessMemory extraction, and
+DispatcherContext read classification.
+
+Source-controlled [synthetic SEH-SMC fixtures](../test-harness/fixtures/seh-smc/FIXTURE.md)
+now cover direct writes and a resolved indirect branch with exact expected
+patches. They provide a reproducible positive baseline; an independently authored
+SEH-SMC sample is still needed to guide broader v3 work.
