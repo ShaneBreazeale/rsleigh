@@ -2,247 +2,194 @@
 
 [![crates.io](https://img.shields.io/crates/v/rsleigh.svg)](https://crates.io/crates/rsleigh)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-2021%20stable-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-2021%20edition-orange.svg)](https://www.rust-lang.org)
 
-rsleigh is a scriptable, pure-Rust reverse-engineering workbench that turns PE,
-ELF, Mach-O, WebAssembly, and raw firmware into C-like pseudocode, disassembly,
-P-code, SSA, xrefs, call graphs, and structured output. It is built for
-static-analysis loops—especially when an LLM helps search the output,
-explain behavior, and turn findings into scripts—without requiring a Ghidra JVM
-or C++ bindings.
+**A reverse engineering framework written in Rust. No JVM. Built for LLM workflows.**
 
-The decoder and P-code lifter are the stable core. The decompiler and
-analysis passes are useful but experimental: verify important conclusions
-against the assembly, P-code, or another tool.
+rsleigh turns binaries into evidence you can query: disassembly, P-code, SSA,
+C-like pseudocode, cross-references, call graphs, and structured findings.
+Use it from a terminal, give a coding agent a bounded view of a target, or
+embed the decoder and lifter in your own Rust tools.
+
+The workflow is simple: map the binary, find the functions that matter, inspect
+their semantics, and carry the evidence into the next question. Compact output,
+explicit limits, and machine-readable artifacts keep that loop practical for
+LLMs and scripts.
 
 ## Contents
 
-- [A real-world solve](#a-real-world-solve)
-- [Capabilities](#capabilities)
-- [Installation](#installation)
-- [Quickstart](#quickstart)
-- [Triage workflow](#triage-workflow)
-- [Packed-code and custom-VM analysis](#packed-code-and-custom-vm-analysis)
-- [SMT-assisted analysis](#smt-assisted-analysis)
-- [Supported targets](#supported-targets)
-- [Rust API](#rust-api)
-- [Development and testing](#development-and-testing)
-- [Project status](#project-status)
-- [Contributing](#contributing)
-- [License](#license)
+[Features](#features) · [Installation](#installation) · [Quickstart](#quickstart) ·
+[LLM workflows](#built-for-llms-and-coding-agents) · [Framework](#under-the-hood) ·
+[Targets](#supported-targets) · [Documentation](#documentation) ·
+[Contributing](#contributing)
 
-## A real-world solve
+## Features
 
-rsleigh recovered `CTF{pyvm_r0cks}` from a PyVMProtect-packed PE64 Python
-extension using static analysis—no live debugger and no Ghidra JVM. The sample
-contained a 53-opcode custom VM, a 117-stage init chain, two PCG decryption
-passes, compressed bytecode, anti-debug checks, and per-entry VARINT data.
-rsleigh found the real entry point, annotated the crypto, classified the VM
-handlers, and disassembled the bytecode; a short Python decoder finished it.
+- **Rust throughout the core.** SLEIGH parsing, decoder generation, P-code
+  lifting, and the decompiler live in Rust. Analysis runs without a Ghidra
+  installation, Java runtime, or bindings to Ghidra's C++ decompiler.
+- **Designed around a context budget.** Ranked briefs and bounded function
+  cards let an agent inspect a few useful functions at a time. Reusable indexes
+  support follow-up queries across turns.
+- **Evidence at multiple levels.** Move from pseudocode to SSA, P-code, and
+  instruction bytes. Outputs expose confidence, analysis stage, warnings, and
+  truncation so a model can distinguish an observation from a hypothesis.
+- **Useful beyond decompilation.** Search strings and API calls, trace xrefs,
+  triage executables, identify library functions, and investigate packed code
+  or custom VMs.
+- **A framework you can embed.** Rust crates expose the decoder, intermediate
+  representation, function identification, and experimental analysis pipeline.
 
-- [Read the in-repo walkthrough](docs/showcase/crackme3-pyvmprotect.md)
-- [Read the full v3 white paper](https://github.com/ShaneBreazeale/pyvmprotect-static-lift/blob/main/WHITEPAPER.md)
-- [See the v5 follow-up](https://github.com/ShaneBreazeale/crackme-pyvmprotect-v5#11-tooling--rsleigh-recon-suite)
-
-## Capabilities
-
-| Task | Useful output |
-|---|---|
-| Understand a function | C-like pseudocode, disassembly, P-code, post-fold SSA |
-| Navigate a binary | Function discovery, xrefs, call graphs, search by string, API, constant, or behavior |
-| Triage an unknown sample | Hashes, IOCs, Authenticode metadata, resources, XOR strings, YARA, vulnerability heuristics |
-| Investigate packed code | Crypto annotations, API-hash recognition, PEB/timing checks, SEH/TLS patch discovery, VM helpers |
-| Work with an LLM or script | Compact text, brief summaries, JSON, P-code/SSA JSON, ranked NDJSON findings |
-| Embed the decoder | A small multi-architecture Rust API returning disassembly and P-code |
-
-When pseudocode is unclear, drop to disassembly, P-code, or SSA without leaving
-the workflow. Feed the smallest useful artifact to your model or script.
+The decoder and P-code lifter are the stable core. Decompilation, discovery,
+and higher-level analysis remain experimental; check important conclusions
+against the assembly and lifted semantics.
 
 ## Installation
 
-Install the CLI from crates.io:
+Install the CLI with a Rust toolchain:
 
 ```bash
 cargo install rsleigh
 ```
 
-For library use:
-
-```toml
-[dependencies]
-rsleigh-api = "0.4"
-pcode-ir = "0.4"
-```
-
-The optional Z3-backed SMT analysis requires a source build; see
-[SMT analysis](#smt-assisted-analysis).
+The default build needs no JVM. Optional SMT analysis adds a native Z3
+dependency; see the [SMT setup and scope](docs/smt-backend.md).
 
 ## Quickstart
 
-Using rsleigh from a coding agent? Copy the bounded workflow contract in
-[docs/AGENTS-rsleigh.md](docs/AGENTS-rsleigh.md) into the target-analysis
-workspace, see the [agent workflow reference](docs/agent-workflow.md) for
-schemas and caps, then start with one capped JSON map:
+Replace `./sample.exe` with your target. Start with a capped JSON map:
 
 ```bash
 rsleigh ./sample.exe --agent-brief
 ```
 
-Choose the artifact that matches the question instead of asking for the largest
-possible dump:
-
-| Question | Start with | Escalate only when needed |
-|---|---|---|
-| What kind of sample is this? | `rsleigh FILE --agent-brief` | Complete `--ioc`, `--sigcheck`, or `--resources` producers |
-| Which functions matter? | `--agent-brief`, `--search`, or `--xrefs` | `--index DIR` for repeated queries |
-| What does one function do? | `FUNCTION --card --pcode` | Add `--decompile` after checking the lift |
-| What instruction semantics were lifted? | `--pcode-json FUNCTION` | `--ssa-json FUNCTION` for data-flow reasoning |
-| Is a source-to-sink path reachable? | `--vulnscan --findings-ndjson` | `--smt-candidates FUNCTION` with the optional `smt` build |
-| Is this raw firmware? | `--raw ARCH --base ADDR` | Keep both values explicit on every follow-up command |
-
-For model-assisted work, preserve the file hash, architecture, image base,
-function address, command, warnings, and truncation limits with every
-conclusion. The [agent workflow reference](docs/agent-workflow.md) defines the
-evidence and reporting contract.
-
-Start with discovered functions, then narrow the analysis:
+The brief includes file hashes, architecture, ranked functions, findings,
+warnings, output limits, and address-specific follow-up commands. Pick a
+function from the map, then inspect it by name or address:
 
 ```bash
-rsleigh ./sample.exe                         # list discovered functions
-rsleigh ./sample.exe main                    # decompile by name
-rsleigh ./sample.exe 0x140001000             # decompile by address
-rsleigh ./sample.exe --xrefs main            # callers, callees, and strings
-rsleigh ./sample.exe --disasm main           # assembly plus lifted P-code
-rsleigh ./sample.exe --pcode-json main       # raw P-code for a script or model
-rsleigh ./sample.exe --ssa-json main         # post-fold SSA
+rsleigh ./sample.exe --xrefs main               # callers, callees, and strings
+rsleigh ./sample.exe main --card --pcode        # bounded assembly and lifted semantics
+rsleigh ./sample.exe main --card --pcode --decompile
 ```
 
-For a large binary, generate a compact map first:
+For direct exploration, list discovered functions or request pseudocode:
 
 ```bash
-rsleigh ./sample.exe --agent-brief              # capped JSON + trust labels + next commands
-rsleigh ./sample.exe --summary
-rsleigh ./sample.exe --callgraph > callgraph.json
-rsleigh ./sample.exe --all --brief --min-complexity 10 > sample.brief.txt
-rsleigh ./sample.exe --index sample-index/      # reusable functions/xrefs/findings/imports
+rsleigh ./sample.exe
+rsleigh ./sample.exe main
+rsleigh ./sample.exe 0x140001000
 ```
 
-Inspect one function without allowing an unbounded dump:
+Use an address from your own target when symbols are unavailable.
+
+## Built for LLMs and coding agents
+
+rsleigh exposes a CLI that agents can call through their shell tools. Copy the
+[drop-in agent instructions](docs/AGENTS-rsleigh.md) into your analysis
+workspace to give an agent the workflow and evidence rules.
+
+| Artifact | What it gives the agent |
+|---|---|
+| `--agent-brief` | One JSON map: 25 functions by default, at most 50 findings, hashes, trust labels, warnings, and next commands |
+| `FUNCTION --card --pcode` | A focused view capped at 40 instructions and 120 P-code operations |
+| `FUNCTION --card --pcode --decompile` | The same evidence plus up to 4,096 bytes of pseudocode |
+| `--pcode-json FUNCTION` / `--ssa-json FUNCTION` | Structured instruction semantics or post-fold data flow for deeper reasoning |
+| `--index DIR` | Reusable function, xref, import, and finding files with a manifest |
+| `--findings-ndjson` | Confidence- and stage-labeled records from supported analysis modes |
+
+For analysis spanning several turns, build an index once and query its files:
 
 ```bash
-rsleigh ./sample.exe 0x140001000 --card
-rsleigh ./sample.exe 0x140001000 --card --pcode
-rsleigh ./sample.exe 0x140001000 --card --pcode --decompile
+rsleigh ./sample.exe --index sample-index/
+jq '.functions[] | select(.imports | index("recv"))' sample-index/functions.json
 ```
 
-Search modes pivot directly to interesting functions:
+Preserve the binary hash, function address, exact command, and relevant warnings
+with each conclusion. Pseudocode is a reconstruction; heuristic findings are
+leads. Check schemas, top-level errors, and reported limits before consuming
+output automatically.
+
+The brief and index currently support PE, ELF, and Mach-O inputs. See the
+[agent workflow reference](docs/agent-workflow.md) for schemas, hard caps,
+ranking, and the reporting contract.
+
+## Explore, triage, investigate
+
+Find an entry point into an unfamiliar binary:
 
 ```bash
 rsleigh ./sample.exe --search "password"
 rsleigh ./sample.exe --search --api LoadLibraryA
 rsleigh ./sample.exe --search --const 0xCAFEBABE
-rsleigh ./sample.exe --search --tag network,crypto --decompile
+rsleigh ./sample.exe --callgraph > callgraph.json
 ```
 
-Raw firmware accepts an architecture and optional base address:
+Extract file-level indicators and collect analysis leads:
 
 ```bash
-rsleigh ./firmware.bin --raw arm32 --base 0x08000000
-rsleigh ./firmware.bin --raw arm32 --base 0x08000000 --disasm 0x08001234
-```
-
-## Triage workflow
-
-Lightweight file-structure and string scans are good first passes:
-
-```bash
-rsleigh ./sample.exe --hashes
-rsleigh ./sample.exe --ioc --json
 rsleigh ./sample.exe --ioc --findings-ndjson > findings.ndjson
 rsleigh ./sample.exe --sigcheck --json
 rsleigh ./sample.exe --resources --dump extracted/
-rsleigh ./sample.exe --xor-strings --json
-rsleigh ./sample.exe --sections
-```
-
-Then move into semantic analysis:
-
-```bash
 rsleigh ./sample.exe --vulnscan --findings-ndjson >> findings.ndjson
-rsleigh ./sample.exe --yara
-rsleigh old.exe --diff new.exe
-rsleigh ./sample.exe --classes --json
 ```
 
-These modes surface leads, not proofs. See the
-[triage reference](docs/cli-triage.md) for schemas and limitations.
+Packed-code analysis includes crypto annotations, API-hash recognition,
+PEB and timing probes, SEH/TLS patch discovery, and custom-VM dispatcher,
+handler, and bytecode helpers. Optional Z3-backed analysis produces ranked
+source-to-sink candidates within its documented model.
 
-## Packed-code and custom-VM analysis
+See the [feature catalog](docs/features.md), [triage reference](docs/cli-triage.md),
+and [SMT candidates](docs/smt-candidates.md) for the specialized workflows.
 
-PE64 analysis flags API-hash resolvers, PEB walks, timing probes, indirect
-trampolines, suspicious dispatchers, scratch-buffer leaks, and SHA-256 regions.
-Focused helpers can then inspect a candidate VM:
+### In practice: a PyVMProtect solve
 
-```bash
-rsleigh ./packed.exe main --annotate-crypto
-rsleigh ./packed.exe --vm-dispatch 0x18001fc70
-rsleigh ./packed.exe --vm-classify-handlers 0x18001eb00,0x180018960
-rsleigh ./packed.exe --summarise-handlers 0x180018960
-rsleigh ./packed.exe --vm-bytecode 0x180063858:0x400 \
-  --vm-handlers handlers.json
+rsleigh helped recover `CTF{pyvm_r0cks}` from a packed PE64 Python extension
+through static analysis. The sample contained a 53-opcode custom VM, a
+117-stage initialization chain, PCG decryption, compressed bytecode, and
+anti-debug checks.
+
+rsleigh found the real entry point, annotated crypto, classified VM handlers,
+and disassembled bytecode. A short Python decoder completed the solve—a
+concrete example of using the framework's evidence to build a focused tool.
+
+Read the [walkthrough](docs/showcase/crackme3-pyvmprotect.md) for the analysis
+and links to the full write-up.
+
+## Under the hood
+
+rsleigh uses Ghidra's SLEIGH processor specifications as input to its own Rust
+parser and code generator. Generated Rust decoders produce disassembly and
+P-code, an intermediate representation of instruction semantics. The analysis
+pipeline builds on that representation to recover data flow and pseudocode.
+
+```text
+SLEIGH specifications → Rust parser + code generator → Rust decoders
+                                                           │
+Binary → load + discover → decode + lift → P-code → SSA → C-like pseudocode
+                              │              │       │          │
+                              └──────────────┴───────┴──────────┘
+                                  CLI artifacts + Rust APIs
 ```
 
-Add `--findings-ndjson` to any VM helper to emit the shared confidence-bearing
-schema documented in [Findings NDJSON](docs/findings-ndjson.md).
+Ghidra provides the specification lineage and oracle fixtures for validation;
+it is not required to run rsleigh. WebAssembly uses a dedicated frontend.
 
-These are pattern-based recon tools, not a general virtualization deobfuscator.
-See the [feature notes](docs/features.md) and
-[PyVMProtect walkthrough](docs/showcase/crackme3-pyvmprotect.md).
-
-## SMT-assisted analysis
-
-The optional `smt` feature adds Z3-backed, interprocedural source-to-sink
-analysis and ranked NDJSON candidates for an analyst or LLM.
-
-On macOS with Homebrew Z3:
-
-```bash
-CPATH=$(brew --prefix z3)/include LIBRARY_PATH=$(brew --prefix z3)/lib \
-  cargo build --release --features smt -p rsleigh-cli
-
-target/release/rsleigh ./binary --smt-candidates main > candidates.ndjson
-```
-
-See [SMT backend](docs/smt-backend.md) for setup and scope,
-[SMT candidates](docs/smt-candidates.md) for taint evidence, and the shared
-[findings NDJSON schema](docs/findings-ndjson.md) used across recon emitters.
-
-## Supported targets
-
-Decode coverage is not the same as lift or decompile coverage. The public
-[architecture support matrix](docs/architectures.md) reports decode, lift,
-discovery, and decompile separately for each ISA/mode.
-
-The CLI loads ELF32/64, PE32/64, Mach-O 64, WebAssembly, and raw blobs. See
-[architecture support](docs/architectures.md) for discovery details and gaps.
-
-### Documentation map
-
-| Need | Reference |
+| Crate | Role |
 |---|---|
-| Bounded LLM/coding-agent loop | [Agent workflow](docs/agent-workflow.md) |
-| Drop-in workspace instructions | [Agent contract](docs/AGENTS-rsleigh.md) |
-| Finding fields and confidence semantics | [Findings NDJSON](docs/findings-ndjson.md) |
-| Decode/lift/discovery/decompile limits | [Architecture matrix](docs/architectures.md) |
-| IOC, signature, and resource extraction | [CLI triage](docs/cli-triage.md) |
-| Solver scope and interpretation | [SMT backend](docs/smt-backend.md) and [SMT candidates](docs/smt-candidates.md) |
-| Pipeline internals and validation | [Decompiler passes](docs/decompiler-passes.md) and [testing](docs/TESTING.md) |
-| Context7 library ID | `/shanebreazeale/rsleigh` |
+| `rsleigh` / `rsleigh-generate` | SLEIGH parsing and Rust decoder generation; the root package also installs the CLI |
+| `rsleigh-api` | Stable multi-architecture decoder and lifter API |
+| `pcode-ir` | Shared instruction and P-code types |
+| `rsleigh-fid` | Function identification from instruction fingerprints |
+| `rsleigh-decompile` | Experimental IR, analysis passes, and pseudocode reconstruction |
+| `rsleigh-cli` | Binary loading and command-line workflows |
 
-## Rust API
+### Embed in Rust
 
-`rsleigh-api` is the stable embedding surface for decoding instructions and
-lifting them to P-code:
+```toml
+[dependencies]
+rsleigh-api = "0.4"
+```
 
 ```rust
 use rsleigh_api::{Architecture, Decoder};
@@ -254,13 +201,48 @@ assert_eq!(inst.disassembly, "MOV RAX,RBX");
 assert_eq!(inst.len, 3);
 ```
 
-The stable surface includes `Decoder`, `Architecture`, register-name lookup,
-and re-exported `pcode-ir` types. Pin a version when embedding the experimental
-`rsleigh-decompile` IR, passes, or printer.
+`rsleigh-api` exposes `Decoder`, `Architecture`, register-name lookup, and
+re-exported P-code types. Pin an exact patch version when depending on the
+experimental `rsleigh-decompile` internals.
 
-## Development and testing
+## Supported targets
 
-Building from a checkout requires Rust 2021 stable and `make`:
+The CLI loads **PE32/64, ELF32/64, Mach-O 64, WebAssembly, and raw firmware**.
+CPU targets include **x86-64, x86-32, AArch64, ARM32/Thumb, MIPS32 big-endian,
+and RISC-V RV64GC**.
+
+Coverage varies by architecture and stage. x86-64 and scalar AArch64 have the
+strongest coverage; successful decoding does not imply complete lifting or
+decompilation. Consult the [architecture matrix](docs/architectures.md) for
+tested paths and known gaps.
+
+For raw firmware, supply the architecture and image base on every command:
+
+```bash
+rsleigh ./firmware.bin --raw arm32 --base 0x08000000
+rsleigh ./firmware.bin --raw arm32 --base 0x08000000 --disasm 0x08001234
+```
+
+## Documentation
+
+| Topic | Reference |
+|---|---|
+| Agent setup and bounded analysis | [Agent instructions](docs/AGENTS-rsleigh.md) · [Workflow and schemas](docs/agent-workflow.md) |
+| Analysis capabilities | [Feature catalog](docs/features.md) · [CLI triage](docs/cli-triage.md) |
+| Structured findings | [NDJSON schema and confidence semantics](docs/findings-ndjson.md) |
+| Architecture coverage | [Support matrix](docs/architectures.md) |
+| Solver-assisted analysis | [SMT backend](docs/smt-backend.md) · [Candidate interpretation](docs/smt-candidates.md) |
+| Pipeline and validation | [Decompiler passes](docs/decompiler-passes.md) · [Testing](docs/TESTING.md) |
+
+Context7 library ID: `/shanebreazeale/rsleigh`.
+
+## Contributing
+
+rsleigh is a v0.x, single-maintainer project. Issues and pull requests are
+welcome, especially reproducible cases that improve decode, lift, discovery,
+or pseudocode quality.
+
+From a checkout with a Rust toolchain and `make`:
 
 ```bash
 make test                                      # generate decoders and run the harness
@@ -269,33 +251,12 @@ make decomp-bench                              # pseudocode regression gate
 cargo install --path rsleigh-cli
 ```
 
-The suite includes P-code tests, Ghidra oracle fixtures, decompiler regressions,
-random-byte panic checks, real binaries, SMT calibration, and pseudocode
-scoring. See [testing](docs/TESTING.md) and
-[decompiler passes](docs/decompiler-passes.md).
-
-## Project status
-
-rsleigh is a v0.x, single-maintainer project. The decoder/lifter API has a narrow
-stability promise; the CLI, pseudocode, discovery, and analysis passes remain
-experimental. It has not received a dedicated security audit, so isolate it in
-automated malware-processing systems.
-
-## Contributing
-
-Issues and pull requests are welcome. Bug fixes should include a regression
-test, and changes to generated decoders should include architecture-level
-coverage. Before opening a pull request, run:
-
-```bash
-make test
-cargo test -p rsleigh-decompile --release --lib
-```
-
-The best starting points are [testing](docs/TESTING.md),
-[decompiler passes](docs/decompiler-passes.md), and
-[architecture support](docs/architectures.md).
+Include regression tests with bug fixes and architecture-level coverage for
+generated-decoder changes. The suite covers P-code, committed Ghidra oracle
+fixtures, decompiler regressions, random-byte panic checks, real binaries,
+and pseudocode scoring. See [testing](docs/TESTING.md) for validation workflows,
+including optional Ghidra comparisons and SMT calibration.
 
 ## License
 
-Apache-2.0. Bundled Ghidra `.slaspec` files are also Apache-2.0.
+[Apache-2.0](LICENSE). Bundled Ghidra `.slaspec` files are also Apache-2.0.
