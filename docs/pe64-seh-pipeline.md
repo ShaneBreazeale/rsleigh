@@ -206,26 +206,52 @@ the user-visible `numpy.ndarray` surface — `ndim`, `shape`, `dtype`,
 3 scope-table addrs surfaced
 ```
 
-## Known limitations (v2)
+### Synthetic SEH-SMC — direct and indirect writes
 
-1. **Indirect branches** in handler bodies terminate the interpreter on
-   that path.  Jump-table dispatch inside a handler hides downstream SMC.
-2. **WriteProcessMemory / VirtualProtect** call sites are flagged but not
-   evaluated — arguments are not symbolically propagated back to source
-   bytes.
+The source-controlled [fixture bundle](../test-harness/fixtures/seh-smc/FIXTURE.md)
+contains assembly source, two reproducibly built PE64 executables, and a Windows
+runtime verification script. Neither executable requires a CRT or imported APIs.
+
+Both raise an illegal-instruction exception inside a function with a
+`.pdata`-registered handler. The handler changes one byte of executable code,
+turning `mov eax, 0; ret` into `mov eax, 42; ret`, and advances the saved RIP
+past the faulting instruction. The indirect variant reaches the write through
+`jmp rax`, with an unreachable `ret` preventing accidental linear fallthrough.
+
+The integration tests require exactly one patch at `payload + 1`, changing
+`00` to `2a`, and compare the entire patched image to ensure no other bytes
+change. Both variants converge in two fixpoint iterations. They change a return
+value and do not demonstrate new function discovery.
+
+```sh
+bash test-harness/fixtures/seh-smc/build.sh
+cargo test -p rsleigh-decompile --test seh_smc_fixture
+```
+
+The static tests pass locally. Windows CI separately runs the original binaries
+and requires exit code 42; runtime validation remains pending until that job
+passes. These are synthetic positive cases, not evidence of recovery from an
+independently authored packer.
+
+## Current limitations
+
+1. **Indirect branches** are partially resolved: tracked register targets,
+   RIP-relative pointers, and some indexed jump tables are supported. An
+   unresolved target still ends that path, potentially hiding downstream SMC.
+2. **WriteProcessMemory** and its Nt/Zw counterparts can emit patches when
+   destination, source, and length are concrete and source bytes are available
+   in the image. Runtime-generated buffers and unknown arguments remain
+   unsupported. **VirtualProtect** calls are classified, but their permission
+   changes and API effects are not evaluated.
 3. **RtlAddFunctionTable** / dynamic handler registration is not
    modelled.  Handlers installed at runtime do not appear in `.pdata`
    and thus miss the enumeration.
 4. **DispatcherContext** (R9) field reads (`ControlPc` at +0, `TargetIp`
-   at +0x20) are not currently tracked; obfuscators that fetch the real
-   fault address from R9 rather than the ExceptionRecord bypass the
-   `reads_exception_info` signal.
+   at +0x20) are classified through `reads_dispatcher_context`. This is a
+   detection signal; the field values are not propagated into patch evaluation.
 
-This list describes the v2 baseline; subsequent code includes partial indirect
-branch resolution, concrete-source WriteProcessMemory extraction, and
-DispatcherContext read classification.
-
-Source-controlled [synthetic SEH-SMC fixtures](../test-harness/fixtures/seh-smc/FIXTURE.md)
-now cover direct writes and a resolved indirect branch with exact expected
-patches. They provide a reproducible positive baseline; an independently authored
-SEH-SMC sample is still needed to guide broader v3 work.
+The synthetic fixtures cover direct stores and one resolved indirect branch.
+API-mediated writes, dynamic registration, DispatcherContext value propagation,
+and more complex dispatch need separate positive fixtures. An independently
+authored SEH-SMC sample with observed runtime patches is still needed to guide
+broader v3 work.
