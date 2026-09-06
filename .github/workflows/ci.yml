@@ -51,9 +51,9 @@ jobs:
       - name: Test — PE64 SEH-SMC fixtures
         run: cargo test --release -p rsleigh-decompile --test seh_smc_fixture
 
-      # Build CLI in release mode (catches optimization-only issues)
-      - name: Build CLI (release)
-        run: cargo build -p rsleigh-cli --release
+      # Build and execute agent workflow and publication/error-path regressions.
+      - name: Test — CLI and agent contracts (release)
+        run: cargo test --release -p rsleigh-cli --lib --tests
 
   seh-smc-windows:
     runs-on: windows-latest

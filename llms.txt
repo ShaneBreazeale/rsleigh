@@ -10,7 +10,7 @@ Context7 library ID: `/shanebreazeale/rsleigh`
 
 - Use the CLI for reverse-engineering workflows and `rsleigh-api` when embedding decoders in Rust.
 - For parsed PE/ELF/Mach-O, start with `--agent-brief --limit 5`, then a verified address with `--card --pcode`. Add `--decompile` only after the lift looks coherent.
-- Use one primary mode per invocation. Cards are text even with `--json`; P-code/SSA JSON contains debug strings and is not capped like a card.
+- Use one primary mode per invocation. Cards support `--json` and instruction/operation cursors; P-code/SSA JSON contains debug strings and is not capped like a card. Agent modes expose status/diagnostics and exit 2 for partial evidence. Verify generation indexes with `--verify-index DIR`.
 - Caps bound output, not total analysis runtime. SMT top-N applies after collection; verify a function address before scoping SMT.
 - The current CLI has no conventional `--help` or `--version`; invoke it without arguments for usage.
 - Validate machine-readable output: reject a top-level `error`, require the documented `schema`, and read `warnings` and `limits`.

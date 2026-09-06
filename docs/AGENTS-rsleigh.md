@@ -46,9 +46,17 @@ instructions.
   rediscover and relift the same binary.
 - Validate machine-readable output before reasoning from it. Reject a top-level
   `error`, require the documented `schema`, and check `warnings` and `limits`.
-- Do not assume a successful process status means an index was written; require
-  a valid `index.json` and all four data files. Use a fresh directory and retain
-  an external input hash; a failed rebuild can leave stale files.
+- Agent modes exit 0 for completion, 2 for partial evidence, and 1 for failure.
+  Inspect per-function `status` and stage-specific `diagnostics`; empty analysis
+  after a failure is not evidence of absence.
+- Use `--card --json --pcode` and returned instruction/operation cursors for
+  paginated evidence. Preserve SHA-256, function/address, and operation index.
+- Verify indexes with `rsleigh FILE --verify-index DIR`. Version 2 manifests
+  reference immutable generation paths and checksums; pin one manifest per
+  investigation step. Verified partial analysis still requires review.
+- Use `--ssa-slice FUNCTION --var ID` for bounded dependencies from the matching
+  `--ssa-json` snapshot. Memory/call boundaries and truncated slices remain
+  unresolved; do not infer reachability from expression dependence.
 - Output caps do not bound runtime. Card metadata still invokes decompilation.
 - Before SMT, verify the function in the map. An unresolved name can cause a
   whole-binary scan; `--smt-candidates-top` limits output after analysis.

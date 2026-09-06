@@ -8,8 +8,10 @@ The CLI does not have a universal JSON mode or a uniform error envelope.
 | Command mode | Stdout / files | Expected shape |
 |---|---|---|
 | `--agent-brief` | One JSON object | `schema: rsleigh.agent-brief/v1`; reject `error` |
-| `--index DIR` | Text completion message; JSON/NDJSON files | `index.json` manifest plus four data files |
-| `FUNCTION --card ...` | Text | Headings, evidence sections, and a literal `warnings[]:` section |
+| `--index DIR` | JSON manifest and generation files | `rsleigh.index/v2`; checksums and paths for four artifacts |
+| `--verify-index DIR` | One JSON object | `rsleigh.index-verification/v1`; validity and analysis status |
+| `--ssa-slice FUNCTION --var ID` | One JSON object | `rsleigh.ssa-slice/v1`; bounded dependencies and boundaries |
+| `FUNCTION --card ...` | Text by default; JSON with `--json` | `rsleigh.card/v1`; evidence references and independent pagination |
 | `--pcode-json FUNCTION` | One JSON object per requested function | `function`, `address`, `instructions` |
 | `--ssa-json FUNCTION` | One JSON object per requested function | `function`, `address`, `blocks`, `vars` |
 | `--disasm FUNCTION --json` | One JSON object per requested function | `function`, `instructions`; `pcode_ops` is a count |
@@ -49,8 +51,12 @@ jq -e '
 ```
 
 This is a minimum shape check, not a full JSON Schema validator. Inspect
-`warnings`, `trust`, and `limits` after it succeeds. A zero process exit status
-can accompany a structured `error` or diagnostic-only failure.
+`warnings`, `trust`, `status`, `diagnostics`, and `limits` after it succeeds.
+Agent briefs, cards, indexes, and SSA slices use exit 0 for completed analysis,
+2 for partial evidence, and 1 for command failure. Per-function diagnostics
+identify decode/decompile failures. Other legacy modes do not share this error
+contract. A successful index verification checks artifact integrity and reports
+the saved analysis status separately.
 
 ## Validate findings without silently dropping bad records
 
@@ -81,36 +87,25 @@ After validation, filtering with `select(...)` is appropriate.
 
 ## Validate an index as a set of files
 
-Use a fresh output directory per input/revision. The index writes several files
-in sequence, is not atomic, and does not store a binary hash. An old manifest
-can survive a failed rebuild; a manifest alone does not prove success.
+Indexes publish an immutable generation and then atomically replace the root
+`index.json`. The version 2 manifest records input SHA-256, tool version,
+effective analysis options, status, and checksums/sizes for all data files.
 
 ```bash
-rsleigh ./sample.exe --index sample-index/ --limit 100 \
-  > index.stdout 2> index.stderr
-```
-
-After checking the command result and diagnostics, verify the manifest and
-all expected artifacts:
-
-```bash
-jq -e '.schema == "rsleigh.index/v1" and
-  (.warnings | type == "array") and (.limits | type == "object") and
-  .files == ["functions.json", "xrefs.json", "findings.ndjson", "imports.json"]' \
-  sample-index/index.json >/dev/null &&
+rsleigh ./sample.exe --index sample-index/ --limit 100 > index.json 2> index.stderr
+rsleigh ./sample.exe --verify-index sample-index/
+functions_path=$(jq -r '.files[] | select(.name == "functions.json") | .path' index.json)
 jq -e '.schema == "rsleigh.functions/v1" and (.functions | type == "array")' \
-  sample-index/functions.json >/dev/null &&
-jq -e '.schema == "rsleigh.xrefs/v1" and (.functions | type == "array")' \
-  sample-index/xrefs.json >/dev/null &&
-jq -e '.schema == "rsleigh.imports/v1" and (.imports | type == "array")' \
-  sample-index/imports.json >/dev/null &&
-test -f sample-index/findings.ndjson
+  "sample-index/$functions_path" >/dev/null
 ```
 
-Apply the findings validator above to `sample-index/findings.ndjson`. It may
-legitimately be empty. Save the external SHA-256 and source revision alongside
-the index, and rebuild if the input changes. Confirm that the manifest's
-`source`, `arch`, and `imagebase` match the current analysis.
+Check the build's exit status before using its stdout manifest. The verification
+command rejects mismatched binaries/tool versions, incomplete generations, and
+missing or corrupted artifacts. Findings may be legitimately empty. A partial
+analysis may pass verification; inspect `analysis_status` before drawing
+conclusions. Retain one manifest when querying multiple files so a concurrent
+rebuild cannot mix generations. See [agent workflow](agent-workflow.md#--index)
+for migration from version 1 and the publication contract.
 
 ## P-code and SSA JSON are inspection artifacts
 

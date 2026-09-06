@@ -46,6 +46,7 @@ mod signatures_python;
 mod signatures_win32;
 pub mod smt_explore;
 pub mod smt_verify;
+pub mod slice;
 pub mod ssa;
 pub mod structure;
 pub mod syscall_table;
@@ -102,6 +103,20 @@ fn is_go_binary(binary: &[u8]) -> bool {
             .any(|s| s.name().ok() == Some(".gopclntab")),
         _ => false,
     }
+}
+
+/// Build the post-fold snapshot shared by SSA JSON and bounded dependency queries.
+/// Variable IDs are local to this exact binary, function, and tool version.
+pub fn folded_ssa(
+    arch: Architecture,
+    instructions: &[(u64, Instruction)],
+    binary: Option<&[u8]>,
+) -> ir::SsaCfg {
+    let cfg = cfg::build_cfg(instructions);
+    let cc = detect_cc(arch, binary);
+    let mut ssa = ssa::build_ssa_with_cc(&cfg, cc);
+    fold::fold_with_cc(&mut ssa, cc);
+    ssa
 }
 
 /// Decompile a function's instructions into C-like pseudocode.

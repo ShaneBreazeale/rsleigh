@@ -8,6 +8,8 @@
 //!   rsleigh <binary> <func> --json      # decompile as JSON
 //!   rsleigh <binary> --disasm <func>    # disassemble (P-code)
 
+mod agent;
+
 use crate::arm32_raw;
 use crate::wasm;
 
@@ -149,7 +151,11 @@ pub fn entrypoint() {
         eprintln!("  rsleigh <binary> --summary          AI summary (one-line per function)");
         eprintln!("  rsleigh <binary> --agent-brief      Bounded JSON map for coding agents");
         eprintln!("  rsleigh <binary> --index <dir>      Write a reusable analysis index");
-        eprintln!("  rsleigh <binary> <func> --card      Bounded function evidence card");
+        eprintln!("  rsleigh <binary> <func> --card [--json] [--pcode] [--decompile]");
+        eprintln!("             [--instruction-cursor N] [--operation-cursor N]  Paginated evidence");
+        eprintln!("  rsleigh <binary> --verify-index <dir>  Verify binary identity and artifact checksums");
+        eprintln!("  rsleigh <binary> --ssa-slice <func> --var ID [--max-nodes N] [--max-depth N]");
+        eprintln!("  Agent exits: 0 complete, 2 partial evidence, 1 failed");
         eprintln!("  rsleigh <binary> --xrefs <func>     Cross-references (callers + callees)");
         eprintln!("  rsleigh <binary> --search <query>   Find functions by string/pattern");
         eprintln!("  rsleigh <binary> --search --api <name>  Find functions calling API");
@@ -175,6 +181,10 @@ pub fn entrypoint() {
         std::process::exit(1);
     }
 
+    if agent::dispatch(&args) {
+        return;
+    }
+
     let binary_path = &args[1];
     let json_mode = args.iter().any(|a| a == "--json");
     let all_mode = args.iter().any(|a| a == "--all");
@@ -185,8 +195,6 @@ pub fn entrypoint() {
     let imphash_mode = args.iter().any(|a| a == "--imphash");
     let hashes_mode = args.iter().any(|a| a == "--hashes");
     let summary_mode = args.iter().any(|a| a == "--summary");
-    let agent_brief_mode = args.iter().any(|a| a == "--agent-brief");
-    let index_mode = args.iter().any(|a| a == "--index");
     let xrefs_mode = args.iter().any(|a| a == "--xrefs");
     let search_mode = args.iter().any(|a| a == "--search");
     let vulnscan_mode = args.iter().any(|a| a == "--vulnscan");
@@ -689,8 +697,8 @@ pub fn entrypoint() {
         return;
     }
 
-    // Summary/Xrefs/Search/Vulnscan/Callgraph/agent modes
-    if summary_mode || agent_brief_mode || index_mode || xrefs_mode || search_mode || vulnscan_mode || callgraph_mode || ioc_mode || xor_strings_mode || sigcheck_mode || resources_mode {
+    // Summary/Xrefs/Search/Vulnscan/Callgraph modes
+    if summary_mode || xrefs_mode || search_mode || vulnscan_mode || callgraph_mode || ioc_mode || xor_strings_mode || sigcheck_mode || resources_mode {
         let data = match std::fs::read(binary_path) {
             Ok(d) => d,
             Err(e) => {
@@ -703,21 +711,7 @@ pub fn entrypoint() {
         let t = std::thread::Builder::new()
             .stack_size(256 * 1024 * 1024)
             .spawn(move || {
-                if agent_brief_mode {
-                    run_agent_brief(&bp, &data, &args_clone);
-                } else if index_mode {
-                    let out_dir = args_clone
-                        .iter()
-                        .position(|a| a == "--index")
-                        .and_then(|i| args_clone.get(i + 1))
-                        .cloned()
-                        .unwrap_or_default();
-                    if out_dir.is_empty() {
-                        eprintln!("Usage: rsleigh <binary> --index <dir> [--limit N]");
-                    } else {
-                        run_agent_index(&bp, &data, &args_clone, &out_dir);
-                    }
-                } else if summary_mode {
+                if summary_mode {
                     run_summary(&bp, &data);
                 } else if xrefs_mode {
                     let target = args_clone
@@ -1611,21 +1605,6 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
 
     let mut dec = rsleigh_api::Decoder::new(arch);
 
-    if args.iter().any(|a| a == "--card") {
-        run_function_cards(
-            binary_path,
-            &data,
-            arch,
-            &obj,
-            &symbols,
-            &segs,
-            &targets,
-            args,
-            &mut dec,
-        );
-        return;
-    }
-
     if disasm_mode {
         // Disassembly mode
         for name in &targets {
@@ -1789,27 +1768,14 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                 );
             }
             if ssa_json {
-                let cfg = rsleigh_decompile::cfg::build_cfg(&insts);
-                let cc = match arch {
-                    rsleigh_api::Architecture::X86_64
-                        if rsleigh_decompile::go_pclntab::parse(&data)
-                            .keys()
-                            .next()
-                            .is_some() =>
-                    {
-                        rsleigh_decompile::fold::CallingConv::GoAmd64
+                let (ssa_instructions, diagnostics) = match agent::ssa_instructions(&data, func_addr) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        eprintln!("Cannot build SSA snapshot: {error}");
+                        std::process::exit(1);
                     }
-                    rsleigh_api::Architecture::X86_32 | rsleigh_api::Architecture::MIPS32 => {
-                        rsleigh_decompile::fold::CallingConv::Cdecl32
-                    }
-                    rsleigh_api::Architecture::ARM32 => rsleigh_decompile::fold::CallingConv::Arm32,
-                    rsleigh_api::Architecture::AArch64 => {
-                        rsleigh_decompile::fold::CallingConv::AArch64
-                    }
-                    _ => rsleigh_decompile::fold::CallingConv::SysV,
                 };
-                let mut ssa = rsleigh_decompile::ssa::build_ssa_with_cc(&cfg, cc);
-                rsleigh_decompile::fold::fold_with_cc(&mut ssa, cc);
+                let ssa = rsleigh_decompile::folded_ssa(arch, &ssa_instructions, Some(&data));
                 let blocks: Vec<serde_json::Value> = ssa
                     .blocks
                     .iter()
@@ -1847,6 +1813,10 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
+                        "file_sha256": compute_sha256(&data),
+                        "tool_version": env!("CARGO_PKG_VERSION"),
+                        "snapshot": "post-fold/v1",
+                        "diagnostics": diagnostics,
                         "function": func_name,
                         "address":  format!("0x{:x}", func_addr),
                         "blocks":   blocks,
@@ -3438,6 +3408,17 @@ fn decode_func(
     data: &[u8],
     dec: &mut rsleigh_api::Decoder,
 ) -> Vec<(u64, pcode_ir::Instruction)> {
+    decode_func_with_diagnostics(fa, symbols, segs, data, dec, &mut Vec::new())
+}
+
+fn decode_func_with_diagnostics(
+    fa: u64,
+    symbols: &[(u64, String)],
+    segs: &[(u64, u64, u64)],
+    data: &[u8],
+    dec: &mut rsleigh_api::Decoder,
+    diagnostics: &mut Vec<serde_json::Value>,
+) -> Vec<(u64, pcode_ir::Instruction)> {
     let off = segs.iter().find_map(|(va, sz, fo)| {
         if fa >= *va && fa < va + sz {
             Some(fo + (fa - va))
@@ -3589,14 +3570,31 @@ fn decode_func(
             Ok(Ok(inst)) => {
                 let l = inst.len as usize;
                 if l == 0 {
+                    diagnostics.push(serde_json::json!({
+                        "stage": "decode", "code": "zero_length",
+                        "address": format!("0x{:x}", fa + io as u64),
+                        "message": "decoder returned a zero-length instruction"
+                    }));
                     io += 1;
                     continue;
                 }
                 insts.push((fa + io as u64, inst));
                 io += l;
             }
-            Ok(Err(_)) => break,
+            Ok(Err(error)) => {
+                diagnostics.push(serde_json::json!({
+                    "stage": "decode", "code": "decode_failed",
+                    "address": format!("0x{:x}", fa + io as u64),
+                    "message": format!("{error:?}")
+                }));
+                break;
+            }
             Err(_) => {
+                diagnostics.push(serde_json::json!({
+                    "stage": "decode", "code": "decode_panicked",
+                    "address": format!("0x{:x}", fa + io as u64),
+                    "message": "decoder panicked; skipped one byte"
+                }));
                 io += 1;
             }
         }
@@ -3891,854 +3889,6 @@ fn build_import_map(obj: &goblin::Object, data: &[u8]) -> std::collections::Hash
         _ => {}
     }
     map
-}
-
-const AGENT_BRIEF_DEFAULT_FUNCTIONS: usize = 25;
-const AGENT_BRIEF_MAX_FUNCTIONS: usize = 100;
-const AGENT_BRIEF_MAX_FINDINGS: usize = 50;
-const AGENT_INDEX_MAX_FUNCTIONS: usize = 10_000;
-const AGENT_INDEX_MAX_FINDINGS: usize = 5_000;
-const AGENT_CARD_MAX_INSTRUCTIONS: usize = 40;
-const AGENT_CARD_MAX_PCODE_OPS: usize = 120;
-const AGENT_CARD_MAX_PSEUDOCODE_BYTES: usize = 4_096;
-
-#[derive(Debug, Clone)]
-struct AgentFunction {
-    address: u64,
-    name: String,
-    size: u64,
-    complexity: usize,
-    xrefs: usize,
-    direct_targets: Vec<u64>,
-    calls: Vec<String>,
-    imports: Vec<String>,
-    strings: Vec<String>,
-    tags: Vec<String>,
-}
-
-struct AgentAnalysis {
-    format: &'static str,
-    arch: rsleigh_api::Architecture,
-    imagebase: u64,
-    functions: Vec<AgentFunction>,
-    total_functions: usize,
-    findings: Vec<rsleigh_decompile::finding::FindingRecord>,
-    total_findings: usize,
-    imports: Vec<(u64, String)>,
-}
-
-fn requested_agent_limit(args: &[String], default: usize, maximum: usize) -> usize {
-    args.iter()
-        .position(|a| a == "--limit")
-        .and_then(|i| args.get(i + 1))
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(default)
-        .clamp(1, maximum)
-}
-
-fn agent_format_and_base(obj: &goblin::Object, segs: &[(u64, u64, u64)]) -> (&'static str, u64) {
-    match obj {
-        goblin::Object::PE(pe) => ("pe", pe.image_base as u64),
-        goblin::Object::Elf(_) => ("elf", segs.iter().map(|(va, _, _)| *va).min().unwrap_or(0)),
-        goblin::Object::Mach(goblin::mach::Mach::Binary(_)) => {
-            ("mach-o", segs.iter().map(|(va, _, _)| *va).min().unwrap_or(0))
-        }
-        _ => ("unknown", 0),
-    }
-}
-
-fn agent_arch_warnings(arch: rsleigh_api::Architecture) -> Vec<&'static str> {
-    use rsleigh_api::Architecture;
-    match arch {
-        Architecture::X86_64 => Vec::new(),
-        Architecture::X86_32 => vec![
-            "x86-32 calling-convention and legacy-mode decompilation are partial",
-        ],
-        Architecture::AArch64 => vec![
-            "NEON/SVE decoding is broader than vector/type recovery in pseudocode",
-        ],
-        Architecture::ARM32 => vec![
-            "ARM32 Thumb-2 and VFP/NEON lifting and decompilation are partial",
-        ],
-        Architecture::MIPS32 => vec![
-            "MIPS32 FPU/DSP/MIPS16/microMIPS lifting and decompilation are partial",
-        ],
-        Architecture::RiscV64 => vec![
-            "RISC-V discovery and F/D/B/K/P/Q/V/C lifting and decompilation are partial",
-        ],
-    }
-}
-
-fn agent_calling_convention(
-    arch: rsleigh_api::Architecture,
-    obj: &goblin::Object,
-) -> &'static str {
-    use rsleigh_api::Architecture;
-    match arch {
-        Architecture::X86_64 if matches!(obj, goblin::Object::PE(_)) => "Win64",
-        Architecture::X86_64 => "SysV",
-        Architecture::X86_32 | Architecture::MIPS32 => "cdecl32",
-        Architecture::AArch64 => "AAPCS64",
-        Architecture::ARM32 => "AAPCS32",
-        Architecture::RiscV64 => "LP64",
-    }
-}
-
-fn agent_symbols(
-    obj: &goblin::Object,
-    data: &[u8],
-) -> Option<(
-    rsleigh_api::Architecture,
-    Vec<(u64, u64, u64)>,
-    Vec<(u64, String)>,
-)> {
-    let (arch, segs, mut symbols) = parse_binary(obj, data)?;
-
-    if let goblin::Object::PE(pe) = obj {
-        if let Some(optional) = pe.header.optional_header {
-            let entry = pe.image_base as u64
-                + optional.standard_fields.address_of_entry_point as u64;
-            let existing: std::collections::HashSet<u64> =
-                symbols.iter().map(|(addr, _)| *addr).collect();
-            for (addr, name) in discover_pe_functions(entry, &segs, data, arch) {
-                if !existing.contains(&addr) {
-                    symbols.push((addr, name));
-                }
-            }
-        }
-    }
-
-    if let goblin::Object::Elf(elf) = obj {
-        let needs_discovery = elf.syms.len() == 0
-            || symbols.is_empty()
-            || symbols.iter().all(|(_, name)| name.starts_with("FUN_"));
-        if needs_discovery {
-            let existing: std::collections::HashSet<u64> =
-                symbols.iter().map(|(addr, _)| *addr).collect();
-            for (addr, name) in discover_elf_functions(elf, &segs, data, arch) {
-                if !existing.contains(&addr) {
-                    symbols.push((addr, name));
-                }
-            }
-        }
-    }
-
-    let go_symbols = rsleigh_decompile::go_pclntab::parse(data);
-    for (addr, name) in go_symbols {
-        if let Some((_, current)) = symbols.iter_mut().find(|(candidate, _)| *candidate == addr) {
-            if current.is_empty() || current.starts_with("FUN_") || current.starts_with("func_") {
-                *current = name;
-            }
-        } else {
-            symbols.push((addr, name));
-        }
-    }
-
-    symbols.retain(|(addr, name)| {
-        !name.is_empty()
-            && !HIDDEN.contains(&name.as_str())
-            && segs.iter().any(|(va, size, _)| *addr >= *va && *addr < va + size)
-    });
-    symbols.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-    symbols.dedup_by(|a, b| {
-        if a.0 != b.0 {
-            return false;
-        }
-        let a_generic = a.1.starts_with("FUN_") || a.1.starts_with("func_");
-        let b_generic = b.1.starts_with("FUN_") || b.1.starts_with("func_");
-        if a_generic && !b_generic {
-            a.1 = b.1.clone();
-        }
-        true
-    });
-    Some((arch, segs, symbols))
-}
-
-fn collect_agent_byte_findings(
-    binary_path: &str,
-    data: &[u8],
-) -> Vec<rsleigh_decompile::finding::FindingRecord> {
-    use rsleigh_decompile::finding::{FindingConfidence, FindingRecord, FindingStage};
-
-    let mut records = Vec::new();
-    let texts = rsleigh_decompile::iot_capabilities::extract_printable_runs(data, 6);
-    let mut urls = std::collections::BTreeSet::new();
-    let mut ips = std::collections::BTreeSet::new();
-    for text in &texts {
-        for token in text.split_whitespace() {
-            let value = token.trim_matches(|c: char| {
-                matches!(c, '\"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';')
-            });
-            if value.starts_with("http://")
-                || value.starts_with("https://")
-                || value.starts_with("ftp://")
-            {
-                urls.insert(value.trim_end_matches(['.', ':', '/']).to_string());
-            }
-            let host = value.split(':').next().unwrap_or(value);
-            let octets: Option<Vec<u16>> = host
-                .split('.')
-                .map(|part| part.parse::<u16>().ok().filter(|octet| *octet <= 255))
-                .collect();
-            if let Some(octets) = octets {
-                if octets.len() == 4 && octets.iter().filter(|&&octet| octet == 0).count() < 2 {
-                    ips.insert(host.to_string());
-                }
-            }
-        }
-    }
-    for (kind, values) in [("url", urls), ("ipv4", ips)] {
-        for value in values {
-            records.push(
-                FindingRecord::new(
-                    format!("ioc.{kind}"),
-                    "ioc",
-                    FindingConfidence::Pattern,
-                    FindingStage::File,
-                    format!("{kind}: {value}"),
-                )
-                .with_evidence(serde_json::json!({
-                    "binary": binary_path,
-                    "value": value,
-                })),
-            );
-        }
-    }
-
-    if let Some(family) = rsleigh_decompile::iot_family::classify_bytes(data) {
-        records.push(
-            FindingRecord::new(
-                "malware.family",
-                "ioc",
-                FindingConfidence::Heuristic,
-                FindingStage::File,
-                format!("family: {}", family.label),
-            )
-            .with_evidence(serde_json::json!({
-                "binary": binary_path,
-                "family_id": family.id,
-                "variant": family.variant,
-                "evidence": family.evidence,
-            })),
-        );
-    }
-    for capability in rsleigh_decompile::iot_capabilities::classify_bytes(data) {
-        records.push(
-            FindingRecord::new(
-                "malware.capability",
-                "ioc",
-                FindingConfidence::Heuristic,
-                FindingStage::File,
-                format!("capability: {}", capability.label),
-            )
-            .with_evidence(serde_json::json!({
-                "binary": binary_path,
-                "capability_id": capability.id,
-                "evidence": capability.evidence,
-            })),
-        );
-    }
-    records
-}
-
-fn finding_sort_key(record: &rsleigh_decompile::finding::FindingRecord) -> (u8, u8) {
-    use rsleigh_decompile::finding::FindingConfidence;
-    let severity = match record.severity.as_deref() {
-        Some("CRIT") => 0,
-        Some("HIGH") => 1,
-        Some("MED") => 2,
-        Some("LOW") => 3,
-        Some("INFO") => 4,
-        _ => 5,
-    };
-    let confidence = match record.confidence {
-        FindingConfidence::Proved => 0,
-        FindingConfidence::Heuristic => 1,
-        FindingConfidence::Pattern => 2,
-    };
-    (severity, confidence)
-}
-
-fn build_agent_analysis(
-    binary_path: &str,
-    data: &[u8],
-    function_limit: usize,
-    finding_limit: usize,
-) -> Result<AgentAnalysis, String> {
-    use pcode_ir::{AddressSpaceId, PcodeOp};
-    use rsleigh_decompile::finding::{FindingConfidence, FindingRecord, FindingStage};
-
-    let obj = parse_object_lenient(data).map_err(|error| error.to_string())?;
-    let (arch, segs, symbols) = agent_symbols(&obj, data)
-        .ok_or_else(|| "unsupported binary format or architecture".to_string())?;
-    let (format, imagebase) = agent_format_and_base(&obj, &segs);
-    let import_map = build_import_map(&obj, data);
-    let import_names: std::collections::HashSet<String> =
-        import_map.values().cloned().collect();
-    let name_by_addr: std::collections::HashMap<u64, String> =
-        symbols.iter().cloned().collect();
-    let mut decoder = rsleigh_api::Decoder::new(arch);
-    let mut functions = Vec::new();
-    let mut incoming: std::collections::HashMap<u64, usize> =
-        std::collections::HashMap::new();
-
-    for (address, name) in &symbols {
-        let instructions = decode_func(*address, &symbols, &segs, data, &mut decoder);
-        if instructions.is_empty() {
-            continue;
-        }
-        let size = instructions
-            .last()
-            .map(|(inst_addr, inst)| inst_addr + inst.len - address)
-            .unwrap_or(0);
-        let mut complexity = 1usize;
-        let mut direct_targets = Vec::new();
-        for (_, instruction) in &instructions {
-            for op in &instruction.ops {
-                match op {
-                    PcodeOp::CBranch { .. } => complexity += 1,
-                    PcodeOp::Call { dest } if dest.space == AddressSpaceId::Ram => {
-                        direct_targets.push(dest.offset);
-                        *incoming.entry(dest.offset).or_insert(0) += 1;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        direct_targets.sort_unstable();
-        direct_targets.dedup();
-        let mut calls = Vec::new();
-        let mut imports = Vec::new();
-        for target in &direct_targets {
-            if let Some(import) = import_map.get(target) {
-                imports.push(import.clone());
-                calls.push(import.clone());
-            } else if let Some(callee) = name_by_addr.get(target) {
-                calls.push(callee.clone());
-            } else {
-                calls.push(format!("0x{target:x}"));
-            }
-        }
-        calls.sort();
-        calls.dedup();
-        imports.sort();
-        imports.dedup();
-        functions.push(AgentFunction {
-            address: *address,
-            name: name.clone(),
-            size,
-            complexity,
-            xrefs: 0,
-            direct_targets,
-            calls,
-            imports,
-            strings: Vec::new(),
-            tags: Vec::new(),
-        });
-    }
-
-    for function in &mut functions {
-        function.xrefs = incoming.get(&function.address).copied().unwrap_or(0);
-    }
-    functions.sort_by(|a, b| {
-        b.xrefs
-            .cmp(&a.xrefs)
-            .then_with(|| b.complexity.cmp(&a.complexity))
-            .then_with(|| b.size.cmp(&a.size))
-            .then_with(|| a.address.cmp(&b.address))
-    });
-    let total_functions = functions.len();
-    functions.truncate(function_limit);
-
-    let path = Path::new(binary_path);
-    let mut findings = collect_agent_byte_findings(binary_path, data);
-    for function in &mut functions {
-        let instructions = decode_func(function.address, &symbols, &segs, data, &mut decoder);
-        let pseudocode = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            rsleigh_decompile::decompile_with_binary(arch, &instructions, Some(data), Some(path))
-        }))
-        .unwrap_or_default();
-        let meta = rsleigh_decompile::analysis::extract_function_meta(
-            &function.name,
-            function.address,
-            &pseudocode,
-        );
-        function.strings = meta.strings.into_iter().take(5).collect();
-        function.tags = meta.tags;
-        for call in meta.calls {
-            if !function.calls.contains(&call) {
-                function.calls.push(call.clone());
-            }
-            if import_names.contains(&call) && !function.imports.contains(&call) {
-                function.imports.push(call);
-            }
-        }
-        function.calls.sort();
-        function.calls.dedup();
-        function.imports.sort();
-        function.imports.dedup();
-
-        for vuln in rsleigh_decompile::analysis::scan_vulns(
-            &function.name,
-            function.address,
-            &pseudocode,
-        ) {
-            let mut record = FindingRecord::new(
-                "vulnerability.pattern",
-                "vulnscan",
-                if vuln.severity == "INFO" {
-                    FindingConfidence::Heuristic
-                } else {
-                    FindingConfidence::Pattern
-                },
-                FindingStage::Decompile,
-                vuln.description,
-            )
-            .with_evidence(serde_json::json!({
-                "binary": binary_path,
-                "context": vuln.context,
-            }));
-            record.severity = Some(vuln.severity);
-            record.function = Some(vuln.function);
-            record.address = Some(format!("0x{:x}", vuln.address));
-            findings.push(record);
-        }
-    }
-    findings.sort_by_key(finding_sort_key);
-    let total_findings = findings.len();
-    findings.truncate(finding_limit);
-
-    let mut imports: Vec<(u64, String)> = import_map.into_iter().collect();
-    imports.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-    Ok(AgentAnalysis {
-        format,
-        arch,
-        imagebase,
-        functions,
-        total_functions,
-        findings,
-        total_findings,
-        imports,
-    })
-}
-
-fn agent_function_json(function: &AgentFunction) -> serde_json::Value {
-    serde_json::json!({
-        "name": function.name,
-        "addr": format!("0x{:x}", function.address),
-        "stage": "discover",
-        "confidence": "pattern",
-        "size": function.size,
-        "complexity": function.complexity,
-        "complexity_stage": "lift",
-        "xrefs": function.xrefs,
-        "imports": function.imports,
-        "strings": function.strings,
-        "calls": function.calls,
-        "tags": function.tags,
-    })
-}
-
-fn agent_trust_json() -> serde_json::Value {
-    serde_json::json!({
-        "primary": ["decoder", "pcode"],
-        "hypothesis": ["pseudocode"],
-        "leads": ["ioc", "vulnscan", "vm_helpers"],
-        "proved_claim": "SMT record with verdict == Reachable (confidence == proved alone is not a positive verdict)",
-        "disagreement_rule": "If pseudocode and P-code disagree, use P-code and report the conflict",
-    })
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn run_agent_brief(binary_path: &str, data: &[u8], args: &[String]) {
-    let limit = requested_agent_limit(
-        args,
-        AGENT_BRIEF_DEFAULT_FUNCTIONS,
-        AGENT_BRIEF_MAX_FUNCTIONS,
-    );
-    let analysis = match build_agent_analysis(
-        binary_path,
-        data,
-        limit,
-        AGENT_BRIEF_MAX_FINDINGS,
-    ) {
-        Ok(analysis) => analysis,
-        Err(error) => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "schema": "rsleigh.agent-brief/v1",
-                    "error": error,
-                }))
-                .unwrap()
-            );
-            return;
-        }
-    };
-    let top_addr = analysis.functions.first().map(|function| function.address);
-    let next = top_addr
-        .map(|address| {
-            let binary = shell_quote(binary_path);
-            vec![
-                format!("rsleigh {binary} --xrefs 0x{address:x}"),
-                format!("rsleigh {binary} --disasm 0x{address:x}"),
-                format!("rsleigh {binary} --pcode-json 0x{address:x}"),
-            ]
-        })
-        .unwrap_or_default();
-    let findings: Vec<serde_json::Value> = analysis
-        .findings
-        .iter()
-        .filter_map(|record| serde_json::to_value(record).ok())
-        .collect();
-    let imphash = compute_imphash(data);
-    let payload = serde_json::json!({
-        "schema": "rsleigh.agent-brief/v1",
-        "file": {
-            "path": binary_path,
-            "stage": "file",
-            "confidence": "proved",
-            "size": data.len(),
-            "format": analysis.format,
-            "arch": format!("{:?}", analysis.arch),
-            "imagebase": format!("0x{:x}", analysis.imagebase),
-            "hashes": {
-                "md5": compute_md5(data),
-                "sha256": compute_sha256(data),
-                "imphash": imphash,
-            },
-        },
-        "functions": analysis.functions.iter().map(agent_function_json).collect::<Vec<_>>(),
-        "findings": findings,
-        "warnings": agent_arch_warnings(analysis.arch),
-        "trust": agent_trust_json(),
-        "limits": {
-            "functions_returned": analysis.functions.len(),
-            "functions_total": analysis.total_functions,
-            "functions_cap": AGENT_BRIEF_MAX_FUNCTIONS,
-            "findings_returned": analysis.findings.len(),
-            "findings_total": analysis.total_findings,
-            "findings_cap": AGENT_BRIEF_MAX_FINDINGS,
-            "strings_per_function": 5,
-            "pseudocode_bytes": 0,
-        },
-        "next": next,
-    });
-    println!("{}", serde_json::to_string_pretty(&payload).unwrap());
-}
-
-fn run_agent_index(binary_path: &str, data: &[u8], args: &[String], out_dir: &str) {
-    let limit = requested_agent_limit(args, AGENT_INDEX_MAX_FUNCTIONS, AGENT_INDEX_MAX_FUNCTIONS);
-    let analysis = match build_agent_analysis(binary_path, data, limit, AGENT_INDEX_MAX_FINDINGS) {
-        Ok(analysis) => analysis,
-        Err(error) => {
-            eprintln!("Error: cannot build index: {error}");
-            return;
-        }
-    };
-    let root = Path::new(out_dir);
-    if let Err(error) = std::fs::create_dir_all(root) {
-        eprintln!("Error: cannot create {}: {error}", root.display());
-        return;
-    }
-
-    let functions = serde_json::json!({
-        "schema": "rsleigh.functions/v1",
-        "source": binary_path,
-        "count": analysis.functions.len(),
-        "total_discovered": analysis.total_functions,
-        "truncated": analysis.functions.len() < analysis.total_functions,
-        "functions": analysis.functions.iter().map(agent_function_json).collect::<Vec<_>>(),
-    });
-    let mut called_by: std::collections::HashMap<u64, Vec<serde_json::Value>> =
-        std::collections::HashMap::new();
-    let names: std::collections::HashMap<u64, &str> = analysis
-        .functions
-        .iter()
-        .map(|function| (function.address, function.name.as_str()))
-        .collect();
-    for caller in &analysis.functions {
-        for target in &caller.direct_targets {
-            called_by.entry(*target).or_default().push(serde_json::json!({
-                "name": caller.name,
-                "addr": format!("0x{:x}", caller.address),
-            }));
-        }
-    }
-    let xrefs = serde_json::json!({
-        "schema": "rsleigh.xrefs/v1",
-        "source": binary_path,
-        "functions": analysis.functions.iter().map(|function| serde_json::json!({
-            "name": function.name,
-            "addr": format!("0x{:x}", function.address),
-            "calls": function.direct_targets.iter().map(|target| serde_json::json!({
-                "name": names.get(target).copied().unwrap_or("unknown"),
-                "addr": format!("0x{target:x}"),
-            })).collect::<Vec<_>>(),
-            "called_by": called_by.get(&function.address).cloned().unwrap_or_default(),
-        })).collect::<Vec<_>>(),
-    });
-    let imports = serde_json::json!({
-        "schema": "rsleigh.imports/v1",
-        "source": binary_path,
-        "imports": analysis.imports.iter().map(|(address, name)| serde_json::json!({
-            "name": name,
-            "addr": format!("0x{address:x}"),
-        })).collect::<Vec<_>>(),
-    });
-    let manifest = serde_json::json!({
-        "schema": "rsleigh.index/v1",
-        "source": binary_path,
-        "format": analysis.format,
-        "arch": format!("{:?}", analysis.arch),
-        "imagebase": format!("0x{:x}", analysis.imagebase),
-        "files": ["functions.json", "xrefs.json", "findings.ndjson", "imports.json"],
-        "trust": agent_trust_json(),
-        "warnings": agent_arch_warnings(analysis.arch),
-        "limits": {
-            "functions_returned": analysis.functions.len(),
-            "functions_total": analysis.total_functions,
-            "functions_cap": AGENT_INDEX_MAX_FUNCTIONS,
-            "findings_returned": analysis.findings.len(),
-            "findings_total": analysis.total_findings,
-            "findings_cap": AGENT_INDEX_MAX_FINDINGS,
-        },
-    });
-
-    let writes = [
-        ("functions.json", serde_json::to_string_pretty(&functions).unwrap()),
-        ("xrefs.json", serde_json::to_string_pretty(&xrefs).unwrap()),
-        ("imports.json", serde_json::to_string_pretty(&imports).unwrap()),
-        ("index.json", serde_json::to_string_pretty(&manifest).unwrap()),
-    ];
-    for (name, contents) in writes {
-        if let Err(error) = std::fs::write(root.join(name), format!("{contents}\n")) {
-            eprintln!("Error: cannot write {}: {error}", root.join(name).display());
-            return;
-        }
-    }
-    let mut ndjson = String::new();
-    for record in &analysis.findings {
-        ndjson.push_str(&serde_json::to_string(record).unwrap());
-        ndjson.push('\n');
-    }
-    if let Err(error) = std::fs::write(root.join("findings.ndjson"), ndjson) {
-        eprintln!(
-            "Error: cannot write {}: {error}",
-            root.join("findings.ndjson").display()
-        );
-        return;
-    }
-    println!(
-        "Indexed {} of {} functions and {} of {} findings in {}",
-        analysis.functions.len(),
-        analysis.total_functions,
-        analysis.findings.len(),
-        analysis.total_findings,
-        root.display()
-    );
-}
-
-fn truncate_utf8(value: &str, max_bytes: usize) -> (&str, bool) {
-    if value.len() <= max_bytes {
-        return (value, false);
-    }
-    let mut end = max_bytes;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    (&value[..end], true)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_function_cards(
-    binary_path: &str,
-    data: &[u8],
-    arch: rsleigh_api::Architecture,
-    obj: &goblin::Object,
-    symbols: &[(u64, String)],
-    segs: &[(u64, u64, u64)],
-    targets: &[String],
-    args: &[String],
-    decoder: &mut rsleigh_api::Decoder,
-) {
-    use pcode_ir::PcodeOp;
-
-    if targets.is_empty() {
-        eprintln!("Usage: rsleigh <binary> <func> --card [--pcode] [--decompile]");
-        return;
-    }
-    let include_pcode = args.iter().any(|arg| arg == "--pcode");
-    let include_pseudocode = args.iter().any(|arg| arg == "--decompile");
-    let import_names: std::collections::HashSet<String> =
-        build_import_map(obj, data).into_values().collect();
-    let path = Path::new(binary_path);
-
-    for target in targets {
-        let address = target
-            .strip_prefix("0x")
-            .or_else(|| target.strip_prefix("0X"))
-            .and_then(|hex| u64::from_str_radix(hex, 16).ok())
-            .or_else(|| symbols.iter().find(|(_, name)| name == target).map(|(addr, _)| *addr));
-        let Some(address) = address else {
-            eprintln!("Function '{target}' not found");
-            continue;
-        };
-        let name = symbols
-            .iter()
-            .find(|(candidate, _)| *candidate == address)
-            .map(|(_, name)| name.clone())
-            .unwrap_or_else(|| format!("FUN_{address:x}"));
-        let instructions = decode_func(address, symbols, segs, data, decoder);
-        if instructions.is_empty() {
-            eprintln!("Function '{target}' has no decodable instructions");
-            continue;
-        }
-        let size = instructions
-            .last()
-            .map(|(inst_addr, inst)| inst_addr + inst.len - address)
-            .unwrap_or(0);
-        let complexity = 1
-            + instructions
-                .iter()
-                .flat_map(|(_, inst)| inst.ops.iter())
-                .filter(|op| matches!(op, PcodeOp::CBranch { .. }))
-                .count();
-        let pseudocode = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            rsleigh_decompile::decompile_with_binary(
-                arch,
-                &instructions,
-                Some(data),
-                Some(path),
-            )
-        }))
-        .unwrap_or_default();
-        let meta = rsleigh_decompile::analysis::extract_function_meta(&name, address, &pseudocode);
-        let mut imports: Vec<String> = meta
-            .calls
-            .iter()
-            .filter(|call| import_names.contains(*call))
-            .cloned()
-            .collect();
-        imports.sort();
-        imports.dedup();
-        let mut warnings: Vec<String> = agent_arch_warnings(arch)
-            .into_iter()
-            .map(str::to_string)
-            .collect();
-        if instructions
-            .iter()
-            .flat_map(|(_, inst)| inst.ops.iter())
-            .any(|op| matches!(op, PcodeOp::CallInd { .. }))
-        {
-            warnings.push("indirect call target was not resolved".to_string());
-        }
-        let total_ops: usize = instructions.iter().map(|(_, inst)| inst.ops.len()).sum();
-        if instructions.len() > AGENT_CARD_MAX_INSTRUCTIONS {
-            warnings.push(format!(
-                "disassembly card truncated at {AGENT_CARD_MAX_INSTRUCTIONS} instructions"
-            ));
-        }
-        if include_pcode && total_ops > AGENT_CARD_MAX_PCODE_OPS {
-            warnings.push(format!(
-                "P-code card truncated at {AGENT_CARD_MAX_PCODE_OPS} operations"
-            ));
-        }
-        if include_pseudocode && pseudocode.len() > AGENT_CARD_MAX_PSEUDOCODE_BYTES {
-            warnings.push(format!(
-                "pseudocode card truncated at {AGENT_CARD_MAX_PSEUDOCODE_BYTES} bytes"
-            ));
-        }
-
-        let mut constructor_spans = Vec::new();
-        for (_, instruction) in &instructions {
-            if let Some(span) = &instruction.constructor {
-                let label = format!(
-                    "{} (table={}, constructor={})",
-                    span.source, span.table_id, span.constructor_id
-                );
-                if !constructor_spans.contains(&label) {
-                    constructor_spans.push(label);
-                }
-                if constructor_spans.len() == 5 {
-                    break;
-                }
-            }
-        }
-
-        println!(
-            "# {}  addr=0x{:x}  size=0x{:x}  complexity={}  cc={}",
-            name,
-            address,
-            size,
-            complexity,
-            agent_calling_convention(arch, obj)
-        );
-        println!(
-            "imports: {}",
-            if imports.is_empty() { "(none)".to_string() } else { imports.join(", ") }
-        );
-        let strings: Vec<String> = meta.strings.into_iter().take(5).collect();
-        println!(
-            "strings: {}",
-            if strings.is_empty() { "(none)".to_string() } else { strings.iter().map(|s| format!("{s:?}")).collect::<Vec<_>>().join(", ") }
-        );
-        println!(
-            "constructor spans: {}",
-            if constructor_spans.is_empty() {
-                "(unavailable)".to_string()
-            } else {
-                constructor_spans.join("; ")
-            }
-        );
-        println!("trust: decoder/P-code=primary; pseudocode=hypothesis; findings=leads");
-        println!("warnings[]:");
-        if warnings.is_empty() {
-            println!("  - (none)");
-        } else {
-            for warning in &warnings {
-                println!("  - {warning}");
-            }
-        }
-        println!("\n## disasm (first {AGENT_CARD_MAX_INSTRUCTIONS} instructions)");
-        for (inst_addr, inst) in instructions.iter().take(AGENT_CARD_MAX_INSTRUCTIONS) {
-            println!("0x{inst_addr:08x}  {}", inst.disassembly);
-        }
-        if instructions.len() > AGENT_CARD_MAX_INSTRUCTIONS {
-            println!("... truncated {} instruction(s)", instructions.len() - AGENT_CARD_MAX_INSTRUCTIONS);
-        }
-
-        if include_pcode {
-            println!("\n## p-code (first {AGENT_CARD_MAX_PCODE_OPS} ops)");
-            let mut emitted = 0usize;
-            'instructions: for (inst_addr, inst) in &instructions {
-                for op in &inst.ops {
-                    if emitted == AGENT_CARD_MAX_PCODE_OPS {
-                        break 'instructions;
-                    }
-                    println!("0x{inst_addr:08x}  {op:?}");
-                    emitted += 1;
-                }
-            }
-            if total_ops > emitted {
-                println!("... truncated {} P-code op(s)", total_ops - emitted);
-            }
-        }
-        if include_pseudocode {
-            println!("\n## pseudocode (hypothesis; max {AGENT_CARD_MAX_PSEUDOCODE_BYTES} bytes)");
-            let (rendered, truncated) = truncate_utf8(&pseudocode, AGENT_CARD_MAX_PSEUDOCODE_BYTES);
-            print!("{rendered}");
-            if !rendered.ends_with('\n') {
-                println!();
-            }
-            if truncated {
-                println!("// ... pseudocode truncated by --card output budget");
-            }
-        }
-    }
 }
 
 /// Generate a one-line summary per function for AI-assisted triage.

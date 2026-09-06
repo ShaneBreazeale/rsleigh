@@ -2,6 +2,30 @@
 
 All notable user-facing changes to rsleigh are documented here.
 
+## [Unreleased]
+
+### Added
+
+- JSON function cards with binary hashes, instruction/operation evidence IDs,
+  and independent pagination cursors.
+- `--ssa-slice FUNCTION --var ID` for bounded backward expression dependencies,
+  with phi inputs, block IDs, budgets, and explicit memory/call boundaries.
+- `--verify-index DIR` for binary/version identity and artifact integrity checks.
+- CI coverage for CLI integrations, agent investigations, pagination, partial
+  analysis, and interrupted index publication. Default-build SMT integration
+  coverage now asserts the unsupported solver result for synthesized paths.
+
+### Changed
+
+- Agent commands expose `ok`, `partial`, or `failed` status and diagnostics;
+  exit codes are respectively 0, 2, and 1. Decoder and decompiler failures no
+  longer masquerade as successful empty analysis.
+- Index manifests use `rsleigh.index/v2`, record effective options and artifact
+  checksums, and publish immutable generations through an atomic root-manifest
+  replacement. Consumers must follow manifest paths; rebuild version 1 indexes.
+- SSA JSON and bounded queries share function boundaries and calling-convention
+  selection, including Win64 for PE64 inputs.
+
 ## [0.4.3] - 2026-08-30
 
 ### Added

@@ -111,21 +111,26 @@ workspace to give an agent the workflow and evidence rules.
 | Artifact | What it gives the agent |
 |---|---|
 | `--agent-brief` | One JSON map: 25 functions by default, at most 50 findings, hashes, trust labels, warnings, and next commands |
-| `FUNCTION --card --pcode` | A focused view capped at 40 instructions and 120 P-code operations |
+| `FUNCTION --card --pcode [--json]` | A paginated view capped at 40 instructions and 120 P-code operations, with hashes and evidence references |
 | `FUNCTION --card --pcode --decompile` | The same evidence plus up to 4,096 bytes of pseudocode |
 | `--pcode-json FUNCTION` / `--ssa-json FUNCTION` | Structured instruction semantics or post-fold data flow for deeper reasoning |
-| `--index DIR` | Reusable function, xref, import, and finding files with a manifest |
+| `--index DIR` / `--verify-index DIR` | Immutable generations with binary identity, artifact checksums, and atomic manifest publication |
+| `--ssa-slice FUNCTION --var ID` | Bounded backward SSA dependencies with explicit memory/call boundaries |
 | `--findings-ndjson` | Confidence- and stage-labeled records from supported analysis modes |
 
 For analysis spanning several turns, build an index once and query its files:
 
 ```bash
 rsleigh ./sample.exe --index sample-index/
-jq '.functions[] | select(.imports | index("recv"))' sample-index/functions.json
+rsleigh ./sample.exe --verify-index sample-index/
+functions_path=$(jq -r '.files[] | select(.name == "functions.json") | .path' sample-index/index.json)
+jq '.functions[] | select(.imports | index("recv"))' "sample-index/$functions_path"
 ```
 
 Preserve the binary hash, function address, exact command, and relevant warnings
-with each conclusion. Pseudocode is a reconstruction; heuristic findings are
+with each conclusion. Agent commands exit 0 on completion, 2 for partial analysis,
+and 1 on failure; inspect `status` and `diagnostics` before reasoning from evidence.
+Pseudocode is a reconstruction; heuristic findings are
 leads. Check schemas, top-level errors, and reported limits before consuming
 output automatically.
 

@@ -59,7 +59,7 @@ rsleigh sample.exe 0x140001000 --card --pcode --decompile
 | What does the function probably do? | `FUNCTION --card --pcode --decompile` | experimental reconstruction | Verify important claims against P-code or disassembly. |
 | Which leads should be investigated? | `--ioc`, `--vulnscan`, or VM helpers with `--findings-ndjson` | pattern or heuristic | Confidence is evidence quality, not severity or truth. |
 | Is a named flow reachable in the model? | `--smt-candidates FUNCTION` | solver result over modeled paths | Require `verdict == "Reachable"`; review unsupported operations and bounds. |
-| Will analysis span several turns? | `--index DIR` | reusable bounded map | Record an external binary hash and rebuild the index when the input changes. |
+| Will analysis span several turns? | `--index DIR` | reusable bounded map | Run `--verify-index DIR`; pin the manifest generation for queries. |
 | Is the input raw firmware? | `--raw ARCH --base ADDR` on every command | caller-supplied file context | Never infer the ISA, mode, endianness, or image base from output alone. |
 
 Do not use pseudocode to answer an instruction-semantics question when P-code
@@ -121,6 +121,8 @@ rsleigh FILE --smt-candidates ADDR
 ```json
 {
   "schema": "rsleigh.agent-brief/v1",
+  "status": "ok",
+  "tool_version": "0.4.3",
   "file": {
     "path": "sample.exe",
     "stage": "file",
@@ -138,6 +140,8 @@ rsleigh FILE --smt-candidates ADDR
   "functions": [
     {
       "name": "main",
+      "status": "ok",
+      "diagnostics": [],
       "addr": "0x140001000",
       "stage": "discover",
       "confidence": "pattern",
@@ -157,8 +161,8 @@ rsleigh FILE --smt-candidates ADDR
   "limits": {},
   "next": [
     "rsleigh 'sample.exe' --xrefs 0x140001000",
-    "rsleigh 'sample.exe' --disasm 0x140001000",
-    "rsleigh 'sample.exe' --pcode-json 0x140001000"
+    "rsleigh 'sample.exe' 0x140001000 --card --json --pcode",
+    "rsleigh 'sample.exe' --ssa-json 0x140001000"
   ]
 }
 ```
@@ -169,32 +173,23 @@ dedicated frontend for WebAssembly.
 
 ### Validate machine-readable success
 
-See [output formats and validation](output-formats.md) for checks of every
-index artifact and streaming NDJSON validation. Cards are text, not JSON.
+See [output formats and validation](output-formats.md) for all artifact checks.
+Agent modes return `status: ok | partial | failed`. Function records in briefs
+and indexes carry their own status and stage-specific diagnostics. Decode
+errors and caught decompiler panics make surviving evidence `partial`, rather
+than silently substituting an apparently successful empty analysis.
 
-
-Do not treat process completion alone as proof that analysis succeeded. Some
-unsupported analysis paths return a structured top-level `error`, while some
-index failures are diagnostic-only. Validate the expected schema and artifacts:
+Exit codes are 0 for completed analysis, 2 for partial evidence, and 1 for a
+failed command. A partial result remains usable after inspecting its diagnostics.
+Architecture warnings and pagination alone do not signal an execution failure;
+`ok` does not establish semantic correctness. Other legacy CLI modes retain
+their existing error behavior.
 
 ```bash
-rsleigh FILE --agent-brief > brief.json
-jq -e '
-  .schema == "rsleigh.agent-brief/v1" and
-  (has("error") | not) and
-  (.functions | type == "array") and
-  (.warnings | type == "array") and
-  (.limits | type == "object")
-' brief.json >/dev/null
-
-rsleigh FILE --index out/
-test -s out/index.json
-jq -e '.schema == "rsleigh.index/v1"' out/index.json >/dev/null
+rsleigh FILE FUNCTION --card --json --pcode > card.json
+jq -e '.schema == "rsleigh.card/v1" and .status != "failed"' card.json
+rsleigh FILE --verify-index out/
 ```
-
-The index check above verifies only the manifest. Use a fresh output directory
-and verify all listed files before reusing an index; writes are not atomic and
-`findings.ndjson` may be legitimately empty.
 
 Machine-readable records are written to stdout or files; diagnostics and
 progress may use stderr. Capture them separately when reproducibility matters.
@@ -207,13 +202,38 @@ rsleigh FILE FUNCTION --card --pcode
 rsleigh FILE FUNCTION --card --pcode --decompile
 ```
 
-Cards are text, even when `--json` is present. Their `warnings[]:` label is a
-text section, not a serialized JSON field.
+Cards render text by default and one `rsleigh.card/v1` object with `--json`.
+Request exactly one function per invocation. Both renderers use the same
+bounded evidence model, including status, diagnostics, warnings, binary SHA-256,
+architecture, image base, and tool version.
 
-The base card shows metadata, imports, up to five strings, constructor
+Each instruction has an absolute `index`, address, bytes, disassembly, and
+constructor provenance. Each operation has a function-wide `index`,
+`instruction_index`, instruction address, and instruction-local `operation_index`.
+Its `op` is a Rust debug string, not a versioned operand serialization. Cite the
+binary hash, function address, instruction address, and operation index together.
+
+Use `pagination.instructions.next_cursor` and `pagination.operations.next_cursor`
+with `--instruction-cursor N` and `--operation-cursor N`. These independent
+cursors index the full instruction/operation lists, not the current page.
+A null next cursor means that stream is exhausted; its total count is a valid
+cursor for an empty terminal page. Out-of-range or malformed cursors fail.
+A nonzero operation cursor requires `--pcode`. Cursors belong to the exact
+binary/function/tool version; compare identity before combining pages.
+
+```bash
+rsleigh FILE FUNCTION --card --json --pcode
+rsleigh FILE FUNCTION --card --json --pcode --instruction-cursor 40 --operation-cursor 120
+```
+
+Use the returned cursors for your target; the second example assumes both
+streams have additional evidence. Pseudocode remains a capped prefix and does
+not have a cursor.
+
+The base card shows metadata, imports, up to five strings, per-instruction constructor
 provenance, trust labels, warnings, and the first 40 instructions. Optional
 sections are capped at 120 P-code operations and 4,096 UTF-8-safe pseudocode
-bytes. Truncation is repeated in `warnings[]` and at the cut point.
+bytes. Truncation is reported in warnings and pagination/pseudocode metadata.
 
 Cards warn when the architecture support matrix marks important lift or
 decompile gaps and when the function contains an unresolved indirect call.
@@ -230,36 +250,69 @@ files and select a relevant slice as shown in [output formats](output-formats.md
 rsleigh FILE --index DIR [--limit N]
 ```
 
-Builds a reusable on-disk map so later agent turns can query files with `jq`,
-`rg`, or scripts instead of rediscovering the binary. The output directory
-contains:
+Builds a reusable on-disk map. The root `index.json` uses `rsleigh.index/v2`;
+its `files` array contains `{name, path, sha256, size}` for four data artifacts:
 
-| File | Schema | Contents |
+| Artifact name | Schema | Contents |
 |---|---|---|
-| `index.json` | `rsleigh.index/v1` | Source, architecture, trust policy, warnings, caps, and manifest |
-| `functions.json` | `rsleigh.functions/v1` | Ranked function metadata without pseudocode |
-| `xrefs.json` | `rsleigh.xrefs/v1` | Direct calls and reverse callers for indexed functions |
-| `findings.ndjson` | `rsleigh.finding/v1` | One confidence/stage-labeled finding per line |
+| `functions.json` | `rsleigh.functions/v1` | Ranked metadata, status, and diagnostics |
+| `xrefs.json` | `rsleigh.xrefs/v1` | Direct calls and callers within the returned function subset |
+| `findings.ndjson` | `rsleigh.finding/v1` | Confidence/stage-labeled findings; may be empty |
 | `imports.json` | `rsleigh.imports/v1` | Resolved import addresses and names |
 
-Index stdout is a text completion message. Parse the files, not stdout. The
-manifest contains no input hash, so retain an external SHA-256 and rebuild into
-a fresh directory when the target changes.
+Paths are relative to the index root, under `generations/GENERATION/`. Writers
+create a new generation, complete and sync its artifacts and manifest, then
+atomically replace the root manifest. Existing generations remain unchanged.
+Interrupted writes may leave unpublished generations; readers must follow the
+published manifest. Do not query root-level v1 data files left by older builds.
 
-The index has hard caps of 10,000 functions and 5,000 findings. The manifest
-reports `returned`, `total`, and cap values so truncation is visible. Indexing
-may be substantially slower than `--agent-brief` because metadata and
-vulnerability leads are recovered for every indexed function; it is intended
-as a one-time cost for repeated analysis.
-
-Example queries:
+Stdout is the published JSON manifest. It records binary SHA-256, tool version,
+format/architecture/base under `file`, effective `analysis_options`, analysis
+status, warnings, and limits. The hard caps remain 10,000 functions and 5,000
+findings. Metadata extraction still decompiles indexed functions; output caps
+are not runtime limits.
 
 ```bash
-jq '.functions[] | select(.xrefs >= 5)' out/functions.json
-jq '.functions[] | select(.imports | index("recv"))' out/functions.json
-jq '.functions[] | select(.called_by | length > 10)' out/xrefs.json
-jq 'select(.severity == "HIGH" or .severity == "CRIT")' out/findings.ndjson
+rsleigh FILE --index out/ --limit 100
+rsleigh FILE --verify-index out/
+functions_path=$(jq -r '.files[] | select(.name == "functions.json") | .path' out/index.json)
+jq '.functions[] | select(.imports | index("recv"))' "out/$functions_path"
 ```
+
+Verification checks the input hash and tool version, the completed generation
+manifest, and every artifact's presence, size, checksum, and schema. A verified
+partial index remains partial: the verification result includes `analysis_status`.
+For several queries, read and retain the manifest once to pin one generation.
+Version 1 indexes must be rebuilt. Checksums detect stale/mixed or damaged
+artifacts; they are not a signature or a semantic correctness proof.
+
+## Bounded backward SSA query
+
+```bash
+rsleigh FILE --ssa-json FUNCTION > function.ssa.json
+# Choose an ID from function.ssa.json's vars array:
+rsleigh FILE --ssa-slice FUNCTION --var 42 --max-nodes 64 --max-depth 16
+```
+
+`--ssa-slice` emits one `rsleigh.ssa-slice/v1` JSON object. It shares the
+post-fold SSA builder with `--ssa-json`; variable IDs belong to that binary,
+function, and tool version. The envelope records SHA-256, function address,
+architecture, version, snapshot stage, status, and diagnostics.
+
+The `slice` contains nodes with IDs, expression kinds, definition block IDs,
+input variable IDs, depth, and unresolved boundaries. Phi inputs and all three
+ternary inputs participate. Cycles are visited once. Memory loads, field loads,
+call results, and user operations stop traversal explicitly. Inputs at those
+boundaries are reported but not followed. Unknown values, external parameters,
+and missing IDs remain visible; this is intra-function expression dependence,
+not memory alias analysis, control dependence, or a reachability proof.
+
+Defaults are 64 nodes and depth 16; hard caps are 256 nodes, depth 32, 2,048
+input edges, and 256 block records. `truncated` reports budget cuts;
+`complete` is false for cuts or unresolved boundaries. Such queries exit 2 and
+retain their evidence. A nonexistent root ID fails with exit 1. Definition
+block IDs can be empty for entry values or assignments removed by folding;
+SSA nodes do not claim instruction-level source mappings.
 
 ## LLM reporting contract
 

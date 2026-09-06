@@ -214,6 +214,15 @@ fn v10_inter_procedural_reachable_via_summaries() {
         v2_out.contains("recv -> strcpy"),
         "v2 missing recv->strcpy:\n{v2_out}"
     );
+    // v1 has no sink, so it never calls the solver and cannot expose the
+    // disabled-feature message. Check the synthesized v2 path as well.
+    if !cfg!(feature = "smt") {
+        assert!(
+            v2_out.contains("smt feature not enabled at build time"),
+            "default build must report the unsupported solver: {v2_out}"
+        );
+        return;
+    }
     assert!(
         v2_out.contains("REACHABLE"),
         "v2 should be REACHABLE via summary synthesis:\n{v2_out}"

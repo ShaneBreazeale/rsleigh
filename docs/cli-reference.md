@@ -44,7 +44,7 @@ These analysis modes operate on parsed PE, ELF, and Mach-O binaries.
 | Where is an API used? | `--search --api recv` | API-based function search |
 | Where is a constant used? | `--search --const 0xCAFEBABE` | Constant-based function search |
 | Who refers to this function? | `--xrefs FUNCTION` | Text callers, callees, and strings |
-| How do I reuse a map across turns? | `--index DIR --limit 100` | Files plus a text completion message; more work than a small brief |
+| How do I reuse a map across turns? | `--index DIR --limit 100` | JSON generation manifest plus artifact files; more work than a small brief |
 | What is the whole call graph? | `--callgraph` | JSON; whole-binary analysis, with calls recovered from pseudocode |
 | What is a compact overview? | `--summary` | Text summaries; whole-binary analysis |
 
@@ -64,7 +64,13 @@ captures every indirect or dynamically resolved call.
 | What is the post-fold data flow? | `--ssa-json FUNCTION` | JSON blocks and variables with debug strings |
 | What is the full pseudocode? | `FUNCTION` | Text; no card output cap |
 
-Cards are text even with `--json`. P-code/SSA JSON dumps are not capped like
+Cards support `--json` (`rsleigh.card/v1`) and independent
+`--instruction-cursor N` / `--operation-cursor N` pagination.
+`--ssa-slice FUNCTION --var ID [--max-nodes N] [--max-depth N]` returns bounded
+backward expression dependencies with unresolved boundaries.
+`--verify-index DIR` checks version 2 generation identity and artifact checksums.
+Agent commands exit 0 on completion, 2 for partial evidence, and 1 on failure.
+P-code/SSA JSON dumps are not capped like
 cards and are not a typed, versioned IR serialization. Save a full-function
 dump to a file, select the relevant instructions/blocks, and preserve its
 address and command. See [output formats](output-formats.md).
