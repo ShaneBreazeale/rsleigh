@@ -490,9 +490,28 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+mod cache;
 mod card;
 mod index;
 mod slice;
+
+fn execution_scope(args: &[String]) -> Result<rsleigh_decompile::budget::Scope, String> {
+    let number = |flag| -> Result<Option<u64>, String> {
+        value_arg(args, flag)?
+            .map(|v| {
+                v.parse::<u64>()
+                    .map_err(|_| format!("{flag} requires an unsigned integer"))
+            })
+            .transpose()
+    };
+    Ok(rsleigh_decompile::budget::Scope::new(
+        rsleigh_decompile::budget::Limits {
+            decode_instructions: number("--max-decode-instructions")?,
+            ssa_work: number("--max-ssa-work")?,
+            deadline_ms: number("--deadline-ms")?,
+        },
+    ))
+}
 
 /// Keep SSA IDs tied to the same discovered boundaries in full dumps and slices.
 pub(super) fn ssa_instructions(
@@ -503,7 +522,7 @@ pub(super) fn ssa_instructions(
     let (arch, segs, symbols) =
         agent_symbols(&obj, data).ok_or("unsupported binary format or architecture")?;
     let mut diagnostics = Vec::new();
-    let instructions = decode_func_with_diagnostics(
+    let instructions = decode_func_raw_with_diagnostics(
         address,
         &symbols,
         &segs,
@@ -511,7 +530,7 @@ pub(super) fn ssa_instructions(
         &mut rsleigh_api::Decoder::new(arch),
         &mut diagnostics,
     );
-    if instructions.is_empty() {
+    if instructions.is_empty() && rsleigh_decompile::budget::stopped().is_none() {
         return Err("no decodable instructions at requested address".into());
     }
     Ok((instructions, diagnostics))
@@ -666,10 +685,10 @@ pub(super) fn dispatch(args: &[String]) -> bool {
     }
     let schema = match selected[0] {
         "--agent-brief" => "rsleigh.agent-brief/v1",
-        "--card" => "rsleigh.card/v1",
+        "--card" => "rsleigh.card/v2",
         "--index" => "rsleigh.index/v2",
         "--verify-index" => "rsleigh.index-verification/v1",
-        _ => "rsleigh.ssa-slice/v1",
+        _ => "rsleigh.ssa-slice/v3",
     };
     let args = args.to_vec();
     let mode = selected[0];
@@ -688,6 +707,10 @@ pub(super) fn dispatch(args: &[String]) -> bool {
                 "--verify-index" => &["--verify-index", "--json"],
                 "--card" => &[
                     "--card",
+                    "--analysis-cache",
+                    "--max-decode-instructions",
+                    "--max-ssa-work",
+                    "--deadline-ms",
                     "--json",
                     "--pcode",
                     "--decompile",
@@ -697,8 +720,20 @@ pub(super) fn dispatch(args: &[String]) -> bool {
                 _ => &[
                     "--ssa-slice",
                     "--var",
+                    "--call-site",
+                    "--arg",
+                    "--return",
+                    "--at",
+                    "--condition",
+                    "--analysis-cache",
+                    "--max-decode-instructions",
+                    "--max-ssa-work",
+                    "--deadline-ms",
                     "--max-nodes",
                     "--max-depth",
+                    "--max-call-depth",
+                    "--max-functions",
+                    "--max-traversal-work",
                     "--json",
                 ],
             };
@@ -710,8 +745,19 @@ pub(super) fn dispatch(args: &[String]) -> bool {
                 "--operation-cursor",
                 "--ssa-slice",
                 "--var",
+                "--call-site",
+                "--arg",
+                "--at",
+                "--condition",
+                "--analysis-cache",
+                "--max-decode-instructions",
+                "--max-ssa-work",
+                "--deadline-ms",
                 "--max-nodes",
                 "--max-depth",
+                "--max-call-depth",
+                "--max-functions",
+                "--max-traversal-work",
             ];
             let mut i = 2;
             while i < args.len() {
@@ -735,6 +781,9 @@ pub(super) fn dispatch(args: &[String]) -> bool {
                 "--operation-cursor",
                 "--max-nodes",
                 "--max-depth",
+                "--max-call-depth",
+                "--max-functions",
+                "--max-traversal-work",
             ] {
                 if value_arg(&args, flag)?.is_some() {
                     number_arg(&args, flag, 0)?;

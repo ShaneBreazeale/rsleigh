@@ -1,7 +1,8 @@
 //! P-code intermediate representation types.
 //!
-//! Zero-dependency crate defining [`PcodeOp`] and [`Varnode`] — the types
+//! Zero-dependency by default, defining [`PcodeOp`] and [`Varnode`] — the types
 //! emitted by SLEIGH-generated instruction decoders.
+//! The optional `serde` feature enables typed operation and varnode snapshots.
 
 #![no_std]
 
@@ -17,6 +18,7 @@ use alloc::vec::Vec;
 /// precludes `HashMap`). The derived ordering is arbitrary and should not be relied
 /// upon for semantic comparisons.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum AddressSpaceId {
     /// CPU registers (offset = Ghidra register offset).
     Register,
@@ -33,6 +35,7 @@ pub enum AddressSpaceId {
 /// `Ord` is derived for use as `BTreeMap` keys in the peephole optimizer.
 /// The derived lexicographic ordering is not semantically meaningful.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Varnode {
     pub space: AddressSpaceId,
     pub offset: u64,
@@ -1142,6 +1145,8 @@ fn visit_reads_mut(op: &mut PcodeOp, f: &mut impl FnMut(&mut Varnode)) {
 /// Variant naming follows Ghidra's P-code reference.
 /// See: <https://ghidra.re/courses/languages/html/pcoderef.html>
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(tag = "opcode", rename_all = "snake_case"))]
 pub enum PcodeOp {
     // ── Data Movement ──────────────────────────────────────────────
     Copy {

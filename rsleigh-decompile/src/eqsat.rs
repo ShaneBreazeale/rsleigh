@@ -326,6 +326,8 @@ fn make_binop(
                 call_return: false,
                 inferred_type: crate::ir::InferredType::Unknown,
                 display_type: None,
+                memory: None,
+                origins: Default::default(),
             });
             id
         }
@@ -345,6 +347,8 @@ fn make_binop(
                 call_return: false,
                 inferred_type: crate::ir::InferredType::Unknown,
                 display_type: None,
+                memory: None,
+                origins: Default::default(),
             });
             id
         }
@@ -367,6 +371,8 @@ fn make_binop(
                 call_return: false,
                 inferred_type: crate::ir::InferredType::Unknown,
                 display_type: None,
+                memory: None,
+                origins: Default::default(),
             });
             id
         }
@@ -386,6 +392,8 @@ fn make_binop(
                 call_return: false,
                 inferred_type: crate::ir::InferredType::Unknown,
                 display_type: None,
+                memory: None,
+                origins: Default::default(),
             });
             id
         }
@@ -417,6 +425,8 @@ fn make_unaryop(
                 call_return: false,
                 inferred_type: crate::ir::InferredType::Unknown,
                 display_type: None,
+                memory: None,
+                origins: Default::default(),
             });
             id
         }

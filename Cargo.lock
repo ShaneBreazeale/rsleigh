@@ -494,6 +494,9 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 [[package]]
 name = "pcode-ir"
 version = "0.4.3"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "pdb"
@@ -640,6 +643,7 @@ dependencies = [
  "rsleigh-api",
  "rsleigh-decompile",
  "rsleigh-fid",
+ "serde",
  "serde_json",
  "sha2",
  "wasmparser",

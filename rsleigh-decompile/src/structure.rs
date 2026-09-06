@@ -108,6 +108,7 @@ fn emit_region(
     _loop_ctx: Option<&LoopCtx>,
     consumed: &mut HashSet<VarId>,
 ) {
+    crate::budget::work("structure", 0);
     if depth >= MAX_STRUCTURE_DEPTH {
         out.push(StructuredStmt::Goto(0)); // bail on too-deep nesting
         return;
@@ -967,6 +968,7 @@ fn same_test_var(a: VarId, b: VarId, ssa: &SsaCfg) -> bool {
 fn flatten_if_return(stmts: &mut Vec<StructuredStmt>) {
     let mut i = 0;
     while i < stmts.len() {
+        crate::budget::work("render", 0);
         // Recurse first into nested bodies
         match &mut stmts[i] {
             StructuredStmt::IfElse {
@@ -1025,6 +1027,7 @@ fn flatten_if_return(stmts: &mut Vec<StructuredStmt>) {
 fn collapse_if_else_to_switch(stmts: &mut Vec<StructuredStmt>, ssa: &SsaCfg) {
     let mut i = 0;
     while i < stmts.len() {
+        crate::budget::work("render", 0);
         // Try to collapse BEFORE recursing into nested bodies,
         // so we can catch the full if-else chain before inner IfElses
         // are independently processed.
@@ -1238,6 +1241,7 @@ fn can_reach_limited(cfg: &Cfg, from: BlockId, target: BlockId, limit: usize) ->
     let mut stack = vec![from];
     let mut steps = 0;
     while let Some(node) = stack.pop() {
+        crate::budget::work("render", 0);
         if steps > limit {
             return false;
         }

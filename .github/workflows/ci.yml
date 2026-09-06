@@ -48,12 +48,24 @@ jobs:
       - name: Test — decompiler unit tests
         run: cargo test --release -p rsleigh-decompile --lib
 
+      - name: Test — provenance and bounded dependency traversal
+        run: cargo test --release -p rsleigh-decompile --test instruction_provenance --test memory_dependencies --test interprocedural_dependencies --test return_value_validation --test native_return_registers
+
       - name: Test — PE64 SEH-SMC fixtures
         run: cargo test --release -p rsleigh-decompile --test seh_smc_fixture
 
       # Build and execute agent workflow and publication/error-path regressions.
       - name: Test — CLI and agent contracts (release)
         run: cargo test --release -p rsleigh-cli --lib --tests
+
+      - name: Test — deterministic agent RE tasks
+        run: cargo run --release -p rsleigh-cli --example agent_re_eval -- target/release/rsleigh agent-re-results.json
+
+      - name: Test — full six-architecture RE corpus and cache states
+        run: cargo run --release -p rsleigh-cli --example agent_re_eval -- target/release/rsleigh agent-re-full-results.json --full-corpus
+
+      - name: Test — cached card equivalence and recomputation counters
+        run: cargo run --release -p rsleigh-cli --example agent_re_eval -- target/release/rsleigh agent-re-cache-results.json --cache-benchmark
 
   seh-smc-windows:
     runs-on: windows-latest

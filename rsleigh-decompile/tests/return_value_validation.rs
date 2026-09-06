@@ -211,8 +211,13 @@ fn validate_returns_demotes_when_no_caller_reads() {
             .map(|b| &b.terminator)
             .collect::<Vec<_>>()
     );
-    // demoted is 0 if the diag never fired (DCE path) or 1 if it did.
-    assert!(demoted <= 1, "demoted={} should be 0 or 1", demoted);
+    // Both wrappers now retain their reaching call result in SSA. Neither
+    // has an explicit consumer in this closed function set, so both are
+    // demoted (including f, which has no callers in the supplied set).
+    assert_eq!(demoted, 2);
+    assert!(funcs[0].1.blocks.iter().all(|b| {
+        !matches!(b.terminator, SsaTerminator::Return(Some(_)))
+    }));
 }
 
 #[test]

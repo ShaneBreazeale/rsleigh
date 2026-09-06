@@ -307,6 +307,7 @@ fn post_process(
 
     let mut i = 0;
     while i < lines.len() {
+        crate::budget::work("render", 0);
         // #4: Hide stack canary boilerplate
         // Preamble: RAX = *(0x...); RAX = *(RAX); (global canary pointer load)
         // Epilogue: RAX = *(0x...); RAX = *(RAX); RCX = ...; if (...)  { ... }
@@ -439,6 +440,7 @@ fn post_process(
                                 "send", "perror",
                             ];
                             while !rest.is_empty() {
+                                crate::budget::work("render", 0);
                                 let comma = find_balanced_comma(rest).unwrap_or(rest.len());
                                 let arg = rest[..comma].trim();
                                 // Only replace if the nested call is a known void/output function
@@ -636,6 +638,7 @@ fn post_process(
         // (Array scaling cleanup happens after array syntax conversion below)
         // __chk suffix: __strcpy_chk(a, b, size) → strcpy(a, b)
         while let Some(pos) = line.find("__") {
+            crate::budget::work("render", 0);
             if let Some(chk) = line[pos..].find("_chk(") {
                 let func_start = pos + 2;
                 let func_end = pos + chk;
@@ -661,6 +664,7 @@ fn post_process(
         }
         // Collapse double spaces from removals (but not indentation)
         while line.contains("  ") && !line.starts_with("  ") {
+            crate::budget::work("render", 0);
             *line = line.replace("  ", " ");
         }
         // Also collapse double spaces after indentation
@@ -679,6 +683,7 @@ fn post_process(
         let mut depth = 0u32;
         let mut i = 0;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim();
             if lt.starts_with("while (") {
                 in_while = true;
@@ -723,6 +728,7 @@ fn post_process(
     {
         let mut i = 0;
         while i + 1 < lines.len() {
+            crate::budget::work("render", 0);
             let l1 = lines[i].trim().to_string();
             let l2 = lines[i + 1].trim().to_string();
             if let (Some(eq1), Some(eq2)) = (l1.find(" = "), l2.find(" = ")) {
@@ -781,6 +787,7 @@ fn post_process(
     if let Some(param_name) = first_param {
         let mut i = 0;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim().to_string();
             let indent_level = lines[i].len() - lines[i].trim_start().len();
             // Only apply at indent 0 or 4 (top level or first nesting level)
@@ -823,6 +830,7 @@ fn post_process(
                 let mut result = String::new();
                 let mut rest = line.as_str();
                 while let Some(pos) = rest.find(pattern) {
+                    crate::budget::work("render", 0);
                     result.push_str(&rest[..pos]);
                     // Check word boundary
                     let before_ok = pos == 0 || !rest.as_bytes()[pos - 1].is_ascii_alphanumeric();
@@ -851,6 +859,7 @@ fn post_process(
             "RDX << 0x20 | ",
         ] {
             while let Some(pos) = line.find(pattern) {
+                crate::budget::work("render", 0);
                 *line = format!("{}{}", &line[..pos], &line[pos + pattern.len()..]);
             }
         }
@@ -865,6 +874,7 @@ fn post_process(
     for line in &mut lines {
         // Pattern 1: *(uintN_t*)(X + Y)
         while let Some(star_pos) = line.find("*(uint") {
+            crate::budget::work("render", 0);
             if let Some(type_end) = line[star_pos..].find("*)(") {
                 let abs_paren = star_pos + type_end + 2;
                 if let Some(close) = find_matching_paren(line, abs_paren) {
@@ -889,6 +899,7 @@ fn post_process(
         }
         // Pattern 2: *(X + Y) — plain pointer deref with addition
         while let Some(star_pos) = line.find("*(") {
+            crate::budget::work("render", 0);
             // Make sure it's not *(uint...*) which we already handled
             if line[star_pos + 2..].starts_with("uint") {
                 break;
@@ -918,6 +929,7 @@ fn post_process(
     for line in &mut lines {
         for scale in [" * 4]", " * 8]", " * 2]"] {
             while line.contains(scale) {
+                crate::budget::work("render", 0);
                 *line = line.replace(scale, "]");
             }
         }
@@ -1024,6 +1036,7 @@ fn post_process(
     for line in &mut lines {
         let mut pos = 0;
         while let Some(br_start) = line[pos..].find('[') {
+            crate::budget::work("render", 0);
             let abs_start = pos + br_start;
             if let Some(br_end) = line[abs_start..].find(']') {
                 let abs_end = abs_start + br_end;
@@ -1077,6 +1090,7 @@ fn post_process(
             for reg in &reg_names {
                 let arrow = format!("{}->", reg);
                 while line.contains(&arrow) && param_idx < param_names.len() {
+                    crate::budget::work("render", 0);
                     let replacement = format!("{}->", param_names[param_idx]);
                     *line = line.replacen(&arrow, &replacement, 1);
                     param_idx += 1;
@@ -1215,6 +1229,7 @@ fn post_process(
         // `local_K = lVarN->field_0;` (both at top-level indent).
         let mut j = 0;
         while j + 1 < lines.len() {
+            crate::budget::work("render", 0);
             let a = lines[j].trim();
             let b = lines[j + 1].trim();
             let a_dat_load = a.contains("DAT_") && a.contains("->field_0;") && a.contains(" = ");
@@ -1261,6 +1276,7 @@ fn post_process(
     {
         let mut j = 0;
         while j < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[j].trim().to_string();
             // Match if-blocks that are canary checks:
             // 1. Condition mentions __stack_chk_guard
@@ -1351,6 +1367,7 @@ fn post_process(
     {
         let mut j = 0;
         while j + 1 < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[j].trim().to_string();
             if (lt == "RAX = stdout;" || lt == "RAX = stdin;" || lt == "RAX = stderr;")
                 && lines.get(j + 1).map_or(false, |next| {
@@ -1392,6 +1409,7 @@ fn post_process(
             for reg in &reg_names {
                 let deref = format!("*({})", reg);
                 while line.contains(&deref) && param_idx < param_names.len() {
+                    crate::budget::work("render", 0);
                     let replacement = format!("*({})", param_names[param_idx]);
                     *line = line.replacen(&deref, &replacement, 1);
                     param_idx += 1;
@@ -1405,6 +1423,7 @@ fn post_process(
     {
         let mut i = 0;
         while i + 2 < lines.len() {
+            crate::budget::work("render", 0);
             let l1 = lines[i].trim().to_string();
             let l2 = lines[i + 1].trim().to_string();
             let l3 = lines[i + 2].trim().to_string();
@@ -1447,6 +1466,7 @@ fn post_process(
     {
         let mut i = 0;
         while i + 1 < lines.len() {
+            crate::budget::work("render", 0);
             let l1 = lines[i].trim().to_string();
             let l2 = lines[i + 1].trim().to_string();
             if let (Some(eq1), Some(eq2)) = (l1.find(" = "), l2.find(" = ")) {
@@ -1479,6 +1499,7 @@ fn post_process(
     // Final cleanup pass after alias substitution: identity ops and self-assignments
     let mut i = 0;
     while i < lines.len() {
+        crate::budget::work("render", 0);
         let lt = lines[i].trim().to_string();
         // REG = REG - 0; → remove (identity)
         if lt.ends_with(" - 0;") || lt.ends_with(" + 0;") {
@@ -1513,6 +1534,7 @@ fn post_process(
     {
         let mut i = 0;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim().to_string();
             if let Some(eq_pos) = lt.find(" = ") {
                 let lhs = lt[..eq_pos].to_string();
@@ -1613,6 +1635,7 @@ fn post_process(
     // Second pass: remove redundant "REG = call();" after all simplifications
     let mut i = 0;
     while i < lines.len() {
+        crate::budget::work("render", 0);
         let lt = lines[i].trim().to_string();
         if let Some(eq_pos) = lt.find(" = ") {
             let lhs = &lt[..eq_pos];
@@ -1653,6 +1676,7 @@ fn post_process(
     {
         let mut i = 0;
         while i + 1 < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim().to_string();
             if let Some(eq_pos) = lt.find(" = ") {
                 let lhs = &lt[..eq_pos];
@@ -1718,6 +1742,7 @@ fn post_process(
     {
         let mut i = 0;
         while i + 1 < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim().to_string();
             if let Some(eq_pos) = lt.find(" = ") {
                 let lhs = &lt[..eq_pos];
@@ -1824,6 +1849,7 @@ fn post_process(
     for line in &mut lines {
         // RBP + decimal_offset
         while let Some(pos) = line.find("RBP + ") {
+            crate::budget::work("render", 0);
             let after = &line[pos + 6..];
             let end = after
                 .find(|c: char| !c.is_ascii_digit())
@@ -1847,6 +1873,7 @@ fn post_process(
         }
         // RBP[0xHHH]
         while let Some(pos) = line.find("RBP[0x") {
+            crate::budget::work("render", 0);
             let after = &line[pos + 6..];
             let end = after.find(']').unwrap_or(0);
             if end > 0 {
@@ -1861,6 +1888,7 @@ fn post_process(
         }
         // RBP[N] (decimal index)
         while let Some(pos) = line.find("RBP[") {
+            crate::budget::work("render", 0);
             if line[pos + 4..].starts_with("0x") {
                 break;
             } // already handled above
@@ -1894,6 +1922,7 @@ fn post_process(
         for line in lines.iter() {
             let mut s = line.as_str();
             while let Some(pos) = s.find("sp - ") {
+                crate::budget::work("render", 0);
                 let after = &s[pos + 5..];
                 // Parse the constant: decimal or 0xHEX, terminated by non-hex/non-digit
                 let (num_str, parsed): (&str, Option<u64>) = if after.starts_with("0x") {
@@ -1934,6 +1963,7 @@ fn post_process(
             for line in lines.iter_mut() {
                 let mut search_from = 0usize;
                 while let Some(rel) = line[search_from..].find("sp->field_") {
+                    crate::budget::work("render", 0);
                     let pos = search_from + rel;
                     let prev = if pos == 0 {
                         b' '
@@ -1990,6 +2020,7 @@ fn post_process(
             for line in lines.iter_mut() {
                 for pat in [&pat_paren_bare, &pat_paren_hex_bare] {
                     while let Some(pos) = line.find(pat.as_str()) {
+                        crate::budget::work("render", 0);
                         *line = format!(
                             "{}{}{}",
                             &line[..pos],
@@ -2003,6 +2034,7 @@ fn post_process(
                 // (sp - N)->fieldM and sp - N->field_M → local_M (M is hex)
                 for pat in [&pat_field, &pat_hex_field] {
                     while let Some(pos) = line.find(pat.as_str()) {
+                        crate::budget::work("render", 0);
                         let after = &line[pos + pat.len()..];
                         let end = after
                             .find(|c: char| !c.is_ascii_hexdigit())
@@ -2026,6 +2058,7 @@ fn post_process(
                 // sp - N + M → local_M (M is decimal or 0xHEX)
                 for pat in [&pat_plus, &pat_hex_plus] {
                     while let Some(pos) = line.find(pat.as_str()) {
+                        crate::budget::work("render", 0);
                         let after = &line[pos + pat.len()..];
                         let (num_len, parsed): (usize, Option<u64>) = if after.starts_with("0x") {
                             let rest = &after[2..];
@@ -2063,6 +2096,7 @@ fn post_process(
                 let pat_sp_arrow = "sp->field_";
                 let mut search_from = 0usize;
                 while let Some(rel) = line[search_from..].find(pat_sp_arrow) {
+                    crate::budget::work("render", 0);
                     let pos = search_from + rel;
                     let prev = if pos == 0 {
                         b' '
@@ -2102,6 +2136,7 @@ fn post_process(
                 // Bare `sp - N` (no further +/-> ) → local_0 (frame base itself)
                 for pat in [&pat_bare, &pat_hex_bare] {
                     while let Some(pos) = line.find(pat.as_str()) {
+                        crate::budget::work("render", 0);
                         let after_pos = pos + pat.len();
                         let next = line.as_bytes().get(after_pos).copied().unwrap_or(b' ');
                         // Don't match if this `sp - N` is followed by another digit/hex
@@ -2121,6 +2156,7 @@ fn post_process(
                 let pat_sp_plus = "sp + ";
                 let mut search_from = 0usize;
                 while let Some(rel) = line[search_from..].find(pat_sp_plus) {
+                    crate::budget::work("render", 0);
                     let pos = search_from + rel;
                     // Avoid matching inside a longer identifier like "lsp +"
                     let prev = if pos == 0 {
@@ -2170,6 +2206,7 @@ fn post_process(
                 // additive constants directly to a single local_<off>.
                 let mut search_from = 0usize;
                 while let Some(rel) = line[search_from..].find("sp[") {
+                    crate::budget::work("render", 0);
                     let pos = search_from + rel;
                     let prev = if pos == 0 {
                         b' '
@@ -2238,6 +2275,7 @@ fn post_process(
                         }
                     };
                     while j < bytes.len() {
+                        crate::budget::work("render", 0);
                         let c = bytes[j];
                         if c == b' ' {
                             j += 1;
@@ -2331,6 +2369,7 @@ fn post_process(
             let mut pos = abs_bracket + 1;
             let bytes = line.as_bytes();
             while pos < bytes.len() && depth > 0 {
+                crate::budget::work("render", 0);
                 if bytes[pos] == b'[' {
                     depth += 1;
                 }
@@ -2361,6 +2400,7 @@ fn post_process(
         // Pattern: "NNN + RSP" / "NNN + ESP" → "local_NNN" (offset + stack ptr)
         for suffix in &[" + RSP", " + ESP"] {
             while let Some(pos) = line.find(suffix) {
+                crate::budget::work("render", 0);
                 let before = &line[..pos];
                 let num_start = before
                     .rfind(|c: char| !c.is_ascii_hexdigit() && c != 'x')
@@ -2393,6 +2433,7 @@ fn post_process(
         for prefix in &["RSP + ", "ESP + "] {
             let mut search_from = 0usize;
             while let Some(rel) = line[search_from..].find(prefix) {
+                crate::budget::work("render", 0);
                 let pos = search_from + rel;
                 let prev = if pos == 0 {
                     b' '
@@ -2443,6 +2484,7 @@ fn post_process(
         // Bare `*(RSP)` / `*(ESP)` → `local_0` (top-of-stack deref).
         for pat in &["*(RSP)", "*(ESP)"] {
             while let Some(pos) = line.find(pat) {
+                crate::budget::work("render", 0);
                 let before = if pos == 0 {
                     b' '
                 } else {
@@ -2677,6 +2719,7 @@ fn post_process(
     {
         let mut i = 0;
         while i + 2 < lines.len() {
+            crate::budget::work("render", 0);
             let cur_indent = lines[i].len() - lines[i].trim_start().len();
             let cur_t = lines[i].trim();
             let next_indent = lines[i + 1].len() - lines[i + 1].trim_start().len();
@@ -2693,6 +2736,7 @@ fn post_process(
                 // Find the closing brace for this orphaned block
                 let mut j = i + 1;
                 while j < lines.len() {
+                    crate::budget::work("render", 0);
                     let jt = lines[j].trim();
                     let ji = lines[j].len() - lines[j].trim_start().len();
                     if jt == "}" && ji == cur_indent {
@@ -2724,6 +2768,7 @@ fn post_process(
     {
         let mut i = 0;
         while i + 1 < lines.len() {
+            crate::budget::work("render", 0);
             let t = lines[i].trim();
             let next = lines[i + 1].trim();
             if t.starts_with("if (") && t.ends_with('{') && next == "}" {
@@ -2885,6 +2930,7 @@ fn post_process(
                     let mut result = String::new();
                     let mut remaining = t;
                     while let Some(pos) = remaining.find(reg) {
+                        crate::budget::work("render", 0);
                         let before_ok =
                             pos == 0 || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric();
                         let after_pos = pos + reg.len();
@@ -2907,6 +2953,7 @@ fn post_process(
                     let mut result = String::new();
                     let mut remaining = line.as_str();
                     while let Some(pos) = remaining.find(reg) {
+                        crate::budget::work("render", 0);
                         let before_ok =
                             pos == 0 || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric();
                         let after_pos = pos + reg.len();
@@ -2977,6 +3024,7 @@ fn post_process(
             for line in &mut lines {
                 // r-0xNNN → -0xNNN (these are computed addresses, drop the 'r' prefix)
                 while let Some(pos) = line.find("r-0x") {
+                    crate::budget::work("render", 0);
                     let before_ok = pos == 0 || !line.as_bytes()[pos - 1].is_ascii_alphanumeric();
                     if before_ok {
                         line.replace_range(pos..pos + 1, ""); // remove the 'r'
@@ -2985,6 +3033,7 @@ fn post_process(
                     }
                 }
                 while let Some(pos) = line.find("r-") {
+                    crate::budget::work("render", 0);
                     let before_ok = pos == 0 || !line.as_bytes()[pos - 1].is_ascii_alphanumeric();
                     let after = &line[pos + 2..];
                     let is_neg_num = after.starts_with("0x")
@@ -3138,6 +3187,7 @@ fn post_process(
             // 6. Remove empty blocks left by flag removal
             let mut i = 0;
             while i + 1 < lines.len() {
+                crate::budget::work("render", 0);
                 let t = lines[i].trim().to_string();
                 let next = lines
                     .get(i + 1)
@@ -3212,6 +3262,7 @@ fn post_process(
     {
         let mut i = 0;
         while i + 1 < lines.len() {
+            crate::budget::work("render", 0);
             let cur = lines[i].trim().to_string();
             let next = lines[i + 1].trim().to_string();
             // Match: "VAR = EXPR;" followed by "return VAR;"
@@ -3307,6 +3358,7 @@ fn post_process(
         for line in &mut lines {
             // Pattern: "RBP/EBP - N" with decimal offset
             while let Some(_pos) = line.find(&minus_pat) {
+                crate::budget::work("render", 0);
                 let num_start = line.find(&minus_pat).unwrap_or(0) + minus_pat.len();
                 if line[num_start..].starts_with("0x") {
                     break; // hex handled below
@@ -3334,6 +3386,7 @@ fn post_process(
             }
             // Pattern: "RBP/EBP - 0xNN"
             while let Some(_pos) = line.find(&minus_hex_pat) {
+                crate::budget::work("render", 0);
                 let hex_start = line.find(&minus_hex_pat).unwrap_or(0) + minus_hex_pat.len();
                 let hex_end = line[hex_start..]
                     .find(|c: char| !c.is_ascii_hexdigit())
@@ -3358,6 +3411,7 @@ fn post_process(
             }
             // Fallback: "RBP/EBP + 0xNN" where NN is large (signed-byte negative in unsigned form)
             while let Some(_pos) = line.find(&plus_hex_pat) {
+                crate::budget::work("render", 0);
                 let hex_start = line.find(&plus_hex_pat).unwrap_or(0) + plus_hex_pat.len();
                 let hex_end = line[hex_start..]
                     .find(|c: char| !c.is_ascii_hexdigit())
@@ -3400,6 +3454,7 @@ fn post_process(
         // Find all [REG] patterns (bare register in brackets)
         let mut pos = 0;
         while let Some(br_start) = lt[pos..].find('[') {
+            crate::budget::work("render", 0);
             let abs_start = pos + br_start;
             if let Some(br_end) = lt[abs_start..].find(']') {
                 let idx = &lt[abs_start + 1..abs_start + br_end];
@@ -3450,6 +3505,7 @@ fn post_process(
     {
         let mut i = 0;
         while i + 1 < lines.len() {
+            crate::budget::work("render", 0);
             let l1 = lines[i].trim().to_string();
             let l2 = lines[i + 1].trim().to_string();
             // Pattern: "X[a] = X[b];" followed by "X[c] = AL;"
@@ -3597,6 +3653,7 @@ fn post_process(
     {
         let mut i = 0;
         while i + 1 < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim().to_string();
             let next = lines[i + 1].trim().to_string();
             if lt.contains(" = ") && lt.ends_with(';') {
@@ -3654,6 +3711,7 @@ fn post_process(
     {
         let mut i = 0;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             let indent = lines[i].len() - lines[i].trim_start().len();
             let lt = lines[i].trim().to_string();
             // Only fold top-level assignments (indent 0)
@@ -3712,6 +3770,7 @@ fn post_process(
         let mut new_line = line.clone();
         let mut search_from = 0;
         while let Some(pos) = new_line[search_from..].find("0x") {
+            crate::budget::work("render", 0);
             let abs_pos = search_from + pos;
             // Extract the hex value
             let hex_end = abs_pos
@@ -3879,6 +3938,7 @@ fn post_process(
     {
         let mut j = 0;
         while j < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[j].trim();
             // Remove "RAX = *(stdout_sym);" — this is just loading stdout
             if lt.starts_with("RAX = ")
@@ -3892,6 +3952,7 @@ fn post_process(
             if lt.starts_with("setvbuf(") {
                 let mut end = j;
                 while end + 1 < lines.len() && lines[end + 1].trim().starts_with("setvbuf(") {
+                    crate::budget::work("render", 0);
                     end += 1;
                 }
                 if end > j {
@@ -3965,6 +4026,7 @@ fn post_process(
     {
         let mut i = 0;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim().to_string();
             // Match: IDENTIFIER = "...";
             if lt.contains(" = \"")
@@ -4033,6 +4095,7 @@ fn post_process(
     {
         let mut i = 0;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim().to_string();
             let indent = lines[i].len() - lines[i].trim_start().len();
             // Only dedup function calls (contain "(" and end with ";")
@@ -4072,6 +4135,7 @@ fn post_process(
                 let mut all_blank_between = true;
                 let mut j = i + 1;
                 while j < lines.len() {
+                    crate::budget::work("render", 0);
                     let jt = lines[j].trim();
                     let j_indent = lines[j].len() - lines[j].trim_start().len();
                     if j > i + 1 && !jt.is_empty() {
@@ -4207,9 +4271,11 @@ fn post_process(
                 let mut result = String::new();
                 let mut chars = line.chars().peekable();
                 while let Some(c) = chars.next() {
+                    crate::budget::work("render", 0);
                     if c == '"' {
                         let mut s = String::new();
                         while let Some(&nc) = chars.peek() {
+                            crate::budget::work("render", 0);
                             if nc == '"' {
                                 chars.next();
                                 break;
@@ -4283,6 +4349,7 @@ fn post_process(
                     let bytes = l.as_bytes();
                     let rlen = reg.len();
                     while i < bytes.len() {
+                        crate::budget::work("render", 0);
                         if i + rlen <= bytes.len() && &l[i..i + rlen] == *reg {
                             let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
                             let after_ok =
@@ -4378,6 +4445,7 @@ fn post_process(
     if let Some(binary) = ctx.binary {
         let mut i = 0;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim().to_string();
             // Look for the jump table load: "RAX = 0xNNN[REG];" or "RCX = (0xNNN[...])"
             // followed by "return REG + 0xNNN;"
@@ -4545,6 +4613,7 @@ fn post_process(
         let printf_fns = ["printf", "snprintf", "fprintf", "sprintf"];
         let mut i = 0;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim().to_string();
             let is_printf_call = printf_fns
                 .iter()
@@ -4651,6 +4720,7 @@ fn post_process(
         ];
         let mut i = 0;
         while i + 1 < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim().to_string();
             let next = lines[i + 1].trim().to_string();
             // Match: REG = expr; if (SUBREG ...)
@@ -4689,6 +4759,7 @@ fn post_process(
     {
         let mut i = 0;
         while i + 1 < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim().to_string();
             let next = lines[i + 1].trim().to_string();
             // Match: func_call(...); followed by if (0 == 0), if (0 != 0), if (EAX == 0), etc.
@@ -4752,6 +4823,7 @@ fn post_process(
     {
         let mut i = 0;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             if lines[i].contains("SBORROW") {
                 // If it's inside an if-condition, simplify the whole condition
                 let lt = lines[i].trim();
@@ -4875,6 +4947,7 @@ fn post_process(
     {
         let mut i = 0;
         while i + 1 < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim();
             let next = lines
                 .get(i + 1)
@@ -4896,6 +4969,7 @@ fn post_process(
     {
         let mut i = 0;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             // Look for multiply by magic constant
             let lt = lines[i].trim().to_string();
             let mul_pos = lt.find(" * (int)0x").or_else(|| lt.find(" * 0x"));
@@ -5006,6 +5080,7 @@ fn post_process(
             // (sign-extraction >> 63, the actual shift >> N, and sign correction + lines)
             let mut _j = i + 1;
             while _j < lines.len() {
+                crate::budget::work("render", 0);
                 let jt = lines[_j].trim();
                 if jt.contains(">> 63;") || jt.contains(">> 31;") {
                     lines.remove(_j); // sign extraction
@@ -5026,6 +5101,7 @@ fn post_process(
     {
         let mut i = 0;
         while i + 2 < lines.len() {
+            crate::budget::work("render", 0);
             let l0 = lines[i].trim().to_string();
             let l1 = lines[i + 1].trim().to_string();
             let l2 = lines[i + 2].trim().to_string();
@@ -5146,10 +5222,12 @@ fn post_process(
     {
         let mut i = 0;
         while i + 2 < lines.len() {
+            crate::budget::work("render", 0);
             let l0 = lines[i].trim().to_string();
             // Skip any >> 32 lines after the division
             let mut next_idx = i + 1;
             while next_idx < lines.len() {
+                crate::budget::work("render", 0);
                 let skip_t = lines[next_idx].trim();
                 if skip_t.contains(">> 32;")
                     || skip_t.contains(">> 63;")
@@ -5242,6 +5320,7 @@ fn post_process(
     {
         let mut i = 0;
         while i + 2 < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim().to_string();
             let l1 = lines[i + 1].trim().to_string();
             let l2 = lines[i + 2].trim().to_string();
@@ -5273,6 +5352,7 @@ fn post_process(
         let all_text = lines.join("\n");
         let mut i = 0;
         while i + 1 < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim().to_string();
             let next = lines[i + 1].trim().to_string();
             if lt.starts_with("var_") && lt.contains(" = ") && next.starts_with("return ") {
@@ -5307,6 +5387,7 @@ fn post_process(
     {
         let mut i = 0;
         while i + 1 < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim();
             let next = lines[i + 1].trim().to_string();
             // If we see "}" closing an if/else and the next line is "return ...",
@@ -5356,6 +5437,7 @@ fn post_process(
     {
         let mut i = 0;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim();
             // Check if this is a puts("...") or printf("...\n") with string-only arg
             let is_print_str = |line: &str| -> Option<String> {
@@ -5380,6 +5462,7 @@ fn post_process(
                 // Count consecutive print-string lines at the same indent
                 let mut count = 1;
                 while i + count < lines.len() {
+                    crate::budget::work("render", 0);
                     let next = lines[i + count].trim();
                     let next_indent = lines[i + count].len() - lines[i + count].trim_start().len();
                     if next_indent == indent && is_print_str(next).is_some() {
@@ -5412,6 +5495,7 @@ fn post_process(
     {
         let mut i = 0;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim().to_string();
 
             // Find while lines — either at position i or i+1 (if preceded by init)
@@ -5548,6 +5632,7 @@ fn post_process(
         ];
         let mut i = 0;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim().to_string();
             // Match: REG = expr; (simple register assignment)
             if lt.ends_with(';')
@@ -5562,7 +5647,10 @@ fn post_process(
                 && !lt.contains('[')
             {
                 let lhs = lt.split(" = ").next().unwrap_or("");
-                if x86_regs.contains(&lhs) {
+                // Parentheses can denote a call or a read with effects. Text
+                // cleanup cannot prove those expressions safe to discard.
+                let rhs = lt.split_once(" = ").map(|(_, rhs)| rhs).unwrap_or("");
+                if x86_regs.contains(&lhs) && !rhs.contains('(') {
                     // Check if this register is used in any later line in the same scope
                     let my_indent = lines[i].len() - lines[i].trim_start().len();
                     let mut used = false;
@@ -5571,9 +5659,11 @@ fn post_process(
                         let j_indent = lines[j].len() - lines[j].trim_start().len();
                         // Stop at scope boundary
                         if j_indent < my_indent && !jt.is_empty() {
+                            used = true; // a later merge can still consume this value
                             break;
                         }
                         if jt == "}" || jt.starts_with("} else") {
+                            used = true;
                             break;
                         }
                         // Check if the register appears in this line (not as LHS of assignment)
@@ -5623,26 +5713,8 @@ fn post_process(
         }
     }
 
-    // #TRAILINGDEAD: Remove dead assignments at end of blocks.
-    // Pattern: "RAX = v->field;" as the last statement in a block — dead store
-    {
-        let mut i = 0;
-        while i < lines.len() {
-            let lt = lines[i].trim().to_string();
-            if lt.starts_with("RAX = ") && lt.ends_with(';') && !lt.contains("return") {
-                // Check if next non-empty line is } or end of function
-                let next = lines
-                    .get(i + 1)
-                    .map(|l| l.trim().to_string())
-                    .unwrap_or_default();
-                if next == "}" || next.is_empty() || next.starts_with('}') {
-                    lines.remove(i);
-                    continue;
-                }
-            }
-            i += 1;
-        }
-    }
+    // A closing brace does not make a register assignment dead: the value
+    // can be consumed at a merge, and calls can have observable effects.
 
     // #MISC: Quick text cleanups.
     for line in &mut lines {
@@ -5658,6 +5730,7 @@ fn post_process(
     {
         let mut i = 0;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             if lines[i].trim() == "free(NULL);" {
                 lines.remove(i);
                 continue;
@@ -5686,6 +5759,7 @@ fn post_process(
     {
         let mut i = 0;
         while i + 1 < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim().to_string();
             let next = lines[i + 1].trim().to_string();
             // Match: call(...); if (SIMPLE_VAR == 0) or if (SIMPLE_VAR != 0)
@@ -5738,6 +5812,7 @@ fn post_process(
         // Count nesting depth of specific C++ functions
         let mut changed = true;
         while changed {
+            crate::budget::work("render", 0);
             changed = false;
             for func in ["alloc_ctor", "string_ctor", "string_dtor"] {
                 let nested = format!("{}({}(", func, func);
@@ -5761,6 +5836,7 @@ fn post_process(
     {
         let mut i = 0;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim();
             // Remove lines that are ONLY ctype table lookups with no other effect
             if lt.contains("60[") && lt.contains("/* isspace */") && lt.ends_with(';') {
@@ -5811,6 +5887,7 @@ fn post_process(
     {
         let mut i = 0;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim().to_string();
             // Find "if (EXPR == N)" where the next else-if checks the same EXPR
             if lt.starts_with("if (") && lt.contains(" == ") && lt.ends_with(") {") {
@@ -5896,6 +5973,7 @@ fn post_process(
     {
         let mut i = 0;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim().to_string();
             // Remove "REG = void_call(...) + N;" or "REG = void_call(...) * N;"
             let starts_with_reg = lt.starts_with("RAX = ")
@@ -5994,6 +6072,7 @@ fn post_process(
     {
         let mut i = 1;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim();
             if lt.starts_with("*(uint32_t*)(ESP) = ") || lt.starts_with("*(int*)(ESP) = ") {
                 let rhs = if let Some(r) = lt.find(" = ") {
@@ -6078,6 +6157,7 @@ fn post_process(
             // Re-find the GOT add line (index may have shifted)
             let mut i = 0;
             while i < lines.len() {
+                crate::budget::work("render", 0);
                 let t = lines[i].trim();
                 if t.contains(&format!("{} + 0x{:x}", got_var, got_offset))
                     && t.starts_with(got_var.as_str())
@@ -6121,6 +6201,7 @@ fn post_process(
                                     // Find all occurrences
                                     let mut new_line = line.clone();
                                     while let Some(pos) = new_line.find(&pattern_minus) {
+                                        crate::budget::work("render", 0);
                                         let hex_start = pos + pattern_minus.len();
                                         let hex_end = new_line[hex_start..]
                                             .find(|c: char| !c.is_ascii_hexdigit())
@@ -6158,6 +6239,7 @@ fn post_process(
                                 if line.contains(&pattern_plus) {
                                     let mut new_line = line.clone();
                                     while let Some(pos) = new_line.find(&pattern_plus) {
+                                        crate::budget::work("render", 0);
                                         let hex_start = pos + pattern_plus.len();
                                         let hex_end = new_line[hex_start..]
                                             .find(|c: char| !c.is_ascii_hexdigit())
@@ -6271,6 +6353,7 @@ fn post_process(
     {
         let mut i = 0;
         while i + 1 < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim();
             let next = lines[i + 1].trim();
             if lt == "} else {" && next == "}" {
@@ -6290,6 +6373,7 @@ fn post_process(
         // Remove the last "return;" before the closing "}"
         let mut i = lines.len();
         while i > 0 {
+            crate::budget::work("render", 0);
             i -= 1;
             let t = lines[i].trim();
             if t == "return;" {
@@ -6748,10 +6832,12 @@ fn post_process(
     {
         let mut i = 0;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             let mut string_bytes: Vec<(usize, u8)> = Vec::new();
             let mut j = i;
 
             while j < lines.len() {
+                crate::budget::work("render", 0);
                 let t = lines[j].trim();
                 if !t.ends_with(';') {
                     break;
@@ -6926,6 +7012,7 @@ fn post_process(
                 let mut key_end = key_start;
                 let bytes = t.as_bytes();
                 while key_end < bytes.len() && bytes[key_end].is_ascii_hexdigit() {
+                    crate::budget::work("render", 0);
                     key_end += 1;
                 }
                 if key_end > key_start && key_end - key_start <= 2 {
@@ -6949,9 +7036,11 @@ fn post_process(
             let t = line.trim();
             let mut pos = 0;
             while let Some(dat_pos) = t[pos..].find("DAT_") {
+                crate::budget::work("render", 0);
                 let abs_pos = pos + dat_pos + 4;
                 let mut end = abs_pos;
                 while end < t.len() && t.as_bytes()[end].is_ascii_hexdigit() {
+                    crate::budget::work("render", 0);
                     end += 1;
                 }
                 if end > abs_pos {
@@ -7086,6 +7175,7 @@ fn post_process(
     {
         let mut i = 0;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             if lines[i].contains("GetProcAddress") && !lines[i].contains("//") {
                 // Check if nearby lines store to a global and call through it
                 for j in i + 1..(i + 4).min(lines.len()) {
@@ -7345,10 +7435,12 @@ fn post_process(
         // Find all 0x1XXXXXXXX or 0x4XXXXXXX patterns (PE/ELF address ranges)
         let mut pos = 0;
         while let Some(hex_pos) = all_text[pos..].find("0x") {
+            crate::budget::work("render", 0);
             let abs = pos + hex_pos;
             let hex_start = abs + 2;
             let mut hex_end = hex_start;
             while hex_end < all_text.len() && all_text.as_bytes()[hex_end].is_ascii_hexdigit() {
+                crate::budget::work("render", 0);
                 hex_end += 1;
             }
             let hex_str = &all_text[hex_start..hex_end];
@@ -7412,6 +7504,7 @@ fn post_process(
 
         let mut i = 0;
         while i + 1 < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim().to_string();
             let next = lines[i + 1].trim().to_string();
             if lt == "} else {" && next.starts_with("if (") {
@@ -7841,11 +7934,13 @@ fn post_process(
             let text = line.trim();
             let mut pos = 0;
             while pos < text.len() {
+                crate::budget::work("render", 0);
                 if let Some(start) = text[pos..].find("->field_") {
                     let abs_start = pos + start;
                     let base_end = abs_start;
                     let mut base_start = base_end;
                     while base_start > 0 {
+                        crate::budget::work("render", 0);
                         let c = text.as_bytes()[base_start - 1];
                         if c.is_ascii_alphanumeric() || c == b'_' || c == b'*' {
                             base_start -= 1;
@@ -7857,6 +7952,7 @@ fn post_process(
                     let hex_start = abs_start + 8;
                     let mut hex_end = hex_start;
                     while hex_end < text.len() && text.as_bytes()[hex_end].is_ascii_hexdigit() {
+                        crate::budget::work("render", 0);
                         hex_end += 1;
                     }
                     if hex_end > hex_start {
@@ -7892,6 +7988,7 @@ fn post_process(
                 let prefix = format!("*({}*)(", cast);
                 let mut search_from = 0;
                 while let Some(star_pos) = text[search_from..].find(&prefix) {
+                    crate::budget::work("render", 0);
                     let abs_pos = search_from + star_pos;
                     let inner_start = abs_pos + prefix.len();
                     // Find matching close paren
@@ -8052,6 +8149,7 @@ fn post_process(
                 let hex_start = func_start + 5;
                 let mut hex_end = hex_start;
                 while hex_end < t.len() && t.as_bytes()[hex_end].is_ascii_hexdigit() {
+                    crate::budget::work("render", 0);
                     hex_end += 1;
                 }
                 if hex_end > hex_start && hex_end < t.len() && t.as_bytes()[hex_end] == b'(' {
@@ -8533,6 +8631,7 @@ fn post_process(
             "*(int64_t*)(",
         ] {
             while line.contains(cast) {
+                crate::budget::work("render", 0);
                 if let Some(start) = line.find(cast) {
                     let inner_start = start + cast.len();
                     if let Some(close) = line[inner_start..].find(')') {
@@ -8556,6 +8655,7 @@ fn post_process(
         // Bare deref: *(param_N) → *param_N, *(lVar_N) → *lVar_N
         // But NOT *(*(param_N)) — that's a double deref
         while line.contains("*(param_") || line.contains("*(lVar") || line.contains("*(iVar") {
+            crate::budget::work("render", 0);
             let mut replaced = false;
             for prefix in ["*(param_", "*(lVar", "*(iVar"] {
                 if let Some(start) = line.find(prefix) {
@@ -8619,12 +8719,14 @@ fn post_process(
         let mut pos = 0;
         let bytes = all_text.as_bytes();
         while pos < bytes.len() {
+            crate::budget::work("render", 0);
             if bytes[pos] == b'?' {
                 // Scan forward to find the end of the mangled name
                 // MSVC names contain: alphanumeric, @, $, ?, _
                 let start = pos;
                 let mut end = pos + 1;
                 while end < bytes.len() {
+                    crate::budget::work("render", 0);
                     let b = bytes[end];
                     if b.is_ascii_alphanumeric() || b == b'@' || b == b'$' || b == b'?' || b == b'_'
                     {
@@ -8674,6 +8776,7 @@ fn post_process(
         let mut pos = 0;
         let bytes = all_text.as_bytes();
         while pos < bytes.len() {
+            crate::budget::work("render", 0);
             if bytes[pos] == b'$'
                 && pos + 1 < bytes.len()
                 && (bytes[pos + 1] == b's' || bytes[pos + 1] == b'S')
@@ -8681,6 +8784,7 @@ fn post_process(
                 let start = pos;
                 let mut end = pos + 2;
                 while end < bytes.len() {
+                    crate::budget::work("render", 0);
                     let b = bytes[end];
                     if b.is_ascii_alphanumeric() || b == b'_' {
                         end += 1;
@@ -8776,12 +8880,14 @@ fn post_process(
                     // func_XXX(cout, "string") → cout << "string"
                     let pat_with_arg = format!("{}(cout, ", wrapper);
                     while let Some(start) = line.find(&pat_with_arg) {
+                        crate::budget::work("render", 0);
                         // Find the matching closing paren
                         let inner_start = start + pat_with_arg.len();
                         let mut depth = 1;
                         let mut pos = inner_start;
                         let bytes = line.as_bytes();
                         while pos < bytes.len() && depth > 0 {
+                            crate::budget::work("render", 0);
                             if bytes[pos] == b'(' {
                                 depth += 1;
                             }
@@ -8809,11 +8915,13 @@ fn post_process(
                     // func_XXX(cout << "prev", "next") → cout << "prev" << "next"
                     let pat_chain = format!("{}(cout << ", wrapper);
                     while let Some(start) = line.find(&pat_chain) {
+                        crate::budget::work("render", 0);
                         let inner_start = start + pat_chain.len();
                         let mut depth = 1;
                         let mut pos = inner_start;
                         let bytes = line.as_bytes();
                         while pos < bytes.len() && depth > 0 {
+                            crate::budget::work("render", 0);
                             if bytes[pos] == b'(' {
                                 depth += 1;
                             }
@@ -8908,6 +9016,7 @@ fn post_process(
 
         let mut i = 0;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[i].trim().to_string();
             // Pattern: "__error();" followed by "*(uint32_t*)(1) = N;" or "*(uint32_t*)(iVar) = N;"
             if lt == "__error();" || lt.ends_with("__error();") {
@@ -9202,6 +9311,7 @@ fn post_process(
                     let bytes = line.as_bytes();
                     let mut pos = 0;
                     while pos < bytes.len() {
+                        crate::budget::work("render", 0);
                         if pos + old_bytes.len() <= bytes.len()
                             && &bytes[pos..pos + old_bytes.len()] == old_bytes
                         {
@@ -9259,6 +9369,7 @@ fn post_process(
         for prefix in prefixes {
             let mut search_from = 0;
             while let Some(pos) = all_text[search_from..].find(prefix) {
+                crate::budget::work("render", 0);
                 let abs_pos = search_from + pos;
                 // Check word boundary before
                 let before_ok = abs_pos == 0 || {
@@ -9294,6 +9405,7 @@ fn post_process(
         {
             let mut search_from = 0;
             while let Some(pos) = all_text[search_from..].find("var_") {
+                crate::budget::work("render", 0);
                 let abs_pos = search_from + pos;
                 let before_ok = abs_pos == 0 || {
                     let b = all_text.as_bytes()[abs_pos - 1];
@@ -9450,6 +9562,7 @@ fn post_process(
         let mut pos = 0;
         let arrow_field = b"->field";
         while pos < bytes.len() {
+            crate::budget::work("render", 0);
             if pos + arrow_field.len() <= bytes.len()
                 && &bytes[pos..pos + arrow_field.len()] == arrow_field
             {
@@ -9457,6 +9570,7 @@ fn post_process(
                 let hex_start = pos + arrow_field.len();
                 let mut hex_end = hex_start;
                 while hex_end < bytes.len() && (bytes[hex_end] as char).is_ascii_hexdigit() {
+                    crate::budget::work("render", 0);
                     hex_end += 1;
                 }
                 if hex_end > hex_start {
@@ -9496,6 +9610,7 @@ fn post_process(
         let mut pos = 0;
         let bytes = all_text.as_bytes();
         while pos + 4 < bytes.len() {
+            crate::budget::work("render", 0);
             // Look for "(0x" pattern
             if bytes[pos] == b'('
                 && pos + 3 < bytes.len()
@@ -9505,6 +9620,7 @@ fn post_process(
                 let hex_start = pos + 3;
                 let mut hex_end = hex_start;
                 while hex_end < bytes.len() && bytes[hex_end].is_ascii_hexdigit() {
+                    crate::budget::work("render", 0);
                     hex_end += 1;
                 }
                 if hex_end > hex_start && hex_end < bytes.len() && bytes[hex_end] == b')' {
@@ -9541,10 +9657,12 @@ fn post_process(
         let mut result = String::new();
         let mut i = 0;
         while i < bytes.len() {
+            crate::budget::work("render", 0);
             // Check for digit(s) followed by '['
             if bytes[i].is_ascii_digit() {
                 let digit_start = i;
                 while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    crate::budget::work("render", 0);
                     i += 1;
                 }
                 if i < bytes.len() && bytes[i] == b'[' {
@@ -9560,6 +9678,7 @@ fn post_process(
                         let mut depth = 1;
                         i += 1;
                         while i < bytes.len() && depth > 0 {
+                            crate::budget::work("render", 0);
                             if bytes[i] == b'[' {
                                 depth += 1;
                             }
@@ -9598,6 +9717,7 @@ fn post_process(
     {
         let mut i = 0;
         while i + 2 < lines.len() {
+            crate::budget::work("render", 0);
             let t = lines[i].trim().to_string();
             // Match: if (EXPR == VALUE) {
             if let Some((var_name, first_val)) = extract_if_eq_const(&t) {
@@ -9618,6 +9738,7 @@ fn post_process(
                     let mut body = Vec::new();
                     let mut depth = 1i32;
                     while j < lines.len() {
+                        crate::budget::work("render", 0);
                         let lt = lines[j].trim();
                         if lt.ends_with('{') {
                             depth += 1;
@@ -9646,6 +9767,7 @@ fn post_process(
                                 j += 1;
                                 let mut def_depth = 1i32;
                                 while j < lines.len() {
+                                    crate::budget::work("render", 0);
                                     let dlt = lines[j].trim();
                                     if dlt.ends_with('{') {
                                         def_depth += 1;
@@ -9726,6 +9848,7 @@ fn post_process(
     {
         let mut i = 0;
         while i + 2 < lines.len() {
+            crate::budget::work("render", 0);
             let t = lines[i].trim().to_string();
             if t == "} else {" {
                 // Check: does the preceding block end with return?
@@ -9746,6 +9869,7 @@ fn post_process(
                     let mut depth = 1i32;
                     let mut end = i + 1;
                     while end < lines.len() {
+                        crate::budget::work("render", 0);
                         let lt = lines[end].trim();
                         if lt.ends_with('{') {
                             depth += 1;
@@ -9784,6 +9908,7 @@ fn post_process(
     {
         let mut i = 0;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             let t = lines[i].trim().to_string();
             if t.starts_with("} else if (") || t == "} else {" {
                 let current_indent = lines[i].len() - lines[i].trim_start().len();
@@ -9966,6 +10091,7 @@ fn post_process(
                 let mut pos = abs_bracket + 1;
                 let bytes = line.as_bytes();
                 while pos < bytes.len() && depth > 0 {
+                    crate::budget::work("render", 0);
                     if bytes[pos] == b'[' {
                         depth += 1;
                     }
@@ -9992,6 +10118,7 @@ fn post_process(
         // Re-run RBP + N → local_XX
         for line in &mut lines {
             while let Some(pos) = line.find("RBP + ") {
+                crate::budget::work("render", 0);
                 let after = &line[pos + 6..];
                 let end = after
                     .find(|c: char| !c.is_ascii_digit())
@@ -10016,6 +10143,7 @@ fn post_process(
         // Re-run N + RSP → local_XX
         for line in &mut lines {
             while let Some(pos) = line.find(" + RSP") {
+                crate::budget::work("render", 0);
                 let before = &line[..pos];
                 let num_start = before
                     .rfind(|c: char| !c.is_ascii_digit())
@@ -10042,6 +10170,7 @@ fn post_process(
         for line in &mut lines {
             for prefix in ["*(param_", "*(lVar", "*(iVar"] {
                 while let Some(start) = line.find(prefix) {
+                    crate::budget::work("render", 0);
                     if start > 0 && line.as_bytes()[start - 1] == b'(' {
                         break;
                     }
@@ -10079,6 +10208,7 @@ fn post_process(
                     let mut max = 0usize;
                     let mut pos = 0;
                     while let Some(idx) = l[pos..].find("lVar") {
+                        crate::budget::work("render", 0);
                         let start = pos + idx + 4;
                         let end = l[start..]
                             .find(|c: char| !c.is_ascii_digit())
@@ -10112,6 +10242,7 @@ fn post_process(
                 let mut result_line = String::new();
                 let mut remaining = line.as_str();
                 while let Some(pos) = remaining.find("RBP") {
+                    crate::budget::work("render", 0);
                     // Check word boundaries
                     let before_ok =
                         pos == 0 || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric();
@@ -10147,6 +10278,7 @@ fn post_process(
                 let mut result_line = String::new();
                 let mut remaining = line.as_str();
                 while let Some(pos) = remaining.find("EBP") {
+                    crate::budget::work("render", 0);
                     let before_ok =
                         pos == 0 || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric();
                     let after_pos = pos + 3;
@@ -10175,12 +10307,14 @@ fn post_process(
     {
         let mut i = 0;
         while i + 2 < lines.len() {
+            crate::budget::work("render", 0);
             let t = lines[i].trim();
             if t == "if (OV) {" {
                 // Find the closing brace
                 let mut end = i + 1;
                 let mut depth = 1;
                 while end < lines.len() && depth > 0 {
+                    crate::budget::work("render", 0);
                     let et = lines[end].trim();
                     if et.ends_with('{') {
                         depth += 1;
@@ -10295,6 +10429,7 @@ fn post_process(
     {
         let mut i = 0;
         while i + 1 < lines.len() {
+            crate::budget::work("render", 0);
             let l1 = lines[i].trim().to_string();
             let l2 = lines[i + 1].trim().to_string();
             // Don't fold if l2 is inside a while/for body (different indent from l1)
@@ -10347,6 +10482,7 @@ fn post_process(
     {
         let mut j = 0;
         while j + 2 < lines.len() {
+            crate::budget::work("render", 0);
             let wl = lines[j].clone();
             let wt = wl.trim();
             if !(wt.starts_with("while (") && wt.ends_with("{")) {
@@ -10448,6 +10584,7 @@ fn post_process(
                 let mut found = false;
                 let mut p = 0;
                 while p + needle.len() <= bytes.len() {
+                    crate::budget::work("render", 0);
                     if &bytes[p..p + needle.len()] == needle {
                         let lhs_ok = p == 0
                             || !matches!(bytes[p - 1],
@@ -10650,6 +10787,7 @@ fn post_process(
                 let mut new_line = String::new();
                 let mut remaining = line.as_str();
                 while let Some(pos) = remaining.find(from.as_str()) {
+                    crate::budget::work("render", 0);
                     let before_ok = pos == 0
                         || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric()
                             && remaining.as_bytes()[pos - 1] != b'_';
@@ -10723,6 +10861,7 @@ fn post_process(
                         let mut new_line = String::new();
                         let mut remaining = line.as_str();
                         while let Some(pos) = remaining.find(&reg) {
+                            crate::budget::work("render", 0);
                             let before_ok = pos == 0
                                 || !remaining.as_bytes()[pos - 1].is_ascii_alphanumeric()
                                     && remaining.as_bytes()[pos - 1] != b'_';
@@ -10781,6 +10920,7 @@ fn post_process(
             let bytes = new.as_bytes();
             let mut i = 0;
             while i + 7 < bytes.len() {
+                crate::budget::work("render", 0);
                 if &bytes[i..i + 7] == b"param_-" {
                     out.push('-');
                     i += 7;
@@ -10830,6 +10970,7 @@ fn post_process(
             // Find any " + " or " - " followed by a number
             let mut i = 0;
             while i + 3 < bytes.len() {
+                crate::budget::work("render", 0);
                 let is_plus = bytes[i] == b' ' && bytes[i + 1] == b'+' && bytes[i + 2] == b' ';
                 let is_minus = bytes[i] == b' ' && bytes[i + 1] == b'-' && bytes[i + 2] == b' ';
                 if !(is_plus || is_minus) {
@@ -10895,6 +11036,7 @@ fn post_process(
             let num_start = if is_hex { start + 2 } else { start };
             let mut end = num_start;
             while end < bytes.len() {
+                crate::budget::work("render", 0);
                 let c = bytes[end];
                 let ok = if is_hex {
                     c.is_ascii_hexdigit()
@@ -10921,6 +11063,7 @@ fn post_process(
             let mut changed = false;
             for line in lines.iter_mut() {
                 while let Some((s, e, repl)) = find_combine(line) {
+                    crate::budget::work("render", 0);
                     let mut new_line = String::with_capacity(line.len());
                     new_line.push_str(&line[..s]);
                     new_line.push_str(&repl);
@@ -10964,6 +11107,7 @@ fn post_process(
             // whole-word match
             let mut s = rhs;
             while let Some(p) = s.find(sym) {
+                crate::budget::work("render", 0);
                 let before = if p == 0 { b' ' } else { s.as_bytes()[p - 1] };
                 let after_pos = p + sym.len();
                 let after = if after_pos < s.len() {
@@ -10984,6 +11128,7 @@ fn post_process(
         };
         let mut i = 0;
         while i + 1 < lines.len() {
+            crate::budget::work("render", 0);
             let t1 = lines[i].trim();
             let t2 = lines[i + 1].trim();
             if !t1.ends_with(';') || !t2.ends_with(';') {
@@ -11106,6 +11251,7 @@ fn post_process(
     for line in lines.iter_mut() {
         let mut search_from = 0usize;
         while let Some(rel) = line[search_from..].find("*(local_") {
+            crate::budget::work("render", 0);
             let star = search_from + rel;
             let name_start = star + 2;
             let name_end = {
@@ -11145,6 +11291,7 @@ fn post_process(
     for line in lines.iter_mut() {
         let mut search_from = 0usize;
         while let Some(rel) = line[search_from..].find("(local_") {
+            crate::budget::work("render", 0);
             let open = search_from + rel;
             // DO NOT drop the parens when the `(` is the call syntax: the
             // byte before `(` is an identifier char or `]`. Dropping there
@@ -11275,6 +11422,7 @@ fn post_process(
     {
         let mut i = 0usize;
         while i + 1 < lines.len() {
+            crate::budget::work("render", 0);
             let t_prev = lines[i].trim();
             let t_cur = lines[i + 1].trim();
             // Prev line: `IDENT = <call_expr>;` — call expression ends in `)`
@@ -11384,6 +11532,7 @@ fn post_process(
         ] {
             let mut search_from = 0usize;
             while let Some(rel) = line[search_from..].find(pat_prefix) {
+                crate::budget::work("render", 0);
                 let pos = search_from + rel;
                 let after = &line[pos + pat_prefix.len()..];
                 // Accept if followed by decimal digit or 0xHEX — plain literal.
@@ -11470,6 +11619,7 @@ fn post_process(
         };
         let mut i = 0;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             let t = lines[i].trim();
             // Function signature line: starts with a return type keyword and
             // contains `func_` or a demangled name and ends with `{`.
@@ -11523,6 +11673,7 @@ fn post_process(
     {
         let mut i = 0usize;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             let t = lines[i].trim();
             // `TYPE name;` declaration pattern — must start with a common C
             // type keyword, end in `;`, and have no `=` (otherwise it's an
@@ -11563,6 +11714,7 @@ fn post_process(
                 let bytes = other.as_bytes();
                 let mut k = 0;
                 while k + name.len() <= bytes.len() {
+                    crate::budget::work("render", 0);
                     if &bytes[k..k + name.len()] == name.as_bytes() {
                         let before = if k > 0 { bytes[k - 1] } else { b' ' };
                         let after_idx = k + name.len();
@@ -11664,6 +11816,7 @@ fn post_process(
             let bytes = body.as_bytes();
             let mut i = 0;
             while i + sym.len() <= bytes.len() {
+                crate::budget::work("render", 0);
                 if &bytes[i..i + sym.len()] == sym.as_bytes() {
                     let before = if i > 0 { bytes[i - 1] } else { b' ' };
                     let after_idx = i + sym.len();
@@ -11697,6 +11850,7 @@ fn post_process(
                 let asym = alt_sym.as_bytes();
                 let mut i = 0;
                 while i + asym.len() <= bytes.len() {
+                    crate::budget::work("render", 0);
                     if &bytes[i..i + asym.len()] == asym {
                         let before = if i > 0 { bytes[i - 1] } else { b' ' };
                         let after_idx = i + asym.len();
@@ -11744,6 +11898,7 @@ fn post_process(
         };
         let mut i = 0;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             let (leading, t) = {
                 let l = &lines[i];
                 let ls_count = l.len() - l.trim_start().len();
@@ -11903,6 +12058,7 @@ fn post_process(
         // placeholder in either position.
         let mut search_from = 0usize;
         while let Some(rel) = line[search_from..].find("::") {
+            crate::budget::work("render", 0);
             let abs = search_from + rel;
             let rest = &line[abs..];
             let Some(open_rel) = rest.find('(') else {
@@ -11927,6 +12083,7 @@ fn post_process(
         ] {
             let mut search_from = 0usize;
             while let Some(rel) = line[search_from..].find(marker) {
+                crate::budget::work("render", 0);
                 let open = search_from + rel + marker.len() - 1;
                 let after_paren = open + 1;
                 if line[after_paren..].starts_with("?)") {
@@ -11945,6 +12102,7 @@ fn post_process(
         ] {
             let mut search_from = 0usize;
             while let Some(rel) = line[search_from..].find(marker) {
+                crate::budget::work("render", 0);
                 let open = search_from + rel + marker.len() - 1;
                 let after_paren = open + 1;
                 if line[after_paren..].starts_with("?, ") {
@@ -11965,6 +12123,7 @@ fn post_process(
     // pointers stored in the frame.
     for line in lines.iter_mut() {
         while let Some(pos) = line.find("local_0->field_") {
+            crate::budget::work("render", 0);
             let prev = if pos == 0 {
                 b' '
             } else {
@@ -12003,6 +12162,7 @@ fn post_process(
     {
         let mut i = 0usize;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             // Extract owned copies up front so the later `&mut lines[j]` does
             // not conflict with the read of `lines[i]`.
             let (lhs, rhs) = {
@@ -12044,6 +12204,7 @@ fn post_process(
                 let l2 = &mut lines[j];
                 // First, rewrite all `ALIAS->field_HEX` occurrences.
                 while let Some(pos) = l2.find(alias_prefix.as_str()) {
+                    crate::budget::work("render", 0);
                     let prev = if pos == 0 {
                         b' '
                     } else {
@@ -12072,6 +12233,7 @@ fn post_process(
                 let bytes = l2.as_bytes();
                 let mut k = 0;
                 while k + lhs.len() <= bytes.len() {
+                    crate::budget::work("render", 0);
                     if &bytes[k..k + lhs.len()] == lhs.as_bytes() {
                         let before = if k > 0 { bytes[k - 1] } else { b' ' };
                         let after_idx = k + lhs.len();
@@ -12108,6 +12270,7 @@ fn post_process(
     for line in lines.iter_mut() {
         let mut search_from = 0usize;
         while let Some(rel) = line[search_from..].find("local_") {
+            crate::budget::work("render", 0);
             let pos = search_from + rel;
             let prev = if pos == 0 {
                 b' '
@@ -12155,6 +12318,7 @@ fn post_process(
     for line in lines.iter_mut() {
         for cast in &["(uint)", "(uint32_t)", "(uint16_t)", "(uint8_t)"] {
             while let Some(pos) = line.find(cast) {
+                crate::budget::work("render", 0);
                 let after = &line[pos + cast.len()..];
                 // Strip when wrapped value is obviously already 32-bit-readable:
                 //  - literal `0` / small literal (useless cast)
@@ -12209,6 +12373,7 @@ fn post_process(
     {
         let mut i = 0;
         while i + 2 < lines.len() {
+            crate::budget::work("render", 0);
             let t1 = lines[i].trim();
             let t2 = lines[i + 1].trim();
             let t3 = lines[i + 2].trim();
@@ -12286,6 +12451,7 @@ fn post_process(
         for line in lines.iter() {
             let mut s = line.as_str();
             while let Some(pos) = s.find("tmp_") {
+                crate::budget::work("render", 0);
                 let after = &s[pos + 4..];
                 let end = after
                     .find(|c: char| !c.is_ascii_hexdigit())
@@ -12406,6 +12572,7 @@ fn post_process(
             let sign_minus = kw.contains('-');
             let mut search_from = 0usize;
             while let Some(rel) = line[search_from..].find(kw) {
+                crate::budget::work("render", 0);
                 let pos = search_from + rel;
                 let prev = if pos == 0 {
                     b' '
@@ -12463,6 +12630,7 @@ fn post_process(
     for line in lines.iter_mut() {
         let mut search_from = 0usize;
         while let Some(rel) = line[search_from..].find("sp->field_") {
+            crate::budget::work("render", 0);
             let pos = search_from + rel;
             let prev = if pos == 0 {
                 b' '
@@ -12506,6 +12674,7 @@ fn post_process(
     for line in lines.iter_mut() {
         let mut search_from = 0usize;
         while let Some(rel) = line[search_from..].find("(local_") {
+            crate::budget::work("render", 0);
             let open = search_from + rel;
             // Skip when the `(` is a call's open paren (preceded by an
             // identifier char) — stripping there produces garbage like
@@ -12551,6 +12720,7 @@ fn post_process(
         let mut changed = false;
         let mut i = 0usize;
         while i < lines.len() {
+            crate::budget::work("render", 0);
             let t = lines[i].trim();
             // Single-line: `if (...) { }` or `} else { }`
             if (t.starts_with("if (") || t.starts_with("} else if") || t == "} else {")
@@ -12599,6 +12769,7 @@ fn post_process(
         for prefix in &["RSP + ", "ESP + "] {
             let mut search_from = 0usize;
             while let Some(rel) = line[search_from..].find(prefix) {
+                crate::budget::work("render", 0);
                 let pos = search_from + rel;
                 let prev = if pos == 0 {
                     b' '
@@ -12644,6 +12815,7 @@ fn post_process(
         // `NNN + RSP` / `NNN + ESP` form as well.
         for suffix in &[" + RSP", " + ESP"] {
             while let Some(pos) = line.find(suffix) {
+                crate::budget::work("render", 0);
                 let before = &line[..pos];
                 let num_start = before
                     .rfind(|c: char| !c.is_ascii_hexdigit() && c != 'x')
@@ -12676,6 +12848,7 @@ fn post_process(
         // `*RSP` / `*ESP` (no paren) → `local_0`
         for pat in &["*RSP", "*ESP"] {
             while let Some(pos) = line.find(pat) {
+                crate::budget::work("render", 0);
                 let before = if pos == 0 {
                     b' '
                 } else {
@@ -12751,11 +12924,13 @@ fn post_process(
     {
         let mut j = 0;
         while j < lines.len() {
+            crate::budget::work("render", 0);
             let l = lines[j].clone();
             let bytes = l.as_bytes();
             let mut out = String::with_capacity(l.len());
             let mut i = 0;
             while i + 7 < bytes.len() {
+                crate::budget::work("render", 0);
                 if &bytes[i..i + 6] == b"local_" {
                     // Boundary check before `local_`.
                     let before_ok = i == 0
@@ -12766,12 +12941,14 @@ fn post_process(
                         let n_start = i + 6;
                         let mut n_end = n_start;
                         while n_end < bytes.len() && bytes[n_end].is_ascii_hexdigit() {
+                            crate::budget::work("render", 0);
                             n_end += 1;
                         }
                         if n_end > n_start && l[n_end..].starts_with("->field_") {
                             let field_start = n_end + "->field_".len();
                             let mut k_end = field_start;
                             while k_end < bytes.len() && bytes[k_end].is_ascii_hexdigit() {
+                                crate::budget::work("render", 0);
                                 k_end += 1;
                             }
                             if k_end > field_start {
@@ -12830,6 +13007,7 @@ fn post_process(
             let mut i = 0;
             let bytes = l.as_bytes();
             while i + 4 < bytes.len() {
+                crate::budget::work("render", 0);
                 // Match lVar or iVar prefix.
                 let is_lvar = i + 4 <= bytes.len() && &bytes[i..i + 4] == b"lVar";
                 let is_ivar = i + 4 <= bytes.len() && &bytes[i..i + 4] == b"iVar";
@@ -12850,6 +13028,7 @@ fn post_process(
                 // Read digits.
                 let mut j = i + 4;
                 while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    crate::budget::work("render", 0);
                     j += 1;
                 }
                 if j == i + 4 {
@@ -12904,6 +13083,7 @@ fn post_process(
                     let nb = name.as_bytes();
                     let mut pos = 0;
                     while pos < bytes.len() {
+                        crate::budget::work("render", 0);
                         if pos + nb.len() <= bytes.len() && &bytes[pos..pos + nb.len()] == nb {
                             let before_ok = pos == 0
                                 || !matches!(bytes[pos - 1],
@@ -13026,6 +13206,7 @@ fn post_process(
                             // Only count if RHS contains the name as whole word.
                             let mut pos = 0usize;
                             while let Some(p) = rhs[pos..].find(pat.as_str()) {
+                                crate::budget::work("render", 0);
                                 let abs = pos + p;
                                 let before_ok = abs == 0
                                     || !matches!(rhs.as_bytes()[abs - 1],
@@ -13046,6 +13227,7 @@ fn post_process(
                     // Any other occurrence counts as a read.
                     let mut pos = 0usize;
                     while let Some(p) = ot[pos..].find(pat.as_str()) {
+                        crate::budget::work("render", 0);
                         let abs = pos + p;
                         let before_ok = abs == 0
                             || !matches!(ot.as_bytes()[abs - 1],
@@ -13200,6 +13382,7 @@ fn post_process(
             };
         let mut j = 0;
         while j < lines.len() {
+            crate::budget::work("render", 0);
             let line_owned = lines[j].clone();
             let t = line_owned.trim();
             let indent = line_owned.len() - line_owned.trim_start().len();
@@ -13270,6 +13453,7 @@ fn post_process(
     {
         let mut j = 0;
         while j < lines.len() {
+            crate::budget::work("render", 0);
             let t = lines[j].trim();
             let is_classic = t.starts_with("while (")
                 && t.ends_with("{")
@@ -13320,6 +13504,7 @@ fn post_process(
             for pref in &prefixes {
                 let mut rest = line.as_str();
                 while let Some(p) = rest.find(pref) {
+                    crate::budget::work("render", 0);
                     let after = &rest[p + pref.len()..];
                     let n_end = after.chars().take_while(|c| c.is_ascii_digit()).count();
                     if n_end > 0 {
@@ -13390,12 +13575,14 @@ fn post_process(
     {
         let mut j = 0;
         while j + 2 < lines.len() {
+            crate::budget::work("render", 0);
             let a = lines[j].trim().to_string();
             if a.starts_with("if (") && a.ends_with("{") {
                 let open_indent = lines[j].len() - lines[j].trim_start().len();
                 let mut k = j + 1;
                 let mut all_blank = true;
                 while k < lines.len() {
+                    crate::budget::work("render", 0);
                     let bt = lines[k].trim();
                     if bt == "}" {
                         let close_indent = lines[k].len() - lines[k].trim_start().len();
@@ -13448,6 +13635,7 @@ fn post_process(
     {
         let mut j = 0;
         while j < lines.len() {
+            crate::budget::work("render", 0);
             let lt = lines[j].trim();
             let indent = lines[j].len() - lines[j].trim_start().len();
             if indent == 0 && lt.ends_with(';') {
@@ -13655,6 +13843,7 @@ fn apply_named_stack_aliases(
             let mut result = String::new();
             let mut rest = line.as_str();
             while let Some(pos) = rest.find(pattern) {
+                crate::budget::work("render", 0);
                 result.push_str(&rest[..pos]);
                 let before_ok = pos == 0
                     || (!rest.as_bytes()[pos - 1].is_ascii_alphanumeric()
@@ -13680,6 +13869,7 @@ fn collapse_stack_local_derefs(lines: &mut [String]) {
     for line in lines.iter_mut() {
         let mut search_from = 0usize;
         while let Some(rel) = line[search_from..].find("*(local_") {
+            crate::budget::work("render", 0);
             let star = search_from + rel;
             let name_start = star + 2;
             let rest = &line[name_start..];
@@ -13710,6 +13900,7 @@ fn collapse_stack_local_derefs(lines: &mut [String]) {
         }
         search_from = 0;
         while let Some(rel) = line[search_from..].find("*local_") {
+            crate::budget::work("render", 0);
             let star = search_from + rel;
             let prev_ok = star == 0 || !line.as_bytes()[star - 1].is_ascii_alphanumeric();
             if !prev_ok {
@@ -13742,6 +13933,7 @@ fn collapse_frame_base_fields(lines: &mut [String]) {
     for line in lines.iter_mut() {
         let mut search_from = 0usize;
         while let Some(pos) = line[search_from..].find("local_0->field_") {
+            crate::budget::work("render", 0);
             let abs = search_from + pos;
             let after_start = abs + "local_0->field_".len();
             let rest = &line[after_start..];
@@ -15148,8 +15340,8 @@ fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTrac
     // If this variable has a parameter name (from stack param detection or ABI naming),
     // use it directly. This prevents x86-32 stack params from showing as *(param_0)
     // when the Load from [EBP+8] is just reading the parameter value, not dereferencing it.
-    if let Some(ref name) = vdef.param_name {
-        return name.clone();
+    if let Some(name) = copied_parameter_name(id, ssa) {
+        return name.to_owned();
     }
 
     // For Phi/Var nodes on argument registers, check if any input has a param_name.
@@ -15274,6 +15466,7 @@ fn format_var_tracked(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTrac
             let mut cur_expr = &vdef.expr;
             let mut depth = 0;
             while let Expr::Var(src) = cur_expr {
+                crate::budget::work("render", 0);
                 if depth > 5 {
                     break;
                 }
@@ -15678,6 +15871,7 @@ fn vardef_reference(vdef: &VarDef, ctx: &PrintCtx) -> String {
 }
 
 fn format_expr_tracked(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> String {
+    crate::budget::work("render", 0);
     match expr {
         Expr::Var(id) => format_var_tracked(*id, ssa, ctx, tracker),
         Expr::BinOp(kind, left, right) => {
@@ -16556,6 +16750,7 @@ fn count_format_specifiers(expr: &str) -> usize {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
+        crate::budget::work("render", 0);
         if bytes[i] == b'%' {
             i += 1;
             if i >= bytes.len() {
@@ -16568,15 +16763,18 @@ fn count_format_specifiers(expr: &str) -> usize {
             }
             // Skip flags, width, precision: [-+ 0#]*[0-9]*[.][0-9]*
             while i < bytes.len() && matches!(bytes[i], b'-' | b'+' | b' ' | b'0' | b'#') {
+                crate::budget::work("render", 0);
                 i += 1;
             }
             while i < bytes.len() && bytes[i].is_ascii_digit() {
+                crate::budget::work("render", 0);
                 i += 1;
             }
             if i < bytes.len() && bytes[i] == b'.' {
                 i += 1;
             }
             while i < bytes.len() && bytes[i].is_ascii_digit() {
+                crate::budget::work("render", 0);
                 i += 1;
             }
             // Skip length modifiers: h, hh, l, ll, L, z, j, t, q
@@ -16652,6 +16850,7 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
     let needle_bytes = needle.as_bytes();
     let mut i = 0usize;
     while i + needle_bytes.len() <= bytes.len() {
+        crate::budget::work("render", 0);
         if &bytes[i..i + needle_bytes.len()] == needle_bytes {
             let before = if i > 0 { bytes[i - 1] } else { b' ' };
             let after_idx = i + needle_bytes.len();
@@ -16747,6 +16946,7 @@ fn return_matches_assigned_var(line: &str, var: &str) -> bool {
 fn fold_if_else_assignment_returns(lines: &mut Vec<String>) {
     let mut i = 0usize;
     while i + 5 < lines.len() {
+        crate::budget::work("render", 0);
         let header = lines[i].trim();
         if !(header.starts_with("if (") && header.ends_with('{')) {
             i += 1;
@@ -16849,6 +17049,7 @@ fn parse_scaled_pointer_inner(inner: &str) -> Option<(&str, &str, u64)> {
 fn rewrite_scaled_loop_derefs(line: &mut String, aliases: &HashMap<String, String>, ind: &str) {
     let mut search_from = 0usize;
     while let Some(rel) = line[search_from..].find("*(") {
+        crate::budget::work("render", 0);
         let star_pos = search_from + rel;
         let open_pos = star_pos + 1;
         let Some(close) = find_matching_paren(line, open_pos) else {
@@ -16889,6 +17090,7 @@ fn infer_loop_alias_strides(
     for line in &lines[start..end] {
         let mut search_from = 0usize;
         while let Some(rel) = line[search_from..].find("*(") {
+            crate::budget::work("render", 0);
             let star_pos = search_from + rel;
             let open_pos = star_pos + 1;
             let Some(close) = find_matching_paren(line, open_pos) else {
@@ -16919,6 +17121,7 @@ fn rewrite_loop_alias_fields(
         let pat = format!("{}->field_", alias);
         let mut search_from = 0usize;
         while let Some(rel) = line[search_from..].find(&pat) {
+            crate::budget::work("render", 0);
             let pos = search_from + rel;
             let field_start = pos + pat.len();
             let mut field_end = field_start;
@@ -16983,6 +17186,7 @@ fn parse_accumulator_update(line: &str) -> Option<(&str, char, &str)> {
 fn fold_loop_accumulator_updates(lines: &mut Vec<String>, start: usize, end: &mut usize) {
     let mut i = start;
     while i + 1 < *end {
+        crate::budget::work("render", 0);
         let first = lines[i].trim().to_string();
         let second = lines[i + 1].trim().to_string();
         let Some((lhs1, op1, rhs1)) = parse_accumulator_update(&first) else {
@@ -17010,6 +17214,7 @@ fn fold_loop_accumulator_updates(lines: &mut Vec<String>, start: usize, end: &mu
 fn recover_counted_loop_body_exprs(lines: &mut Vec<String>) {
     let mut i = 0usize;
     while i < lines.len() {
+        crate::budget::work("render", 0);
         let Some(induction) = parse_counted_for_induction(&lines[i]) else {
             i += 1;
             continue;
@@ -17049,6 +17254,7 @@ fn recover_counted_loop_body_exprs(lines: &mut Vec<String>) {
 
         let mut j = i + 1;
         while j < end {
+            crate::budget::work("render", 0);
             let remove = if let Some((lhs, rhs)) = parse_plain_assignment(&lines[j]) {
                 aliases
                     .get(lhs)
@@ -17074,6 +17280,7 @@ fn recover_counted_loop_body_exprs(lines: &mut Vec<String>) {
 fn fold_counted_loop_accumulators(lines: &mut Vec<String>) {
     let mut i = 0usize;
     while i < lines.len() {
+        crate::budget::work("render", 0);
         if parse_counted_for_induction(&lines[i]).is_none() {
             i += 1;
             continue;
@@ -17489,6 +17696,20 @@ impl Drop for FormatVarGuard {
     }
 }
 
+/// Store provenance adds explicit copy nodes between a reload and its input.
+/// Resolve only exact copies to a named value, without consulting mutable
+/// physical-register tracking or treating a changed Phi input as an alias.
+fn copied_parameter_name(mut id: VarId, ssa: &SsaCfg) -> Option<&str> {
+    for _ in 0..64 {
+        crate::budget::work("render", 0);
+        let var = ssa.var(id);
+        if var.call_return { return None; }
+        if let Some(name) = var.param_name.as_deref() { return Some(name); }
+        if let Expr::Var(source) = var.expr { id = source; } else { return None; }
+    }
+    None
+}
+
 fn format_var(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
     // Stack overflow guard: pathological deep Var/BinOp/Phi/Ternary
     // chains can blow even a 256MB-stacked thread on tightly coiled
@@ -17502,13 +17723,22 @@ fn format_var(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
     let vdef = ssa.var(id);
 
     // Use parameter name if available
-    if let Some(ref name) = vdef.param_name {
-        return name.clone();
+    if let Some(name) = copied_parameter_name(id, ssa) {
+        return name.to_owned();
     }
 
     // Call return values — if this var holds a call return and is only used once,
     // the printer at the use site should show the call expression
     // (handled by the caller checking call_return flag)
+
+    // A surviving SSA copy denotes its source value, including copies introduced
+    // to retain store evidence. Printing the destination's physical register
+    // instead can leave an unassigned local after the copy statement is folded.
+    if !vdef.call_return {
+        if let Expr::Var(source) = vdef.expr {
+            return format_var(source, ssa, ctx);
+        }
+    }
 
     // Inline Unique-space temporaries (but not bare Unknown — show register name instead)
     if vdef.varnode.space == AddressSpaceId::Unique {
@@ -17680,6 +17910,7 @@ fn format_store_operand(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTr
 }
 
 fn format_expr(expr: &Expr, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
+    crate::budget::work("render", 0);
     match expr {
         Expr::Var(id) => format_var(*id, ssa, ctx),
         Expr::Const(val, sz) => format_const_ctx(*val, *sz, ctx),
@@ -18779,6 +19010,7 @@ fn try_read_wide_string(va: u64, ctx: &PrintCtx) -> Option<String> {
     let mut chars = Vec::new();
     let mut i = 0;
     while i + 1 < slice.len() {
+        crate::budget::work("render", 0);
         let ch = u16::from_le_bytes([slice[i], slice[i + 1]]);
         if ch == 0 {
             break;
@@ -18842,6 +19074,7 @@ fn needs_paren_for_arrow(s: &str) -> bool {
     let mut depth: i32 = 0;
     let mut i = 0;
     while i + 2 < bytes.len() {
+        crate::budget::work("render", 0);
         let b = bytes[i];
         if b == b'(' || b == b'[' {
             depth += 1;
@@ -19102,5 +19335,37 @@ fn unwrap_ext(id: VarId, ssa: &SsaCfg) -> VarId {
     match &ssa.var(id).expr {
         Expr::UnaryOp(UnaryOpKind::Zext | UnaryOpKind::Sext, inner) => *inner,
         _ => id,
+    }
+}
+
+#[cfg(test)]
+mod dependency_render_tests {
+    use super::*;
+
+    #[test]
+    fn call_assignment_survives_a_branch_boundary_and_later_use() {
+        let mut output = "int f(int n) {\nif (n > 1) {\n    RAX = helper(n - 1);\n} else {\n    var_4 = 1;\n}\nreturn RAX * 2;\n".to_string();
+        let imports = HashMap::new();
+        let context = PrintCtx { arch: Architecture::X86_64, binary: None, imports: &imports, try_regions: &[] };
+        post_process(&mut output, &HashMap::new(), &["n".into()], &HashMap::new(), &context);
+        assert_eq!(output.matches("helper(n - 1)").count(), 1, "{output}");
+    }
+
+    #[test]
+    fn parameter_spills_keep_names_through_store_evidence_copies() {
+        // push rbp; mov rbp,rsp; spill edi/esi; reload eax; add second spill;
+        // pop rbp; ret. Store proxies must not render an unassigned EAX local.
+        let bytes = b"\x55\x48\x89\xe5\x89\x7d\xfc\x89\x75\xf8\x8b\x45\xfc\x03\x45\xf8\x5d\xc3";
+        let mut decoder = rsleigh_api::Decoder::new(Architecture::X86_64);
+        let mut instructions = vec![];
+        let mut offset = 0;
+        while offset < bytes.len() {
+            let instruction = decoder.decode(&bytes[offset..], 0x1000 + offset as u64).unwrap();
+            let length = instruction.len as usize;
+            instructions.push((0x1000 + offset as u64, instruction));
+            offset += length;
+        }
+        let output = crate::decompile(Architecture::X86_64, &instructions);
+        assert!(output.lines().any(|line| line.contains("return") && line.contains("param_0") && line.contains("param_1")), "{output}");
     }
 }

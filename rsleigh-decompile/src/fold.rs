@@ -215,6 +215,23 @@ pub fn fold(ssa: &mut SsaCfg) {
 
 /// Fold with explicit calling convention.
 pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
+    fold_with_native_return(ssa, cc, None);
+}
+
+/// Fold native snapshots without guessing their return register from unrelated
+/// register offsets. Unsupported argument conventions remain unbound.
+pub fn fold_for_arch(ssa: &mut SsaCfg, cc: CallingConv, arch: rsleigh_api::Architecture) {
+    let offset = match arch {
+        rsleigh_api::Architecture::MIPS32 => 8,
+        rsleigh_api::Architecture::RiscV64 => 0x2050,
+        _ => abi(cc).return_reg_int.unwrap_or(0),
+    };
+    fold_with_native_return(ssa, cc, Some(offset));
+}
+
+fn fold_with_native_return(ssa: &mut SsaCfg, cc: CallingConv, native_return: Option<u64>) {
+    let supported_arguments = native_return.is_none() || native_return == abi(cc).return_reg_int;
+    crate::provenance::propagate(&mut ssa.vars);
     // Pull arg-register offsets from the ABI descriptor.
     let abi_for_cc = abi(cc);
     ARG_REG_OFFSETS_TLS.with(|r| {
@@ -232,7 +249,9 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
     // Arg register writes (RCX/RDX for Win64, RDI/RSI for SysV) have use_count=0
     // because the Call terminator doesn't reference them by VarId. If we run
     // fold_once or eliminate_dead first, these assignments get removed.
-    collect_call_arguments(ssa);
+    if supported_arguments {
+        collect_call_arguments(ssa);
+    }
     recount_uses(ssa);
 
     // Seed x86 ABI-default flag values for uninitialized reads. DF (x86
@@ -240,42 +259,48 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
     // entry by SysV and Win64. Without this, REP STOSB/MOVSB/SCASB expand
     // to `1 - 2*DF` in the per-iteration advance, leaking `(uint8_t)DF`
     // into output and breaking memset-style recognition.
-    if matches!(
-        cc,
-        CallingConv::SysV | CallingConv::Win64 | CallingConv::Cdecl32 | CallingConv::GoAmd64
-    ) {
+    if supported_arguments
+        && matches!(
+            cc,
+            CallingConv::SysV | CallingConv::Win64 | CallingConv::Cdecl32 | CallingConv::GoAmd64
+        )
+    {
         for v in ssa.vars.iter_mut() {
             if matches!(v.expr, Expr::Unknown)
                 && v.varnode.space == AddressSpaceId::Register
                 && v.varnode.offset == 522
             {
                 v.expr = Expr::Const(0, v.size);
+                v.origins.synthetic = true;
             }
         }
     }
 
-    // Name parameters FIRST so propagate_register_constants won't
-    // overwrite param VarIds with constants from other code paths.
-    name_parameters_with_cc(ssa, cc);
+    // Name parameters before expression simplification.
+    if supported_arguments {
+        name_parameters_with_cc(ssa, cc);
+    }
 
     for _round in 0..8 {
         let before = count_live_stmts(ssa);
         fold_once(ssa);
         recount_uses(ssa);
-        propagate_register_constants(ssa);
         propagate_call_returns(ssa);
         recount_uses(ssa);
         eliminate_dead(ssa);
         recount_uses(ssa);
         recover_conditions(ssa);
         mba_simplify(ssa);
-        detect_return_values(ssa);
+        detect_return_values(ssa, native_return);
         recount_uses(ssa);
         // Name loop Phi variables so the printer uses the name instead of
         // expanding the Phi expression. This prevents #PHI_CLEANUP from
         // destroying loop variable semantics (e.g., "return phi(0, count+1)" → "return 0").
         name_loop_phis(ssa);
-        name_parameters_with_cc(ssa, cc); // Re-run to catch params exposed by folding
+        if supported_arguments {
+            name_parameters_with_cc(ssa, cc);
+        } // Re-run after folding
+        crate::provenance::propagate(&mut ssa.vars);
         let after = count_live_stmts(ssa);
         if before == after {
             break;
@@ -285,6 +310,7 @@ pub fn fold_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
     infer_types(ssa);
     // Recognize struct field access patterns after all folding is done
     recognize_field_access(ssa);
+    crate::provenance::propagate(&mut ssa.vars);
     // Go-specific: detect adjacent-register string/slice/iface parameter
     // pairs and retag their names. Runs last so the prior passes have
     // converged type info.
@@ -337,6 +363,7 @@ fn infer_go_header_params(ssa: &mut SsaCfg) {
     let mut param_vars: std::collections::BTreeMap<String, Vec<usize>> =
         std::collections::BTreeMap::new();
     for (i, v) in ssa.vars.iter().enumerate() {
+        crate::budget::work("fold", 1);
         if let Some(n) = v.param_name.as_ref() {
             if n.starts_with("param_") {
                 param_vars.entry(n.clone()).or_default().push(i);
@@ -369,6 +396,7 @@ fn infer_go_header_params(ssa: &mut SsaCfg) {
             changed = false;
             guard += 1;
             for (idx, v) in ssa.vars.iter().enumerate() {
+                crate::budget::work("fold", 1);
                 if set.contains(&idx) {
                     continue;
                 }
@@ -408,6 +436,7 @@ fn infer_go_header_params(ssa: &mut SsaCfg) {
         }
         let derived = closure_from(vars, ssa);
         for blk in &ssa.blocks {
+            crate::budget::work("fold", 1);
             for stmt in &blk.stmts {
                 match stmt {
                     Stmt::Store { addr, .. } => {
@@ -454,6 +483,7 @@ fn infer_go_header_params(ssa: &mut SsaCfg) {
             }
         }
         for blk in &ssa.blocks {
+            crate::budget::work("fold", 1);
             for stmt in &blk.stmts {
                 if let Stmt::Call { args, .. } = stmt {
                     for a in args {
@@ -491,6 +521,7 @@ fn infer_go_header_params(ssa: &mut SsaCfg) {
         let mut load_chain: std::collections::HashSet<usize> = std::collections::HashSet::new();
         load_chain.extend(a_derived.iter().copied());
         for (idx, v) in ssa.vars.iter().enumerate() {
+            crate::budget::work("fold", 1);
             match &v.expr {
                 Expr::Load(p) if a_derived.contains(&(p.0 as usize)) => {
                     load_chain.insert(idx);
@@ -640,51 +671,89 @@ fn negate_eq_op(op: BinOpKind) -> Option<BinOpKind> {
 fn fold_once(ssa: &mut SsaCfg) {
     // Pass 1: Collapse trivial Phis
     for v in 0..ssa.vars.len() {
+        crate::budget::work("fold", 1);
         if let Expr::Phi(inputs) = &ssa.vars[v].expr {
             if inputs.is_empty() {
                 continue;
             }
             let first = inputs[0];
             if inputs.iter().all(|i| *i == first) {
-                ssa.vars[v].expr = Expr::Var(first);
+                let rewritten = Expr::Var(first);
+                crate::provenance::rewrite(&mut ssa.vars, v, rewritten);
             }
         }
     }
 
     // Pass 1b: Simplify trivial ternaries
     for v in 0..ssa.vars.len() {
+        crate::budget::work("fold", 1);
         if let Expr::Ternary(cond, then_val, else_val) = &ssa.vars[v].expr {
             let c = *cond;
             let t = *then_val;
             let e = *else_val;
             // Ternary(Const(1), a, b) → Var(a)
             if matches!(&ssa.vars[c.0 as usize].expr, Expr::Const(v, _) if *v != 0) {
-                ssa.vars[v].expr = Expr::Var(t);
+                let rewritten = Expr::Var(t);
+                crate::provenance::rewrite(&mut ssa.vars, v, rewritten);
             }
             // Ternary(Const(0), a, b) → Var(b)
             else if matches!(&ssa.vars[c.0 as usize].expr, Expr::Const(0, _)) {
-                ssa.vars[v].expr = Expr::Var(e);
+                let rewritten = Expr::Var(e);
+                crate::provenance::rewrite(&mut ssa.vars, v, rewritten);
             }
             // Ternary(c, a, a) → Var(a)
             else if t == e {
-                ssa.vars[v].expr = Expr::Var(t);
+                let rewritten = Expr::Var(t);
+                crate::provenance::rewrite(&mut ssa.vars, v, rewritten);
             }
         }
     }
 
     // Pass 2: Algebraic simplification + constant folding
     for v in 0..ssa.vars.len() {
+        crate::budget::work("fold", 1);
         let expr = ssa.vars[v].expr.clone();
-        ssa.vars[v].expr = simplify_expr(expr, &ssa.vars);
+        let rewritten = simplify_expr(expr, &ssa.vars);
+        crate::provenance::rewrite(&mut ssa.vars, v, rewritten);
     }
     // Constant folding: evaluate BinOp(Const, Const) chains to single constants.
     for v in 0..ssa.vars.len() {
+        crate::budget::work("fold", 1);
+        // Raw lifts retain explicit immediate extensions. Their output width
+        // belongs to the defining variable, not to the input expression.
+        if let Expr::UnaryOp(kind @ (UnaryOpKind::Zext | UnaryOpKind::Sext), inner) =
+            ssa.vars[v].expr
+        {
+            let output_size = ssa.vars[v].size;
+            if let Some((value, input_size)) =
+                const_fold_expr(&ssa.vars[inner.0 as usize].expr, &ssa.vars)
+            {
+                if (1..=8).contains(&input_size) && (input_size..=8).contains(&output_size) {
+                    let input_mask = u64::MAX >> (64 - input_size * 8);
+                    let output_mask = u64::MAX >> (64 - output_size * 8);
+                    let value = value & input_mask;
+                    let value = if matches!(kind, UnaryOpKind::Sext)
+                        && value & (1u64 << (input_size * 8 - 1)) != 0
+                    {
+                        value | !input_mask
+                    } else {
+                        value
+                    };
+                    crate::provenance::rewrite(
+                        &mut ssa.vars,
+                        v,
+                        Expr::Const(value & output_mask, output_size),
+                    );
+                }
+            }
+        }
         if matches!(
             &ssa.vars[v].expr,
             Expr::BinOp(_, _, _) | Expr::UnaryOp(_, _)
         ) {
             if let Some((val, sz)) = const_fold_expr(&ssa.vars[v].expr, &ssa.vars) {
-                ssa.vars[v].expr = Expr::Const(val, sz);
+                let rewritten = Expr::Const(val, sz);
+                crate::provenance::rewrite(&mut ssa.vars, v, rewritten);
             }
         }
     }
@@ -692,6 +761,7 @@ fn fold_once(ssa: &mut SsaCfg) {
     // Pattern: (RSP op1 C1) op2 C2 → RSP combined_op combined_C
     // Needed for RSP-relative local naming: single-level RSP±N patterns.
     for v in 0..ssa.vars.len() {
+        crate::budget::work("fold", 1);
         let (op2, inner_id, c2_id) = match &ssa.vars[v].expr {
             Expr::BinOp(op, inner, c2) if matches!(op, BinOpKind::Add | BinOpKind::Sub) => {
                 (*op, *inner, *c2)
@@ -723,7 +793,8 @@ fn fold_once(ssa: &mut SsaCfg) {
         let sz = ssa.vars[c1_id.0 as usize].size;
         let varnode = ssa.vars[c1_id.0 as usize].varnode;
         let new_const_id = ssa.new_var(varnode, Expr::Const(combined_c, sz), sz);
-        ssa.vars[v].expr = Expr::BinOp(combined_op, frame_id, new_const_id);
+        let rewritten = Expr::BinOp(combined_op, frame_id, new_const_id);
+        crate::provenance::rewrite(&mut ssa.vars, v, rewritten);
     }
 
     // MBA deobfuscation: deep algebraic simplification through expression trees.
@@ -737,13 +808,15 @@ fn fold_once(ssa: &mut SsaCfg) {
         let prev_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| { /* silence egg panics */ }));
         for v in 0..ssa.vars.len() {
+            crate::budget::work("fold", 1);
             let depth = expr_depth(&ssa.vars[v].expr, &ssa.vars, 0);
             if depth >= 5 {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     crate::eqsat::simplify_expr(v, &mut ssa.vars)
                 }));
                 if let Ok(Some(simplified)) = result {
-                    ssa.vars[v].expr = simplified;
+                    let rewritten = simplified;
+                    crate::provenance::rewrite(&mut ssa.vars, v, rewritten);
                 }
             }
         }
@@ -765,8 +838,10 @@ fn fold_once(ssa: &mut SsaCfg) {
         .collect();
 
     for v in 0..ssa.vars.len() {
+        crate::budget::work("fold", 1);
         let expr = ssa.vars[v].expr.clone();
-        ssa.vars[v].expr = substitute_expr(&expr, &inline_candidates);
+        let rewritten = substitute_expr(&expr, &inline_candidates);
+        crate::provenance::rewrite(&mut ssa.vars, v, rewritten);
     }
 
     // Pass 4: Multi-level register copy propagation
@@ -784,9 +859,11 @@ fn mba_simplify(ssa: &mut SsaCfg) {
     for _pass in 0..4 {
         let mut changed = false;
         for v in 0..ssa.vars.len() {
+            crate::budget::work("fold", 1);
             let new_expr = mba_simplify_expr(v, &ssa.vars);
             if let Some(new_expr) = new_expr {
-                ssa.vars[v].expr = new_expr;
+                let rewritten = new_expr;
+                crate::provenance::rewrite(&mut ssa.vars, v, rewritten);
                 changed = true;
             }
         }
@@ -814,6 +891,7 @@ fn mba_oracle_simplify(ssa: &mut SsaCfg) {
 
         // Forward pass (leaves → root)
         for v in 0..ssa.vars.len() {
+            crate::budget::work("fold", 1);
             if try_simba_at(v, &mut ssa.vars) {
                 changed = true;
             }
@@ -840,7 +918,8 @@ fn try_simba_at(v: usize, vars: &mut Vec<VarDef>) -> bool {
 
     // Constant folding first
     if let Some((val, sz)) = const_fold_expr(&vars[v].expr, vars) {
-        vars[v].expr = Expr::Const(val, sz);
+        let rewritten = Expr::Const(val, sz);
+        crate::provenance::rewrite(vars, v, rewritten);
         return true;
     }
 
@@ -869,7 +948,8 @@ fn try_simba_at(v: usize, vars: &mut Vec<VarDef>) -> bool {
     };
 
     if let Some(simple) = simplified {
-        vars[v].expr = simple;
+        let rewritten = simple;
+        crate::provenance::rewrite(vars, v, rewritten);
         return true;
     }
 
@@ -2341,52 +2421,17 @@ fn is_const_all_ones(id: VarId, vars: &[VarDef]) -> bool {
     }
 }
 
-/// Propagate constants from register writes to Unknown versions at the same offset.
-/// Only propagates to non-parameter, non-argument registers that aren't heavily used
-/// (which would indicate they're loop variables, not constants).
-fn propagate_register_constants(ssa: &mut SsaCfg) {
-    // Collect all register constants: offset → (value, size)
-    let mut reg_consts: std::collections::HashMap<u64, (u64, u32)> =
-        std::collections::HashMap::new();
-    for v in &ssa.vars {
-        if v.varnode.space == AddressSpaceId::Register && v.param_name.is_none() {
-            if let Expr::Const(val, sz) = &v.expr {
-                reg_consts.insert(v.varnode.offset, (*val, *sz));
-            }
-        }
-    }
-
-    // Propagate to Unknown vars at the same register offset
-    // Only target non-parameter, low-use Unknown vars
-    for v in &mut ssa.vars {
-        if v.varnode.space == AddressSpaceId::Register && matches!(&v.expr, Expr::Unknown)
-            && v.param_name.is_none()
-            && v.use_count <= 2  // Low use count = likely a constant setup, not a loop var
-            && !v.call_return    // Don't overwrite call-return placeholders with stale constants
-            && !FLAG_OFFSETS.contains(&v.varnode.offset)
-            && v.varnode.offset != RSP_OFFSET
-            && v.varnode.offset != RIP_OFFSET
-            && v.varnode.offset != 40
-        // RBP
-        {
-            if let Some(&(val, _const_sz)) = reg_consts.get(&v.varnode.offset) {
-                let mask = match v.varnode.size {
-                    1 => 0xFF,
-                    2 => 0xFFFF,
-                    4 => 0xFFFFFFFF,
-                    _ => u64::MAX,
-                };
-                v.expr = Expr::Const(val & mask, v.varnode.size);
-            }
-        }
-    }
-}
+// Unknown SSA versions must stay unknown. A constant written to the same
+// physical register elsewhere does not establish a reaching definition (and
+// may be written only after this read). Fold constants through explicit SSA
+// dependencies instead of guessing from register offsets or use counts.
 
 /// Multi-level register copy propagation:
 /// RAX = var_8; RAX = RAX + 1 → RAX = var_8 + 1
 /// Also handles chains: RAX = X; RAX = RAX op Y; RAX = RAX op Z
 fn propagate_register_copies(ssa: &mut SsaCfg) {
     for bi in 0..ssa.blocks.len() {
+        crate::budget::work("fold", 1);
         // Build a map: for each register, track the most recent assignment's expression
         let mut reg_expr: std::collections::HashMap<(u64, u32), (VarId, Expr)> =
             std::collections::HashMap::new();
@@ -2424,7 +2469,8 @@ fn propagate_register_copies(ssa: &mut SsaCfg) {
 
         for (idx, new_expr) in replacements {
             if let Stmt::Assign(var_id) = &ssa.blocks[bi].stmts[idx] {
-                ssa.vars[var_id.0 as usize].expr = new_expr;
+                let rewritten = new_expr;
+                crate::provenance::rewrite(&mut ssa.vars, var_id.0 as usize, rewritten);
             }
         }
     }
@@ -2710,6 +2756,7 @@ fn recover_conditions(ssa: &mut SsaCfg) {
         };
         let mut rewrites: Vec<(usize, Expr, InferredType)> = Vec::new();
         for (idx, v) in ssa.vars.iter().enumerate() {
+            crate::budget::work("fold", 1);
             let (is_pair, kind, l, r) = match &v.expr {
                 Expr::BinOp(BinOpKind::NotEq, l, r) => {
                     let pair =
@@ -2744,7 +2791,8 @@ fn recover_conditions(ssa: &mut SsaCfg) {
             }
         }
         for (idx, expr, ty) in rewrites {
-            ssa.vars[idx].expr = expr;
+            let rewritten = expr;
+            crate::provenance::rewrite(&mut ssa.vars, idx, rewritten);
             ssa.vars[idx].inferred_type = ty;
         }
     }
@@ -2819,7 +2867,8 @@ fn recover_conditions(ssa: &mut SsaCfg) {
     for (vi, cond_id, block_idx) in ternary_to_recover {
         if let Some(new_cond) = try_recover_condition(cond_id, block_idx, ssa) {
             if let Expr::Ternary(_, then_val, else_val) = ssa.vars[vi].expr {
-                ssa.vars[vi].expr = Expr::Ternary(new_cond, then_val, else_val);
+                let rewritten = Expr::Ternary(new_cond, then_val, else_val);
+                crate::provenance::rewrite(&mut ssa.vars, vi, rewritten);
             }
         }
     }
@@ -2859,7 +2908,8 @@ fn recover_conditions(ssa: &mut SsaCfg) {
             Expr::Const(else_val as u64, size),
             size,
         );
-        ssa.vars[vi].expr = Expr::Ternary(final_cond, then_var, else_var);
+        let rewritten = Expr::Ternary(final_cond, then_var, else_var);
+        crate::provenance::rewrite(&mut ssa.vars, vi, rewritten);
     }
 }
 
@@ -3589,7 +3639,7 @@ fn is_comparison(kind: BinOpKind) -> bool {
 
 // ---- Return Values ----
 
-fn detect_return_values(ssa: &mut SsaCfg) {
+fn detect_return_values(ssa: &mut SsaCfg, native_return: Option<u64>) {
     // Try to detect architecture from register usage:
     // ARM32 r0 = offset 32 (0x20), x86 RAX = offset 0, AArch64 x0 = offset 16384
     let has_arm32_regs = ssa.vars.iter().any(|v| {
@@ -3603,7 +3653,9 @@ fn detect_return_values(ssa: &mut SsaCfg) {
         && v.varnode.offset >= 16384 && v.varnode.offset <= 16440  // x0-x7 range
         && (v.varnode.size == 4 || v.varnode.size == 8)
     });
-    let ret_reg_offset = if has_arm32_regs {
+    let ret_reg_offset = if let Some(offset) = native_return {
+        offset
+    } else if has_arm32_regs {
         32
     } else if has_aarch64_regs {
         16384
@@ -3617,6 +3669,7 @@ fn detect_return_values(ssa: &mut SsaCfg) {
     // x0 size=8 when the function actually operates on w0 size=4).
     if has_aarch64_regs {
         for bi in 0..ssa.blocks.len() {
+            crate::budget::work("fold", 1);
             if let SsaTerminator::Return(Some(var_id)) = ssa.blocks[bi].terminator {
                 if let Expr::UnaryOp(UnaryOpKind::Zext, inner) = &ssa.vars[var_id.0 as usize].expr {
                     if ssa.vars[inner.0 as usize].varnode.size == 4 {
@@ -3629,6 +3682,7 @@ fn detect_return_values(ssa: &mut SsaCfg) {
     }
 
     for bi in 0..ssa.blocks.len() {
+        crate::budget::work("fold", 1);
         if let SsaTerminator::Return(ref ret_val) = ssa.blocks[bi].terminator {
             if ret_val.is_some() {
                 continue;
@@ -3675,6 +3729,7 @@ fn detect_return_values(ssa: &mut SsaCfg) {
         // Strategy 3: Check predecessors (CMOV patterns, conditional returns)
         if found.is_none() {
             for pred_bi in 0..ssa.blocks.len() {
+                crate::budget::work("fold", 1);
                 if pred_bi == bi {
                     continue;
                 }
@@ -3725,6 +3780,7 @@ fn detect_return_values(ssa: &mut SsaCfg) {
                 let mut next_frontier = Vec::new();
                 for &target_bi in &frontier {
                     for pred_bi in 0..ssa.blocks.len() {
+                        crate::budget::work("fold", 1);
                         if visited.contains(&pred_bi) {
                             continue;
                         }
@@ -3803,6 +3859,7 @@ fn detect_return_values(ssa: &mut SsaCfg) {
                 found = find_float_ret_in_block(&ssa.blocks[bi].stmts, &ssa.vars, XMM0_OFFSET);
                 if found.is_none() {
                     for pred_bi in 0..ssa.blocks.len() {
+                        crate::budget::work("fold", 1);
                         if pred_bi == bi {
                             continue;
                         }
@@ -3833,6 +3890,7 @@ fn detect_return_values(ssa: &mut SsaCfg) {
                 if found.is_none() {
                     let mut best: Option<VarId> = None;
                     for (vi, vd) in ssa.vars.iter().enumerate() {
+                        crate::budget::work("fold", 1);
                         if vd.varnode.space == AddressSpaceId::Register
                             && vd.varnode.offset == XMM0_OFFSET
                             && matches!(
@@ -3950,6 +4008,7 @@ fn collect_call_arguments(ssa: &mut SsaCfg) {
     let is_x86_32 = arg_reg_offsets().is_empty();
 
     for bi in 0..ssa.blocks.len() {
+        crate::budget::work("fold", 1);
         // Collect all indices to remove for this block (from multiple calls)
         let mut all_consumed: Vec<usize> = Vec::new();
 
@@ -4183,9 +4242,8 @@ fn collect_stack_args_from_block(
         }
     }
 
-    // Arguments pushed right-to-left: first pushed = last argument
-    // We collected bottom-up, so reverse for correct order
-    pushed_values.reverse();
+    // The backward scan sees the last push first: that is argument zero
+    // under cdecl, immediately above the return address. Already in ABI order.
     (pushed_values, consumed_indices)
 }
 
@@ -4241,6 +4299,7 @@ fn infer_types(ssa: &mut SsaCfg) {
 
     // Mark Store addresses as pointers
     for bi in 0..ssa.blocks.len() {
+        crate::budget::work("fold", 1);
         for stmt in &ssa.blocks[bi].stmts {
             if let Stmt::Store { addr, .. } = stmt {
                 let cur = ssa.vars[addr.0 as usize].inferred_type;
@@ -4451,6 +4510,7 @@ fn backward_propagate(ssa: &mut SsaCfg, var: VarId, ty: InferredType) {
 pub(crate) fn recount_uses(ssa: &mut SsaCfg) {
     let mut use_counts = vec![0u32; ssa.vars.len()];
     for v in 0..ssa.vars.len() {
+        crate::budget::work("fold", 1);
         match &ssa.vars[v].expr {
             Expr::Var(id) => use_counts[id.0 as usize] += 1,
             Expr::BinOp(_, l, r) => {
@@ -4479,6 +4539,7 @@ pub(crate) fn recount_uses(ssa: &mut SsaCfg) {
         }
     }
     for block in &ssa.blocks {
+        crate::budget::work("fold", 1);
         for stmt in &block.stmts {
             match stmt {
                 Stmt::Store { addr, val } => {
@@ -4528,6 +4589,7 @@ pub(crate) fn recount_uses(ssa: &mut SsaCfg) {
 #[allow(dead_code)]
 fn forward_substitute_block(ssa: &mut SsaCfg) {
     for bi in 0..ssa.blocks.len() {
+        crate::budget::work("fold", 1);
         // Map: (register offset, size) → the VarId of the value it currently holds
         let mut reg_value: std::collections::HashMap<(u64, u32), VarId> =
             std::collections::HashMap::new();
@@ -4620,7 +4682,8 @@ fn forward_substitute_block(ssa: &mut SsaCfg) {
 
         // Apply replacements
         for (var_idx, new_expr) in replacements {
-            ssa.vars[var_idx as usize].expr = new_expr;
+            let rewritten = new_expr;
+            crate::provenance::rewrite(&mut ssa.vars, var_idx as usize, rewritten);
         }
     }
 }
@@ -4635,6 +4698,7 @@ fn eliminate_save_restore(ssa: &mut SsaCfg) {
     // stack_var.expr = Var(same_REG) — this is a restore.
     // Replace the restore's expr to point directly at the original register value.
     for v in 0..ssa.vars.len() {
+        crate::budget::work("fold", 1);
         let vdef = &ssa.vars[v];
         if vdef.varnode.space != AddressSpaceId::Register {
             continue;
@@ -4667,6 +4731,7 @@ fn eliminate_save_restore(ssa: &mut SsaCfg) {
     // Collect and apply save/restore eliminations (Var chains)
     let mut sr_replacements: Vec<(usize, VarId)> = Vec::new();
     for v in 0..ssa.vars.len() {
+        crate::budget::work("fold", 1);
         let vdef = &ssa.vars[v];
         if vdef.varnode.space != AddressSpaceId::Register {
             continue;
@@ -4694,6 +4759,7 @@ fn eliminate_save_restore(ssa: &mut SsaCfg) {
     // followed by Load(same_addr) → same register. Only match within the
     // SAME block to avoid cross-block aliasing issues.
     for bi in 0..ssa.blocks.len() {
+        crate::budget::work("fold", 1);
         let mut store_map: std::collections::HashMap<u64, VarId> = std::collections::HashMap::new();
 
         // Collect stores in this block
@@ -4778,6 +4844,7 @@ fn compute_rbp_offset(addr_id: VarId, vars: &[VarDef]) -> Option<u64> {
 
 fn propagate_call_returns(ssa: &mut SsaCfg) {
     for bi in 0..ssa.blocks.len() {
+        crate::budget::work("fold", 1);
         // Check if this block has a Call terminator
         let has_call_term = matches!(&ssa.blocks[bi].terminator, SsaTerminator::Call { .. });
 
@@ -4926,8 +4993,10 @@ fn collapse_copy_chains(ssa: &mut SsaCfg) {
 
     // Substitute: for each var whose expr references a copy source, replace with the source
     for v in 0..ssa.vars.len() {
+        crate::budget::work("fold", 1);
         let expr = ssa.vars[v].expr.clone();
-        ssa.vars[v].expr = substitute_copies(&expr, &copy_map);
+        let rewritten = substitute_copies(&expr, &copy_map);
+        crate::provenance::rewrite(&mut ssa.vars, v, rewritten);
     }
 }
 
@@ -5003,7 +5072,9 @@ fn name_parameters_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
         if let Stmt::Assign(var_id) = stmt {
             let vdef = &ssa.vars[var_id.0 as usize];
             if let Expr::Unknown = &vdef.expr {
-                if vdef.varnode.space == AddressSpaceId::Register
+                if !vdef.call_return
+                    && vdef.origins.operations.is_empty()
+                    && vdef.varnode.space == AddressSpaceId::Register
                     && arg_reg_offsets().contains(&vdef.varnode.offset)
                     && !named_offsets.contains(&vdef.varnode.offset)
                 {
@@ -5021,7 +5092,9 @@ fn name_parameters_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
             let vdef = &ssa.vars[val.0 as usize];
             if vdef.param_name.is_none() {
                 if let Expr::Unknown = &vdef.expr {
-                    if vdef.varnode.space == AddressSpaceId::Register
+                    if !vdef.call_return
+                        && vdef.origins.operations.is_empty()
+                        && vdef.varnode.space == AddressSpaceId::Register
                         && arg_reg_offsets().contains(&vdef.varnode.offset)
                         && !named_offsets.contains(&vdef.varnode.offset)
                     {
@@ -5104,8 +5177,12 @@ fn name_parameters_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
             }
             let mut found: Option<usize> = None;
             for v in 0..ssa.vars.len() {
+                crate::budget::work("fold", 1);
                 let vdef = &ssa.vars[v];
-                if vdef.varnode.space != AddressSpaceId::Register {
+                if vdef.call_return
+                    || !vdef.origins.operations.is_empty()
+                    || vdef.varnode.space != AddressSpaceId::Register
+                {
                     continue;
                 }
                 if vdef.varnode.offset != offset {
@@ -5147,6 +5224,7 @@ fn name_parameters_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
             std::collections::BTreeMap::new();
 
         for v in 0..ssa.vars.len() {
+            crate::budget::work("fold", 1);
             let vdef = &ssa.vars[v];
             if vdef.param_name.is_some() {
                 continue;
@@ -5208,6 +5286,7 @@ fn name_parameters_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
             .any(|v| v.param_name.as_deref() == Some("this"));
         if !has_ecx_param {
             for v in 0..ssa.vars.len() {
+                crate::budget::work("fold", 1);
                 let vdef = &ssa.vars[v];
                 if vdef.varnode.space == AddressSpaceId::Register
                     && vdef.varnode.offset == ECX_OFFSET
@@ -5255,6 +5334,7 @@ fn name_parameters_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
         if fparam_idx == 0 {
             for &offset in float_offsets.iter() {
                 for v in 0..ssa.vars.len() {
+                    crate::budget::work("fold", 1);
                     let vdef = &ssa.vars[v];
                     if vdef.varnode.space == AddressSpaceId::Register
                         && vdef.varnode.offset == offset
@@ -5297,6 +5377,7 @@ fn recognize_field_access(ssa: &mut SsaCfg) {
     // Find Load(BinOp(Add, base, Const(offset))) patterns
     let mut replacements: Vec<(usize, VarId, u64)> = Vec::new();
     for v in 0..ssa.vars.len() {
+        crate::budget::work("fold", 1);
         let vdef = &ssa.vars[v];
         if let Expr::Load(ptr_id) = &vdef.expr {
             let ptr_def = safe_var(&ssa.vars, *ptr_id);
@@ -5339,7 +5420,8 @@ fn recognize_field_access(ssa: &mut SsaCfg) {
     }
 
     for (var_idx, base, offset) in replacements {
-        ssa.vars[var_idx].expr = Expr::FieldAccess(base, offset);
+        let rewritten = Expr::FieldAccess(base, offset);
+        crate::provenance::rewrite(&mut ssa.vars, var_idx, rewritten);
     }
 }
 
@@ -5356,6 +5438,7 @@ pub fn apply_signature_names(
     let mut renames: Vec<(VarId, String, InferredType, Option<&'static str>)> = Vec::new();
 
     for block in &ssa.blocks {
+        crate::budget::work("fold", 1);
         // Helper closure: given a call target and args, collect renames
         let mut process_call = |target: &CallTarget, args: &[VarId]| {
             let addr = match target {
@@ -5419,6 +5502,7 @@ pub fn propagate_signature_return_types(
     let mut type_updates: Vec<(VarId, InferredType, Option<&'static str>)> = Vec::new();
 
     for block in &ssa.blocks {
+        crate::budget::work("fold", 1);
         // Stmt::Call with out variable
         for stmt in &block.stmts {
             if let Stmt::Call {
@@ -5495,6 +5579,7 @@ pub fn propagate_signature_return_types(
     for _round in 0..3 {
         let mut propagated = false;
         for v in 0..ssa.vars.len() {
+            crate::budget::work("fold", 1);
             if let Expr::Var(src) = &ssa.vars[v].expr {
                 let src_idx = src.0 as usize;
                 // Propagate InferredType
@@ -5524,6 +5609,7 @@ pub fn propagate_signature_return_types(
     // then param_3 holds a pointer to HANDLE → display_type = "HANDLE *".
     // This makes function parameter types reflect what the callee expects.
     for v in 0..ssa.vars.len() {
+        crate::budget::work("fold", 1);
         let disp = ssa.vars[v].display_type;
         let Some(disp) = disp else { continue };
         if let Expr::Load(ptr_id) = &ssa.vars[v].expr {
@@ -5555,6 +5641,7 @@ pub fn propagate_signature_return_types(
 fn name_loop_phis(ssa: &mut SsaCfg) {
     let mut loop_phi_count = 0u32;
     for vi in 0..ssa.vars.len() {
+        crate::budget::work("fold", 1);
         if ssa.vars[vi].param_name.is_some() {
             continue;
         }
@@ -5634,6 +5721,7 @@ pub fn rewrite_conditional_phi_to_ternary(ssa: &mut SsaCfg, cfg: &Cfg) {
     }
 
     for merge_bid in 0..ssa.blocks.len() {
+        crate::budget::work("fold", 1);
         if merge_bid >= n {
             break;
         }
@@ -5674,7 +5762,8 @@ pub fn rewrite_conditional_phi_to_ternary(ssa: &mut SsaCfg, cfg: &Cfg) {
                 leaf == first_leaf || ssa.vars[leaf.0 as usize].varnode == first_vn
             });
             if all_same_render {
-                ssa.vars[phi_v.0 as usize].expr = Expr::Var(inputs[0]);
+                let rewritten = Expr::Var(inputs[0]);
+                crate::provenance::rewrite(&mut ssa.vars, phi_v.0 as usize, rewritten);
                 continue;
             }
 
@@ -5697,10 +5786,9 @@ pub fn rewrite_conditional_phi_to_ternary(ssa: &mut SsaCfg, cfg: &Cfg) {
             // merge isn't a clean dominator tree (e.g. irreducible / loop).
             if groups.len() > 2 {
                 let phi_size = ssa.vars[phi_v.0 as usize].size;
-                if let Some(result_id) =
-                    build_nested_phi_ternary(&groups, &dom, ssa, phi_size)
-                {
-                    ssa.vars[phi_v.0 as usize].expr = Expr::Var(result_id);
+                if let Some(result_id) = build_nested_phi_ternary(&groups, &dom, ssa, phi_size) {
+                    let rewritten = Expr::Var(result_id);
+                    crate::provenance::rewrite(&mut ssa.vars, phi_v.0 as usize, rewritten);
                 }
                 continue;
             }
@@ -5755,9 +5843,11 @@ pub fn rewrite_conditional_phi_to_ternary(ssa: &mut SsaCfg, cfg: &Cfg) {
                 t_vn == e_vn
             };
             if same_leaf || same_location {
-                ssa.vars[phi_v.0 as usize].expr = Expr::Var(then_val);
+                let rewritten = Expr::Var(then_val);
+                crate::provenance::rewrite(&mut ssa.vars, phi_v.0 as usize, rewritten);
             } else {
-                ssa.vars[phi_v.0 as usize].expr = Expr::Ternary(cond, then_val, else_val);
+                let rewritten = Expr::Ternary(cond, then_val, else_val);
+                crate::provenance::rewrite(&mut ssa.vars, phi_v.0 as usize, rewritten);
             }
         }
     }
@@ -5777,8 +5867,10 @@ fn build_nested_phi_ternary(
     if groups.len() == 1 {
         return Some(groups[0].0);
     }
-    let all_preds: Vec<BlockId> =
-        groups.iter().flat_map(|(_, ps)| ps.iter().copied()).collect();
+    let all_preds: Vec<BlockId> = groups
+        .iter()
+        .flat_map(|(_, ps)| ps.iter().copied())
+        .collect();
     let common = phi_nearest_common_dom(dom, &all_preds)?;
     if common.0 >= ssa.blocks.len() {
         return None;
@@ -5796,10 +5888,9 @@ fn build_nested_phi_ternary(
     let mut else_groups: Vec<(VarId, Vec<BlockId>)> = Vec::new();
     for g in groups {
         let in_then = g.1.iter().all(|p| phi_dom_dominates(dom, taken.0, p.0));
-        let in_else = g
-            .1
-            .iter()
-            .all(|p| phi_dom_dominates(dom, fallthrough.0, p.0));
+        let in_else =
+            g.1.iter()
+                .all(|p| phi_dom_dominates(dom, fallthrough.0, p.0));
         if in_then && !in_else {
             then_groups.push(g.clone());
         } else if in_else && !in_then {
@@ -5815,22 +5906,15 @@ fn build_nested_phi_ternary(
     let then_var = build_nested_phi_ternary(&then_groups, dom, ssa, size)?;
     let else_var = build_nested_phi_ternary(&else_groups, dom, ssa, size)?;
 
-    let id = VarId(ssa.vars.len() as u32);
-    ssa.vars.push(VarDef {
-        id,
-        varnode: pcode_ir::Varnode {
+    let id = ssa.new_var(
+        pcode_ir::Varnode {
             space: AddressSpaceId::Unique,
-            offset: 0xE100_0000 + id.0 as u64,
+            offset: 0xE100_0000 + ssa.vars.len() as u64,
             size,
         },
-        expr: Expr::Ternary(cond, then_var, else_var),
+        Expr::Ternary(cond, then_var, else_var),
         size,
-        use_count: 1,
-        param_name: None,
-        call_return: false,
-        inferred_type: InferredType::Unknown,
-        display_type: None,
-    });
+    );
     Some(id)
 }
 
@@ -5952,11 +6036,7 @@ mod nway_phi_tests {
         let v_b = ssa.new_var(unique_vn(0x201, 4), Expr::Const(20, 4), 4);
         let v_c = ssa.new_var(unique_vn(0x202, 4), Expr::Const(30, 4), 4);
 
-        let phi_v = ssa.new_var(
-            unique_vn(0x300, 4),
-            Expr::Phi(vec![v_a, v_b, v_c]),
-            4,
-        );
+        let phi_v = ssa.new_var(unique_vn(0x300, 4), Expr::Phi(vec![v_a, v_b, v_c]), 4);
 
         // SSA blocks 0..=5 mirroring CFG.
         for i in 0..=5 {
@@ -5988,6 +6068,7 @@ mod nway_phi_tests {
         let mut cfg_blocks: Vec<BasicBlock> = Vec::new();
         for i in 0..=5usize {
             cfg_blocks.push(BasicBlock {
+                terminator_origin: None,
                 id: BlockId(i),
                 addr: 0x1000 + 0x10 * i as u64,
                 ops: Vec::new(),
@@ -6021,19 +6102,17 @@ mod nway_phi_tests {
             Expr::Var(id) => *id,
             other => panic!("phi not rewritten to Var(...): {:?}", other),
         };
-        let (cond_outer, then_outer, else_outer) = match &ssa.vars[outer_id.0 as usize].expr
-        {
+        let (cond_outer, then_outer, else_outer) = match &ssa.vars[outer_id.0 as usize].expr {
             Expr::Ternary(c, t, e) => (*c, *t, *e),
             other => panic!("outer not Ternary: {:?}", other),
         };
         assert_eq!(cond_outer, c0, "outer condition must be c0");
         assert_eq!(else_outer, v_a, "B2-arm value must be v_a");
 
-        let (cond_inner, then_inner, else_inner) =
-            match &ssa.vars[then_outer.0 as usize].expr {
-                Expr::Ternary(c, t, e) => (*c, *t, *e),
-                other => panic!("inner not Ternary: {:?}", other),
-            };
+        let (cond_inner, then_inner, else_inner) = match &ssa.vars[then_outer.0 as usize].expr {
+            Expr::Ternary(c, t, e) => (*c, *t, *e),
+            other => panic!("inner not Ternary: {:?}", other),
+        };
         assert_eq!(cond_inner, c1, "inner condition must be c1");
         assert_eq!(then_inner, v_b, "B3-arm value must be v_b");
         assert_eq!(else_inner, v_c, "B4-arm value must be v_c");
@@ -6081,6 +6160,7 @@ mod nway_phi_tests {
         let mut cfg_blocks: Vec<BasicBlock> = Vec::new();
         for i in 0..=3usize {
             cfg_blocks.push(BasicBlock {
+                terminator_origin: None,
                 id: BlockId(i),
                 addr: 0x10 * i as u64,
                 ops: Vec::new(),

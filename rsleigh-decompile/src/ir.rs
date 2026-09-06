@@ -2,16 +2,16 @@ use pcode_ir::{PcodeOp, Varnode};
 
 // ---- Identifiers ----
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BlockId(pub usize);
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub struct VarId(pub u32);
 
 // ---- Diagnostics ----
 
 /// Severity of a diagnostic emitted during decode/lift/SSA construction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Severity {
     /// Informational; benign approximation.
     Info,
@@ -22,7 +22,7 @@ pub enum Severity {
 }
 
 /// What kind of approximation/fallback fired.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum DiagKind {
     /// `safe_var` returned the sentinel for an out-of-bounds VarId.
     OobVarId,
@@ -53,7 +53,7 @@ pub enum DiagKind {
 }
 
 /// One observation surfaced from the decode/lift/SSA pipeline.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Diagnostic {
     pub severity: Severity,
     pub kind: DiagKind,
@@ -77,6 +77,7 @@ pub struct BasicBlock {
     /// (instruction address, pcode op)
     pub ops: Vec<(u64, PcodeOp)>,
     pub terminator: Terminator,
+    pub terminator_origin: Option<crate::provenance::OperationOrigin>,
 }
 
 /// DFS classification of a concrete CFG edge.
@@ -115,7 +116,7 @@ pub enum Terminator {
     Indirect(Varnode),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum CallTarget {
     Direct(u64),
     Indirect(Varnode),
@@ -123,6 +124,7 @@ pub enum CallTarget {
 
 // ---- SSA types ----
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SsaCfg {
     pub blocks: Vec<SsaBlock>,
     pub vars: Vec<VarDef>,
@@ -132,6 +134,7 @@ pub struct SsaCfg {
     pub diagnostics: Vec<Diagnostic>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct SsaBlock {
     pub id: BlockId,
     pub addr: u64,
@@ -139,7 +142,7 @@ pub struct SsaBlock {
     pub terminator: SsaTerminator,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum SsaTerminator {
     Fallthrough(BlockId),
     Branch(BlockId),
@@ -158,7 +161,7 @@ pub enum SsaTerminator {
     Indirect(VarId),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Stmt {
     Assign(VarId),
     Store {
@@ -173,7 +176,7 @@ pub enum Stmt {
 }
 
 /// Inferred type for a variable, propagated by the type inference pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum InferredType {
     /// No type inferred yet — prints as uintN_t based on size
     Unknown,
@@ -206,10 +209,13 @@ impl InferredType {
     }
 }
 
+#[derive(serde::Serialize)]
 pub struct VarDef {
     pub id: VarId,
     pub varnode: Varnode,
     pub expr: Expr,
+    pub origins: crate::provenance::Origins,
+    pub memory: Option<crate::memory::Access>,
     pub size: u32,
     pub use_count: u32,
     /// If this var is a function parameter, its name (e.g. "param_0")
@@ -224,7 +230,7 @@ pub struct VarDef {
     pub display_type: Option<&'static str>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Expr {
     Var(VarId),
     Const(u64, u32),
@@ -249,7 +255,7 @@ pub enum Expr {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum BinOpKind {
     Add,
     Sub,
@@ -286,7 +292,7 @@ pub enum BinOpKind {
     FloatLessEq,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum UnaryOpKind {
     Neg,
     Not,
@@ -400,6 +406,8 @@ static SENTINEL_VARDEF: std::sync::LazyLock<VarDef> = std::sync::LazyLock::new(|
     call_return: false,
     inferred_type: InferredType::Unknown,
     display_type: None,
+    memory: None,
+    origins: Default::default(),
 });
 
 impl SsaCfg {
@@ -430,6 +438,8 @@ impl SsaCfg {
                     call_return: false,
                     inferred_type: InferredType::Unknown,
                     display_type: None,
+                    memory: None,
+                    origins: Default::default(),
                 });
             }
         }
@@ -437,7 +447,9 @@ impl SsaCfg {
     }
 
     pub fn new_var(&mut self, varnode: Varnode, expr: Expr, size: u32) -> VarId {
+        crate::budget::work("ssa", 1);
         let id = VarId(self.vars.len() as u32);
+        let origins = crate::provenance::Origins::definition(&expr, &self.vars);
         self.vars.push(VarDef {
             id,
             varnode,
@@ -448,7 +460,49 @@ impl SsaCfg {
             call_return: false,
             inferred_type: InferredType::Unknown,
             display_type: None,
+            memory: None,
+            origins,
         });
         id
+    }
+}
+
+// Folded snapshots have no signature display types. Reject richer snapshots
+// on restore rather than dropping metadata or leaking owned strings forever.
+impl<'de> serde::Deserialize<'de> for VarDef {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct OwnedVarDef {
+            id: VarId,
+            varnode: Varnode,
+            expr: Expr,
+            origins: crate::provenance::Origins,
+            memory: Option<crate::memory::Access>,
+            size: u32,
+            use_count: u32,
+            param_name: Option<String>,
+            call_return: bool,
+            inferred_type: InferredType,
+            display_type: Option<String>,
+        }
+        let v = OwnedVarDef::deserialize(deserializer)?;
+        if v.display_type.is_some() {
+            return Err(serde::de::Error::custom(
+                "signature display types require an owned snapshot format",
+            ));
+        }
+        Ok(Self {
+            id: v.id,
+            varnode: v.varnode,
+            expr: v.expr,
+            size: v.size,
+            use_count: v.use_count,
+            param_name: v.param_name,
+            call_return: v.call_return,
+            inferred_type: v.inferred_type,
+            display_type: None,
+            memory: v.memory,
+            origins: v.origins,
+        })
     }
 }

@@ -1,38 +1,8 @@
 use crate::fold::CallingConv;
 use crate::ir::*;
+use crate::provenance::{OperationOrigin, SourceScope};
 use pcode_ir::{get_output, AddressSpaceId, PcodeOp, Varnode};
-use std::collections::{HashMap, HashSet, VecDeque};
-
-/// Stack slot key: identifies a unique stack memory location.
-/// Keyed by (base register offset, displacement, access size) to prevent
-/// conflating different-sized accesses at the same offset.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct SlotKey {
-    base_reg: u64, // Frame register offset (RBP=40, x29=29, RSP=32, SP=256, GP=112)
-    disp: i64,     // Displacement from base
-    size: u32,     // Access size in bytes
-}
-
-type StackMap = HashMap<SlotKey, VarId>;
-
-/// Intra-block forwarding map for global memory: `(absolute address, access
-/// size in bytes) -> last stored VarId`. Reset per block. Cross-block memory
-/// SSA (audit P1 #3 full) is intentionally out of scope here.
-type GlobalMap = HashMap<(u64, u32), VarId>;
-
-/// Walk a VarId through Copy/Var chains to find an underlying constant
-/// address. Returns `None` if the chain hits anything else.
-fn resolve_const_addr(ssa: &SsaCfg, mut vid: VarId) -> Option<u64> {
-    for _ in 0..16 {
-        let vdef = &ssa.vars[vid.0 as usize];
-        match &vdef.expr {
-            Expr::Const(v, _) => return Some(*v),
-            Expr::Var(inner) => vid = *inner,
-            _ => return None,
-        }
-    }
-    None
-}
+use std::collections::{HashMap, HashSet};
 
 /// Convert a CFG into SSA form (SysV calling convention).
 pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
@@ -42,6 +12,26 @@ pub fn build_ssa(cfg: &Cfg) -> SsaCfg {
 /// Convert a CFG into SSA form with a specific calling convention.
 /// The `cc` parameter controls which registers are invalidated after Call sites.
 pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
+    build_ssa_with_return_register(cfg, cc, crate::fold::abi(cc).return_reg_int)
+}
+
+/// Use the native architecture's register layout for return-value selection.
+/// MIPS/RISC-V argument binding remains unsupported; their return registers
+/// must not be confused with an x86 register at a similar offset.
+pub fn build_ssa_for_arch(cfg: &Cfg, cc: CallingConv, arch: rsleigh_api::Architecture) -> SsaCfg {
+    let offset = match arch {
+        rsleigh_api::Architecture::MIPS32 => 8,
+        rsleigh_api::Architecture::RiscV64 => 0x2050,
+        _ => crate::fold::abi(cc).return_reg_int.unwrap_or(0),
+    };
+    build_ssa_with_return_register(cfg, cc, Some(offset))
+}
+
+fn build_ssa_with_return_register(
+    cfg: &Cfg,
+    cc: CallingConv,
+    return_register: Option<u64>,
+) -> SsaCfg {
     let mut ssa = SsaCfg {
         blocks: Vec::new(),
         vars: Vec::new(),
@@ -65,17 +55,6 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
     // Per-block: map from varnode -> VarId at block exit
     let mut block_exit_vars: Vec<HashMap<Varnode, VarId>> = vec![HashMap::new(); cfg.blocks.len()];
 
-    // Per-block: stack slot values at block exit (Phase 1 collection).
-    let mut block_exit_stack: Vec<StackMap> = vec![HashMap::new(); cfg.blocks.len()];
-
-    // Audit P1 #3 cross-block: parallel data structure for global memory.
-    // Keyed by (absolute address, access size). Cross-block phi insertion
-    // mirrors the stack-slot machinery in Phase 2.
-    let mut block_exit_global: Vec<GlobalMap> = vec![HashMap::new(); cfg.blocks.len()];
-    let mut global_store_blocks: HashMap<(u64, u32), Vec<usize>> = HashMap::new();
-    // Track which blocks have STORES (not inherited) for each slot key.
-    let mut slot_store_blocks: HashMap<SlotKey, Vec<usize>> = HashMap::new();
-
     // Iterative dataflow: re-process blocks until exit vars stabilize (max 4 passes).
     // Track the blocks changed by the previous complete pass. Comparing a
     // snapshot with the live map at the start of the next pass misses changes
@@ -85,6 +64,7 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
         let changed_last_iteration = std::mem::take(&mut changed_blocks);
 
         for (block_idx, block) in cfg.blocks.iter().enumerate() {
+            crate::budget::work("ssa", 1);
             let block_preds = &preds[block.id.0];
 
             // On iteration > 0, skip blocks whose predecessors haven't changed.
@@ -111,14 +91,6 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
             }
 
             let mut current: HashMap<Varnode, VarId> = HashMap::new();
-            // Phase 1 stack tracking: INTRA-BLOCK only during SSA construction.
-            // Cross-block resolution happens in Phase 2 after Phi insertion.
-            let mut local_stack: StackMap = HashMap::new();
-            // Audit P1 #3 wedge: intra-block forwarding for global memory
-            // (Store/Load through pointers that resolve to constants). Resets
-            // per block; cross-block extension is future work.
-            let mut local_global: GlobalMap = HashMap::new();
-
             // Inherit from the first already-processed acyclic predecessor.
             // DFS edge classification, rather than block layout order, identifies
             // loop-carried inputs. Back-edge values are merged via Phi nodes below.
@@ -171,6 +143,10 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
 
                 // Find Zext ops that write to a register that is also read by later ops
                 for (i, op) in inst_ops.iter().enumerate() {
+                    let _source = SourceScope::enter(Some(OperationOrigin {
+                        instruction_address: inst_addr,
+                        operation_index: i,
+                    }));
                     if let PcodeOp::IntZext { out, input } = op {
                         if out.space == AddressSpaceId::Register
                             && input.space == AddressSpaceId::Register
@@ -261,18 +237,23 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                         process_op(
                             &mut ssa,
                             &mut current,
-                            &mut local_stack,
-                            &mut local_global,
-                            &mut slot_store_blocks,
-                            &mut global_store_blocks,
-                            block.id.0,
                             &mut stmts,
                             op,
                             cc,
+                            OperationOrigin {
+                                instruction_address: inst_addr,
+                                operation_index: op_idx,
+                            },
                         );
                     }
 
-                    let cond_var = resolve_input(&mut ssa, &mut current, &cond_vn);
+                    let cond_var = {
+                        let _source = SourceScope::enter(Some(OperationOrigin {
+                            instruction_address: inst_addr,
+                            operation_index: cb_idx,
+                        }));
+                        resolve_input(&mut ssa, &mut current, &cond_vn)
+                    };
 
                     // Snapshot current state — Unique varnodes hold "then" values
                     let then_state: HashMap<Varnode, VarId> = current
@@ -283,18 +264,17 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
 
                     // Process else-path ops (between CBranch and last op)
                     let last_idx = inst_ops.len() - 1;
-                    for op in &inst_ops[cb_idx + 1..last_idx] {
+                    for (relative_idx, op) in inst_ops[cb_idx + 1..last_idx].iter().enumerate() {
                         process_op(
                             &mut ssa,
                             &mut current,
-                            &mut local_stack,
-                            &mut local_global,
-                            &mut slot_store_blocks,
-                            &mut global_store_blocks,
-                            block.id.0,
                             &mut stmts,
                             op,
                             cc,
+                            OperationOrigin {
+                                instruction_address: inst_addr,
+                                operation_index: cb_idx + 1 + relative_idx,
+                            },
                         );
                     }
 
@@ -305,6 +285,12 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                             if else_var != *then_var {
                                 let ternary_expr = Expr::Ternary(cond_var, *then_var, else_var);
                                 let ternary_id = ssa.new_var(*vn, ternary_expr, vn.size);
+                                ssa.vars[ternary_id.0 as usize]
+                                    .origins
+                                    .insert(OperationOrigin {
+                                        instruction_address: inst_addr,
+                                        operation_index: cb_idx,
+                                    });
                                 current.insert(*vn, ternary_id);
                                 stmts.push(Stmt::Assign(ternary_id));
                             }
@@ -316,14 +302,13 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                         process_op(
                             &mut ssa,
                             &mut current,
-                            &mut local_stack,
-                            &mut local_global,
-                            &mut slot_store_blocks,
-                            &mut global_store_blocks,
-                            block.id.0,
                             &mut stmts,
                             inst_ops[last_idx],
                             cc,
+                            OperationOrigin {
+                                instruction_address: inst_addr,
+                                operation_index: last_idx,
+                            },
                         );
                     }
                 } else {
@@ -343,14 +328,13 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                         process_op(
                             &mut ssa,
                             &mut current,
-                            &mut local_stack,
-                            &mut local_global,
-                            &mut slot_store_blocks,
-                            &mut global_store_blocks,
-                            block.id.0,
                             &mut stmts,
                             op,
                             cc,
+                            OperationOrigin {
+                                instruction_address: inst_addr,
+                                operation_index: op_idx,
+                            },
                         );
                     }
                 }
@@ -361,47 +345,22 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                 }
             }
 
-            let terminator =
-                convert_terminator(&mut ssa, &mut current, &block.terminator, cc, &mut stmts);
-
-            // Build exit stack: inherit from an acyclic predecessor + local stores.
-            // Block IDs are layout only; a lower-ID predecessor may be a latch.
-            let mut exit_stack: StackMap = if !block_preds.is_empty() {
-                block_preds
-                    .iter()
-                    .find(|p| acyclic_edges.contains(&(**p, block.id)))
-                    .map(|p| block_exit_stack[p.0].clone())
-                    .unwrap_or_default()
-            } else {
-                HashMap::new()
+            let terminator = {
+                let _source = SourceScope::enter(block.terminator_origin);
+                convert_terminator(
+                    &mut ssa,
+                    &mut current,
+                    &block.terminator,
+                    cc,
+                    &mut stmts,
+                    return_register,
+                )
             };
-            for (key, var_id) in &local_stack {
-                exit_stack.insert(*key, *var_id);
-            }
-            // Same shape for global slots — Phase 2 fixed-point refines
-            // and inserts memory phis at join points.
-            let mut exit_global: GlobalMap = if !block_preds.is_empty() {
-                block_preds
-                    .iter()
-                    .find(|p| acyclic_edges.contains(&(**p, block.id)))
-                    .map(|p| block_exit_global[p.0].clone())
-                    .unwrap_or_default()
-            } else {
-                HashMap::new()
-            };
-            for (key, var_id) in &local_global {
-                exit_global.insert(*key, *var_id);
-            }
 
-            if block_exit_vars[block.id.0] != current
-                || block_exit_stack[block.id.0] != exit_stack
-                || block_exit_global[block.id.0] != exit_global
-            {
+            if block_exit_vars[block.id.0] != current {
                 changed_blocks.insert(block.id);
             }
             block_exit_vars[block.id.0] = current;
-            block_exit_stack[block.id.0] = exit_stack;
-            block_exit_global[block.id.0] = exit_global;
 
             // On first iteration, push new blocks; on subsequent iterations, replace
             if iteration == 0 {
@@ -513,7 +472,8 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                 for stmt in &block.stmts {
                     if let Stmt::Assign(vid) = stmt {
                         let vi = vid.0 as usize;
-                        ssa.vars[vi].expr = relink_expr(&ssa.vars[vi].expr, &relink);
+                        let rewritten = relink_expr(&ssa.vars[vi].expr, &relink);
+                        crate::provenance::rewrite(&mut ssa.vars, vi, rewritten);
                     }
                 }
                 // Also re-link the terminator condition
@@ -569,7 +529,8 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
                     for stmt in &ssa.blocks[succ_bid].stmts {
                         if let Stmt::Assign(vid) = stmt {
                             let vi = vid.0 as usize;
-                            ssa.vars[vi].expr = relink_expr(&ssa.vars[vi].expr, &back_relink);
+                            let rewritten = relink_expr(&ssa.vars[vi].expr, &back_relink);
+                            crate::provenance::rewrite(&mut ssa.vars, vi, rewritten);
                         }
                     }
                     // Re-link return value
@@ -603,304 +564,23 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
         }
     }
 
-    // ====================================================================
-    // Phase 2: Memory SSA — resolve cross-block stack Loads via Phi nodes
-    // ====================================================================
-    //
-    // Phase 2a: Compute block_entry_stack to fixed point via worklist.
-    //           Insert memory Phis at join points where predecessors disagree.
-    // Phase 2b: Walk all Loads and replace opaque Expr::Load(ptr) with
-    //           Expr::Var(resolved_value) when the stack slot is known.
-    {
-        let mut block_entry_stack: Vec<StackMap> = vec![HashMap::new(); cfg.blocks.len()];
-        // Effective exit stacks for Phase 2 (entry values + Phase 1 stores)
-        let mut effective_exit: Vec<StackMap> = vec![HashMap::new(); cfg.blocks.len()];
-        // Memory Phis created: (block_id, slot_key) → phi VarId
-        let mut mem_phis: HashMap<(usize, SlotKey), VarId> = HashMap::new();
-
-        // Phase 2a: Fixed-point computation of entry stack state
-        let mut worklist: VecDeque<usize> = (0..cfg.blocks.len()).collect();
-        let mut visited = vec![false; cfg.blocks.len()];
-        let max_iterations = cfg.blocks.len() * 4; // safety cap
-        let mut iter_count = 0;
-
-        while let Some(bid) = worklist.pop_front() {
-            iter_count += 1;
-            if iter_count > max_iterations {
-                break;
-            }
-
-            let block_preds_list = &preds[bid];
-            let mut new_entry: StackMap = HashMap::new();
-
-            if block_preds_list.is_empty() {
-                // Entry block: no predecessors, entry stack is empty
-            } else if block_preds_list.len() == 1 {
-                // Single predecessor: inherit from effective exit
-                new_entry = effective_exit[block_preds_list[0].0].clone();
-            } else {
-                // Multiple predecessors: merge with Phi insertion
-                let mut all_keys: HashSet<SlotKey> = HashSet::new();
-                for &pred_id in block_preds_list {
-                    for key in effective_exit[pred_id.0].keys() {
-                        all_keys.insert(*key);
-                    }
-                }
-
-                for key in &all_keys {
-                    let pred_values: Vec<Option<VarId>> = block_preds_list
-                        .iter()
-                        .map(|pred| effective_exit[pred.0].get(key).copied())
-                        .collect();
-
-                    // If ANY predecessor is missing this slot, don't forward (fail closed)
-                    if pred_values.iter().any(|v| v.is_none()) {
-                        continue;
-                    }
-
-                    let values: Vec<VarId> = pred_values.into_iter().map(|v| v.unwrap()).collect();
-
-                    // If all predecessors agree, no Phi needed
-                    if values.iter().all(|v| *v == values[0]) {
-                        new_entry.insert(*key, values[0]);
-                    } else {
-                        // Create or reuse a memory Phi
-                        let phi_key = (bid, *key);
-                        let phi_var = if let Some(&existing) = mem_phis.get(&phi_key) {
-                            // Update existing Phi's inputs
-                            ssa.vars[existing.0 as usize].expr = Expr::Phi(values.clone());
-                            existing
-                        } else {
-                            let slot_vn = Varnode {
-                                space: AddressSpaceId::Unique,
-                                offset: 0xF000_0000_u64
-                                    .wrapping_add(key.disp as u64)
-                                    .wrapping_add(key.base_reg << 32),
-                                size: key.size,
-                            };
-                            let phi_var = ssa.new_var(slot_vn, Expr::Phi(values), key.size);
-                            // Prepend Phi stmt to block
-                            ssa.blocks[bid].stmts.insert(0, Stmt::Assign(phi_var));
-                            mem_phis.insert(phi_key, phi_var);
-                            phi_var
-                        };
-                        new_entry.insert(*key, phi_var);
-                    }
-                }
-            }
-
-            // Check for convergence
-            if visited[bid] && new_entry == block_entry_stack[bid] {
-                continue; // No change — don't re-process successors
-            }
-            visited[bid] = true;
-            block_entry_stack[bid] = new_entry.clone();
-
-            // Compute effective exit: entry values + Phase 1 local stores.
-            let mut new_effective_exit = new_entry.clone();
-            for (key, var_id) in &block_exit_stack[bid] {
-                // Phase 1 local stores override inherited values
-                new_effective_exit.insert(*key, *var_id);
-            }
-
-            if effective_exit[bid] != new_effective_exit {
-                effective_exit[bid] = new_effective_exit;
-                // Schedule successors for re-processing
-                for succ in cfg.successors(BlockId(bid)) {
-                    if !worklist.contains(&succ.0) {
-                        worklist.push_back(succ.0);
-                    }
-                }
-            }
-        }
-
-        // Phase 2b: Resolve cross-block Loads using computed entry stack
-        for bid in 0..ssa.blocks.len() {
-            let mut running_stack = block_entry_stack[bid].clone();
-            let mut local_stack_keys: HashSet<SlotKey> = HashSet::new();
-
-            for stmt in &ssa.blocks[bid].stmts {
-                match stmt {
-                    Stmt::Store { addr, val } => {
-                        let val_size = ssa.vars[val.0 as usize].size;
-                        if let Some(key) = get_slot_key(*addr, val_size, &ssa) {
-                            running_stack.insert(key, *val);
-                            local_stack_keys.insert(key);
-                        }
-                    }
-                    Stmt::Assign(var_id) => {
-                        let vdef = &ssa.vars[var_id.0 as usize];
-                        if let Expr::Load(ptr) = &vdef.expr {
-                            let load_size = vdef.size;
-                            if let Some(key) = get_slot_key(*ptr, load_size, &ssa) {
-                                if let Some(&stored_var) = running_stack.get(&key) {
-                                    // Only resolve when safe:
-                                    // - Phi: properly merged value at join point
-                                    // - Local: same-block store→load (always safe)
-                                    // - Readonly: slot only written in entry block (never changes)
-                                    let is_phi = matches!(
-                                        &ssa.vars[stored_var.0 as usize].expr,
-                                        Expr::Phi(_)
-                                    );
-                                    let is_local = local_stack_keys.contains(&key);
-                                    // Check if this slot is only stored in the entry block
-                                    let is_readonly = slot_store_blocks
-                                        .get(&key)
-                                        .map_or(false, |blocks| blocks.iter().all(|b| *b == 0));
-                                    if is_phi || is_local || is_readonly {
-                                        // If the stored VarId has a param_name but its expression
-                                        // was contaminated by SSA convergence (Const/Phi instead of
-                                        // Unknown), the param's original value is lost. In that case,
-                                        // keep the Load as-is — the printer will handle it.
-                                        // Only forward if the expression is still usable.
-                                        ssa.vars[var_id.0 as usize].expr = Expr::Var(stored_var);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
+    for block in &ssa.blocks {
+        if matches!(block.terminator, SsaTerminator::Return(Some(id)) if ssa.var(id).call_return) {
+            ssa.diagnostics.push(Diagnostic {
+                severity: Severity::Info,
+                kind: DiagKind::StaleReturnInherited,
+                addr: Some(block.addr),
+                detail:
+                    "return-register value comes from a call; source-level function may be void"
+                        .into(),
+            });
         }
     }
-
-    // ====================================================================
-    // Phase 3: Memory SSA — cross-block global Loads via Phi nodes
-    // ====================================================================
-    //
-    // Mirror of Phase 2 keyed by `(absolute address, access size)`. Audit
-    // P1 #3 full closure. The key difference vs stack: the slot key
-    // already encodes a global address, so the resulting phi varnode uses
-    // the address directly rather than a synthesized frame-relative offset.
-    {
-        let mut block_entry_global: Vec<GlobalMap> = vec![HashMap::new(); cfg.blocks.len()];
-        let mut effective_exit: Vec<GlobalMap> = vec![HashMap::new(); cfg.blocks.len()];
-        let mut mem_phis: HashMap<(usize, (u64, u32)), VarId> = HashMap::new();
-
-        let mut worklist: VecDeque<usize> = (0..cfg.blocks.len()).collect();
-        let mut visited = vec![false; cfg.blocks.len()];
-        let max_iterations = cfg.blocks.len() * 4;
-        let mut iter_count = 0;
-
-        while let Some(bid) = worklist.pop_front() {
-            iter_count += 1;
-            if iter_count > max_iterations {
-                break;
-            }
-
-            let block_preds_list = &preds[bid];
-            let mut new_entry: GlobalMap = HashMap::new();
-
-            if block_preds_list.is_empty() {
-                // Entry block: empty global state.
-            } else if block_preds_list.len() == 1 {
-                new_entry = effective_exit[block_preds_list[0].0].clone();
-            } else {
-                let mut all_keys: HashSet<(u64, u32)> = HashSet::new();
-                for &pred_id in block_preds_list {
-                    for key in effective_exit[pred_id.0].keys() {
-                        all_keys.insert(*key);
-                    }
-                }
-                for key in &all_keys {
-                    let pred_values: Vec<Option<VarId>> = block_preds_list
-                        .iter()
-                        .map(|pred| effective_exit[pred.0].get(key).copied())
-                        .collect();
-                    if pred_values.iter().any(|v| v.is_none()) {
-                        continue;
-                    }
-                    let values: Vec<VarId> = pred_values.into_iter().map(|v| v.unwrap()).collect();
-                    if values.iter().all(|v| *v == values[0]) {
-                        new_entry.insert(*key, values[0]);
-                    } else {
-                        let phi_key = (bid, *key);
-                        let phi_var = if let Some(&existing) = mem_phis.get(&phi_key) {
-                            ssa.vars[existing.0 as usize].expr = Expr::Phi(values.clone());
-                            existing
-                        } else {
-                            // Synthesize a Unique varnode for the global phi
-                            // sentinel. Address is the absolute global addr;
-                            // collisions with stack phis are avoided by the
-                            // 0xE000_… high bits.
-                            let slot_vn = Varnode {
-                                space: AddressSpaceId::Unique,
-                                offset: 0xE000_0000_0000_0000_u64
-                                    .wrapping_add(key.0 ^ ((key.1 as u64) << 56)),
-                                size: key.1,
-                            };
-                            let phi_var = ssa.new_var(slot_vn, Expr::Phi(values), key.1);
-                            ssa.blocks[bid].stmts.insert(0, Stmt::Assign(phi_var));
-                            mem_phis.insert(phi_key, phi_var);
-                            phi_var
-                        };
-                        new_entry.insert(*key, phi_var);
-                    }
-                }
-            }
-
-            if visited[bid] && new_entry == block_entry_global[bid] {
-                continue;
-            }
-            visited[bid] = true;
-            block_entry_global[bid] = new_entry.clone();
-
-            let mut new_effective_exit = new_entry.clone();
-            for (key, var_id) in &block_exit_global[bid] {
-                new_effective_exit.insert(*key, *var_id);
-            }
-            if effective_exit[bid] != new_effective_exit {
-                effective_exit[bid] = new_effective_exit;
-                for succ in cfg.successors(BlockId(bid)) {
-                    if !worklist.contains(&succ.0) {
-                        worklist.push_back(succ.0);
-                    }
-                }
-            }
-        }
-
-        // Phase 3b: Resolve cross-block Loads with constant-resolvable
-        // pointers using the computed entry global state.
-        for bid in 0..ssa.blocks.len() {
-            let mut running_global = block_entry_global[bid].clone();
-            let mut local_global_keys: HashSet<(u64, u32)> = HashSet::new();
-
-            for stmt_idx in 0..ssa.blocks[bid].stmts.len() {
-                match ssa.blocks[bid].stmts[stmt_idx].clone() {
-                    Stmt::Store { addr, val } => {
-                        let val_size = ssa.vars[val.0 as usize].size;
-                        if let Some(global_addr) = resolve_const_addr(&ssa, addr) {
-                            running_global.insert((global_addr, val_size), val);
-                            local_global_keys.insert((global_addr, val_size));
-                        }
-                    }
-                    Stmt::Assign(var_id) => {
-                        let load_size = ssa.vars[var_id.0 as usize].size;
-                        if let Expr::Load(ptr) = ssa.vars[var_id.0 as usize].expr.clone() {
-                            if let Some(global_addr) = resolve_const_addr(&ssa, ptr) {
-                                let key = (global_addr, load_size);
-                                if let Some(&stored_var) = running_global.get(&key) {
-                                    let is_phi = matches!(
-                                        &ssa.vars[stored_var.0 as usize].expr,
-                                        Expr::Phi(_)
-                                    );
-                                    let is_local = local_global_keys.contains(&key);
-                                    let is_readonly = global_store_blocks
-                                        .get(&key)
-                                        .map_or(false, |blocks| blocks.iter().all(|b| *b == 0));
-                                    if is_phi || is_local || is_readonly {
-                                        ssa.vars[var_id.0 as usize].expr = Expr::Var(stored_var);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+    if return_register == crate::fold::abi(cc).return_reg_int {
+        crate::memory::forward(&mut ssa, cfg, cc);
     }
+
+    crate::provenance::propagate(&mut ssa.vars);
 
     // Count uses (after Phase 2 + Phase 3 may have changed expressions)
     count_uses(&mut ssa);
@@ -913,43 +593,31 @@ pub fn build_ssa_with_cc(cfg: &Cfg, cc: CallingConv) -> SsaCfg {
 fn process_op(
     ssa: &mut SsaCfg,
     current: &mut HashMap<Varnode, VarId>,
-    local_stack: &mut StackMap,
-    local_global: &mut GlobalMap,
-    slot_store_blocks: &mut HashMap<SlotKey, Vec<usize>>,
-    global_store_blocks: &mut HashMap<(u64, u32), Vec<usize>>,
-    block_id: usize,
     stmts: &mut Vec<Stmt>,
     op: &PcodeOp,
     _cc: CallingConv,
+    origin: OperationOrigin,
 ) {
+    let _source = SourceScope::enter(Some(origin));
     match op.clone() {
-        PcodeOp::Store { ptr, val, .. } => {
+        PcodeOp::Store { space, ptr, val } => {
             let addr_var = resolve_input(ssa, current, &ptr);
             let val_var = resolve_input(ssa, current, &val);
-            let val_size = ssa.vars[val_var.0 as usize].size;
-            let key = get_slot_key(addr_var, val_size, ssa);
-            if let Some(key) = key {
-                local_stack.insert(key, val_var);
-                slot_store_blocks.entry(key).or_default().push(block_id);
-            } else if let Some(addr) = resolve_const_addr(ssa, addr_var) {
-                // Constant absolute address — record as a global memory slot
-                // so a subsequent Load through the same address forwards the
-                // stored value (audit P1 #3, intra-block + cross-block).
-                local_global.insert((addr, val_size), val_var);
-                global_store_blocks
-                    .entry((addr, val_size))
-                    .or_default()
-                    .push(block_id);
-            } else {
-                // Unknown pointer: conservatively invalidate the global map
-                // since the store could alias any global. Stack tracking
-                // stays intact — stack slots cannot alias the global heap
-                // under standard C/C++ object lifetime rules.
-                local_global.clear();
-            }
+            // Give the stored value its own SSA definition so copies and folds
+            // retain the Store operation without attributing later writes to
+            // the original value's earlier uses.
+            let stored = ssa.new_var(
+                Varnode::unique(0xF300_0000 + ssa.vars.len() as u64, val.size),
+                Expr::Var(val_var),
+                val.size,
+            );
+            let address_origins = ssa.var(addr_var).origins.clone();
+            ssa.var_mut(stored).origins.merge(&address_origins);
+            ssa.var_mut(stored).origins.synthetic = true;
+            ssa.var_mut(stored).memory = Some(crate::memory::Access::Store { space });
             stmts.push(Stmt::Store {
                 addr: addr_var,
-                val: val_var,
+                val: stored,
             });
         }
         PcodeOp::CallOther {
@@ -985,31 +653,20 @@ fn process_op(
         }
         ref op => {
             if let Some(out_vn) = get_output(op) {
-                let expr = if let PcodeOp::Load { ptr, .. } = op {
-                    let p = resolve_input(ssa, current, ptr);
-                    let key = get_slot_key(p, out_vn.size, ssa);
-                    if let Some(key) = key {
-                        if let Some(&stored_var) = local_stack.get(&key) {
-                            Expr::Var(stored_var)
-                        } else {
-                            Expr::Load(p)
-                        }
-                    } else if let Some(addr) = resolve_const_addr(ssa, p) {
-                        // Global memory forward: previous Store to the same
-                        // (addr, size) wins.
-                        if let Some(&stored_var) = local_global.get(&(addr, out_vn.size)) {
-                            Expr::Var(stored_var)
-                        } else {
-                            Expr::Load(p)
-                        }
-                    } else {
-                        Expr::Load(p)
-                    }
-                } else {
-                    build_expr(ssa, current, op)
-                };
+                let expr = build_expr(ssa, current, op);
                 let effective_size = float_semantic_size(&expr, &ssa.vars).unwrap_or(out_vn.size);
                 let var_id = ssa.new_var(out_vn, expr, effective_size);
+                if let PcodeOp::Load { space, .. } = op {
+                    ssa.var_mut(var_id).memory = Some(crate::memory::Access::Load {
+                        space: *space,
+                        stores: vec![],
+                        boundary: Some(crate::memory::Boundary::UnmodeledMemory),
+                    });
+                }
+                // An unsupported output still has a defining raw operation.
+                if matches!(ssa.vars[var_id.0 as usize].expr, Expr::Unknown) {
+                    ssa.vars[var_id.0 as usize].origins.attach_source();
+                }
                 current.insert(out_vn, var_id);
                 // Sub-register propagation: when writing to a larger register (e.g., RAX 8-byte),
                 // also update the smaller sub-register at the same offset (e.g., EAX 4-byte).
@@ -1088,6 +745,9 @@ fn process_op(
                                 Expr::BinOp(BinOpKind::Or, high_id, zext_id),
                                 parent_size,
                             );
+                            for id in [mask_const_id, high_id, zext_id, merged_id] {
+                                ssa.vars[id.0 as usize].origins.synthetic = true;
+                            }
                             current.insert(parent_vn, merged_id);
                         }
                     }
@@ -1123,6 +783,7 @@ fn resolve_input(ssa: &mut SsaCfg, current: &mut HashMap<Varnode, VarId>, vn: &V
                     // Case 2: read larger from smaller — zero-extend
                     let expr = Expr::UnaryOp(UnaryOpKind::Zext, existing_var);
                     let var_id = ssa.new_var(*vn, expr, vn.size);
+                    ssa.vars[var_id.0 as usize].origins.synthetic = true;
                     current.insert(*vn, var_id);
                     return var_id;
                 }
@@ -1162,9 +823,6 @@ fn relink_expr(expr: &Expr, relink: &HashMap<VarId, VarId>) -> Expr {
     }
 }
 
-/// Frame base register offsets recognized for stack slot tracking.
-const FRAME_REGS: [u64; 5] = [40, 29, 32, 256, 112]; // RBP, x29, RSP, SP, GP
-
 /// Caller-saved (volatile) integer register offsets per ABI.
 /// These registers must be invalidated in the SSA `current` map after any Call.
 ///
@@ -1201,12 +859,8 @@ const AARCH64_CALLER_SAVED: &[u64] = &[
     16512, 16520, 16528, // x16..x18
 ];
 
-/// x86-32 cdecl caller-saved: EAX, ECX, EDX. Offsets same as x86-64 lower regs.
-const X86_32_CALLER_SAVED: &[u64] = &[
-    0,  // EAX
-    8,  // ECX
-    16, // EDX
-];
+/// x86-32 cdecl caller-saved: EAX, ECX, EDX in the native 32-bit register space.
+const X86_32_CALLER_SAVED: &[u64] = &[0, 4, 8];
 
 /// ARM32 AAPCS caller-saved: r0-r3 (args), r12 (IP scratch), r14 (LR).
 const ARM32_CALLER_SAVED: &[u64] = &[
@@ -1247,8 +901,8 @@ fn caller_saved_offsets(cc: CallingConv) -> &'static [u64] {
 
 /// Invalidate caller-saved registers in `current` after a Call.
 /// Emits one `Stmt::Assign(ret_var)` for the return register with `call_return=true`.
-/// Other caller-saved registers are removed from `current`; if read later,
-/// `resolve_input` will create fresh Unknown VarDefs for them.
+/// Other caller-saved registers receive unknown definitions attributed to the
+/// call, so later reads cannot be mislabeled as incoming function parameters.
 fn clobber_caller_saved(
     ssa: &mut SsaCfg,
     current: &mut HashMap<Varnode, VarId>,
@@ -1262,6 +916,19 @@ fn clobber_caller_saved(
     // Drop every current entry at any caller-saved offset, regardless of size.
     current.retain(|vn, _| !(vn.space == AddressSpaceId::Register && offsets.contains(&vn.offset)));
 
+    for &offset in offsets {
+        if offset == ret_off {
+            continue;
+        }
+        let vn = Varnode::register(offset, ret_size);
+        let unknown = ssa.new_var(vn, Expr::Unknown, ret_size);
+        ssa.var_mut(unknown).origins.attach_source();
+        current.insert(vn, unknown);
+        if ret_size == 8 {
+            current.insert(Varnode::register(offset, 4), unknown);
+        }
+    }
+
     // Create a fresh return-register clobber with call_return=true.
     let ret_vn = Varnode {
         space: AddressSpaceId::Register,
@@ -1270,6 +937,7 @@ fn clobber_caller_saved(
     };
     let ret_var = ssa.new_var(ret_vn, Expr::Unknown, ret_size);
     ssa.vars[ret_var.0 as usize].call_return = true;
+    ssa.vars[ret_var.0 as usize].origins.attach_source();
     current.insert(ret_vn, ret_var);
 
     // Seed size-4 sub-register too (so `mov eax, ...` reads see the same VarId).
@@ -1283,53 +951,6 @@ fn clobber_caller_saved(
     }
 
     stmts.push(Stmt::Assign(ret_var));
-}
-
-/// Extract a stack slot key from a pointer VarId.
-/// Recognizes: FRAME_REG + const, FRAME_REG - const (via large unsigned const).
-fn get_slot_key(ptr_var: VarId, size: u32, ssa: &SsaCfg) -> Option<SlotKey> {
-    let vdef = &ssa.vars[ptr_var.0 as usize];
-    match &vdef.expr {
-        Expr::Unknown if vdef.varnode.space == AddressSpaceId::Register => {
-            if FRAME_REGS.contains(&vdef.varnode.offset) {
-                Some(SlotKey {
-                    base_reg: vdef.varnode.offset,
-                    disp: 0,
-                    size,
-                })
-            } else {
-                None
-            }
-        }
-        Expr::BinOp(BinOpKind::Add, left, right) => {
-            let lv = &ssa.vars[left.0 as usize];
-            let rv = &ssa.vars[right.0 as usize];
-            if lv.varnode.space == AddressSpaceId::Register
-                && FRAME_REGS.contains(&lv.varnode.offset)
-            {
-                if let Expr::Const(val, _) = &rv.expr {
-                    return Some(SlotKey {
-                        base_reg: lv.varnode.offset,
-                        disp: *val as i64,
-                        size,
-                    });
-                }
-            }
-            if rv.varnode.space == AddressSpaceId::Register
-                && FRAME_REGS.contains(&rv.varnode.offset)
-            {
-                if let Expr::Const(val, _) = &lv.expr {
-                    return Some(SlotKey {
-                        base_reg: rv.varnode.offset,
-                        disp: *val as i64,
-                        size,
-                    });
-                }
-            }
-            None
-        }
-        _ => None,
-    }
 }
 
 fn build_expr(ssa: &mut SsaCfg, current: &mut HashMap<Varnode, VarId>, op: &PcodeOp) -> Expr {
@@ -1442,6 +1063,7 @@ fn build_expr(ssa: &mut SsaCfg, current: &mut HashMap<Varnode, VarId>, op: &Pcod
                     Expr::Const((*lsb as u64) * 8, 4),
                     4,
                 );
+                ssa.vars[shift_amt.0 as usize].origins.synthetic = true;
                 Expr::BinOp(BinOpKind::Lsr, i, shift_amt)
             }
         }
@@ -1501,6 +1123,7 @@ fn convert_terminator(
     term: &Terminator,
     cc: CallingConv,
     stmts: &mut Vec<Stmt>,
+    return_register: Option<u64>,
 ) -> SsaTerminator {
     match term {
         Terminator::Fallthrough(b) => SsaTerminator::Fallthrough(*b),
@@ -1521,7 +1144,34 @@ fn convert_terminator(
             target,
             fallthrough,
         } => {
-            clobber_caller_saved(ssa, current, cc, stmts);
+            if return_register == crate::fold::abi(cc).return_reg_int {
+                clobber_caller_saved(ssa, current, cc, stmts);
+            } else {
+                // The fallback convention does not describe this architecture.
+                // Invalidate all live registers conservatively; only the native
+                // return register gets a call-result dependency. Do not retain
+                // a pre-call value using an unrelated architecture's ABI.
+                let mut registers: Vec<_> = current
+                    .keys()
+                    .copied()
+                    .filter(|vn| vn.space == AddressSpaceId::Register)
+                    .collect();
+                registers.sort_by_key(|vn| (vn.offset, vn.size));
+                for vn in registers {
+                    let value = ssa.new_var(vn, Expr::Unknown, vn.size);
+                    ssa.var_mut(value).origins.attach_source();
+                    current.insert(vn, value);
+                }
+                if let Some(offset) = return_register {
+                    let size = if offset == 8 { 4 } else { 8 };
+                    let vn = Varnode::register(offset, size);
+                    let result = ssa.new_var(vn, Expr::Unknown, size);
+                    ssa.var_mut(result).call_return = true;
+                    ssa.var_mut(result).origins.attach_source();
+                    current.insert(vn, result);
+                    stmts.push(Stmt::Assign(result));
+                }
+            }
             SsaTerminator::Call {
                 target: target.clone(),
                 args: vec![],
@@ -1530,68 +1180,22 @@ fn convert_terminator(
             }
         }
         Terminator::Return => {
-            // Try to find RAX/EAX/x0/r0/v0 (return value register) in current state.
-            // These are the conventional return value registers for each architecture:
-            // x86-64/x86-32: RAX/EAX at register offset 0
-            // AArch64: x0 at register offset 0 (per AAPCS64)
-            // ARM32: r0 at register offset 0
-            // MIPS32: v0 at register offset 16
-            // RISC-V: a0 at register offset 80
-            // Prefer the smaller (more specific) register first: EAX before RAX,
-            // w0 before x0. This gets the correct return type (int vs long).
-            // Only use the register if it has a real expression (not Unknown),
-            // to avoid false return values from void functions that happen to
-            // leave x0/EAX as the entry parameter value.
-            // AArch64 x0 checked first: on AArch64, offset 0 is PC (set by RET),
-            // not the return value register. Checking 16384 first prevents false matches.
-            // Check smaller register first (EAX before RAX) for correct return types.
-            // BUT: if EAX has a stale value (Const(0) from XOR self-zeroing) and
-            // RAX has a real value, prefer RAX. This handles loop counters where
-            // XOR EAX,EAX inits the counter but LEA/INC on RAX is the loop result.
-            let ret_val = [
-                Varnode {
-                    space: AddressSpaceId::Register,
-                    offset: 16384,
-                    size: 4,
-                }, // AArch64 w0
-                Varnode {
-                    space: AddressSpaceId::Register,
-                    offset: 16384,
-                    size: 8,
-                }, // AArch64 x0
-                Varnode {
-                    space: AddressSpaceId::Register,
-                    offset: 0,
-                    size: 4,
-                }, // EAX / r0
-                Varnode {
-                    space: AddressSpaceId::Register,
-                    offset: 0,
-                    size: 8,
-                }, // RAX
-                Varnode {
-                    space: AddressSpaceId::Register,
-                    offset: 16,
-                    size: 4,
-                }, // MIPS v0
-                Varnode {
-                    space: AddressSpaceId::Register,
-                    offset: 80,
-                    size: 8,
-                }, // RISC-V a0
-            ]
-            .iter()
-            .find_map(|vn| {
-                let var_id = current.get(vn).copied()?;
-                let vdef = &ssa.vars[var_id.0 as usize];
-                // Skip if this is just the entry parameter value (Unknown)
-                // — the function didn't explicitly set a return value.
-                // Also skip bare Unknown without param_name (uninitialized reads).
-                if matches!(&vdef.expr, Expr::Unknown) {
-                    return None;
-                }
-                Some(var_id)
-            });
+            // Select only the native return register, preferring its narrow
+            // definition when present. Entry unknowns do not imply a return.
+            let ret_val = return_register
+                .into_iter()
+                .flat_map(|offset| [Varnode::register(offset, 4), Varnode::register(offset, 8)])
+                .find_map(|vn| {
+                    let var_id = current.get(&vn).copied()?;
+                    let vdef = &ssa.vars[var_id.0 as usize];
+                    // Skip if this is just the entry parameter value (Unknown)
+                    // — the function didn't explicitly set a return value.
+                    // Also skip bare Unknown without param_name (uninitialized reads).
+                    if matches!(&vdef.expr, Expr::Unknown) && !vdef.call_return {
+                        return None;
+                    }
+                    Some(var_id)
+                });
             SsaTerminator::Return(ret_val)
         }
         Terminator::Indirect(vn) => {
@@ -1606,6 +1210,7 @@ fn count_uses(ssa: &mut SsaCfg) {
     let mut use_counts = vec![0u32; ssa.vars.len()];
 
     for v in 0..ssa.vars.len() {
+        crate::budget::work("ssa", 1);
         let refs = collect_expr_refs(&ssa.vars[v].expr);
         for id in refs {
             use_counts[id.0 as usize] += 1;
@@ -1613,6 +1218,7 @@ fn count_uses(ssa: &mut SsaCfg) {
     }
 
     for block in &ssa.blocks {
+        crate::budget::work("ssa", 1);
         for stmt in &block.stmts {
             match stmt {
                 Stmt::Store { addr, val } => {
@@ -1643,7 +1249,7 @@ fn count_uses(ssa: &mut SsaCfg) {
     }
 }
 
-fn collect_expr_refs(expr: &Expr) -> Vec<VarId> {
+pub(crate) fn collect_expr_refs(expr: &Expr) -> Vec<VarId> {
     match expr {
         Expr::Var(id) => vec![*id],
         Expr::BinOp(_, l, r) => vec![*l, *r],

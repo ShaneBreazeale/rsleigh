@@ -63,12 +63,14 @@ fn layout_reversed_loop_relinks_from_acyclic_entry() {
     let cfg = Cfg {
         blocks: vec![
             BasicBlock {
+                terminator_origin: None,
                 id: BlockId(0),
                 addr: 0x1000,
                 ops: vec![],
                 terminator: Terminator::Return,
             },
             BasicBlock {
+                terminator_origin: None,
                 id: BlockId(1),
                 addr: 0x1010,
                 ops: vec![(
@@ -82,6 +84,7 @@ fn layout_reversed_loop_relinks_from_acyclic_entry() {
                 terminator: Terminator::Branch(BlockId(2)),
             },
             BasicBlock {
+                terminator_origin: None,
                 id: BlockId(2),
                 addr: 0x1020,
                 ops: vec![copy(0x1020, r1, r0)],
@@ -92,6 +95,7 @@ fn layout_reversed_loop_relinks_from_acyclic_entry() {
                 },
             },
             BasicBlock {
+                terminator_origin: None,
                 id: BlockId(3),
                 addr: 0x1030,
                 ops: vec![copy(0x1030, r0, Varnode::constant(0, 8))],
@@ -115,6 +119,7 @@ fn tree_plus_cross_join_relinks_both_acyclic_inputs() {
     let cfg = Cfg {
         blocks: vec![
             BasicBlock {
+                terminator_origin: None,
                 id: BlockId(0),
                 addr: 0x1000,
                 ops: vec![],
@@ -125,18 +130,21 @@ fn tree_plus_cross_join_relinks_both_acyclic_inputs() {
                 },
             },
             BasicBlock {
+                terminator_origin: None,
                 id: BlockId(1),
                 addr: 0x1010,
                 ops: vec![copy(0x1010, r1, r0)],
                 terminator: Terminator::Return,
             },
             BasicBlock {
+                terminator_origin: None,
                 id: BlockId(2),
                 addr: 0x1020,
                 ops: vec![copy(0x1020, r0, Varnode::constant(11, 8))],
                 terminator: Terminator::Branch(BlockId(1)),
             },
             BasicBlock {
+                terminator_origin: None,
                 id: BlockId(3),
                 addr: 0x1030,
                 ops: vec![copy(0x1030, r0, Varnode::constant(22, 8))],

@@ -46,6 +46,8 @@ fn clean_fold_emits_no_oob_diag() {
         call_return: false,
         inferred_type: rsleigh_decompile::ir::InferredType::Unknown,
         display_type: None,
+        memory: None,
+        origins: Default::default(),
     }];
     let stmts = vec![rsleigh_decompile::ir::Stmt::Assign(VarId(0))];
 

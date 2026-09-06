@@ -16,6 +16,7 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
     // Flatten into (addr, op) pairs, grouped by instruction address
     let mut inst_ops: Vec<(u64, Vec<PcodeOp>)> = Vec::new();
     for (addr, inst) in instructions {
+        crate::budget::work("cfg", 1);
         inst_ops.push((*addr, inst.ops.clone()));
     }
 
@@ -28,8 +29,10 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
         .collect();
 
     for (addr, inst) in instructions {
+        crate::budget::work("cfg", 1);
         let next_addr = addr + inst.len;
         for op in &inst.ops {
+            crate::budget::work("cfg", 1);
             match op {
                 PcodeOp::Branch { dest } if dest.space == AddressSpaceId::Ram => {
                     leaders.push(dest.offset);
@@ -83,8 +86,10 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
         let mut last_inst_len = 0u64;
 
         for (addr, inst) in instructions {
+            crate::budget::work("cfg", 1);
             if *addr >= leader_addr && *addr < next_leader {
                 for op in &inst.ops {
+                    crate::budget::work("cfg", 1);
                     ops.push((*addr, op.clone()));
                 }
                 last_inst_addr = *addr;
@@ -93,6 +98,18 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
         }
 
         let next_inst_addr = last_inst_addr + last_inst_len;
+
+        // Only suffixes are removed below, so surviving operation indices stay
+        // equal to raw instruction indices. Capture control evidence first.
+        let terminator_origin = ops.last().and_then(|(address, op)| {
+            matches!(op, PcodeOp::Return { .. } | PcodeOp::Branch { .. }
+                | PcodeOp::CBranch { .. } | PcodeOp::BranchInd { .. }
+                | PcodeOp::Call { .. } | PcodeOp::CallInd { .. })
+                .then(|| crate::provenance::OperationOrigin {
+                    instruction_address: *address,
+                    operation_index: ops.iter().rev().take_while(|(a, _)| a == address).count() - 1,
+                })
+        });
 
         // Determine terminator from the last op
         let terminator = if let Some((_, last_op)) = ops.last().cloned() {
@@ -245,6 +262,7 @@ pub fn build_cfg(instructions: &[(u64, Instruction)]) -> Cfg {
         };
 
         blocks.push(BasicBlock {
+            terminator_origin,
             id: BlockId(block_idx),
             addr: leader_addr,
             ops,
@@ -886,18 +904,21 @@ mod tests {
         let cfg = Cfg {
             blocks: vec![
                 BasicBlock {
+                    terminator_origin: None,
                     id: BlockId(0),
                     addr: 0x1000,
                     ops: vec![],
                     terminator: Terminator::Branch(BlockId(2)),
                 },
                 BasicBlock {
+                    terminator_origin: None,
                     id: BlockId(1),
                     addr: 0x1004,
                     ops: vec![],
                     terminator: Terminator::Branch(BlockId(2)),
                 },
                 BasicBlock {
+                    terminator_origin: None,
                     id: BlockId(2),
                     addr: 0x1008,
                     ops: vec![],
@@ -922,6 +943,7 @@ mod tests {
         let cfg = Cfg {
             blocks: vec![
                 BasicBlock {
+                    terminator_origin: None,
                     id: BlockId(0),
                     addr: 0x1000,
                     ops: vec![],
@@ -932,18 +954,21 @@ mod tests {
                     },
                 },
                 BasicBlock {
+                    terminator_origin: None,
                     id: BlockId(1),
                     addr: 0x1004,
                     ops: vec![],
                     terminator: Terminator::Branch(BlockId(2)),
                 },
                 BasicBlock {
+                    terminator_origin: None,
                     id: BlockId(2),
                     addr: 0x1008,
                     ops: vec![],
                     terminator: Terminator::Branch(BlockId(1)),
                 },
                 BasicBlock {
+                    terminator_origin: None,
                     id: BlockId(3),
                     addr: 0x100c,
                     ops: vec![],

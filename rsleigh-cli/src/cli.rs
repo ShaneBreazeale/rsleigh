@@ -155,6 +155,9 @@ pub fn entrypoint() {
         eprintln!("             [--instruction-cursor N] [--operation-cursor N]  Paginated evidence");
         eprintln!("  rsleigh <binary> --verify-index <dir>  Verify binary identity and artifact checksums");
         eprintln!("  rsleigh <binary> --ssa-slice <func> --var ID [--max-nodes N] [--max-depth N]");
+        eprintln!("    [--max-call-depth N] [--max-functions N] [--max-traversal-work N]");
+        eprintln!("             Roots: --call-site 0xADDR --arg N | --return [--at 0xADDR] | --condition 0xADDR");
+        eprintln!("  Card/slice analysis: [--analysis-cache DIR] [--max-decode-instructions N] [--max-ssa-work N] [--deadline-ms N]");
         eprintln!("  Agent exits: 0 complete, 2 partial evidence, 1 failed");
         eprintln!("  rsleigh <binary> --xrefs <func>     Cross-references (callers + callees)");
         eprintln!("  rsleigh <binary> --search <query>   Find functions by string/pattern");
@@ -1722,7 +1725,11 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                 eprintln!("Function '{}' not found", name);
                 continue;
             };
-            let insts = decode_func(func_addr, &symbols, &segs, &data, &mut dec);
+            let insts = if pcode_json {
+                decode_func_raw_with_diagnostics(func_addr, &symbols, &segs, &data, &mut dec, &mut Vec::new())
+            } else {
+                decode_func(func_addr, &symbols, &segs, &data, &mut dec)
+            };
             if insts.is_empty() {
                 eprintln!("// {} — no instructions", name);
                 continue;
@@ -1752,7 +1759,7 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                                 "source":         span.source,
                             })),
                             "ops":         inst.ops.iter()
-                                .map(|op| serde_json::json!({ "op": format!("{:?}", op) }))
+                                .map(|op| serde_json::json!({ "op": format!("{:?}", op), "operation": op }))
                                 .collect::<Vec<_>>(),
                         })
                     })
@@ -1763,6 +1770,8 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                         "function":     func_name,
                         "address":      format!("0x{:x}", func_addr),
                         "instructions": entries,
+                        "schema": "rsleigh.pcode/v2",
+                        "operation_stage": "raw-pcode/v1",
                     }))
                     .unwrap()
                 );
@@ -1803,6 +1812,8 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                             "id":           vi,
                             "varnode":      format!("{:?}", v.varnode),
                             "expr":         format!("{:?}", v.expr),
+                            "expression": v.expr,
+                            "origins": v.origins,
                             "size":         v.size,
                             "param_name":   v.param_name,
                             "inferred":     format!("{:?}", v.inferred_type),
@@ -1815,7 +1826,7 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                     serde_json::to_string_pretty(&serde_json::json!({
                         "file_sha256": compute_sha256(&data),
                         "tool_version": env!("CARGO_PKG_VERSION"),
-                        "snapshot": "post-fold/v1",
+                        "snapshot": "post-fold/v3",
                         "diagnostics": diagnostics,
                         "function": func_name,
                         "address":  format!("0x{:x}", func_addr),
@@ -3419,17 +3430,43 @@ fn decode_func_with_diagnostics(
     dec: &mut rsleigh_api::Decoder,
     diagnostics: &mut Vec<serde_json::Value>,
 ) -> Vec<(u64, pcode_ir::Instruction)> {
+    decode_func_with_operation_stage(fa, symbols, segs, data, dec, diagnostics, false)
+}
+
+fn decode_func_raw_with_diagnostics(
+    fa: u64,
+    symbols: &[(u64, String)],
+    segs: &[(u64, u64, u64)],
+    data: &[u8],
+    dec: &mut rsleigh_api::Decoder,
+    diagnostics: &mut Vec<serde_json::Value>,
+) -> Vec<(u64, pcode_ir::Instruction)> {
+    decode_func_with_operation_stage(fa, symbols, segs, data, dec, diagnostics, true)
+}
+
+fn decode_func_with_operation_stage(
+    fa: u64,
+    symbols: &[(u64, String)],
+    segs: &[(u64, u64, u64)],
+    data: &[u8],
+    dec: &mut rsleigh_api::Decoder,
+    diagnostics: &mut Vec<serde_json::Value>,
+    raw_operations: bool,
+) -> Vec<(u64, pcode_ir::Instruction)> {
     let off = segs.iter().find_map(|(va, sz, fo)| {
         if fa >= *va && fa < va + sz {
-            Some(fo + (fa - va))
+            Some((fo + (fa - va), va + sz - fa))
         } else {
             None
         }
     });
-    let Some(off) = off else {
+    let Some((off, available)) = off else {
         return vec![];
     };
-    let max = 4096.min(data.len() - off as usize);
+    let max = 4096.min(data.len().saturating_sub(off as usize)).min(available as usize);
+    if max == 0 {
+        return vec![];
+    }
     let raw_bytes = &data[off as usize..off as usize + max];
     // Function-start padding skip. When a CALL rel32 target lands on
     // inter-function zero padding (or .pdata reports a stale entry into
@@ -3564,8 +3601,16 @@ fn decode_func_with_diagnostics(
     let mut insts = Vec::new();
     let mut io = 0;
     while io < decode_max {
+        if let Err(stop) = rsleigh_decompile::budget::decode_step() {
+            diagnostics.push(serde_json::json!({"stage":stop.stage,"code":"execution_limit","stop":stop}));
+            break;
+        }
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            dec.decode(&bytes[io..], fa + io as u64)
+            if raw_operations {
+                dec.decode_unoptimized(&bytes[io..decode_max], fa + io as u64)
+            } else {
+                dec.decode(&bytes[io..decode_max], fa + io as u64)
+            }
         })) {
             Ok(Ok(inst)) => {
                 let l = inst.len as usize;
@@ -3580,6 +3625,10 @@ fn decode_func_with_diagnostics(
                 }
                 insts.push((fa + io as u64, inst));
                 io += l;
+                if let Err(stop) = rsleigh_decompile::budget::poll("decode") {
+                    diagnostics.push(serde_json::json!({"stage":stop.stage,"code":"execution_limit","stop":stop}));
+                    break;
+                }
             }
             Ok(Err(error)) => {
                 diagnostics.push(serde_json::json!({

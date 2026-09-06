@@ -25,12 +25,14 @@ pub mod imports;
 pub mod iot_capabilities;
 pub mod iot_family;
 pub mod ir;
+pub mod memory;
 pub mod jmp_rax_trampoline;
 pub mod opaque_pred;
 pub mod pdb_info;
 pub mod peb_walk;
 pub mod peb_walk_detect;
 pub mod printer;
+pub mod provenance;
 pub mod region;
 pub mod rip_xref;
 pub mod scratch_leak;
@@ -47,6 +49,7 @@ mod signatures_win32;
 pub mod smt_explore;
 pub mod smt_verify;
 pub mod slice;
+pub mod budget;
 pub mod ssa;
 pub mod structure;
 pub mod syscall_table;
@@ -64,7 +67,7 @@ use rsleigh_api::Architecture;
 use std::path::Path;
 
 /// Detect calling convention from binary format and architecture.
-fn detect_cc(arch: Architecture, binary: Option<&[u8]>) -> fold::CallingConv {
+pub fn detect_cc(arch: Architecture, binary: Option<&[u8]>) -> fold::CallingConv {
     if let Some(binary) = binary {
         // Go binaries carry a `.gopclntab` section. On amd64 use Go
         // internal ABI (RAX, RBX, RCX, RDI, RSI, R8-R11). Other arches
@@ -114,8 +117,8 @@ pub fn folded_ssa(
 ) -> ir::SsaCfg {
     let cfg = cfg::build_cfg(instructions);
     let cc = detect_cc(arch, binary);
-    let mut ssa = ssa::build_ssa_with_cc(&cfg, cc);
-    fold::fold_with_cc(&mut ssa, cc);
+    let mut ssa = ssa::build_ssa_for_arch(&cfg, cc, arch);
+    fold::fold_for_arch(&mut ssa, cc, arch);
     ssa
 }
 
@@ -151,9 +154,9 @@ pub fn decompile_with_binary(
         .unwrap_or_default();
 
     let cc = detect_cc(arch, binary);
-    let mut ssa = ssa::build_ssa_with_cc(&cfg, cc);
+    let mut ssa = ssa::build_ssa_for_arch(&cfg, cc, arch);
 
-    fold::fold_with_cc(&mut ssa, cc);
+    fold::fold_for_arch(&mut ssa, cc, arch);
 
     // Apply function signature parameter names and return types
     fold::apply_signature_names(&mut ssa, &import_map);
@@ -349,9 +352,9 @@ pub fn extract_learned_types(
         .unwrap_or_default();
 
     let cc = detect_cc(arch, binary);
-    let mut ssa = ssa::build_ssa_with_cc(&cfg, cc);
+    let mut ssa = ssa::build_ssa_for_arch(&cfg, cc, arch);
 
-    fold::fold_with_cc(&mut ssa, cc);
+    fold::fold_for_arch(&mut ssa, cc, arch);
     fold::apply_signature_names(&mut ssa, &import_map);
     fold::propagate_signature_return_types(&mut ssa, &import_map);
 
@@ -476,9 +479,9 @@ pub fn infer_returns_from_callsites(
         .map(|b| imports::resolve_imports(b))
         .unwrap_or_default();
     let cc = detect_cc(arch, binary);
-    let mut ssa = ssa::build_ssa_with_cc(&cfg_result, cc);
+    let mut ssa = ssa::build_ssa_for_arch(&cfg_result, cc, arch);
 
-    fold::fold_with_cc(&mut ssa, cc);
+    fold::fold_for_arch(&mut ssa, cc, arch);
 
     let mut results = Vec::new();
 

@@ -26,6 +26,8 @@ fn vd(id: u32, expr: Expr, size: u32) -> VarDef {
         call_return: false,
         inferred_type: InferredType::Unknown,
         display_type: None,
+        memory: None,
+        origins: Default::default(),
     }
 }
 

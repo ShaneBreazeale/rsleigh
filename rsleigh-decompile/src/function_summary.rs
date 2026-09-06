@@ -117,15 +117,15 @@ pub fn build_function_summary(
             // caller's path collection sees a sink lift even when
             // there's no libc memcpy/strncpy in the body.
             if has_null_terminator_loop {
-            if let Stmt::Store { addr, val } = stmt {
-                if let Some(slots) = detect_tainted_store(*addr, *val, ssa, &regions) {
-                    summary.sinks.push(SinkInvocation {
-                        sink: crate::smt_explore::STORE_SINK_SPEC,
-                        call_site: block.addr,
-                        tainted_caller_slots: slots,
-                    });
+                if let Stmt::Store { addr, val } = stmt {
+                    if let Some(slots) = detect_tainted_store(*addr, *val, ssa, &regions) {
+                        summary.sinks.push(SinkInvocation {
+                            sink: crate::smt_explore::STORE_SINK_SPEC,
+                            call_site: block.addr,
+                            tainted_caller_slots: slots,
+                        });
+                    }
                 }
-            }
             }
         }
         if let SsaTerminator::Call { target, args, .. } = &block.terminator {
@@ -228,8 +228,7 @@ fn find_load_src_param_slots(
     use crate::smt_explore::AbiSlot;
     let param_slots = collect_param_bearing_slots(ssa, arg_vars);
     let mut out: Vec<AbiSlot> = Vec::new();
-    let mut visited: std::collections::HashSet<u32> =
-        std::collections::HashSet::new();
+    let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut stack = vec![val];
     let mut classify_addr = |addr: VarId, sink: &mut Vec<AbiSlot>| {
         for cs in arg_slots_for_var(addr, ssa, arg_vars) {
@@ -256,7 +255,9 @@ fn find_load_src_param_slots(
         if !visited.insert(cur.0) || visited.len() > 64 {
             continue;
         }
-        let Some(def) = ssa.vars.get(cur.0 as usize) else { continue };
+        let Some(def) = ssa.vars.get(cur.0 as usize) else {
+            continue;
+        };
         match &def.expr {
             crate::ir::Expr::Var(inner) => stack.push(*inner),
             crate::ir::Expr::Load(addr) => {
@@ -325,20 +326,23 @@ fn cond_is_null_check(
     if depth > 16 || !visited.insert(v.0) {
         return false;
     }
-    let Some(def) = ssa.vars.get(v.0 as usize) else { return false };
+    let Some(def) = ssa.vars.get(v.0 as usize) else {
+        return false;
+    };
     match &def.expr {
         Expr::Var(inner) => cond_is_null_check(*inner, ssa, visited, depth + 1),
         Expr::UnaryOp(_, a) => cond_is_null_check(*a, ssa, visited, depth + 1),
         Expr::BinOp(BinOpKind::Eq | BinOpKind::NotEq, a, b) => {
             let traces_load = |v: VarId| -> bool {
-                let mut vv: std::collections::HashSet<u32> =
-                    std::collections::HashSet::new();
+                let mut vv: std::collections::HashSet<u32> = std::collections::HashSet::new();
                 let mut st = vec![v];
                 while let Some(c) = st.pop() {
                     if !vv.insert(c.0) || vv.len() > 16 {
                         continue;
                     }
-                    let Some(d) = ssa.vars.get(c.0 as usize) else { continue };
+                    let Some(d) = ssa.vars.get(c.0 as usize) else {
+                        continue;
+                    };
                     match &d.expr {
                         Expr::Load(_) | Expr::FieldAccess(_, _) => return true,
                         Expr::Var(inner) => st.push(*inner),
@@ -379,14 +383,15 @@ fn cond_is_null_check(
 /// Var/Load chain. Those still surface as TaintedStore candidates.
 fn store_addr_uses_bounded_index(addr: VarId, ssa: &crate::ir::SsaCfg) -> bool {
     use crate::ir::{BinOpKind, Expr};
-    let mut visited: std::collections::HashSet<u32> =
-        std::collections::HashSet::new();
+    let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut stack = vec![addr];
     while let Some(cur) = stack.pop() {
         if !visited.insert(cur.0) || visited.len() > 32 {
             continue;
         }
-        let Some(def) = ssa.vars.get(cur.0 as usize) else { continue };
+        let Some(def) = ssa.vars.get(cur.0 as usize) else {
+            continue;
+        };
         match &def.expr {
             Expr::Phi(inputs) => {
                 let has_const = inputs.iter().any(|v| {
@@ -452,20 +457,19 @@ fn collect_param_bearing_slots(
                     continue;
                 };
                 // Walk val's Var-chain looking for any function arg.
-                let mut visited: std::collections::HashSet<u32> =
-                    std::collections::HashSet::new();
+                let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
                 let mut cur = *val;
                 for _ in 0..16 {
                     if !visited.insert(cur.0) {
                         break;
                     }
                     if let Some(slot) = arg_set.get(&cur) {
-                        m.entry(key.clone())
-                            .or_default()
-                            .push(AbiSlot::Arg(*slot));
+                        m.entry(key.clone()).or_default().push(AbiSlot::Arg(*slot));
                         break;
                     }
-                    let Some(def) = ssa.vars.get(cur.0 as usize) else { break };
+                    let Some(def) = ssa.vars.get(cur.0 as usize) else {
+                        break;
+                    };
                     match &def.expr {
                         crate::ir::Expr::Var(inner) => cur = *inner,
                         _ => break,
@@ -482,14 +486,15 @@ fn addr_loads_from_param_slot(
     ssa: &crate::ir::SsaCfg,
     param_slots: &HashMap<String, Vec<crate::smt_explore::AbiSlot>>,
 ) -> Option<Vec<crate::smt_explore::AbiSlot>> {
-    let mut visited: std::collections::HashSet<u32> =
-        std::collections::HashSet::new();
+    let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut stack = vec![addr];
     while let Some(cur) = stack.pop() {
         if !visited.insert(cur.0) || visited.len() > 32 {
             continue;
         }
-        let Some(def) = ssa.vars.get(cur.0 as usize) else { continue };
+        let Some(def) = ssa.vars.get(cur.0 as usize) else {
+            continue;
+        };
         match &def.expr {
             crate::ir::Expr::Var(inner) => stack.push(*inner),
             crate::ir::Expr::Load(load_addr) => {
@@ -615,8 +620,7 @@ fn arg_slots_for_var(
 ) -> Vec<AbiSlot> {
     let mem = build_store_map(ssa);
     let mut out = Vec::new();
-    let mut visited: std::collections::HashSet<u32> =
-        std::collections::HashSet::new();
+    let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut stack = vec![var];
     while let Some(cur) = stack.pop() {
         if !visited.insert(cur.0) || visited.len() > 64 {
@@ -742,11 +746,7 @@ fn build_store_map(ssa: &SsaCfg) -> HashMap<String, VarId> {
 /// `BinOp(Add, base, Const(offset, 8))` — so a `FieldAccess(base,
 /// offset)` Load form aliases the corresponding pointer-arithmetic
 /// Store on the same stack slot.
-fn field_access_canon(
-    base: VarId,
-    offset: u64,
-    vars: &[crate::ir::VarDef],
-) -> String {
+fn field_access_canon(base: VarId, offset: u64, vars: &[crate::ir::VarDef]) -> String {
     let kb = addr_canon(base, vars).unwrap_or_else(|| "?".to_string());
     let kc = format!("C{}.8", offset);
     format!("BAdd({},{})", kb, kc)
@@ -931,6 +931,150 @@ pub fn arg_vars_from_ssa(ssa: &SsaCfg) -> HashMap<u8, VarId> {
     out
 }
 
+/// The dependency-facing portion of a function summary. Slots follow the ABI,
+/// including gaps; inferred display names do not renumber them.
+pub struct DependencySummary {
+    pub parameters: HashMap<VarId, usize>,
+    pub returns: Vec<VarId>,
+    pub unsupported_side_effects: bool,
+}
+
+pub fn dependency_summary(ssa: &SsaCfg, cc: crate::fold::CallingConv) -> DependencySummary {
+    use crate::{ir::Expr, region::ExactLocation};
+    let abi = crate::fold::abi(cc);
+    let mut parameters = HashMap::new();
+    for var in &ssa.vars {
+        crate::budget::work("call_summary", 1);
+        if matches!(var.expr, Expr::Unknown)
+            && !var.call_return
+            && var.origins.operations.is_empty()
+            && var.varnode.space == pcode_ir::AddressSpaceId::Register
+        {
+            if let Some(slot) = abi
+                .int_args
+                .iter()
+                .position(|offset| *offset == var.varnode.offset)
+            {
+                parameters.insert(var.id, slot);
+            }
+        }
+        if matches!(
+            cc,
+            crate::fold::CallingConv::Cdecl32 | crate::fold::CallingConv::Stdcall32
+        ) {
+            let location = match var.expr {
+                Expr::Load(ptr) => crate::region::exact_location(ssa, ptr, var.size, cc),
+                Expr::FieldAccess(base, offset) => {
+                    crate::region::exact_location(ssa, base, var.size, cc).and_then(|location| {
+                        if let ExactLocation::Stack {
+                            base,
+                            displacement,
+                            size,
+                        } = location
+                        {
+                            Some(ExactLocation::Stack {
+                                base,
+                                displacement: displacement
+                                    .checked_add(i64::try_from(offset).ok()?)?,
+                                size,
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                }
+                _ => None,
+            };
+            if let Some(ExactLocation::Stack {
+                base, displacement, ..
+            }) = location
+            {
+                // Incoming ESP points at the return address. Frame-pointer
+                // prologues must resolve back to this same incoming SSA base.
+                if ssa.var(VarId(base)).varnode.offset == 16
+                    && displacement >= 4
+                    && displacement % 4 == 0
+                    && displacement <= 128
+                {
+                    parameters.insert(var.id, ((displacement - 4) / 4) as usize);
+                }
+            }
+        }
+    }
+    let mut returns = Vec::new();
+    let mut unsupported_side_effects = false;
+    let stack_pointer = match cc {
+        crate::fold::CallingConv::SysV
+        | crate::fold::CallingConv::Win64
+        | crate::fold::CallingConv::GoAmd64 => 32,
+        crate::fold::CallingConv::AArch64 => 8,
+        crate::fold::CallingConv::Arm32 => 84,
+        _ => 16,
+    };
+    for block in &ssa.blocks {
+        crate::budget::work("call_summary", 1);
+        if let SsaTerminator::Return(Some(value)) = block.terminator {
+            if !returns.contains(&value) {
+                returns.push(value);
+            }
+        }
+        for stmt in &block.stmts {
+            crate::budget::work("call_summary", 1);
+            match stmt {
+                Stmt::Store { addr, val } => {
+                    // Stores below the incoming stack pointer are local
+                    // spills. Other writes need a side-effect summary.
+                    let local = matches!(crate::region::exact_location(ssa, *addr, ssa.var(*val).size, cc),
+                        Some(ExactLocation::Stack { base, displacement, size }) if ssa.var(VarId(base)).varnode.offset == stack_pointer && displacement.checked_add(size as i64).is_some_and(|end| end <= 0));
+                    unsupported_side_effects |= !local;
+                }
+                Stmt::Assign(id) if matches!(ssa.var(*id).expr, Expr::UserOp { .. }) => {
+                    unsupported_side_effects = true
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut dependencies = std::collections::HashSet::new();
+    let mut queue = returns.clone();
+    while let Some(id) = queue.pop() {
+        crate::budget::work("call_summary", 1);
+        if !dependencies.insert(id) {
+            continue;
+        }
+        if let Some(var) = ssa.vars.get(id.0 as usize) {
+            queue.extend(crate::ssa::collect_expr_refs(&var.expr));
+        }
+    }
+    for block in &ssa.blocks {
+        let calls = block
+            .stmts
+            .iter()
+            .filter_map(|stmt| {
+                if let Stmt::Call { out, .. } = stmt {
+                    Some(*out)
+                } else {
+                    None
+                }
+            })
+            .chain(if let SsaTerminator::Call { out, .. } = block.terminator {
+                Some(out)
+            } else {
+                None
+            });
+        for out in calls {
+            if out.is_none_or(|out| !dependencies.contains(&out)) {
+                unsupported_side_effects = true;
+            }
+        }
+    }
+    DependencySummary {
+        parameters,
+        returns,
+        unsupported_side_effects,
+    }
+}
+
 fn normalise_libc_name(raw: &str) -> &str {
     let stripped = raw.split('@').next().unwrap_or(raw);
     let unprefixed = stripped.trim_start_matches('_');
@@ -943,8 +1087,7 @@ fn normalise_libc_name(raw: &str) -> &str {
 mod tests {
     use super::*;
     use crate::ir::{
-        BlockId, CallTarget, Diagnostic, Expr, InferredType, SsaBlock, SsaTerminator,
-        VarDef,
+        BlockId, CallTarget, Diagnostic, Expr, InferredType, SsaBlock, SsaTerminator, VarDef,
     };
     use pcode_ir::Varnode;
 
@@ -959,6 +1102,8 @@ mod tests {
             call_return: false,
             inferred_type: InferredType::Unknown,
             display_type: None,
+            memory: None,
+            origins: Default::default(),
         }
     }
 
@@ -985,10 +1130,7 @@ mod tests {
     fn function_invoking_strcpy_records_sink_with_caller_slot() {
         // helper(arg0, arg1) calls strcpy(arg0, arg1) directly.
         // arg0 = VarId(0), arg1 = VarId(1).
-        let vars = vec![
-            mk_var(0, Expr::Const(0, 8)),
-            mk_var(1, Expr::Const(0, 8)),
-        ];
+        let vars = vec![mk_var(0, Expr::Const(0, 8)), mk_var(1, Expr::Const(0, 8))];
         let ssa = SsaCfg {
             blocks: vec![SsaBlock {
                 id: BlockId(0),
@@ -1023,10 +1165,10 @@ mod tests {
         // wrapper(buf) calls recv(0, buf, 256, 0).
         // The function has only 1 incoming arg → arg0 = VarId(0).
         let vars = vec![
-            mk_var(0, Expr::Const(0, 8)),  // function arg 0 = buf
-            mk_var(1, Expr::Const(0, 8)),  // sock = const 0
+            mk_var(0, Expr::Const(0, 8)),   // function arg 0 = buf
+            mk_var(1, Expr::Const(0, 8)),   // sock = const 0
             mk_var(2, Expr::Const(256, 8)), // len = const 256
-            mk_var(3, Expr::Const(0, 8)),  // flags = const 0
+            mk_var(3, Expr::Const(0, 8)),   // flags = const 0
         ];
         let ssa = SsaCfg {
             blocks: vec![SsaBlock {
@@ -1099,10 +1241,7 @@ mod tests {
         use crate::callgraph::{build_call_graph, tarjan_sccs};
 
         // helper SSA: arg0=VarId(0), arg1=VarId(1), strcpy at 0x125d8.
-        let helper_vars = vec![
-            mk_var(0, Expr::Const(0, 8)),
-            mk_var(1, Expr::Const(0, 8)),
-        ];
+        let helper_vars = vec![mk_var(0, Expr::Const(0, 8)), mk_var(1, Expr::Const(0, 8))];
         let helper_ssa = SsaCfg {
             blocks: vec![SsaBlock {
                 id: BlockId(0),
@@ -1123,10 +1262,7 @@ mod tests {
         helper_args.insert(1u8, VarId(1));
 
         // outer SSA: arg0=VarId(0), arg1=VarId(1), calls helper at 0x2000.
-        let outer_vars = vec![
-            mk_var(0, Expr::Const(0, 8)),
-            mk_var(1, Expr::Const(0, 8)),
-        ];
+        let outer_vars = vec![mk_var(0, Expr::Const(0, 8)), mk_var(1, Expr::Const(0, 8))];
         let outer_ssa = SsaCfg {
             blocks: vec![SsaBlock {
                 id: BlockId(0),
@@ -1149,10 +1285,8 @@ mod tests {
         let mut imports = HashMap::new();
         imports.insert(0x125d8u64, "strcpy".to_string());
 
-        let funcs: Vec<(FuncId, &SsaCfg)> = vec![
-            (FuncId(0x2000), &helper_ssa),
-            (FuncId(0x1000), &outer_ssa),
-        ];
+        let funcs: Vec<(FuncId, &SsaCfg)> =
+            vec![(FuncId(0x2000), &helper_ssa), (FuncId(0x1000), &outer_ssa)];
         let graph = build_call_graph(&funcs, &imports);
         let sccs = tarjan_sccs(&graph);
 
@@ -1172,8 +1306,7 @@ mod tests {
             },
         );
 
-        let summaries =
-            build_summaries_bottom_up(&graph, &sccs, &contexts, &imports);
+        let summaries = build_summaries_bottom_up(&graph, &sccs, &contexts, &imports);
 
         // Helper has the direct strcpy sink.
         let helper_sum = summaries.get(&FuncId(0x2000)).unwrap();
@@ -1271,8 +1404,7 @@ mod tests {
             );
         }
 
-        let summaries =
-            build_summaries_bottom_up(&graph, &sccs, &contexts, &imports);
+        let summaries = build_summaries_bottom_up(&graph, &sccs, &contexts, &imports);
         for (fid, addr) in [
             (FuncId(0x3000), 0x3000u64),
             (FuncId(0x2000), 0x2000u64),
@@ -1334,10 +1466,8 @@ mod tests {
         let mut imports = HashMap::new();
         imports.insert(0x125d8u64, "strcpy".to_string());
 
-        let funcs: Vec<(FuncId, &SsaCfg)> = vec![
-            (FuncId(0x2000), &helper_ssa),
-            (FuncId(0x1000), &outer_ssa),
-        ];
+        let funcs: Vec<(FuncId, &SsaCfg)> =
+            vec![(FuncId(0x2000), &helper_ssa), (FuncId(0x1000), &outer_ssa)];
         let graph = build_call_graph(&funcs, &imports);
         let sccs = tarjan_sccs(&graph);
 
@@ -1361,8 +1491,7 @@ mod tests {
             },
         );
 
-        let summaries =
-            build_summaries_bottom_up(&graph, &sccs, &contexts, &imports);
+        let summaries = build_summaries_bottom_up(&graph, &sccs, &contexts, &imports);
 
         // helper's intra summary: strcpy watched=Arg(1) → helper's
         // VarId(0) → helper arg 0.
@@ -1430,8 +1559,7 @@ mod tests {
                 arg_vars: &arg_vars,
             },
         );
-        let summaries =
-            build_summaries_bottom_up(&graph, &sccs, &contexts, &imports);
+        let summaries = build_summaries_bottom_up(&graph, &sccs, &contexts, &imports);
         // Empty intra summaries; no propagation across the cycle.
         assert!(summaries.get(&FuncId(0xA000)).unwrap().is_leaf());
         assert!(summaries.get(&FuncId(0xB000)).unwrap().is_leaf());

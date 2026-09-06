@@ -7,6 +7,9 @@ an MCP server, and does not require Ghidra or a JVM.
 For instructions that can be copied into a target-analysis workspace, see
 [the drop-in agent contract](AGENTS-rsleigh.md).
 
+For planned improvements and completion criteria, see the
+[LLM-assisted RE roadmap](llm-re-roadmap.md).
+
 ## Start a session
 
 Use the [command guide](cli-reference.md) for syntax and input-type limits.
@@ -187,7 +190,7 @@ their existing error behavior.
 
 ```bash
 rsleigh FILE FUNCTION --card --json --pcode > card.json
-jq -e '.schema == "rsleigh.card/v1" and .status != "failed"' card.json
+jq -e '.schema == "rsleigh.card/v2" and .status != "failed"' card.json
 rsleigh FILE --verify-index out/
 ```
 
@@ -202,7 +205,7 @@ rsleigh FILE FUNCTION --card --pcode
 rsleigh FILE FUNCTION --card --pcode --decompile
 ```
 
-Cards render text by default and one `rsleigh.card/v1` object with `--json`.
+Cards render text by default and one `rsleigh.card/v2` object with `--json`.
 Request exactly one function per invocation. Both renderers use the same
 bounded evidence model, including status, diagnostics, warnings, binary SHA-256,
 architecture, image base, and tool version.
@@ -288,31 +291,159 @@ artifacts; they are not a signature or a semantic correctness proof.
 
 ## Bounded backward SSA query
 
+Choose a semantic root directly, without first fetching a full SSA dump:
+
+```bash
+rsleigh FILE --ssa-slice FUNCTION --call-site 0x401024 --arg 0
+rsleigh FILE --ssa-slice FUNCTION --return
+rsleigh FILE --ssa-slice FUNCTION --return --at 0x401049
+rsleigh FILE --ssa-slice FUNCTION --condition 0x401042
+```
+
+Addresses identify the call, return, or conditional-branch **instruction**,
+not the callee or block start. Use addresses from your target's card. Select
+exactly one root. `--return` requires `--at` if multiple return sites exist,
+even if they return the same value. A return without a recovered value is
+unsupported; the tool does not guess a value for void functions.
+
+`--arg` is a zero-based integer/pointer ABI slot: cdecl32 uses stack-push
+order, and supported register conventions use their integer register order.
+The output names the detected convention. Recovery does not establish the
+callee's signature. Missing register slots are not renumbered. Floating-point
+and mixed signatures, stack arguments under register conventions, and
+MIPS/RISC-V argument conventions are currently unsupported by selectors.
+Scalar return selection uses the native return-register layout on all six
+architectures, including MIPS V0 and RISC-V A0. Unsupported call conventions
+invalidate register values conservatively instead of retaining pre-call values.
+
+Successful responses add `selection` with the root ID, instruction address,
+selector, calling convention, and interpretation. Failures expose
+`selection_error.code`: `ambiguous_target` (with candidate sites),
+`missing_target`, or `unsupported_root`, and exit 1 without a slice. Addresses
+must be hexadecimal with a `0x` prefix. Variable-ID selection remains available:
+
 ```bash
 rsleigh FILE --ssa-json FUNCTION > function.ssa.json
 # Choose an ID from function.ssa.json's vars array:
 rsleigh FILE --ssa-slice FUNCTION --var 42 --max-nodes 64 --max-depth 16
 ```
 
-`--ssa-slice` emits one `rsleigh.ssa-slice/v1` JSON object. It shares the
+`--ssa-slice` emits one `rsleigh.ssa-slice/v3` JSON object. It shares the
 post-fold SSA builder with `--ssa-json`; variable IDs belong to that binary,
 function, and tool version. The envelope records SHA-256, function address,
 architecture, version, snapshot stage, status, and diagnostics.
 
 The `slice` contains nodes with IDs, expression kinds, definition block IDs,
 input variable IDs, depth, and unresolved boundaries. Phi inputs and all three
-ternary inputs participate. Cycles are visited once. Memory loads, field loads,
-call results, and user operations stop traversal explicitly. Inputs at those
-boundaries are reported but not followed. Unknown values, external parameters,
-and missing IDs remain visible; this is intra-function expression dependence,
-not memory alias analysis, control dependence, or a reachability proof.
+ternary inputs participate. Each node belongs to a `context_id`; use
+`(context_id, var_id)` as its identity. Repeated helper invocations have separate
+contexts. Local `inputs` stay in the node's context; `links` connect callee
+returns and caller argument bindings across contexts.
 
-Defaults are 64 nodes and depth 16; hard caps are 256 nodes, depth 32, 2,048
-input edges, and 256 block records. `truncated` reports budget cuts;
+Loads follow known reaching stores at exact stack slots or constant addresses.
+Stack slots are relative to the same SSA frame/stack base. Overlapping stores,
+unknown pointer writes, calls, and user operations conservatively invalidate
+memory state. Joins require a known store on every predecessor; several known
+stores remain alternative dependencies. `memory` records store IDs or the
+reason a load remains unresolved, including `ambiguous_alias`,
+`overlapping_store`, and `unsupported_side_effects`.
+Memory forwarding currently covers x86, x86-64, AArch64, and ARM32. MIPS/RISC-V
+memory loads remain explicit unresolved boundaries.
+
+Direct helper results can expand into callee return dependencies and bind ABI
+parameters to the selected call's arguments. Supported binding conventions are
+x86, x86-64, AArch64, and ARM32; MIPS and RISC-V helper binding remains unavailable.
+Call metadata includes its raw operation origin, target, confidence, and
+resolution method. External/unresolved calls, unsupported side effects, missing
+arguments, and recursive calls remain explicit boundaries. These results claim
+data dependencies, not control dependence, proved reachability, or a confirmed
+vulnerability.
+
+Defaults are 64 nodes, depth 16, call depth 2, 16 functions, and 100,000 traversal
+work units. Configure helper traversal with `--max-call-depth N`,
+`--max-functions N`, and `--max-traversal-work N`. Call depth zero stops at calls;
+zero traversal work retains decoded evidence without visiting nodes. Function
+counts include the root and attempted callee admissions. Hard caps are 256 nodes,
+depth 32, call depth 8, 32 functions, 1,000,000 work units, 2,048 input/link edges,
+and 256 block records. Work counts SSA scans, nodes, edges, and admissions;
+callee decode/SSA construction also obeys the shared execution limits below.
+`truncated` reports budget cuts;
 `complete` is false for cuts or unresolved boundaries. Such queries exit 2 and
 retain their evidence. A nonexistent root ID fails with exit 1. Definition
 block IDs can be empty for entry values or assignments removed by folding;
-SSA nodes do not claim instruction-level source mappings.
+SSA nodes retain bounded instruction/P-code origins independently of surviving
+assignment blocks. See [typed evidence](output-formats.md#typed-evidence-and-origin-migration).
+
+### Reuse analysis
+
+Add `--analysis-cache DIR` to slice queries or cards. Slices persist decoded
+instructions and folded SSA; cards persist decoded evidence and their full
+decompilation/metadata so subsequent pages do not rebuild analysis:
+
+```bash
+rsleigh FILE --ssa-slice FUNCTION --return --analysis-cache analysis-cache/
+rsleigh FILE --ssa-slice FUNCTION --condition 0x401042 --analysis-cache analysis-cache/
+rsleigh FILE FUNCTION --card --json --pcode --analysis-cache analysis-cache/
+rsleigh FILE FUNCTION --card --json --pcode --operation-cursor 120 --analysis-cache analysis-cache/
+```
+
+`metrics.cache` reports `disabled`, `miss`, or `hit` (`skipped` if a deadline
+prevents lookup); `decode_builds` and
+`ssa_builds` are zero on a hit. Identity includes binary content (and therefore
+its embedded architecture/mode/base), the linked tool build, function
+address, snapshot format, and effective `RSLEIGH_OPAQUE_FOLD` setting. Output
+limits, root selectors, and execution allowances do not invalidate completed
+analysis. Tool identity uses Mach-O UUID or ELF GNU build ID plus image size,
+falling back to executable SHA-256 when no linker ID is available. Rebuilt tools
+invalidate cached analysis even when the package version is unchanged.
+
+Card identity also includes the function name and SHA-256 of companion PDB and
+dSYM inputs, including their absence; changes during analysis prevent cache
+publication. Signature tables are compiled into the identified build. Slice
+snapshots do not consume external debug files. Cards and slices have separate
+analysis profiles, since cards apply additional debug and presentation passes.
+
+Entries live under `DIR/IDENTITY/generations/GENERATION/`. Each identity's
+`index.json` atomically publishes a completed immutable generation. Reads
+verify identity, both manifests, artifact size and SHA-256, and SSA references.
+Invalid or interrupted entries are misses and are rebuilt. Decode failures
+are not cached. Completed snapshots retain their SSA diagnostics and unresolved
+boundaries; a hit does not upgrade evidence to semantic correctness.
+
+No automatic eviction runs. Remove an unused identity directory, or the whole
+cache directory, to reclaim storage; stop concurrent writers first if removal
+must remain effective. Unpublished generations can be removed while preserving
+the generation named by `index.json`. Snapshot artifacts are limited to 64 MiB.
+Cache write failures appear in metrics while the computed evidence stays usable.
+
+### Limit execution work
+
+Cards and slices accept limits independent of their output caps:
+
+```bash
+rsleigh FILE --ssa-slice FUNCTION --return --max-decode-instructions 500 --max-ssa-work 100000 --deadline-ms 2000
+rsleigh FILE FUNCTION --card --json --pcode --max-ssa-work 100000 --deadline-ms 2000
+```
+
+`--max-decode-instructions` limits decoder attempts, including failed attempts.
+`--max-ssa-work` counts CFG/SSA/fold traversal steps and SSA allocations; it is
+an execution counter, not a variable-count or output-size cap. Allowances are
+optional; zero permits no new work in that category. A cache hit can therefore
+succeed with both work allowances zero. Briefs and indexes retain their existing
+behavior and do not accept these per-function analysis options.
+
+`--deadline-ms` is a cooperative elapsed-time deadline. Checkpoints run during
+decoding, CFG/SSA/folding, structure recovery, and repeated expression/text
+rendering, and between cache stages. Individual parsing or filesystem calls
+may run past the deadline before the next checkpoint; it is not a process kill
+timer. Use an external timeout when a strict wall-clock bound is required.
+
+`metrics.execution` records effective allowances, consumed decode/SSA work, and
+the stopping stage, reason, consumption, and limit. Limits stop work before the
+next counted unit. Stopped slice queries return `slice: null` and a bounded
+`evidence.instructions` list; cards retain their decoded pages. Exit 2 means
+decoded evidence survives; exit 1 means no instruction evidence is available.
+Stopped analysis is never published as a complete cache snapshot.
 
 ## LLM reporting contract
 

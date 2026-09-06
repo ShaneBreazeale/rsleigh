@@ -88,7 +88,7 @@ fn write_new(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// Readers pin root/index.json once. A writer never modifies any published
 /// generation; its only replacement is the final atomic manifest rename.
-fn publish(
+pub(super) fn publish(
     root: &Path,
     mut manifest: Value,
     artifacts: &[(&str, Vec<u8>)],

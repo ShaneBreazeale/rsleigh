@@ -56,6 +56,123 @@ pub struct CallEdge {
     pub call_site: u64,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DependencyCall {
+    pub target_address: Option<u64>,
+    pub import: Option<String>,
+    pub origin: crate::provenance::OperationOrigin,
+    pub confidence: &'static str,
+    pub resolution: &'static str,
+    pub arguments: std::collections::BTreeMap<usize, crate::ir::VarId>,
+}
+
+/// Resolve a call-result dependency using the CFG's resolved target and its
+/// retained raw call origin. Never search unrelated register versions to guess
+/// an indirect target. The ordinary graph and this query share classification.
+pub fn dependency_call<'a>(
+    ssa: &crate::ir::SsaCfg,
+    value: crate::ir::VarId,
+    cc: crate::fold::CallingConv,
+    imports: &HashMap<u64, String>,
+    operation: impl Fn(crate::provenance::OperationOrigin) -> Option<&'a pcode_ir::PcodeOp>,
+) -> Result<DependencyCall, &'static str> {
+    use crate::ir::{CallTarget, SsaTerminator};
+    let value_origins = &ssa.var(value).origins.operations;
+    let mut candidates = Vec::new();
+    for block in &ssa.blocks {
+        crate::budget::work("call_resolution", 1);
+        if let SsaTerminator::Call {
+            target,
+            args,
+            out: Some(out),
+            ..
+        } = &block.terminator
+        {
+            let origins: Vec<_> = ssa
+                .var(*out)
+                .origins
+                .operations
+                .iter()
+                .copied()
+                .filter(|origin| {
+                    value_origins.contains(origin)
+                        && matches!(
+                            operation(*origin),
+                            Some(
+                                pcode_ir::PcodeOp::Call { .. } | pcode_ir::PcodeOp::CallInd { .. }
+                            )
+                        )
+                })
+                .collect();
+            if origins.len() == 1 {
+                candidates.push((target, args, origins[0]));
+            }
+        }
+    }
+    if candidates.len() != 1 {
+        return Err(if candidates.is_empty() {
+            "unknown_call"
+        } else {
+            "ambiguous_call"
+        });
+    }
+    let (target, args, origin) = candidates[0];
+    let mut arguments = std::collections::BTreeMap::new();
+    let registers = crate::fold::abi(cc).int_args;
+    if registers.is_empty() {
+        arguments.extend(args.iter().copied().enumerate());
+    } else {
+        for &arg in args {
+            let var = ssa.var(arg);
+            if var.varnode.space == pcode_ir::AddressSpaceId::Register {
+                if let Some(slot) = registers
+                    .iter()
+                    .position(|offset| *offset == var.varnode.offset)
+                {
+                    arguments.insert(slot, arg);
+                }
+            }
+        }
+    }
+    let CallTarget::Direct(address) = target else {
+        return Ok(DependencyCall {
+            target_address: None,
+            import: None,
+            origin,
+            arguments,
+            confidence: "unknown",
+            resolution: "unresolved_indirect",
+        });
+    };
+    let edge = classify_edges(
+        target,
+        &ssa.vars,
+        imports,
+        &std::collections::HashSet::from([FuncId(*address)]),
+        None,
+        0,
+    )
+    .remove(0);
+    let import = if let CalleeRef::Import { name, .. } = edge.callee {
+        Some(name)
+    } else {
+        None
+    };
+    let direct = matches!(operation(origin), Some(pcode_ir::PcodeOp::Call { dest }) if dest.space == pcode_ir::AddressSpaceId::Ram);
+    Ok(DependencyCall {
+        target_address: Some(*address),
+        import,
+        origin,
+        arguments,
+        confidence: if direct { "direct" } else { "heuristic" },
+        resolution: if direct {
+            "raw_direct_call"
+        } else {
+            "cfg_resolved_indirect"
+        },
+    })
+}
+
 /// Static call graph over a set of functions. Built once per
 /// binary, consumed by the summary builder.
 #[derive(Debug, Default)]
@@ -235,8 +352,7 @@ pub fn build_call_graph_with_image(
     const VTABLE_CAP: usize = 64;
 
     let mut g = CallGraph::new();
-    let func_set: std::collections::HashSet<FuncId> =
-        funcs.iter().map(|(id, _)| *id).collect();
+    let func_set: std::collections::HashSet<FuncId> = funcs.iter().map(|(id, _)| *id).collect();
 
     for (id, _) in funcs {
         g.add_function(*id);
@@ -253,14 +369,8 @@ pub fn build_call_graph_with_image(
         for block in &ssa.blocks {
             for stmt in &block.stmts {
                 if let crate::ir::Stmt::Call { target, .. } = stmt {
-                    let edges = classify_edges(
-                        target,
-                        &ssa.vars,
-                        imports,
-                        &func_set,
-                        image,
-                        VTABLE_CAP,
-                    );
+                    let edges =
+                        classify_edges(target, &ssa.vars, imports, &func_set, image, VTABLE_CAP);
                     for e in edges {
                         let key = (e.call_site, e.callee.clone());
                         if seen.insert(key) {
@@ -270,14 +380,8 @@ pub fn build_call_graph_with_image(
                 }
             }
             if let crate::ir::SsaTerminator::Call { target, .. } = &block.terminator {
-                let edges = classify_edges(
-                    target,
-                    &ssa.vars,
-                    imports,
-                    &func_set,
-                    image,
-                    VTABLE_CAP,
-                );
+                let edges =
+                    classify_edges(target, &ssa.vars, imports, &func_set, image, VTABLE_CAP);
                 for e in edges {
                     let key = (e.call_site, e.callee.clone());
                     if seen.insert(key) {
@@ -378,9 +482,10 @@ impl<'a> ImageView<'a> {
                 .data
                 .get(off..off + 4)
                 .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as u64),
-            8 => self.data.get(off..off + 8).map(|b| {
-                u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
-            }),
+            8 => self
+                .data
+                .get(off..off + 8)
+                .map(|b| u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])),
             _ => None,
         }
     }
@@ -432,10 +537,7 @@ pub fn resolve_vtable_targets(
         def
     }
 
-    let target_def = match drill_var(
-        vars.iter().rev().find(|d| d.varnode == *target_vn),
-        vars,
-    ) {
+    let target_def = match drill_var(vars.iter().rev().find(|d| d.varnode == *target_vn), vars) {
         Some(d) => d,
         None => return Vec::new(),
     };
@@ -682,8 +784,8 @@ mod tests {
     }
 
     use crate::ir::{
-        BlockId, CallTarget, Diagnostic, Expr, InferredType, SsaBlock, SsaCfg,
-        SsaTerminator, Stmt, VarDef, VarId,
+        BlockId, CallTarget, Diagnostic, Expr, InferredType, SsaBlock, SsaCfg, SsaTerminator, Stmt,
+        VarDef, VarId,
     };
     use pcode_ir::Varnode;
 
@@ -698,27 +800,32 @@ mod tests {
             call_return: false,
             inferred_type: InferredType::Unknown,
             display_type: None,
+            memory: None,
+            origins: Default::default(),
         }
     }
 
     fn ssa_with_terminator_call(target: CallTarget, vars: Vec<VarDef>) -> SsaCfg {
         SsaCfg {
-            blocks: vec![SsaBlock {
-                id: BlockId(0),
-                addr: 0,
-                stmts: vec![],
-                terminator: SsaTerminator::Call {
-                    target,
-                    args: vec![],
-                    out: None,
-                    fallthrough: BlockId(1),
+            blocks: vec![
+                SsaBlock {
+                    id: BlockId(0),
+                    addr: 0,
+                    stmts: vec![],
+                    terminator: SsaTerminator::Call {
+                        target,
+                        args: vec![],
+                        out: None,
+                        fallthrough: BlockId(1),
+                    },
                 },
-            }, SsaBlock {
-                id: BlockId(1),
-                addr: 0x10,
-                stmts: vec![],
-                terminator: SsaTerminator::Return(None),
-            }],
+                SsaBlock {
+                    id: BlockId(1),
+                    addr: 0x10,
+                    stmts: vec![],
+                    terminator: SsaTerminator::Return(None),
+                },
+            ],
             vars,
             entry: BlockId(0),
             diagnostics: Vec::<Diagnostic>::new(),
@@ -736,16 +843,16 @@ mod tests {
             CallTarget::Direct(0x3000),
             vec![mk_var(0, Expr::Const(0, 8))],
         );
-        let funcs = vec![
-            (FuncId(0x1000), &ssa_a),
-            (FuncId(0x2000), &ssa_b),
-        ];
+        let funcs = vec![(FuncId(0x1000), &ssa_a), (FuncId(0x2000), &ssa_b)];
         let imports: HashMap<u64, String> = HashMap::new();
         let g = build_call_graph(&funcs, &imports);
 
         let edges_a = g.edges.get(&FuncId(0x1000)).unwrap();
         assert_eq!(edges_a.len(), 1);
-        assert!(matches!(edges_a[0].callee, CalleeRef::Direct(FuncId(0x2000))));
+        assert!(matches!(
+            edges_a[0].callee,
+            CalleeRef::Direct(FuncId(0x2000))
+        ));
         assert_eq!(g.direct_successors(FuncId(0x1000)), vec![FuncId(0x2000)]);
     }
 
@@ -833,12 +940,18 @@ mod tests {
         // Build SSA: target = Load(Add(Const(0x4000), Mult(idx, Const(8))))
         let target_vn = Varnode::register(0x100, 8);
         let vars = vec![
-            mk_var(0, Expr::Const(0x4000, 8)),         // 0: table base
-            mk_var(1, Expr::Const(8, 8)),              // 1: stride
-            mk_var(2, Expr::Const(7, 8)),              // 2: idx (any)
-            mk_var(3, Expr::BinOp(crate::ir::BinOpKind::Mult, VarId(2), VarId(1))), // 3: idx*stride
-            mk_var(4, Expr::BinOp(crate::ir::BinOpKind::Add, VarId(0), VarId(3))),  // 4: addr
-            mk_var_with_vn(5, Expr::Load(VarId(4)), target_vn.clone()),             // 5: target
+            mk_var(0, Expr::Const(0x4000, 8)), // 0: table base
+            mk_var(1, Expr::Const(8, 8)),      // 1: stride
+            mk_var(2, Expr::Const(7, 8)),      // 2: idx (any)
+            mk_var(
+                3,
+                Expr::BinOp(crate::ir::BinOpKind::Mult, VarId(2), VarId(1)),
+            ), // 3: idx*stride
+            mk_var(
+                4,
+                Expr::BinOp(crate::ir::BinOpKind::Add, VarId(0), VarId(3)),
+            ), // 4: addr
+            mk_var_with_vn(5, Expr::Load(VarId(4)), target_vn.clone()), // 5: target
         ];
 
         let out = resolve_vtable_targets(&target_vn, &vars, image, 64);
@@ -861,8 +974,14 @@ mod tests {
             mk_var(0, Expr::Const(0x4000, 8)),
             mk_var(1, Expr::Const(3, 8)), // log2(8)
             mk_var(2, Expr::Const(0, 8)), // idx
-            mk_var(3, Expr::BinOp(crate::ir::BinOpKind::Lsl, VarId(2), VarId(1))),
-            mk_var(4, Expr::BinOp(crate::ir::BinOpKind::Add, VarId(3), VarId(0))),
+            mk_var(
+                3,
+                Expr::BinOp(crate::ir::BinOpKind::Lsl, VarId(2), VarId(1)),
+            ),
+            mk_var(
+                4,
+                Expr::BinOp(crate::ir::BinOpKind::Add, VarId(3), VarId(0)),
+            ),
             mk_var_with_vn(5, Expr::Load(VarId(4)), target_vn.clone()),
         ];
         let out = resolve_vtable_targets(&target_vn, &vars, image, 64);
@@ -880,10 +999,7 @@ mod tests {
         data[0x10..0x18].copy_from_slice(&0xAAu64.to_le_bytes());
         data[0x18..0x20].copy_from_slice(&0xBBu64.to_le_bytes());
         // 0x20..0x28 left zero
-        let segs: Vec<(u64, u64, u64)> = vec![
-            (0x3000, 0x10, 0),
-            (0x5000, 0x40, 0x10),
-        ];
+        let segs: Vec<(u64, u64, u64)> = vec![(0x3000, 0x10, 0), (0x5000, 0x40, 0x10)];
         let image = ImageView {
             data: &data,
             segs: &segs,
@@ -891,12 +1007,18 @@ mod tests {
         };
         let target_vn = Varnode::register(0x300, 8);
         let vars = vec![
-            mk_var(0, Expr::Const(0x3000, 8)),       // slot const
-            mk_var(1, Expr::Load(VarId(0))),         // vtable ptr
+            mk_var(0, Expr::Const(0x3000, 8)), // slot const
+            mk_var(1, Expr::Load(VarId(0))),   // vtable ptr
             mk_var(2, Expr::Const(8, 8)),
             mk_var(3, Expr::Const(2, 8)),
-            mk_var(4, Expr::BinOp(crate::ir::BinOpKind::Mult, VarId(3), VarId(2))),
-            mk_var(5, Expr::BinOp(crate::ir::BinOpKind::Add, VarId(1), VarId(4))),
+            mk_var(
+                4,
+                Expr::BinOp(crate::ir::BinOpKind::Mult, VarId(3), VarId(2)),
+            ),
+            mk_var(
+                5,
+                Expr::BinOp(crate::ir::BinOpKind::Add, VarId(1), VarId(4)),
+            ),
             mk_var_with_vn(6, Expr::Load(VarId(5)), target_vn.clone()),
         ];
         let out = resolve_vtable_targets(&target_vn, &vars, image, 64);
@@ -922,8 +1044,14 @@ mod tests {
             mk_var(0, Expr::Const(0x4000, 8)),
             mk_var(1, Expr::Const(8, 8)),
             mk_var(2, Expr::Const(0, 8)),
-            mk_var(3, Expr::BinOp(crate::ir::BinOpKind::Mult, VarId(2), VarId(1))),
-            mk_var(4, Expr::BinOp(crate::ir::BinOpKind::Add, VarId(0), VarId(3))),
+            mk_var(
+                3,
+                Expr::BinOp(crate::ir::BinOpKind::Mult, VarId(2), VarId(1)),
+            ),
+            mk_var(
+                4,
+                Expr::BinOp(crate::ir::BinOpKind::Add, VarId(0), VarId(3)),
+            ),
             mk_var_with_vn(5, Expr::Load(VarId(4)), target_vn.clone()),
         ];
         let ssa = SsaCfg {
@@ -1056,8 +1184,14 @@ mod tests {
             mk_var(0, Expr::Const(0x4000, 8)),
             mk_var(1, Expr::Const(8, 8)),
             mk_var(2, Expr::Const(0, 8)),
-            mk_var(3, Expr::BinOp(crate::ir::BinOpKind::Mult, VarId(2), VarId(1))),
-            mk_var(4, Expr::BinOp(crate::ir::BinOpKind::Add, VarId(0), VarId(3))),
+            mk_var(
+                3,
+                Expr::BinOp(crate::ir::BinOpKind::Mult, VarId(2), VarId(1)),
+            ),
+            mk_var(
+                4,
+                Expr::BinOp(crate::ir::BinOpKind::Add, VarId(0), VarId(3)),
+            ),
             mk_var_with_vn(5, Expr::Load(VarId(4)), target_vn.clone()),
         ];
         let out = resolve_vtable_targets(&target_vn, &vars, image, 8);
@@ -1079,8 +1213,14 @@ mod tests {
             mk_var(0, Expr::Const(0x4000, 8)),
             mk_var(1, Expr::Const(4, 8)), // wrong stride
             mk_var(2, Expr::Const(0, 8)),
-            mk_var(3, Expr::BinOp(crate::ir::BinOpKind::Mult, VarId(2), VarId(1))),
-            mk_var(4, Expr::BinOp(crate::ir::BinOpKind::Add, VarId(0), VarId(3))),
+            mk_var(
+                3,
+                Expr::BinOp(crate::ir::BinOpKind::Mult, VarId(2), VarId(1)),
+            ),
+            mk_var(
+                4,
+                Expr::BinOp(crate::ir::BinOpKind::Add, VarId(0), VarId(3)),
+            ),
             mk_var_with_vn(5, Expr::Load(VarId(4)), target_vn.clone()),
         ];
         let out = resolve_vtable_targets(&target_vn, &vars, image, 64);

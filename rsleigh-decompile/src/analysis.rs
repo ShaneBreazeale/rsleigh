@@ -385,24 +385,42 @@ use crate::ir::{CallTarget, Diagnostic, Severity, SsaCfg, SsaTerminator};
 pub fn collect_callsite_return_uses(ssa: &SsaCfg) -> Vec<(u64, bool)> {
     let mut out = Vec::new();
     for block in &ssa.blocks {
-        let SsaTerminator::Call { target, .. } = &block.terminator else {
+        let SsaTerminator::Call {
+            target,
+            out: result,
+            ..
+        } = &block.terminator
+        else {
             continue;
         };
         let CallTarget::Direct(callee) = target else {
             continue;
         };
-        // The synthetic ret_var Stmt::Assign(ret_var) with call_return=true
-        // is appended to the call block by `clobber_caller_saved`; if it
-        // has any use_count > 0 reads downstream, the result was consumed.
+        // Count explicit consumers of this call's result. An inferred
+        // `call; ret` forwarding return is itself the ambiguity being
+        // validated, and must not serve as evidence for its own inference.
         let mut uses_return = false;
         for b in &ssa.blocks {
             for stmt in &b.stmts {
-                if let crate::ir::Stmt::Assign(var_id) = stmt {
-                    let vdef = &ssa.vars[var_id.0 as usize];
-                    if vdef.call_return && vdef.use_count > 0 {
-                        uses_return = true;
+                let Some(result) = result else {
+                    continue;
+                };
+                uses_return |= match stmt {
+                    crate::ir::Stmt::Assign(id) if id != result => {
+                        crate::ssa::collect_expr_refs(&ssa.var(*id).expr).contains(result)
                     }
-                }
+                    crate::ir::Stmt::Store { addr, val } => addr == result || val == result,
+                    crate::ir::Stmt::Call { args, .. } => args.contains(result),
+                    _ => false,
+                };
+            }
+            if let Some(result) = result {
+                uses_return |= match &b.terminator {
+                    SsaTerminator::Call { args, .. } => args.contains(result),
+                    SsaTerminator::CBranch { cond, .. } => cond == result,
+                    SsaTerminator::Indirect(value) => value == result,
+                    _ => false,
+                };
             }
             if uses_return {
                 break;

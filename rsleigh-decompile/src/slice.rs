@@ -4,6 +4,9 @@ use crate::ir::{Expr, SsaCfg, SsaTerminator, Stmt, VarId};
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
+pub mod interprocedural;
+pub mod selector;
+
 pub const MAX_NODES: usize = 256;
 pub const MAX_DEPTH: usize = 32;
 pub const MAX_INPUTS: usize = 2048;
@@ -22,6 +25,9 @@ pub struct SliceNode {
     /// Definition sites retained by folding; empty for entry values or removed assignments.
     pub block_ids: Vec<usize>,
     pub kind: String,
+    pub origins: crate::provenance::Origins,
+    pub memory: Option<crate::memory::Access>,
+    pub origins_unavailable: Option<&'static str>,
     pub size: u32,
     pub constant: Option<u64>,
     pub parameter: Option<String>,
@@ -92,7 +98,7 @@ pub fn backward_slice(
     let mut complete = true;
     while let Some((id, depth)) = queue.pop_front() {
         let v = &ssa.vars[id.0 as usize];
-        let (kind, dependencies, boundary) = match &v.expr {
+        let (kind, mut dependencies, mut boundary) = match &v.expr {
             Expr::Var(a) => ("var".into(), vec![*a], None),
             Expr::Const(_, _) => ("constant".into(), vec![], None),
             Expr::BinOp(op, a, b) => (format!("binary.{op:?}"), vec![*a, *b], None),
@@ -109,6 +115,23 @@ pub fn backward_slice(
             }
             Expr::Unknown => ("unknown".into(), vec![], Some("unknown_value")),
         };
+        if let Some(crate::memory::Access::Load {
+            stores,
+            boundary: memory_boundary,
+            ..
+        }) = &v.memory
+        {
+            if matches!(v.expr, Expr::Load(_) | Expr::FieldAccess(..)) {
+                boundary = memory_boundary
+                    .map(crate::memory::Boundary::as_str)
+                    .or(boundary);
+            }
+            for store in stores {
+                if !dependencies.contains(store) {
+                    dependencies.push(*store);
+                }
+            }
+        }
         let boundary = if v.call_return || call_outputs.contains(&id) {
             Some("unmodeled_call")
         } else {
@@ -167,6 +190,17 @@ pub fn backward_slice(
             depth,
             block_ids,
             kind,
+            origins: v.origins.clone(),
+            memory: v.memory.clone(),
+            origins_unavailable: if !v.origins.operations.is_empty() {
+                None
+            } else if matches!(v.expr, Expr::Unknown) {
+                Some("external_or_unknown_value")
+            } else if v.origins.synthetic {
+                Some("synthetic_definition")
+            } else {
+                Some("source_not_retained")
+            },
             size: v.size,
             constant: if let Expr::Const(value, _) = v.expr {
                 Some(value)
@@ -222,6 +256,8 @@ mod tests {
                 call_return: false,
                 inferred_type: InferredType::Unknown,
                 display_type: None,
+                memory: None,
+                origins: Default::default(),
             })
             .collect();
         SsaCfg {

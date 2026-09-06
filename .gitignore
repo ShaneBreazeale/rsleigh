@@ -9,4 +9,6 @@ hs_err_pid*.log
 rsleigh-decompile/data/ghidra_*.json
 .opt/
 results/
+# Reproducible agent RE measurements are versioned source artifacts.
+!/test-harness/fixtures/agent-re/results/
 scripts/__pycache__/

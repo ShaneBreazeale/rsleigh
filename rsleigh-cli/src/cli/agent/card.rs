@@ -1,7 +1,18 @@
 use super::*;
 
+mod analysis;
+
 pub(super) fn run(binary_path: &str, data: &[u8], args: &[String]) -> Result<u8, String> {
-    let values = ["--instruction-cursor", "--operation-cursor", "--limit"];
+    let _execution = execution_scope(args)?;
+    let values = [
+        "--instruction-cursor",
+        "--operation-cursor",
+        "--limit",
+        "--analysis-cache",
+        "--max-decode-instructions",
+        "--max-ssa-work",
+        "--deadline-ms",
+    ];
     let mut targets = Vec::new();
     let mut i = 2;
     while i < args.len() {
@@ -28,22 +39,32 @@ pub(super) fn run(binary_path: &str, data: &[u8], args: &[String]) -> Result<u8,
         .find(|(a, _)| *a == address)
         .map(|(_, n)| n.clone())
         .unwrap_or_else(|| format!("FUN_{address:x}"));
-    let mut diagnostics = Vec::new();
-    let instructions = decode_func_with_diagnostics(
-        address,
-        &symbols,
-        &segs,
+    let (prepared, metrics) = analysis::prepare(
+        binary_path,
         data,
-        &mut rsleigh_api::Decoder::new(arch),
-        &mut diagnostics,
-    );
+        args,
+        arch,
+        address,
+        &name,
+        &obj,
+        &segs,
+        &symbols,
+    )?;
+    let analysis::Analysis {
+        instructions,
+        pseudocode,
+        imports,
+        strings,
+        mut warnings,
+        mut diagnostics,
+    } = prepared;
     if instructions.is_empty() {
         let error = "no decodable instructions at requested address";
         diagnostics.push(diagnostic("decode", "no_instructions", error));
         emit(
-            &json!({"schema":"rsleigh.card/v1", "status":"failed", "error":error,
+            &json!({"schema":"rsleigh.card/v2", "status":"failed", "error":error,
             "file":{"sha256":compute_sha256(data)}, "function":{"name":name,"address":format!("0x{address:x}")},
-            "diagnostics":diagnostics, "instructions":[], "operations":[]}),
+            "diagnostics":diagnostics, "metrics":metrics, "instructions":[], "operations":[]}),
         );
         return Ok(1);
     }
@@ -56,44 +77,10 @@ pub(super) fn run(binary_path: &str, data: &[u8], args: &[String]) -> Result<u8,
     }
     let total_ops = instructions
         .iter()
-        .map(|(_, inst)| inst.ops.len())
+        .map(|inst| inst.operations.len())
         .sum::<usize>();
     if instruction_cursor > instructions.len() || operation_cursor > total_ops {
         return Err("cursor is beyond the end of this function's evidence".to_string());
-    }
-    let pseudocode = recover_decompile(
-        || {
-            rsleigh_decompile::decompile_with_binary(
-                arch,
-                &instructions,
-                Some(data),
-                Some(Path::new(binary_path)),
-            )
-        },
-        &mut diagnostics,
-    );
-    let meta = rsleigh_decompile::analysis::extract_function_meta(&name, address, &pseudocode);
-    let import_names: std::collections::HashSet<_> =
-        build_import_map(&obj, data).into_values().collect();
-    let mut imports: Vec<_> = meta
-        .calls
-        .into_iter()
-        .filter(|c| import_names.contains(c))
-        .collect();
-    imports.sort();
-    imports.dedup();
-    let mut warnings: Vec<String> = agent_arch_warnings(arch)
-        .into_iter()
-        .map(str::to_string)
-        .collect();
-    if instructions
-        .iter()
-        .flat_map(|(_, i)| &i.ops)
-        .any(|o| matches!(o, pcode_ir::PcodeOp::CallInd { .. }))
-    {
-        warnings.push(
-            "indirect call appears in raw P-code; target resolution is not guaranteed".into(),
-        );
     }
     let instruction_end = instruction_cursor
         .saturating_add(AGENT_CARD_MAX_INSTRUCTIONS)
@@ -101,25 +88,37 @@ pub(super) fn run(binary_path: &str, data: &[u8], args: &[String]) -> Result<u8,
     let operation_end = operation_cursor
         .saturating_add(AGENT_CARD_MAX_PCODE_OPS)
         .min(total_ops);
-    let instruction_page: Vec<_> = instructions.iter().enumerate().skip(instruction_cursor)
-        .take(AGENT_CARD_MAX_INSTRUCTIONS).map(|(index,(addr,inst))| {
-            let bytes = segs.iter().find_map(|(va,size,offset)| {
-                let delta = addr.checked_sub(*va)?;
-                if delta >= *size { return None; }
-                let start = usize::try_from(offset.checked_add(delta)?).ok()?;
-                data.get(start..start.checked_add(inst.len as usize)?)
-            }).map(|b| b.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    let instruction_page: Vec<_> = instructions
+        .iter()
+        .enumerate()
+        .skip(instruction_cursor)
+        .take(AGENT_CARD_MAX_INSTRUCTIONS)
+        .map(|(index, inst)| {
+            let addr = inst.address;
+            let bytes = segs
+                .iter()
+                .find_map(|(va, size, offset)| {
+                    let delta = addr.checked_sub(*va)?;
+                    if delta >= *size {
+                        return None;
+                    }
+                    let start = usize::try_from(offset.checked_add(delta)?).ok()?;
+                    data.get(start..start.checked_add(inst.len as usize)?)
+                })
+                .map(|b| b.iter().map(|b| format!("{b:02x}")).collect::<String>());
             json!({"index":index, "address":format!("0x{addr:x}"), "length":inst.len,
                 "bytes":bytes, "disassembly":inst.disassembly,
-                "constructor":inst.constructor.as_ref().map(|s| json!({"source":s.source,"table_id":s.table_id,"constructor_id":s.constructor_id}))})
-        }).collect();
+                "constructor":inst.constructor})
+        })
+        .collect();
     let operations: Vec<_> = if include_pcode {
-        instructions.iter().enumerate().flat_map(|(instruction_index,(addr,inst))| {
-            inst.ops.iter().enumerate().map(move |(operation_index,op)| (instruction_index,addr,operation_index,op))
+        instructions.iter().enumerate().flat_map(|(instruction_index,inst)| {
+            let addr=inst.address;
+            inst.operations.iter().enumerate().map(move |(operation_index,op)| (instruction_index,addr,operation_index,op))
         }).enumerate().skip(operation_cursor).take(AGENT_CARD_MAX_PCODE_OPS)
         .map(|(index,(instruction_index,addr,operation_index,op))| json!({
             "index":index, "instruction_index":instruction_index, "address":format!("0x{addr:x}"),
-            "operation_index":operation_index, "op":format!("{op:?}")
+            "operation_index":operation_index, "operation":op, "op":format!("{op:?}")
         })).collect()
     } else {
         Vec::new()
@@ -144,15 +143,15 @@ pub(super) fn run(binary_path: &str, data: &[u8], args: &[String]) -> Result<u8,
     let status = evidence_status(true, &diagnostics);
     let (_, imagebase) = agent_format_and_base(&obj, &segs);
     let payload = json!({
-        "schema":"rsleigh.card/v1", "status":status, "tool_version":env!("CARGO_PKG_VERSION"),
+        "schema":"rsleigh.card/v2", "status":status, "tool_version":env!("CARGO_PKG_VERSION"),
         "file":{"path":binary_path,"sha256":compute_sha256(data),"arch":format!("{arch:?}"),"imagebase":format!("0x{imagebase:x}")},
         "function":{"name":name,"address":format!("0x{address:x}"),
-            "size":instructions.last().map(|(a,i)| a + i.len - address).unwrap_or(0),
-            "complexity":1 + instructions.iter().flat_map(|(_,i)| &i.ops).filter(|o| matches!(o,pcode_ir::PcodeOp::CBranch{..})).count(),
+            "size":instructions.last().map(|i| i.address + i.len - address).unwrap_or(0),
+            "complexity":1 + instructions.iter().flat_map(|i| &i.operations).filter(|o| matches!(o,pcode_ir::PcodeOp::CBranch{..})).count(),
             "calling_convention":agent_calling_convention(arch,&obj)},
-        "imports":imports,"strings":meta.strings.into_iter().take(5).collect::<Vec<_>>(),
-        "metadata_stage":"decompile", "trust":agent_trust_json(), "warnings":warnings,"diagnostics":diagnostics,
-        "instructions":instruction_page,"operations":operations,
+        "imports":imports,"strings":strings,
+        "metrics":metrics,"metadata_stage":"decompile", "trust":agent_trust_json(), "warnings":warnings,"diagnostics":diagnostics,
+        "instructions":instruction_page,"operations":operations,"operation_stage":"raw-pcode/v1",
         "pagination":{
             "instructions":page(instruction_cursor,instruction_end,instructions.len(),AGENT_CARD_MAX_INSTRUCTIONS),
             "operations":if include_pcode { page(operation_cursor,operation_end,total_ops,AGENT_CARD_MAX_PCODE_OPS) } else { Value::Null }
@@ -211,6 +210,7 @@ fn render_text(card: &Value) {
         println!("  - {}", s(warning));
     }
     println!("diagnostics: {}", card["diagnostics"]);
+    println!("metrics: {}", card["metrics"]);
     println!("\n## disasm (first 40 instructions per page)");
     for inst in card["instructions"].as_array().unwrap() {
         println!("{}  {}", s(&inst["address"]), s(&inst["disassembly"]));

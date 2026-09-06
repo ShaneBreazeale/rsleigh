@@ -60,18 +60,26 @@ captures every indirect or dynamically resolved call.
 | What might it do? | `FUNCTION --card --pcode --decompile` | Text; adds at most 4,096 bytes of pseudocode |
 | What are the decoded instructions? | `--disasm FUNCTION` | Assembly text; does not include P-code |
 | What are the instruction metadata? | `--disasm FUNCTION --json` | JSON instruction array with P-code operation **counts** |
-| What are the lifted semantics? | `--pcode-json FUNCTION` | JSON with constructor provenance and operation debug strings |
+| What are the lifted semantics? | `--pcode-json FUNCTION` | `rsleigh.pcode/v2` with raw typed operations and readable text |
 | What is the post-fold data flow? | `--ssa-json FUNCTION` | JSON blocks and variables with debug strings |
 | What is the full pseudocode? | `FUNCTION` | Text; no card output cap |
 
-Cards support `--json` (`rsleigh.card/v1`) and independent
+Cards support `--json` (`rsleigh.card/v2`) and independent
 `--instruction-cursor N` / `--operation-cursor N` pagination.
 `--ssa-slice FUNCTION --var ID [--max-nodes N] [--max-depth N]` returns bounded
-backward expression dependencies with unresolved boundaries.
+backward expression, exact-memory, and bounded helper dependencies with unresolved boundaries.
+Replace `--var ID` with `--call-site 0xADDRESS --arg INDEX`,
+`--return [--at 0xADDRESS]`, or `--condition 0xADDRESS` to select by intent.
+See the [selector semantics and calling-convention limits](agent-workflow.md#bounded-backward-ssa-query).
+Cards and slices support `--analysis-cache DIR`, `--max-decode-instructions N`,
+`--max-ssa-work N`, and cooperative `--deadline-ms N`; see
+[execution limits](agent-workflow.md#limit-execution-work).
+Slices also support `--max-call-depth N`, `--max-functions N`, and
+`--max-traversal-work N`; defaults are 2, 16, and 100,000 respectively.
 `--verify-index DIR` checks version 2 generation identity and artifact checksums.
 Agent commands exit 0 on completion, 2 for partial evidence, and 1 on failure.
-P-code/SSA JSON dumps are not capped like
-cards and are not a typed, versioned IR serialization. Save a full-function
+P-code/SSA JSON dumps are not capped like cards. SSA dumps retain legacy
+inspection fields alongside typed expressions. Save a full-function
 dump to a file, select the relevant instructions/blocks, and preserve its
 address and command. See [output formats](output-formats.md).
 

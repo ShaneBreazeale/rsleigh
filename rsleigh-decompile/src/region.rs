@@ -26,8 +26,196 @@
 
 use std::collections::HashMap;
 
-use crate::ir::{Expr, SsaCfg, Stmt, SsaTerminator, VarDef, VarId};
+use crate::ir::{Expr, SsaCfg, SsaTerminator, Stmt, VarDef, VarId};
 use pcode_ir::AddressSpaceId;
+
+/// An exact address suitable for store/load dependency forwarding. A stack
+/// base is an incoming SSA value, never just a physical register number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum ExactLocation {
+    Global {
+        address: u64,
+        size: u32,
+    },
+    Stack {
+        base: u32,
+        displacement: i64,
+        size: u32,
+    },
+}
+
+impl ExactLocation {
+    pub(crate) fn size(self) -> u32 {
+        match self {
+            Self::Global { size, .. } | Self::Stack { size, .. } => size,
+        }
+    }
+
+    /// Different bases are not assumed disjoint: an unknown pointer or an
+    /// independently read frame register may alias the stored location.
+    pub(crate) fn may_overlap(self, other: Self) -> bool {
+        let overlaps = |a: i128, a_size: u32, b: i128, b_size: u32| {
+            a < b + b_size as i128 && b < a + a_size as i128
+        };
+        match (self, other) {
+            (
+                Self::Global {
+                    address: a,
+                    size: sa,
+                },
+                Self::Global {
+                    address: b,
+                    size: sb,
+                },
+            ) => overlaps(a as i128, sa, b as i128, sb),
+            (
+                Self::Stack {
+                    base: a,
+                    displacement: da,
+                    size: sa,
+                },
+                Self::Stack {
+                    base: b,
+                    displacement: db,
+                    size: sb,
+                },
+            ) if a == b => overlaps(da as i128, sa, db as i128, sb),
+            _ => true,
+        }
+    }
+}
+
+/// Resolve only bounded copy/add/sub address expressions with constant
+/// displacements. Symbolic indices, phi addresses, and wrapped ranges remain
+/// unknown. This is stricter than the coarse region classifier used for taint.
+pub(crate) fn exact_location(
+    ssa: &SsaCfg,
+    ptr: VarId,
+    size: u32,
+    cc: crate::fold::CallingConv,
+) -> Option<ExactLocation> {
+    use crate::{fold::CallingConv, ir::BinOpKind};
+    fn resolve(
+        ssa: &SsaCfg,
+        ptr: VarId,
+        size: u32,
+        frames: &[u64],
+        depth: usize,
+    ) -> Option<ExactLocation> {
+        crate::budget::work("memory", 1);
+        if depth >= 64 || size == 0 {
+            return None;
+        }
+        let var = ssa.vars.get(ptr.0 as usize)?;
+        let offset = |value: u64, width: u32| -> Option<i64> {
+            if !(1..=8).contains(&width) {
+                return None;
+            }
+            let shift = 64 - width * 8;
+            Some(((value << shift) as i64) >> shift)
+        };
+        fn constant_bits(ssa: &SsaCfg, id: VarId, depth: usize, fuel: &mut usize) -> Option<u64> {
+            crate::budget::work("memory", 1);
+            if depth >= 64 || *fuel == 0 {
+                return None;
+            }
+            *fuel -= 1;
+            let var = ssa.vars.get(id.0 as usize)?;
+            if !(1..=8).contains(&var.size) {
+                return None;
+            }
+            let mask = u64::MAX >> (64 - var.size * 8);
+            let value = match var.expr {
+                Expr::Const(value, _) => value,
+                Expr::Var(inner) => constant_bits(ssa, inner, depth + 1, fuel)?,
+                Expr::UnaryOp(crate::ir::UnaryOpKind::Zext, inner) => {
+                    constant_bits(ssa, inner, depth + 1, fuel)?
+                }
+                Expr::UnaryOp(crate::ir::UnaryOpKind::Sext, inner) => {
+                    let value = constant_bits(ssa, inner, depth + 1, fuel)?;
+                    let width = ssa.vars.get(inner.0 as usize)?.size;
+                    if !(1..=8).contains(&width) || width > var.size {
+                        return None;
+                    }
+                    let shift = 64 - width * 8;
+                    (((value << shift) as i64) >> shift) as u64
+                }
+                Expr::BinOp(BinOpKind::Add, a, b) => constant_bits(ssa, a, depth + 1, fuel)?
+                    .wrapping_add(constant_bits(ssa, b, depth + 1, fuel)?),
+                Expr::BinOp(BinOpKind::Sub, a, b) => constant_bits(ssa, a, depth + 1, fuel)?
+                    .wrapping_sub(constant_bits(ssa, b, depth + 1, fuel)?),
+                _ => return None,
+            };
+            Some(value & mask)
+        }
+        let constant = |id: VarId| {
+            offset(
+                constant_bits(ssa, id, 0, &mut 64)?,
+                ssa.vars.get(id.0 as usize)?.size,
+            )
+        };
+        let adjust = |location: ExactLocation, displacement: i64| -> Option<ExactLocation> {
+            match location {
+                ExactLocation::Global { address, size } => {
+                    let address = address.checked_add_signed(displacement)?;
+                    if var.size < 8 && address >= 1u64.checked_shl(var.size * 8)? {
+                        return None;
+                    }
+                    address.checked_add(size as u64)?;
+                    Some(ExactLocation::Global { address, size })
+                }
+                ExactLocation::Stack {
+                    base,
+                    displacement: prior,
+                    size,
+                } => Some(ExactLocation::Stack {
+                    base,
+                    displacement: prior.checked_add(displacement)?,
+                    size,
+                }),
+            }
+        };
+        match var.expr {
+            Expr::Const(address, _) if address.checked_add(size as u64).is_some() => {
+                Some(ExactLocation::Global { address, size })
+            }
+            Expr::Unknown
+                if var.varnode.space == AddressSpaceId::Register
+                    && frames.contains(&var.varnode.offset)
+                    && !var.call_return =>
+            {
+                Some(ExactLocation::Stack {
+                    base: ptr.0,
+                    displacement: 0,
+                    size,
+                })
+            }
+            Expr::Var(inner) => resolve(ssa, inner, size, frames, depth + 1),
+            Expr::BinOp(BinOpKind::Add, a, b) => {
+                if let Some(displacement) = constant(b) {
+                    adjust(resolve(ssa, a, size, frames, depth + 1)?, displacement)
+                } else {
+                    adjust(resolve(ssa, b, size, frames, depth + 1)?, constant(a)?)
+                }
+            }
+            Expr::BinOp(BinOpKind::Sub, a, b) => adjust(
+                resolve(ssa, a, size, frames, depth + 1)?,
+                constant(b)?.checked_neg()?,
+            ),
+            _ => None,
+        }
+    }
+    let frames: &[u64] = match cc {
+        CallingConv::SysV | CallingConv::Win64 | CallingConv::GoAmd64 => &[32, 40],
+        CallingConv::Cdecl32
+        | CallingConv::Stdcall32
+        | CallingConv::Thiscall32
+        | CallingConv::Fastcall32 => &[16, 20],
+        CallingConv::AArch64 => &[8, 16616], // SP, x29 in the native register space
+        CallingConv::Arm32 => &[84, 76],     // SP, r11
+    };
+    resolve(ssa, ptr, size, frames, 0)
+}
 
 /// Newtype index into the per-SsaCfg `regions` table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -79,10 +267,7 @@ impl RegionMap {
     /// Region of `var`. If the var wasn't classified (out-of-bounds),
     /// returns a fresh `Unknown` region.
     pub fn region_of(&self, var: VarId) -> Region {
-        *self
-            .by_var
-            .get(var.0 as usize)
-            .unwrap_or(&Region(u32::MAX))
+        *self.by_var.get(var.0 as usize).unwrap_or(&Region(u32::MAX))
     }
 
     /// AllocSite for a region.
@@ -150,8 +335,7 @@ pub fn infer_regions(ssa: &SsaCfg) -> RegionMap {
         if slot.0 == u32::MAX {
             let r = Region(map.sites.len() as u32);
             map.sites.push(AllocSite::Unknown(i as u32));
-            map.intern
-                .insert(AllocSite::Unknown(i as u32), r);
+            map.intern.insert(AllocSite::Unknown(i as u32), r);
             *slot = r;
         }
     }
@@ -300,7 +484,10 @@ fn build_spill_map(ssa: &SsaCfg) -> SpillMap {
             }
         }
     }
-    SpillMap { by_canon, by_varnode }
+    SpillMap {
+        by_canon,
+        by_varnode,
+    }
 }
 
 impl SpillMap {
@@ -369,6 +556,8 @@ mod tests {
             call_return: false,
             inferred_type: InferredType::Unknown,
             display_type: None,
+            memory: None,
+            origins: Default::default(),
         }
     }
 

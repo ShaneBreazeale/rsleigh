@@ -315,6 +315,8 @@ mod tests {
                 call_return: false,
                 inferred_type: InferredType::Unknown,
                 display_type: None,
+                memory: None,
+                origins: Default::default(),
             })
             .collect()
     }
