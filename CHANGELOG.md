@@ -4,6 +4,8 @@ All notable user-facing changes to rsleigh are documented here.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-07
+
 ### Added
 
 - JSON function cards with binary hashes, instruction/operation evidence IDs,
@@ -25,6 +27,12 @@ All notable user-facing changes to rsleigh are documented here.
   replacement. Consumers must follow manifest paths; rebuild version 1 indexes.
 - SSA JSON and bounded queries share function boundaries and calling-convention
   selection, including Win64 for PE64 inputs.
+
+### Fixed
+
+- Emitted generated P-code in SLEIGH pattern-operand order, correcting
+  operation sequencing for constructors whose operands are declared out of
+  order.
 
 ## [0.4.3] - 2026-08-30
 
@@ -97,5 +105,7 @@ All notable user-facing changes to rsleigh are documented here.
 - Reduced false-positive ARM function discovery and added ARM-to-Thumb call
   discovery.
 
+[Unreleased]: https://github.com/ShaneBreazeale/rsleigh/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/ShaneBreazeale/rsleigh/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/ShaneBreazeale/rsleigh/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/ShaneBreazeale/rsleigh/compare/v0.4.1...v0.4.2
