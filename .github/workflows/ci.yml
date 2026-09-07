@@ -29,13 +29,16 @@ jobs:
         with:
           cache-on-failure: true
 
+      - name: Test — stable raw lift generation
+        run: cargo test --release -p rsleigh --no-default-features --test codegen_lift_order
+
       # Generate code from slaspecs (~30s)
       - name: Generate Rust from slaspecs
         run: cargo run -p rsleigh-generate
 
-      # Build all crates (catches compile errors in decompiler, CLI, etc.)
+      # Use the test profile to avoid compiling the large decoders twice.
       - name: Build all crates
-        run: cargo build --workspace
+        run: cargo build --workspace --release
 
       # Run golden P-code + decompiler validation tests.
       # --release sidesteps a pre-existing stack overflow in the

@@ -676,7 +676,9 @@ const RAW_SCORE_BASELINES: &[(&str, OracleScore)] = &[
             length_mismatches: 0,
             missing_ops: 0,
             extra_ops: 13,
-            op_mismatches: 21,
+            // SLEIGH pattern operand order replaces the previous randomized
+            // raw ordering. Optimized semantics and all other scores agree.
+            op_mismatches: 22,
             destination_mismatches: 0,
         },
     ),

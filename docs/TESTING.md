@@ -29,6 +29,18 @@ python3 scripts/decomp-regress.py --binary ./some.bin --sample 12
 
 ## Layer 1: Golden P-code Tests (`test-harness`)
 
+Fresh decoder generation is part of release validation. Subtables must emit
+P-code in SLEIGH pattern operand order across repeated parses; declaration
+order and randomized hash-map iteration must not change the lift. The focused
+regression runs before generation in CI:
+
+```bash
+cargo test --release -p rsleigh --no-default-features --test codegen_lift_order
+```
+
+CI builds the workspace in release mode so the generated decoder libraries
+are reused by the release test suites.
+
 **Test:** `x86_64_golden`
 
 Validates that specific x86-64 instruction byte sequences produce the exact expected P-code operations. Each test encodes known instruction bytes, decodes them, and asserts on:

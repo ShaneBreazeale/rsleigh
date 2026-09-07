@@ -43,6 +43,29 @@ pub struct ConstructorStruct {
     pub dis_fields: IndexMap<crate::disassembly::VariableId, Ident>,
 }
 impl ConstructorStruct {
+    fn pattern_table_order(pattern: &crate::pattern::Pattern, out: &mut Vec<crate::TableId>) {
+        use crate::pattern::{Block, Verification};
+        for block in pattern.blocks() {
+            let checks = match block {
+                Block::And { verifications, .. } => verifications,
+                Block::Or { branches, .. } => branches,
+            };
+            for check in checks.iter() {
+                match check {
+                    Verification::TableBuild { produced_table, .. } => {
+                        if !out.contains(&produced_table.table) {
+                            out.push(produced_table.table);
+                        }
+                    }
+                    Verification::SubPattern { pattern, .. } => {
+                        Self::pattern_table_order(pattern, out);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     fn context_field_ident(sleigh: &crate::Sleigh, context: crate::ContextId) -> Ident {
         let context = sleigh.context(context);
         format_ident!("ctx_{}", from_sleigh(context.name()))
@@ -188,9 +211,27 @@ impl ConstructorStruct {
         let mut context_ids = Vec::new();
         let mut execution_token_fields = Vec::new();
         //tables are always included to the struct, used or not
+        // Pattern tables originate in HashMaps. Their iteration order must not
+        // change raw P-code operation order or unique-varnode allocation between
+        // generated builds. Use the operand order in the pattern, including
+        // nested patterns, rather than declaration order or HashMap order.
+        let mut table_order = Vec::new();
+        Self::pattern_table_order(&constructor.pattern, &mut table_order);
         let table_fields = constructor
             .pattern
-            .produced_tables()
+            .blocks()
+            .iter()
+            .flat_map(|block| {
+                let mut tables: Vec<_> = block.tables().iter().collect();
+                tables.sort_by_key(|table| {
+                    let position = table_order
+                        .iter()
+                        .position(|id| *id == table.table)
+                        .unwrap_or(usize::MAX);
+                    (position, table.table.0)
+                });
+                tables
+            })
             .map(|produced_table| {
                 let table = sleigh.table(produced_table.table);
                 (
