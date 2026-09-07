@@ -129,7 +129,7 @@ rsleigh FILE --smt-candidates ADDR
 {
   "schema": "rsleigh.agent-brief/v1",
   "status": "ok",
-  "tool_version": "0.4.3",
+  "tool_version": "0.5.0",
   "file": {
     "path": "sample.exe",
     "stage": "file",
