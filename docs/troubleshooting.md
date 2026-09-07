@@ -8,7 +8,7 @@ reproducible.
 |---|---|
 | `cannot read --help` or `cannot read --version` | Those flags are treated as filenames. Invoke `rsleigh` with no arguments for usage; see [CLI conventions](cli-reference.md#invocation-conventions). |
 | Exit status is zero, but there is no useful result | Some failures only print diagnostics, and a brief may contain `error`. Validate the expected artifact using [output checks](output-formats.md). |
-| `jq` fails on a card or index command's stdout | Cards and index completion messages are text. Parse the brief, an explicit JSON mode, or the index files. |
+| `jq` fails on a card or index command's stdout | Cards default to text; add `--json`. Index completion messages are text; parse the manifest and its referenced files. |
 | `jq` sees several JSON values instead of one | Multiple functions or output modes were requested. Run one function/mode per command. |
 | `--vulnscan --json` prints text | Use `--vulnscan --findings-ndjson`. `--json` is not universal. |
 | Only one of several requested scans runs | Primary modes have dispatch precedence. Run each producer separately. |
@@ -18,9 +18,13 @@ reproducible.
 | An SMT run unexpectedly scans the whole binary | An unresolved name can become an empty scope. Verify the target in the map and use its address. |
 | Brief has no functions or no `next` commands | Discovery found no usable entries. Check the architecture/container and diagnostics; do not infer that the binary has no code. |
 | Pseudocode looks implausible | Inspect the function card's warnings, assembly, and P-code; check the [architecture matrix](architectures.md). Report the unresolved reconstruction gap. |
-| A card omits the behavior you expected | It may be truncated. Save a single-function P-code dump and select relevant addresses outside the card slice. |
+| A card omits the behavior you expected | Inspect limits and use the returned instruction/operation cursors for another page, or request a semantic slice of the relevant value. |
 | “No callers” conflicts with runtime behavior | Direct xrefs omit unresolved indirect/virtual calls; discovery may also miss functions. Absence of an edge is not proof of unreachability. |
-| A previous index still exists after a failed rebuild | Index writes are non-atomic. Use a fresh directory, verify all files, and compare external hashes. |
+| A previous index still exists after a failed rebuild | Publication is atomic; the prior complete generation remains available. Run `--verify-index DIR`, check binary identity, and pin the verified manifest. |
+| A return or argument selector fails | Use `--at ADDR` for multiple returns and the exact call instruction address for arguments. Argument slots are zero-based; unsupported or missing slots are not guessed. |
+| A slice stops at memory or a helper call | Inspect boundary reasons, architecture support, and traversal limits. Unknown aliases, external calls, and unsupported argument conventions remain unresolved. |
+| A cache query does new analysis | Check cache diagnostics and identity: changed input, build, analysis settings, or card debug inputs invalidate reuse. A stopped computation is never published as a complete snapshot. |
+| Zero decode/SSA budgets produce partial evidence | Those allowances permit reuse of an existing complete snapshot. A cold or invalidated cache needs work to build one. |
 | An SMT record says `Unsupported` | Read `filter_reasons`: the feature may be absent or the semantics outside the model. Build the correct executable or report the gap. |
 | SMT stdout stays empty for a long time | Candidates are collected and ranked before output. Scope to one verified function; top-N alone does not bound the analysis work. |
 | No findings, or only `NotReachable` records | Check completion, caps, source/sink coverage, and filter reasons. This does not establish that the target is free of bugs. |
@@ -28,10 +32,14 @@ reproducible.
 
 ## Keep work bounded
 
-Briefs and cards bound emitted output, not total runtime. Discovery may examine
-the whole file, and card metadata still invokes decompilation. An index can
-analyze thousands of functions; a scoped SMT run may also build callee
-summaries.
+Output caps alone do not bound runtime. Cards and slices additionally support
+`--max-decode-instructions N`, `--max-ssa-work N`, and cooperative
+`--deadline-ms N`; slices have separate traversal caps. Check stop records,
+status, and work metrics. Deadlines are checked during analysis, not enforced
+as hard process preemption. See [execution limits](agent-workflow.md#limit-execution-work).
+
+Discovery may examine the whole file, and an index can analyze thousands of
+functions. A scoped SMT run may also build callee summaries.
 
 If a command times out under your runner, retain stdout/stderr, mark the result
 incomplete, and narrow the question. Avoid retrying a whole-binary mode with

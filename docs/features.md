@@ -44,7 +44,21 @@ for internals. Capabilities remain subject to the [architecture matrix](architec
   `findings.ndjson`, `imports.json`, and an `index.json` manifest
 - Function evidence card (`FUNCTION --card [--pcode] [--decompile]`): first 40
   instructions, optional first 120 P-code ops, optional 4,096-byte pseudocode,
-  constructor provenance, and `warnings[]`
+  instruction/operation pagination, constructor provenance, and `warnings[]`;
+  `--json` emits `rsleigh.card/v2`
+- Semantic dependency slices (`--ssa-slice FUNCTION`): select `--return`,
+  `--call-site ADDR --arg INDEX`, `--condition ADDR`, or snapshot-local `--var ID`.
+  `rsleigh.ssa-slice/v3` follows supported exact memory stores and helper
+  argument/return bindings, with invocation contexts and explicit boundaries
+- Typed evidence: cards, slices, and `--pcode-json` preserve raw decoder
+  operations and instruction origins. SSA retains origins through folding;
+  synthetic, unavailable, and truncated origins remain labeled
+- Reusable analysis (`--analysis-cache DIR` on cards/slices): immutable complete
+  snapshots, atomic publication, input/build identity checks, and cache/work
+  metrics. Warm snapshots avoid new decode/SSA work
+- Execution budgets: decode instructions, SSA work, and cooperative deadlines
+  for cards/slices; node/depth/call-depth/function/traversal-work caps for slices.
+  Stopped analysis retains available evidence and is not cached as complete
 - Compact (`--compact`), brief (`--brief`), and `--min-complexity N` reduce
   displayed pseudocode in supported paths. Savings depend on the binary and
   tokenizer; use cards when an explicit evidence-section cap matters.

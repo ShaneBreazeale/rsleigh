@@ -13,11 +13,11 @@ historical totals are not a compatibility or coverage guarantee.
 make test                                    # generate + run test-harness
 
 # decompiler library and agent-facing CLI contracts
-cargo test -p rsleigh-decompile --release --lib
-cargo test --release -p rsleigh-cli --lib --test agent_interface
+cargo test --release -p rsleigh-decompile --lib --tests
+cargo test --release -p rsleigh-cli --lib --tests
 
 # rsleigh — test-harness only (fast, no codegen)
-cargo test -p test-harness
+cargo test --release -p test-harness
 
 # benchmarks
 python3 scripts/benchmark.py                 # function count vs Ghidra baselines
@@ -64,16 +64,42 @@ This test runs random byte sequences through both the decoder and the decompiler
 real CLI processes. Coverage includes brief → selected address → JSON/text card,
 byte and P-code evidence, instruction/operation pagination against full dumps,
 partial decode recovery, invalid inputs, generation identity/checksums,
-stale/corrupt/missing artifacts, write failures, and SSA dump → bounded query.
+stale/corrupt/missing artifacts, write failures, semantic selectors, typed raw
+origins, reusable snapshots, execution budgets, and bounded dependency queries.
 CLI unit tests inject decompiler panics and interrupted artifact publication.
-Decompiler slice tests exercise phi cycles, memory/call boundaries, missing
-variables, and node/depth/input caps. CI runs the decompiler library tests and
-all CLI unit/integration tests in release mode (`--lib --tests`).
+Decompiler tests exercise phi cycles, conservative store forwarding, helper
+invocation contexts, missing variables/arguments, native return layouts, and
+traversal caps. CI runs decompiler library tests, focused integration suites,
+and all CLI unit/integration tests in release mode.
 
 ```bash
 cargo test --release -p rsleigh-cli --lib --test agent_interface
-cargo test --release -p rsleigh-decompile --lib
+cargo test --release -p rsleigh-decompile --lib --tests
 ```
+
+### Deterministic agent RE evaluation
+
+The runner covers 18 tasks using original hand-encoded fixtures across six
+native architectures: 14 recovered-fact tasks and four explicit-unresolved tasks.
+It checks answers and raw instruction origins over three repetitions in each
+of three cache states, including graph equivalence and zero new decode/SSA
+work on warm hits. The corpus needs no external compiler, JVM, or hosted model.
+
+```bash
+cargo build --release -p rsleigh-cli
+cargo run --release -p rsleigh-cli --example agent_re_eval -- \
+  target/release/rsleigh agent-re-results.json --full-corpus
+cargo run --release -p rsleigh-cli --example agent_re_eval -- \
+  target/release/rsleigh agent-re-cache-results.json --cache-benchmark
+```
+
+See the [task catalog](../test-harness/fixtures/agent-re/corpus.md),
+[measurement report](agent-re-evaluation.md), and
+[completion audit](llm-re-completion-audit.md) for reproducibility, raw results,
+and baseline limitations. The `ecfd1cd` audit recorded 162/162 corpus checks and
+365 regression tests passing locally; those are revision-specific results.
+Origin checks use the same decoder API and are separate from Ghidra oracle
+parity. Latency and byte totals are measurements, not portable CI thresholds.
 
 ---
 
@@ -228,11 +254,14 @@ Validated against external binary corpora (not in CI, manual testing):
 
 ## CI Pipeline
 
-3 parallel GitHub Actions jobs:
+Four GitHub Actions jobs in [ci.yml](../.github/workflows/ci.yml):
 
-1. **test** — Generate slaspecs → build all generated crates → golden P-code tests → decompiler unit tests → CLI release build
-2. **clippy** — Lint core crates (rsleigh-api, rsleigh-decompile, pcode-ir)
-3. **check** — Fast compile check on pcode-ir (no_std, zero deps)
+1. **test** — Generate decoders, build the workspace, run the harness, decompiler
+   unit and focused integration tests, CLI contracts, and deterministic seed,
+   six-architecture corpus, and card-cache gates.
+2. **seh-smc-windows** — Execute the PE64 SEH-SMC fixtures on Windows.
+3. **clippy** — Lint core crates and CLI; currently allows lint failures.
+4. **check** — Fast compile check on pcode-ir without decoder generation.
 
 ```
 make test-all    # full pipeline

@@ -1,6 +1,6 @@
 # Roadmap: higher-yield LLM-assisted reverse engineering
 
-Status: implemented and locally validated. Baseline commit: `8ed1cde`.
+Status: implemented and locally validated in `ecfd1cd`. Baseline commit: `8ed1cde`.
 
 All five milestones are complete within the documented native dependency scope.
 The final corpus contains 18 tasks across six architectures. See
@@ -270,6 +270,6 @@ Append an entry after each completed milestone or material change of direction.
 | 2026-09-06 | Milestone 3 / working tree | 54 CLI tests, 198 decompiler unit tests, 27 targeted integration tests, and 2 P-code oracle tests pass; 24/24 answer and instruction-origin checks pass; typed raw operations and bounded origins survive folding/cache restore; stdout −74.2% vs baseline | Memory/call traversal, full six-architecture corpus, final revision evidence |
 | 2026-09-06 | Milestone 4 / working tree | 283 decompiler unit/integration tests and 56 CLI tests pass; exact stack/global store evidence, context-specific helper arguments/returns, clobbered arguments, ambiguous memory, recursion, and traversal budgets validated; seed answer/evidence checks remain 24/24; slice v3 documented and focused CI gate added | Full six-architecture corpus, repeated baseline/cache comparison, known test-harness factorial failure, final revision evidence |
 
-| 2026-09-06 | Milestone 5 / final implementation revision (`git log -1`) | 18 tasks, six architectures, 162/162 current answer/raw-origin checks across repeated uncached/cold/warm states; baseline 24/54 answers, 90.4% less aggregate uncached output, zero new work on every warm function; all 365 combined regression tests pass, including the former factorial failure | None within the roadmap scope; unsupported conventions/frontends remain explicit |
+| 2026-09-06 | Milestone 5 / implementation `ecfd1cd` | 18 tasks, six architectures, 162/162 current answer/raw-origin checks across repeated uncached/cold/warm states; baseline 24/54 answers, 90.4% less aggregate uncached output, zero new work on every warm function; all 365 combined regression tests pass, including the former factorial failure | None within the roadmap scope; unsupported conventions/frontends remain explicit |
 
 Validation details and raw measurements: [agent RE evaluation](agent-re-evaluation.md).

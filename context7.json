@@ -27,14 +27,16 @@
     "Use the rsleigh CLI for end-user reverse-engineering workflows and rsleigh-api when embedding decoders in Rust applications.",
     "Check the documented target and analysis-stage support before selecting architecture-dependent features.",
     "Treat rsleigh.finding/v1 NDJSON records as the stable machine-readable finding envelope.",
-    "Prefer the bounded --agent-brief, --index, and --card modes for agent-driven reverse engineering.",
+    "Prefer bounded --agent-brief and --card evidence, semantic --ssa-slice selectors for value questions, and --index for reusable navigation maps.",
     "Treat P-code and decoded bytes as primary evidence; treat decompiler pseudocode as experimental and verify important claims against P-code or disassembly.",
     "Read docs/README.md for navigation, docs/cli-reference.md for command selection, and docs/output-formats.md for renderer-specific validation.",
-    "Use one primary mode per command. Cards are text; --json is not universal. P-code/SSA JSON contains debug strings, not a typed IR schema.",
+    "Use one primary mode per command. Cards support --json; --json is not universal. Card v2, P-code v2, and slice v3 include typed raw operations; SSA dumps retain typed expressions and legacy inspection fields.",
     "Native agent briefs, indexes, cards, and P-code/SSA JSON apply to parsed PE/ELF/Mach-O, not the raw or WebAssembly frontends. Raw --disasm currently renders pseudocode.",
-    "Output caps do not bound total runtime. Verify SMT scope addresses: unresolved names can cause whole-binary scans; top-N applies after collection.",
-    "Validate all index files in a fresh directory and retain an external input hash. Index writes are non-atomic and the manifest omits hashes.",
-    "Inspect SMT verdict and filter_reasons: NotReachable can come from a static filter before Z3 runs even when confidence is proved."
+    "Output caps alone do not bound runtime. Cards and slices support decode/SSA budgets and cooperative deadlines; slices also cap traversal work. Verify SMT scope addresses; top-N applies after collection.",
+    "Indexes publish immutable generations atomically with binary hashes and artifact checksums. Run --verify-index DIR and pin the verified manifest. Use --analysis-cache DIR on cards/slices for complete decoded/SSA snapshot reuse.",
+    "Inspect SMT verdict and filter_reasons: NotReachable can come from a static filter before Z3 runs even when confidence is proved.",
+    "Select one SSA root by --return (with --at for ambiguity), --call-site ADDR --arg INDEX (zero-based ABI slots), --condition ADDR, or snapshot-local --var ID. Unknown dependencies and unsupported MIPS/RISC-V argument/frame-memory conventions remain explicit boundaries, not reachability claims.",
+    "Preserve raw-pcode/v1 instruction origins and per-function snapshot identities; slice node identity is (context_id, var_id). Check status, diagnostics, limits, and cache/work metrics before making claims."
   ],
   "previousVersions": [
     {

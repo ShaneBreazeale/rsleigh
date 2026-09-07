@@ -7,8 +7,9 @@ an MCP server, and does not require Ghidra or a JVM.
 For instructions that can be copied into a target-analysis workspace, see
 [the drop-in agent contract](AGENTS-rsleigh.md).
 
-For planned improvements and completion criteria, see the
-[LLM-assisted RE roadmap](llm-re-roadmap.md).
+For the completed implementation and validation evidence, see the
+[LLM-assisted RE roadmap](llm-re-roadmap.md) and
+[18-task evaluation](agent-re-evaluation.md).
 
 ## Start a session
 
@@ -42,8 +43,9 @@ Use the smallest sufficient layer:
 1. Build a capped map with `--agent-brief`.
 2. Select at most a few functions from the map.
 3. Inspect xrefs and the bounded disassembly/P-code card.
-4. Request pseudocode only after the lift looks coherent.
-5. Use SMT only for a named source/sink question.
+4. Select a call argument, return, or condition for a bounded dependency query.
+5. Request pseudocode only after the lift looks coherent.
+6. Use SMT only for a named source/sink question.
 
 ```bash
 rsleigh sample.exe --agent-brief
@@ -59,6 +61,8 @@ rsleigh sample.exe 0x140001000 --card --pcode --decompile
 | What is the file and where should I start? | `rsleigh FILE --agent-brief` | file + bounded navigation map | Reject a top-level `error`; inspect `warnings` and `limits`. |
 | Where is a string, API, constant, or behavior used? | `--search`, then `--xrefs FUNCTION` | discovery + direct references | Direct xrefs omit unresolved indirect calls. |
 | What are the lifted instruction semantics? | `FUNCTION --card --pcode` or `--pcode-json FUNCTION` | decode + lift | Check constructor provenance and architecture warnings. |
+| Where does a value come from? | `--ssa-slice FUNCTION --return`, `--call-site ADDR --arg N`, or `--condition ADDR` | bounded dependencies + raw origins | Use one selector; inspect unresolved boundaries and per-function snapshot identities. |
+| Can a follow-up reuse decoded/SSA analysis? | `--analysis-cache DIR` on cards/slices | complete reusable snapshots | Inspect cache hits and work counters; execution limits are separate from output caps. |
 | What does the function probably do? | `FUNCTION --card --pcode --decompile` | experimental reconstruction | Verify important claims against P-code or disassembly. |
 | Which leads should be investigated? | `--ioc`, `--vulnscan`, or VM helpers with `--findings-ndjson` | pattern or heuristic | Confidence is evidence quality, not severity or truth. |
 | Is a named flow reachable in the model? | `--smt-candidates FUNCTION` | solver result over modeled paths | Require `verdict == "Reachable"`; review unsupported operations and bounds. |

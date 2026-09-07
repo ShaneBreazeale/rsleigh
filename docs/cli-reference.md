@@ -61,7 +61,7 @@ captures every indirect or dynamically resolved call.
 | What are the decoded instructions? | `--disasm FUNCTION` | Assembly text; does not include P-code |
 | What are the instruction metadata? | `--disasm FUNCTION --json` | JSON instruction array with P-code operation **counts** |
 | What are the lifted semantics? | `--pcode-json FUNCTION` | `rsleigh.pcode/v2` with raw typed operations and readable text |
-| What is the post-fold data flow? | `--ssa-json FUNCTION` | JSON blocks and variables with debug strings |
+| What is the post-fold data flow? | `--ssa-json FUNCTION` | JSON blocks and variables with typed expressions, origins, and legacy debug strings |
 | What is the full pseudocode? | `FUNCTION` | Text; no card output cap |
 
 Cards support `--json` (`rsleigh.card/v2`) and independent

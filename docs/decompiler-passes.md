@@ -6,6 +6,25 @@ start with the [agent workflow](agent-workflow.md) and [CLI guide](cli-reference
 for tool use. Internal passes and IR are experimental; verify behavior against
 the source revision being used.
 
+## Evidence and bounded dependencies
+
+Raw decoder operations feed card v2, P-code JSON v2, and slice v3 evidence.
+`provenance.rs` carries instruction address/operation-index origins through
+SSA construction and folding, with bounded origin sets and explicit synthetic,
+unavailable, or truncated states. Indices refer to `raw-pcode/v1`, before
+optimization.
+
+`slice/selector.rs` resolves semantic roots against the same post-fold snapshot
+used for traversal. `memory.rs` forwards exact reaching stores conservatively;
+`slice/interprocedural.rs` follows supported helper return/argument dependencies
+in separate invocation contexts. Unknown effects and exhausted budgets stay
+explicit boundaries. `budget.rs` supplies cooperative analysis work limits;
+the CLI publishes only complete reusable snapshots through its analysis cache.
+
+See [workflow and limits](agent-workflow.md#bounded-backward-ssa-query),
+[schema migration](output-formats.md#typed-evidence-and-origin-migration), and
+[validation](TESTING.md#deterministic-agent-re-evaluation).
+
 ## SSA builder (ssa.rs)
 
 - Iterative dataflow, max 4 passes for loop headers + merges

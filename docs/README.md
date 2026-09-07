@@ -23,6 +23,8 @@ links for details instead of loading all documentation into every model turn.
 | Question | Read |
 |---|---|
 | How should an agent investigate a binary? | [Agent workflow](agent-workflow.md) |
+| Where does a call argument, return value, or condition come from? | [Semantic dependency selectors](agent-workflow.md#bounded-backward-ssa-query) |
+| How do I reuse analysis and bound execution work? | [Analysis cache](agent-workflow.md#reuse-analysis) · [Work limits](agent-workflow.md#limit-execution-work) |
 | Which command and flags answer this question? | [CLI command guide](cli-reference.md) |
 | Is this output JSON, NDJSON, or text? How do I detect failure? | [Output formats](output-formats.md) |
 | Why is output empty, incomplete, or unexpected? | [Troubleshooting](troubleshooting.md) |
@@ -34,6 +36,7 @@ links for details instead of loading all documentation into every model turn.
 | How has this been used on real targets? | [Sony camera and TP-Link router firmware](showcase/firmware-investigations.md) · [PyVMProtect case study](showcase/crackme3-pyvmprotect.md) |
 | How do I embed the decoder? | [Rust API example](../README.md#embed-in-rust) |
 | How do the decompiler and tests work? | [Decompiler passes](decompiler-passes.md) · [Testing](TESTING.md) |
+| What validates the completed agent RE roadmap? | [18-task evaluation](agent-re-evaluation.md) · [Completion audit](llm-re-completion-audit.md) |
 
 ## Reading outputs correctly
 

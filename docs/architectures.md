@@ -28,6 +28,22 @@ Binary containers currently accepted by the CLI include ELF (32/64), PE
 (32/64), Mach-O (64), WASM, and raw images. Container support is separate from
 the ISA-stage matrix above.
 
+## Native dependency queries
+
+Semantic slices apply to parsed PE/ELF/Mach-O inputs. Support below is for
+scalar integer/pointer dependencies; it does not extend the ISA coverage above.
+
+| Dependency | x86-64 / x86-32 | AArch64 / ARM32 | MIPS32 / RISC-V |
+|---|---|---|---|
+| Native scalar return selection | Supported | Supported | Supported |
+| ABI call-argument selection and helper argument binding | Supported for documented conventions | Supported for documented conventions | Unsupported; reported explicitly |
+| Exact stack/global store-to-load forwarding | Supported | Supported | Unsupported; loads remain boundaries |
+
+Unknown aliases, unknown calls, unsupported effects, recursion, and exhausted
+budgets remain explicit boundaries. Resolved indirect calls retain heuristic
+confidence. See [selector details](agent-workflow.md#bounded-backward-ssa-query)
+and the [six-architecture evaluation](agent-re-evaluation.md#final-six-architecture-comparison).
+
 ## Function discovery
 
 The discovery pipeline combines symbol tables, recursive direct-call descent,

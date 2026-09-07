@@ -49,9 +49,19 @@ arguments prints usage. [All releases and SHA-256 checksums](https://github.com/
 cargo install rsleigh
 ```
 
-Both options install the CLI used below. Prebuilt releases use the default
-features; optional SMT solving requires a source build with native Z3. See
-[SMT setup and scope](docs/smt-backend.md).
+This README describes the current source checkout. To use the semantic slice
+selectors, analysis cache, and typed evidence introduced in `ecfd1cd`, build
+from source; the pinned v0.4.3 downloads predate that implementation:
+
+```bash
+git clone https://github.com/ShaneBreazeale/rsleigh.git
+cd rsleigh
+cargo run -p rsleigh-generate
+cargo install --path rsleigh-cli
+```
+
+Prebuilt releases use the default features; optional SMT solving requires a
+source build with native Z3. See [SMT setup and scope](docs/smt-backend.md).
 
 ## Quickstart
 
@@ -89,6 +99,13 @@ Use an address from your own target when symbols are unavailable.
 - **Designed around a context budget.** Ranked briefs and bounded function
   cards let an agent inspect a few useful functions at a time. Reusable indexes
   support follow-up queries across turns.
+- **Ask about a value directly.** Select a call argument, return value, or
+  branch condition without searching a full SSA dump for variable IDs. Bounded
+  slices follow supported memory stores and helper calls, exposing unresolved
+  dependencies and the raw instructions behind recovered values.
+- **Reuse analysis and limit work.** Cache decoded instructions and SSA across
+  queries. Set decode, SSA, traversal, and cooperative deadline limits to retain
+  partial evidence when an investigation reaches its budget.
 - **Evidence at multiple levels.** Move from pseudocode to SSA, P-code, and
   instruction bytes. Outputs expose confidence, analysis stage, warnings, and
   truncation so a model can distinguish an observation from a hypothesis.
@@ -115,10 +132,30 @@ workspace to give an agent the workflow and evidence rules.
 | `FUNCTION --card --pcode --decompile` | The same evidence plus up to 4,096 bytes of pseudocode |
 | `--pcode-json FUNCTION` / `--ssa-json FUNCTION` | Structured instruction semantics or post-fold data flow for deeper reasoning |
 | `--index DIR` / `--verify-index DIR` | Immutable generations with binary identity, artifact checksums, and atomic manifest publication |
-| `--ssa-slice FUNCTION --var ID` | Bounded backward SSA dependencies with explicit memory/call boundaries |
+| `--ssa-slice FUNCTION --return` | Bounded value dependencies through supported memory and helpers, with raw instruction origins |
+| `--analysis-cache DIR` on a card or slice | Reusable complete analysis snapshots with identity checks and work counters |
 | `--findings-ndjson` | Confidence- and stage-labeled records from supported analysis modes |
 
-For analysis spanning several turns, build an index once and query its files:
+Ask a focused dependency question using addresses from your target's card:
+
+```bash
+rsleigh ./sample.exe --ssa-slice main --return --analysis-cache sample-cache/
+rsleigh ./sample.exe --ssa-slice main --call-site 0x140001020 --arg 0 --analysis-cache sample-cache/
+rsleigh ./sample.exe --ssa-slice main --condition 0x140001030 --max-nodes 32 --max-call-depth 1
+```
+
+Call arguments are zero-based ABI slots. For multiple returns, add
+`--at 0xADDRESS`; `--var ID` remains available for an exact SSA snapshot.
+Unknown aliases, unsupported calling conventions, and exhausted limits stay
+explicitly unresolved. Dependencies do not establish runtime reachability.
+See [selectors and architecture limits](docs/agent-workflow.md#bounded-backward-ssa-query).
+
+Cards and slices also accept `--max-decode-instructions`, `--max-ssa-work`, and
+`--deadline-ms`. A warm cache reuses completed analysis without new decode/SSA
+work; small queries may still cost more to load than to recompute. See
+[cache behavior and execution limits](docs/agent-workflow.md#reuse-analysis).
+
+For a reusable binary-wide navigation map, build an index and query its files:
 
 ```bash
 rsleigh ./sample.exe --index sample-index/
@@ -261,6 +298,7 @@ Start with the [documentation hub](docs/README.md),
 | Architecture coverage | [Support matrix](docs/architectures.md) |
 | Solver-assisted analysis | [SMT backend](docs/smt-backend.md) · [Candidate interpretation](docs/smt-candidates.md) |
 | Pipeline and validation | [Decompiler passes](docs/decompiler-passes.md) · [Testing](docs/TESTING.md) |
+| Agent RE results | [18-task evaluation](docs/agent-re-evaluation.md) · [Completed roadmap audit](docs/llm-re-completion-audit.md) |
 
 Context7 library ID: `/shanebreazeale/rsleigh`.
 

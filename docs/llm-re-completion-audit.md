@@ -4,7 +4,7 @@ Audit date: 2026-09-06. Baseline: `8ed1cde`.
 
 The implementation, fixtures, tests, and reports in this revision cover all five
 milestones in [the roadmap](llm-re-roadmap.md). The final implementation is
-recorded as one local commit; `git log -1` identifies that revision. Earlier
+recorded in commit `ecfd1cd`. Earlier
 progress rows describe intermediate working-tree measurements, whose executable
 hashes remain in their reports. No hosted CI execution or live-model evaluation
 is claimed.
