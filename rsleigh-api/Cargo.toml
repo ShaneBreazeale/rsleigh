@@ -10,10 +10,10 @@ keywords = ["disassembler", "pcode", "decoder", "sleigh", "ghidra"]
 categories = ["development-tools", "parsing"]
 
 [dependencies]
-pcode-ir = { path = "../pcode-ir", version = "0.4.3" }
-x86-root = { package = "rsleigh-gen-x86", path = "../generated/x86", version = "0.4.3" }
-x86-32-root = { package = "rsleigh-gen-x86-32", path = "../generated/x86-32", version = "0.4.3" }
-aarch64-root = { package = "rsleigh-gen-aarch64", path = "../generated/aarch64", version = "0.4.3" }
-riscv-root = { package = "rsleigh-gen-riscv", path = "../generated/riscv", version = "0.4.3" }
-mips-root = { package = "rsleigh-gen-mips", path = "../generated/mips", version = "0.4.3" }
-arm32-root = { package = "rsleigh-gen-arm32", path = "../generated/arm32", version = "0.4.3" }
+pcode-ir = { path = "../pcode-ir", version = "0.5.0" }
+x86-root = { package = "rsleigh-gen-x86", path = "../generated/x86", version = "0.5.0" }
+x86-32-root = { package = "rsleigh-gen-x86-32", path = "../generated/x86-32", version = "0.5.0" }
+aarch64-root = { package = "rsleigh-gen-aarch64", path = "../generated/aarch64", version = "0.5.0" }
+riscv-root = { package = "rsleigh-gen-riscv", path = "../generated/riscv", version = "0.5.0" }
+mips-root = { package = "rsleigh-gen-mips", path = "../generated/mips", version = "0.5.0" }
+arm32-root = { package = "rsleigh-gen-arm32", path = "../generated/arm32", version = "0.5.0" }

@@ -9,6 +9,13 @@ progress rows describe intermediate working-tree measurements, whose executable
 hashes remain in their reports. No hosted CI execution or live-model evaluation
 is claimed.
 
+A subsequent [hosted run of `ecfd1cd`](https://github.com/ShaneBreazeale/rsleigh/actions/runs/34066678446)
+exposed randomized subtable emission order in fresh decoder generation. The
+v0.5.0 preparation fixes that ordering and adds a repeated-generation regression;
+the AArch64 CSEL raw mismatch baseline changes from 21 to 22, while optimized
+oracle scores remain unchanged. The local results below describe the original
+audit; see [release preparation](releases/v0.5.0.md) for the follow-up.
+
 ## Requirement-to-evidence mapping
 
 | Roadmap requirement | Implementation / contract | Observed validation |

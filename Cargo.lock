@@ -493,7 +493,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "pcode-ir"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "serde",
 ]
@@ -606,7 +606,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "rsleigh"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "bitvec",
  "ethnum",
@@ -621,7 +621,7 @@ dependencies = [
 
 [[package]]
 name = "rsleigh-api"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "pcode-ir",
  "rsleigh-gen-aarch64",
@@ -634,7 +634,7 @@ dependencies = [
 
 [[package]]
 name = "rsleigh-cli"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "cpp_demangle 0.4.5",
  "goblin",
@@ -651,7 +651,7 @@ dependencies = [
 
 [[package]]
 name = "rsleigh-decompile"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "cpp_demangle 0.5.1",
  "egg",
@@ -672,7 +672,7 @@ dependencies = [
 
 [[package]]
 name = "rsleigh-fid"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "byteorder",
  "flate2",
@@ -684,49 +684,49 @@ dependencies = [
 
 [[package]]
 name = "rsleigh-gen-aarch64"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "pcode-ir",
 ]
 
 [[package]]
 name = "rsleigh-gen-arm32"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "pcode-ir",
 ]
 
 [[package]]
 name = "rsleigh-gen-mips"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "pcode-ir",
 ]
 
 [[package]]
 name = "rsleigh-gen-riscv"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "pcode-ir",
 ]
 
 [[package]]
 name = "rsleigh-gen-x86"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "pcode-ir",
 ]
 
 [[package]]
 name = "rsleigh-gen-x86-32"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "pcode-ir",
 ]
 
 [[package]]
 name = "rsleigh-generate"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "rsleigh",
 ]
