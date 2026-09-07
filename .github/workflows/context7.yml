@@ -38,8 +38,21 @@ jobs:
         env:
           CONTEXT7_API_KEY: ${{ secrets.CONTEXT7_API_KEY }}
         run: |
-          curl --fail-with-body --silent --show-error \
+          response_file=$(mktemp)
+          trap 'rm -f "$response_file"' EXIT
+          http_status=$(curl --silent --show-error \
+            --output "$response_file" --write-out '%{http_code}' \
             --request POST https://context7.com/api/v1/refresh \
             --header "Content-Type: application/json" \
             --header "Authorization: Bearer $CONTEXT7_API_KEY" \
-            --data "{\"libraryName\":\"/${{ github.repository }}\"}"
+            --data "{\"libraryName\":\"/${{ github.repository }}\"}")
+          if [[ "$http_status" == 2* ]]; then
+            cat "$response_file"
+          elif [[ "$http_status" == 400 ]] && jq -e '.error == "too-early"' "$response_file" >/dev/null; then
+            echo "::notice::Context7 refresh skipped: the library is still within its refresh interval."
+            echo "Context7 refresh deferred by the service's minimum refresh interval." >> "$GITHUB_STEP_SUMMARY"
+          else
+            cat "$response_file"
+            echo "::error::Context7 refresh failed (HTTP $http_status)."
+            exit 1
+          fi
