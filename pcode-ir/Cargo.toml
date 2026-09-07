@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 description = "P-code intermediate representation types for SLEIGH-generated decoders"
+readme = "README.md"
 keywords = ["pcode", "ir", "sleigh", "ghidra", "no-std"]
 categories = ["no-std", "data-structures"]
 
