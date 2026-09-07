@@ -43,15 +43,15 @@ on your `PATH`. You can also run it directly from the extracted directory as
 `./rsleigh` on macOS/Linux or `.\rsleigh.exe` in PowerShell. Running it without
 arguments prints usage. [All releases and SHA-256 checksums](https://github.com/ShaneBreazeale/rsleigh/releases).
 
-**Prefer Cargo?** With a Rust toolchain, installation is one command:
+**Install v0.5.0 with Cargo.** With a Rust toolchain, installation is one command:
 
 ```bash
-cargo install rsleigh
+cargo install rsleigh --version 0.5.0 --locked
 ```
 
-This README describes the current source checkout. To use the semantic slice
-selectors, analysis cache, and typed evidence introduced in `ecfd1cd`, build
-from source; the pinned v0.4.3 downloads predate that implementation:
+The semantic slice selectors, analysis cache, and typed evidence described here
+are available in v0.5.0 through Cargo. The pinned v0.4.3 prebuilt downloads
+predate those features. To build the current source checkout instead:
 
 ```bash
 git clone https://github.com/ShaneBreazeale/rsleigh.git

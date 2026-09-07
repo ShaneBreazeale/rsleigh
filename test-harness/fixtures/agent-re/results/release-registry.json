@@ -1,0 +1,106 @@
+[
+  {
+    "crate": "pcode-ir",
+    "version": "0.5.0",
+    "published_at": "2026-09-07T02:03:52.686442Z",
+    "checksum": "b292544b8f43445ce16724d6c3f17d955d311ec6df662fdcd231d20425ea97e7",
+    "yanked": false,
+    "url": "https://crates.io/api/v1/crates/pcode-ir/0.5.0"
+  },
+  {
+    "crate": "rsleigh-gen-x86",
+    "version": "0.5.0",
+    "published_at": "2026-09-07T02:09:14.863841Z",
+    "checksum": "282172d4754cf12c125c94d859386ff806cae0e9a23d737a278ee375c0a777be",
+    "yanked": false,
+    "url": "https://crates.io/api/v1/crates/rsleigh-gen-x86/0.5.0"
+  },
+  {
+    "crate": "rsleigh-gen-x86-32",
+    "version": "0.5.0",
+    "published_at": "2026-09-07T02:13:55.064673Z",
+    "checksum": "5524dc1895744330da315867a7445ca951b2d7d7c3319a053d49f6359bd7b33b",
+    "yanked": false,
+    "url": "https://crates.io/api/v1/crates/rsleigh-gen-x86-32/0.5.0"
+  },
+  {
+    "crate": "rsleigh-gen-aarch64",
+    "version": "0.5.0",
+    "published_at": "2026-09-07T02:20:13.627058Z",
+    "checksum": "eb0d40f45fdcc50ba88681101985233d77bf1652c9a330ab1c2ab766345a5685",
+    "yanked": false,
+    "url": "https://crates.io/api/v1/crates/rsleigh-gen-aarch64/0.5.0"
+  },
+  {
+    "crate": "rsleigh-gen-arm32",
+    "version": "0.5.0",
+    "published_at": "2026-09-07T02:22:18.439958Z",
+    "checksum": "68b810028bfddc9a09884903fd0d96e07cbd020d156ec3874ac038765a23c66f",
+    "yanked": false,
+    "url": "https://crates.io/api/v1/crates/rsleigh-gen-arm32/0.5.0"
+  },
+  {
+    "crate": "rsleigh-gen-mips",
+    "version": "0.5.0",
+    "published_at": "2026-09-07T02:23:28.713736Z",
+    "checksum": "d29af01a00b5260c16daae2acb48b4a8850134a3f54330203287bf35c91bd191",
+    "yanked": false,
+    "url": "https://crates.io/api/v1/crates/rsleigh-gen-mips/0.5.0"
+  },
+  {
+    "crate": "rsleigh-gen-riscv",
+    "version": "0.5.0",
+    "published_at": "2026-09-07T02:24:16.519375Z",
+    "checksum": "7f8b1f945ba9818bf6db273f087c75966049e16151aa7edf67c17b6b6a3df6d9",
+    "yanked": false,
+    "url": "https://crates.io/api/v1/crates/rsleigh-gen-riscv/0.5.0"
+  },
+  {
+    "crate": "rsleigh-api",
+    "version": "0.5.0",
+    "published_at": "2026-09-07T02:31:20.287334Z",
+    "checksum": "317faeaeb45bf9f2ba94aa651c6b2671c25ec49986b8488611aee35bec20c179",
+    "yanked": false,
+    "url": "https://crates.io/api/v1/crates/rsleigh-api/0.5.0"
+  },
+  {
+    "crate": "rsleigh-decompile",
+    "version": "0.5.0",
+    "published_at": "2026-09-07T02:39:28.641489Z",
+    "checksum": "ddab886ae1af1bfcb5100a0cee34b34767c662f44feb633810d10e36706ff57d",
+    "yanked": false,
+    "url": "https://crates.io/api/v1/crates/rsleigh-decompile/0.5.0"
+  },
+  {
+    "crate": "rsleigh-fid",
+    "version": "0.5.0",
+    "published_at": "2026-09-07T02:40:04.859876Z",
+    "checksum": "b647da3c7661b7063bb37fd2ab4b9ec3618665c3948af5d5dc1196cd595527f3",
+    "yanked": false,
+    "url": "https://crates.io/api/v1/crates/rsleigh-fid/0.5.0"
+  },
+  {
+    "crate": "rsleigh-cli",
+    "version": "0.5.0",
+    "published_at": "2026-09-07T02:40:53.110937Z",
+    "checksum": "c994bc6c5defc964be8e14f91bb3754027dcb4eaf634701377b0d5787a0fbebb",
+    "yanked": false,
+    "url": "https://crates.io/api/v1/crates/rsleigh-cli/0.5.0"
+  },
+  {
+    "crate": "rsleigh",
+    "version": "0.5.0",
+    "published_at": "2026-09-07T02:48:22.205897Z",
+    "checksum": "df6da7cca651581e6bfc2d3d19502ccc507a3e3158f3fe947aabcc9a87e2ef91",
+    "yanked": false,
+    "url": "https://crates.io/api/v1/crates/rsleigh/0.5.0"
+  },
+  {
+    "crate": "rsleigh-generate",
+    "version": "0.5.0",
+    "published_at": "2026-09-07T02:48:58.937540Z",
+    "checksum": "7eb707a9223ad1633c223ec4e2755ec02da21878d8bdb92d7bf60c4b4e2fa71d",
+    "yanked": false,
+    "url": "https://crates.io/api/v1/crates/rsleigh-generate/0.5.0"
+  }
+]
