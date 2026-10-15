@@ -4917,12 +4917,7 @@ fn post_process(
 
     // #POSIX: Replace POSIX magic numbers with readable macros.
     for line in &mut lines {
-        // S_ISDIR: (st_mode & 0xf000) == 16384 → S_ISDIR(st_mode)
-        *line = line.replace("& 0xf000 == 16384", "& 0xf000) == 0x4000 /* S_ISDIR */");
-        *line = line.replace("& 0xf000 != 16384", "& 0xf000) != 0x4000 /* !S_ISDIR */");
-        // S_ISREG: (st_mode & 0xf000) == 32768
-        *line = line.replace("& 0xf00-32768 == 0", "& 0xf000) == 0x8000 /* S_ISREG */");
-        *line = line.replace("& 0xf000 == 32768", "& 0xf000) == 0x8000 /* S_ISREG */");
+        rewrite_posix_mode_tests(line);
         // ASCII char constants in comparisons
         let ascii_chars: &[(i32, &str)] = &[
             (9, "'\\t'"),
@@ -19618,6 +19613,69 @@ fn typed_name(size: u32, ty: InferredType) -> &'static str {
     }
 }
 
+/// Rewrite unparenthesized `st_mode & 0xf000 == 16384` file-type tests into
+/// `(st_mode & 0xf000) == 0x4000 /* S_ISDIR */`. The unparenthesized form
+/// means `st_mode & (0xf000 == 16384)` in C, so the left operand of `&` must
+/// be wrapped, not just closed: a bare `)` leaves the line unbalanced.
+fn rewrite_posix_mode_tests(line: &mut String) {
+    const RULES: &[(&str, &str)] = &[
+        ("& 0xf000 == 16384", "& 0xf000) == 0x4000 /* S_ISDIR */"),
+        ("& 0xf000 != 16384", "& 0xf000) != 0x4000 /* !S_ISDIR */"),
+        ("& 0xf00-32768 == 0", "& 0xf000) == 0x8000 /* S_ISREG */"),
+        ("& 0xf000 == 32768", "& 0xf000) == 0x8000 /* S_ISREG */"),
+    ];
+    for &(pat, repl) in RULES {
+        let mut from = 0;
+        while let Some(rel) = line[from..].find(pat) {
+            let at = from + rel;
+            let Some(start) = left_operand_start(&line[..at]) else {
+                from = at + pat.len();
+                continue;
+            };
+            line.replace_range(at..at + pat.len(), repl);
+            line.insert(start, '(');
+            from = at + 1 + repl.len();
+        }
+    }
+}
+
+/// Byte index where the operand ending just before `prefix`'s trailing
+/// spaces begins. Binary operators are printed with spaces around them, so
+/// the operand is the run of non-space text, with balanced `()`/`[]` groups
+/// taken whole. `None` when there is no operand.
+fn left_operand_start(prefix: &str) -> Option<usize> {
+    let bytes = prefix.as_bytes();
+    let mut end = bytes.len();
+    while end > 0 && bytes[end - 1] == b' ' {
+        end -= 1;
+    }
+    let mut i = end;
+    while i > 0 {
+        match bytes[i - 1] {
+            b')' | b']' => {
+                let mut depth = 0i32;
+                while i > 0 {
+                    match bytes[i - 1] {
+                        b')' | b']' => depth += 1,
+                        b'(' | b'[' => depth -= 1,
+                        _ => {}
+                    }
+                    i -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                if depth != 0 {
+                    return None;
+                }
+            }
+            b' ' | b'(' | b'[' | b',' => break,
+            _ => i -= 1,
+        }
+    }
+    (i < end).then_some(i)
+}
+
 /// C precedence of a printed binary operator; higher binds tighter.
 fn c_precedence(op: &str) -> Option<u8> {
     Some(match op {
@@ -19808,6 +19866,58 @@ fn unwrap_ext(id: VarId, ssa: &SsaCfg) -> VarId {
     match &ssa.var(id).expr {
         Expr::UnaryOp(UnaryOpKind::Zext | UnaryOpKind::Sext, inner) => *inner,
         _ => id,
+    }
+}
+
+#[cfg(test)]
+mod posix_mode_rewrite_tests {
+    use super::*;
+
+    fn rewritten(src: &str) -> String {
+        let mut line = src.to_string();
+        rewrite_posix_mode_tests(&mut line);
+        line
+    }
+
+    fn balanced(s: &str) -> bool {
+        s.matches('(').count() == s.matches(')').count()
+    }
+
+    #[test]
+    fn wraps_left_operand_of_the_mask() {
+        // Shape from GNU ls 0x3e10 at 13765bf: the rewrite closed a paren it never opened.
+        let out = rewritten("        if (iVar3 & 0xf000 != 16384) {");
+        assert_eq!(
+            out,
+            "        if ((iVar3 & 0xf000) != 0x4000 /* !S_ISDIR */) {"
+        );
+        assert!(balanced(&out), "{out}");
+    }
+
+    #[test]
+    fn takes_casts_and_dereferences_whole() {
+        let out = rewritten("x = *(uint32_t*)(param_0 + 0xac) & 0xf000 == 16384;");
+        assert_eq!(
+            out,
+            "x = (*(uint32_t*)(param_0 + 0xac) & 0xf000) == 0x4000 /* S_ISDIR */;"
+        );
+        let out = rewritten("if (f(a, b->st_mode & 0xf000 == 32768)) {");
+        assert_eq!(
+            out,
+            "if (f(a, (b->st_mode & 0xf000) == 0x8000 /* S_ISREG */)) {"
+        );
+        assert!(balanced(&out), "{out}");
+    }
+
+    #[test]
+    fn rewrites_every_occurrence_and_leaves_other_lines_alone() {
+        let out = rewritten("if (a & 0xf000 == 16384 || b & 0xf000 == 16384) {");
+        assert_eq!(
+            out,
+            "if ((a & 0xf000) == 0x4000 /* S_ISDIR */ || (b & 0xf000) == 0x4000 /* S_ISDIR */) {"
+        );
+        let untouched = "if ((mode & 0xf000) == 16384) {";
+        assert_eq!(rewritten(untouched), untouched);
     }
 }
 

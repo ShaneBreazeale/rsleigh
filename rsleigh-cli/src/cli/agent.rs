@@ -635,7 +635,6 @@ fn decompile_function(
     path: &Path,
     diagnostics: &mut Vec<Value>,
 ) -> String {
-    use rsleigh_decompile::ir::{DiagKind, Severity};
     let mut pipeline = Vec::new();
     let text = recover_decompile(
         || {
@@ -650,16 +649,9 @@ fn decompile_function(
         },
         diagnostics,
     );
-    let mut seen = std::collections::BTreeSet::new();
-    for d in &pipeline {
-        let unresolved = matches!(
-            d.kind,
-            DiagKind::UnresolvedBranchTarget | DiagKind::UnrecoveredIndirectJump
-        );
-        if unresolved && !matches!(d.severity, Severity::Info) && seen.insert(d.addr) {
-            diagnostics.push(json!({"stage":"decompile","code":"unresolved_control_flow",
-                "address":d.addr.map(|a| format!("0x{a:x}")),"message":d.detail}));
-        }
+    for d in rsleigh_decompile::unresolved_control_flow(&pipeline) {
+        diagnostics.push(json!({"stage":"decompile","code":"unresolved_control_flow",
+            "address":d.addr.map(|a| format!("0x{a:x}")),"message":d.detail}));
     }
     let does_work = instructions.iter().flat_map(|(_, i)| &i.ops).any(|op| {
         matches!(
