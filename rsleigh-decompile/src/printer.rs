@@ -20237,9 +20237,17 @@ fn type_field_accesses(
         }
     }
     let mut body_start = sig + 1;
+    let mut in_comment = false;
     while body_start < lines.len() {
         let t = lines[body_start].trim();
-        if t.is_empty() || t.starts_with("/*") || t.starts_with('*') {
+        // Skip blank lines and the try/catch summary comment; a line that
+        // merely starts with `*` is a dereference, not a comment.
+        if in_comment || t.starts_with("/*") {
+            in_comment = !t.contains("*/");
+            body_start += 1;
+            continue;
+        }
+        if t.is_empty() {
             body_start += 1;
             continue;
         }
@@ -20410,6 +20418,54 @@ fn type_field_accesses(
     if !definitions.is_empty() {
         definitions.push(String::new());
         lines.splice(sig..sig, definitions);
+    }
+}
+
+#[cfg(test)]
+mod field_access_typing_tests {
+    use super::*;
+
+    fn typed(lines: &[&str]) -> Vec<String> {
+        let mut lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+        type_field_accesses(&mut lines, &Default::default());
+        lines
+    }
+
+    #[test]
+    fn a_body_that_starts_with_a_dereference_is_still_rewritten() {
+        // CrashLogger 0x18004e270: the first statements begin with `*(`,
+        // which the declaration scan took for block-comment lines.
+        let out = typed(&[
+            "long f(long param_0, long param_1) {",
+            "    long lVar1;",
+            "",
+            "*(uint64_t*)local_68 = DAT_1802f76c0->field_0 ^ RSP - 120;",
+            "*(uint64_t*)(RSP - 32) = param_1->field_0;",
+            "}",
+        ]);
+        assert_eq!(
+            out[3],
+            "*(uint64_t*)local_68 = *(int64_t *)(DAT_1802f76c0 + 0x0) ^ RSP - 120;"
+        );
+        assert_eq!(
+            out[4],
+            "*(uint64_t*)(RSP - 32) = *(int64_t *)(param_1 + 0x0);"
+        );
+    }
+
+    #[test]
+    fn member_chains_and_expression_bases_print_as_casts() {
+        let out = typed(&[
+            "long f(long param_0) {",
+            "",
+            "return param_0->field_8->field_10 + (param_0 + 8)->field_4;",
+            "}",
+        ]);
+        assert_eq!(
+            out[2],
+            "return *(int64_t *)((char *)*(int64_t *)(param_0 + 0x8) + 0x10) \
+             + *(int64_t *)((char *)(param_0 + 8) + 0x4);"
+        );
     }
 }
 
