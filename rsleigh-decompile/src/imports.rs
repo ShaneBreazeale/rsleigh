@@ -1210,6 +1210,12 @@ fn resolve_pe_crt_wrappers(pe: &goblin::pe::PE, binary: &[u8], map: &mut HashMap
     if vfprintf_addr.is_none() {
         return;
     }
+    let targets = CrtTargets {
+        iob: iob_func_addr,
+        vfprintf: vfprintf_addr,
+        vfwprintf: vfwprintf_addr,
+        vfscanf: vfscanf_addr,
+    };
 
     for sec in &pe.sections {
         if sec.characteristics & 0x20000000 == 0 {
@@ -1223,125 +1229,200 @@ fn resolve_pe_crt_wrappers(pe: &goblin::pe::PE, binary: &[u8], map: &mut HashMap
         }
         let sec_bytes = &binary[sec_fo..sec_fo + sec_sz];
 
-        // Scan for function prologues that might be CRT wrappers.
-        // We look for E8 (CALL rel32) instructions within short spans before a C3 (RET).
-        let mut off = 0usize;
-        while off < sec_sz {
-            // Find the next potential function start (skip NOP padding)
-            if sec_bytes[off] == 0x90 || sec_bytes[off] == 0xCC {
-                off += 1;
-                continue;
-            }
-
-            let func_start = off;
-            let func_va = sec_va + func_start as u64;
-
-            // Already mapped (thunk or import)
-            if map.contains_key(&func_va) {
-                off += 1;
-                continue;
-            }
-
-            // Scan up to 128 bytes for CALLs and RET
-            let max_scan = (func_start + 128).min(sec_sz);
-            let mut calls_iob = false;
-            let mut calls_vfprintf = false;
-            let mut calls_vfwprintf = false;
-            let mut calls_vfscanf = false;
-            let mut iob_index: Option<u8> = None;
-            let mut found_ret = false;
-
-            let mut i = func_start;
-            while i + 5 <= max_scan {
-                let b = sec_bytes[i];
-                if b == 0xC3 {
-                    // RET
-                    found_ret = true;
-                    break;
-                }
-                if b == 0xE8 {
-                    // CALL rel32
-                    let disp = i32::from_le_bytes([
-                        sec_bytes[i + 1],
-                        sec_bytes[i + 2],
-                        sec_bytes[i + 3],
-                        sec_bytes[i + 4],
-                    ]);
-                    let call_va = sec_va + i as u64 + 5;
-                    let target = call_va.wrapping_add(disp as i64 as u64);
-
-                    if iob_func_addr == Some(target) {
-                        calls_iob = true;
-                        // Look for MOV ECX, imm8 before this CALL to get the stream index
-                        // B9 xx 00 00 00 = mov ecx, xx
-                        if i >= func_start + 5 {
-                            for back in 1..=40 {
-                                if i < func_start + back {
-                                    break;
-                                }
-                                let p = i - back;
-                                if sec_bytes[p] == 0xB9
-                                    && p + 5 <= i
-                                    && sec_bytes[p + 2] == 0
-                                    && sec_bytes[p + 3] == 0
-                                    && sec_bytes[p + 4] == 0
-                                {
-                                    iob_index = Some(sec_bytes[p + 1]);
-                                    break;
-                                }
-                            }
-                        }
-                    } else if vfprintf_addr == Some(target) {
-                        calls_vfprintf = true;
-                    } else if vfwprintf_addr == Some(target) {
-                        calls_vfwprintf = true;
-                    } else if vfscanf_addr == Some(target) {
-                        calls_vfscanf = true;
-                    }
-                }
-                i += 1;
-            }
-
-            if !found_ret {
-                off += 1;
-                continue;
-            }
-
-            // Classify the wrapper
-            let name = if calls_iob && calls_vfprintf {
-                match iob_index {
-                    Some(1) => Some("printf"),
-                    Some(2) => Some("fprintf_stderr"),
-                    _ => Some("fprintf"),
-                }
-            } else if calls_iob && calls_vfwprintf {
-                match iob_index {
-                    Some(1) => Some("wprintf"),
-                    Some(2) => Some("fwprintf_stderr"),
-                    _ => Some("fwprintf"),
-                }
-            } else if !calls_iob && calls_vfprintf {
-                // Direct __stdio_common_vfprintf without __acrt_iob_func
-                // This is fprintf (stream passed by caller)
-                Some("fprintf")
-            } else if !calls_iob && calls_vfwprintf {
-                Some("fwprintf")
-            } else if calls_iob && calls_vfscanf {
-                match iob_index {
-                    Some(0) => Some("scanf"),
-                    _ => Some("fscanf"),
-                }
-            } else {
-                None
-            };
-
-            if let Some(name) = name {
-                map.insert(func_va, name.to_string());
-            }
-
-            off = i + 1; // skip past the RET
+        let mapped = |va: u64| map.contains_key(&va);
+        let found = crt_wrappers_in_section(sec_bytes, sec_va, &targets, &mapped);
+        for (va, name) in found {
+            map.insert(va, name.to_string());
         }
     }
+}
+
+/// CRT stdio entry points a wrapper calls (thunk or import addresses).
+#[derive(Clone, Copy)]
+struct CrtTargets {
+    iob: Option<u64>,
+    vfprintf: Option<u64>,
+    vfwprintf: Option<u64>,
+    vfscanf: Option<u64>,
+}
+
+/// Short functions in one executable section that call the CRT stdio entry
+/// points, classified as printf/fprintf/scanf-style wrappers. `mapped`
+/// reports addresses that already have a name.
+fn crt_wrappers_in_section(
+    sec_bytes: &[u8],
+    sec_va: u64,
+    targets: &CrtTargets,
+    mapped: &dyn Fn(u64) -> bool,
+) -> Vec<(u64, &'static str)> {
+    let CrtTargets {
+        iob: iob_func_addr,
+        vfprintf: vfprintf_addr,
+        vfwprintf: vfwprintf_addr,
+        vfscanf: vfscanf_addr,
+    } = *targets;
+    let sec_sz = sec_bytes.len();
+    let mut found = Vec::new();
+    // A window is classified only when it calls vf(w)printf or vfscanf
+    // before its RET. Find those calls and every RET once, so a start that
+    // cannot classify costs a lookup instead of a 128-byte rescan (CrashLogger:
+    // 83 ms per resolve_imports before).
+    let needed = [vfprintf_addr, vfwprintf_addr, vfscanf_addr];
+    let hits: Vec<usize> = (0..sec_sz.saturating_sub(4))
+        .filter(|&i| {
+            sec_bytes[i] == 0xE8 && {
+                let disp = i32::from_le_bytes([
+                    sec_bytes[i + 1],
+                    sec_bytes[i + 2],
+                    sec_bytes[i + 3],
+                    sec_bytes[i + 4],
+                ]);
+                let target = (sec_va + i as u64 + 5).wrapping_add(disp as i64 as u64);
+                needed.contains(&Some(target))
+            }
+        })
+        .collect();
+    if hits.is_empty() {
+        return found;
+    }
+    let mut next_ret = vec![usize::MAX; sec_sz + 1];
+    for i in (0..sec_sz).rev() {
+        next_ret[i] = if sec_bytes[i] == 0xC3 {
+            i
+        } else {
+            next_ret[i + 1]
+        };
+    }
+    // Scan for function prologues that might be CRT wrappers.
+    // We look for E8 (CALL rel32) instructions within short spans before a C3 (RET).
+    let mut off = 0usize;
+    while off < sec_sz {
+        // Find the next potential function start (skip NOP padding)
+        if sec_bytes[off] == 0x90 || sec_bytes[off] == 0xCC {
+            off += 1;
+            continue;
+        }
+
+        let func_start = off;
+        let func_va = sec_va + func_start as u64;
+
+        // Already mapped (thunk or import)
+        if mapped(func_va) {
+            off += 1;
+            continue;
+        }
+
+        // Scan up to 128 bytes for CALLs and RET
+        let max_scan = (func_start + 128).min(sec_sz);
+        // The scan below stops at the first RET `i` with `i + 5 <= max_scan`.
+        let ret = next_ret[func_start];
+        if ret == usize::MAX || ret + 5 > max_scan {
+            off += 1;
+            continue;
+        }
+        let next_hit = hits.partition_point(|&h| h < func_start);
+        if hits.get(next_hit).is_none_or(|&h| h >= ret) {
+            off = ret + 1;
+            continue;
+        }
+        let mut calls_iob = false;
+        let mut calls_vfprintf = false;
+        let mut calls_vfwprintf = false;
+        let mut calls_vfscanf = false;
+        let mut iob_index: Option<u8> = None;
+        let mut found_ret = false;
+
+        let mut i = func_start;
+        while i + 5 <= max_scan {
+            let b = sec_bytes[i];
+            if b == 0xC3 {
+                // RET
+                found_ret = true;
+                break;
+            }
+            if b == 0xE8 {
+                // CALL rel32
+                let disp = i32::from_le_bytes([
+                    sec_bytes[i + 1],
+                    sec_bytes[i + 2],
+                    sec_bytes[i + 3],
+                    sec_bytes[i + 4],
+                ]);
+                let call_va = sec_va + i as u64 + 5;
+                let target = call_va.wrapping_add(disp as i64 as u64);
+
+                if iob_func_addr == Some(target) {
+                    calls_iob = true;
+                    // Look for MOV ECX, imm8 before this CALL to get the stream index
+                    // B9 xx 00 00 00 = mov ecx, xx
+                    if i >= func_start + 5 {
+                        for back in 1..=40 {
+                            if i < func_start + back {
+                                break;
+                            }
+                            let p = i - back;
+                            if sec_bytes[p] == 0xB9
+                                && p + 5 <= i
+                                && sec_bytes[p + 2] == 0
+                                && sec_bytes[p + 3] == 0
+                                && sec_bytes[p + 4] == 0
+                            {
+                                iob_index = Some(sec_bytes[p + 1]);
+                                break;
+                            }
+                        }
+                    }
+                } else if vfprintf_addr == Some(target) {
+                    calls_vfprintf = true;
+                } else if vfwprintf_addr == Some(target) {
+                    calls_vfwprintf = true;
+                } else if vfscanf_addr == Some(target) {
+                    calls_vfscanf = true;
+                }
+            }
+            i += 1;
+        }
+
+        if !found_ret {
+            off += 1;
+            continue;
+        }
+
+        // Classify the wrapper
+        let name = if calls_iob && calls_vfprintf {
+            match iob_index {
+                Some(1) => Some("printf"),
+                Some(2) => Some("fprintf_stderr"),
+                _ => Some("fprintf"),
+            }
+        } else if calls_iob && calls_vfwprintf {
+            match iob_index {
+                Some(1) => Some("wprintf"),
+                Some(2) => Some("fwprintf_stderr"),
+                _ => Some("fwprintf"),
+            }
+        } else if !calls_iob && calls_vfprintf {
+            // Direct __stdio_common_vfprintf without __acrt_iob_func
+            // This is fprintf (stream passed by caller)
+            Some("fprintf")
+        } else if !calls_iob && calls_vfwprintf {
+            Some("fwprintf")
+        } else if calls_iob && calls_vfscanf {
+            match iob_index {
+                Some(0) => Some("scanf"),
+                _ => Some("fscanf"),
+            }
+        } else {
+            None
+        };
+
+        if let Some(name) = name {
+            found.push((func_va, name));
+        }
+
+        off = i + 1; // skip past the RET
+    }
+    found
 }
 
 /// Manual PE import parsing for malformed binaries that goblin can't handle.
@@ -1556,4 +1637,200 @@ fn arm_decode_modified_imm(imm12: u32) -> u32 {
     let val = imm12 & 0xff;
     let rot = ((imm12 >> 8) & 0xf) * 2;
     val.rotate_right(rot)
+}
+
+#[cfg(test)]
+mod crt_wrapper_scan_tests {
+    use super::*;
+
+    /// The byte-by-byte scan `crt_wrappers_in_section` replaced, kept to
+    /// prove the fast scan finds exactly the same wrappers.
+    fn reference(
+        sec_bytes: &[u8],
+        sec_va: u64,
+        targets: &CrtTargets,
+        mapped: &dyn Fn(u64) -> bool,
+    ) -> Vec<(u64, &'static str)> {
+        let CrtTargets {
+            iob: iob_func_addr,
+            vfprintf: vfprintf_addr,
+            vfwprintf: vfwprintf_addr,
+            vfscanf: vfscanf_addr,
+        } = *targets;
+        let sec_sz = sec_bytes.len();
+        let mut found = Vec::new();
+        // Scan for function prologues that might be CRT wrappers.
+        // We look for E8 (CALL rel32) instructions within short spans before a C3 (RET).
+        let mut off = 0usize;
+        while off < sec_sz {
+            // Find the next potential function start (skip NOP padding)
+            if sec_bytes[off] == 0x90 || sec_bytes[off] == 0xCC {
+                off += 1;
+                continue;
+            }
+
+            let func_start = off;
+            let func_va = sec_va + func_start as u64;
+
+            // Already mapped (thunk or import)
+            if mapped(func_va) {
+                off += 1;
+                continue;
+            }
+
+            // Scan up to 128 bytes for CALLs and RET
+            let max_scan = (func_start + 128).min(sec_sz);
+            let mut calls_iob = false;
+            let mut calls_vfprintf = false;
+            let mut calls_vfwprintf = false;
+            let mut calls_vfscanf = false;
+            let mut iob_index: Option<u8> = None;
+            let mut found_ret = false;
+
+            let mut i = func_start;
+            while i + 5 <= max_scan {
+                let b = sec_bytes[i];
+                if b == 0xC3 {
+                    // RET
+                    found_ret = true;
+                    break;
+                }
+                if b == 0xE8 {
+                    // CALL rel32
+                    let disp = i32::from_le_bytes([
+                        sec_bytes[i + 1],
+                        sec_bytes[i + 2],
+                        sec_bytes[i + 3],
+                        sec_bytes[i + 4],
+                    ]);
+                    let call_va = sec_va + i as u64 + 5;
+                    let target = call_va.wrapping_add(disp as i64 as u64);
+
+                    if iob_func_addr == Some(target) {
+                        calls_iob = true;
+                        // Look for MOV ECX, imm8 before this CALL to get the stream index
+                        // B9 xx 00 00 00 = mov ecx, xx
+                        if i >= func_start + 5 {
+                            for back in 1..=40 {
+                                if i < func_start + back {
+                                    break;
+                                }
+                                let p = i - back;
+                                if sec_bytes[p] == 0xB9
+                                    && p + 5 <= i
+                                    && sec_bytes[p + 2] == 0
+                                    && sec_bytes[p + 3] == 0
+                                    && sec_bytes[p + 4] == 0
+                                {
+                                    iob_index = Some(sec_bytes[p + 1]);
+                                    break;
+                                }
+                            }
+                        }
+                    } else if vfprintf_addr == Some(target) {
+                        calls_vfprintf = true;
+                    } else if vfwprintf_addr == Some(target) {
+                        calls_vfwprintf = true;
+                    } else if vfscanf_addr == Some(target) {
+                        calls_vfscanf = true;
+                    }
+                }
+                i += 1;
+            }
+
+            if !found_ret {
+                off += 1;
+                continue;
+            }
+
+            // Classify the wrapper
+            let name = if calls_iob && calls_vfprintf {
+                match iob_index {
+                    Some(1) => Some("printf"),
+                    Some(2) => Some("fprintf_stderr"),
+                    _ => Some("fprintf"),
+                }
+            } else if calls_iob && calls_vfwprintf {
+                match iob_index {
+                    Some(1) => Some("wprintf"),
+                    Some(2) => Some("fwprintf_stderr"),
+                    _ => Some("fwprintf"),
+                }
+            } else if !calls_iob && calls_vfprintf {
+                // Direct __stdio_common_vfprintf without __acrt_iob_func
+                // This is fprintf (stream passed by caller)
+                Some("fprintf")
+            } else if !calls_iob && calls_vfwprintf {
+                Some("fwprintf")
+            } else if calls_iob && calls_vfscanf {
+                match iob_index {
+                    Some(0) => Some("scanf"),
+                    _ => Some("fscanf"),
+                }
+            } else {
+                None
+            };
+
+            if let Some(name) = name {
+                found.push((func_va, name));
+            }
+
+            off = i + 1; // skip past the RET
+        }
+        found
+    }
+
+    /// xorshift64*: deterministic noise without a dependency.
+    fn noise(seed: &mut u64) -> u8 {
+        *seed ^= *seed >> 12;
+        *seed ^= *seed << 25;
+        *seed ^= *seed >> 27;
+        (seed.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 56) as u8
+    }
+
+    fn call(at: usize, target: u64, va: u64) -> [u8; 5] {
+        let disp = target.wrapping_sub(va + at as u64 + 5) as i32;
+        let d = disp.to_le_bytes();
+        [0xe8, d[0], d[1], d[2], d[3]]
+    }
+
+    #[test]
+    fn fast_scan_matches_the_byte_by_byte_scan() {
+        let va = 0x1_8000_1000u64;
+        let targets = CrtTargets {
+            iob: Some(0x1_8000_0100),
+            vfprintf: Some(0x1_8000_0200),
+            vfwprintf: Some(0x1_8000_0300),
+            vfscanf: Some(0x1_8000_0400),
+        };
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        for round in 0..64 {
+            // Sparse C3 bytes in some rounds, so 128-byte windows often lack a RET.
+            let ret_odds = if round % 2 == 0 { 40 } else { 255 };
+            let mut bytes: Vec<u8> = (0..20_000)
+                .map(|_| match noise(&mut seed) {
+                    b if b == 0xc3 && noise(&mut seed) > ret_odds => 0x00,
+                    b => b,
+                })
+                .collect();
+            // Plant wrappers: [mov ecx, k] call iob ; call vf* ; ret
+            for w in 0..40 {
+                let at = 300 + w * 480 + (noise(&mut seed) as usize % 64);
+                let k = noise(&mut seed) % 3;
+                bytes[at..at + 5].copy_from_slice(&[0xb9, k, 0, 0, 0]);
+                bytes[at + 5..at + 10].copy_from_slice(&call(at + 5, 0x1_8000_0100, va));
+                let vf = [0x1_8000_0200, 0x1_8000_0300, 0x1_8000_0400][w % 3];
+                bytes[at + 10..at + 15].copy_from_slice(&call(at + 10, vf, va));
+                bytes[at + 15] = 0xc3;
+            }
+            let mapped = |a: u64| a % 97 == 0;
+            let expected = reference(&bytes, va, &targets, &mapped);
+            assert!(!expected.is_empty());
+            assert_eq!(
+                crt_wrappers_in_section(&bytes, va, &targets, &mapped),
+                expected,
+                "round {round}"
+            );
+        }
+    }
 }
