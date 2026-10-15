@@ -34,6 +34,12 @@ rsleigh ./sample.exe 0x140001000 --card --pcode
   table. Text output marks the function with a `// WARNING: unresolved control
   flow at ADDR` line; `--json` sets that function's `status` to `partial` and
   lists the branch in `diagnostics`.
+- `--all` and multi-function decompiles run on `--jobs N` threads (default:
+  one per core) and print in target order as functions finish; the output is
+  the same for any thread count. `--fn-timeout SECS` stops one function's
+  analysis after that long (default 10 with `--all`, `0` for none); a stopped
+  function prints a comment instead of its body, gets `status: partial` with a
+  `deadline` diagnostic in `--json`, and makes the run exit 2.
 - `--features smt` is a Cargo build option, never an `rsleigh` runtime option.
 
 The tables below show the supported combinations to use. They are a task guide,

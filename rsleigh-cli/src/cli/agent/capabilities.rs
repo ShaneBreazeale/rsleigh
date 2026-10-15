@@ -209,6 +209,10 @@ const LEGACY_USAGE: &[(&str, &str)] = &[
         "rsleigh <binary> --all --min-complexity 10",
         "Skip trivial functions",
     ),
+    (
+        "rsleigh <binary> --all --jobs 8 --fn-timeout 10",
+        "Threads, and seconds per function before it is skipped (0 = none)",
+    ),
     ("rsleigh <binary> --callgraph", "Export call graph as JSON"),
     (
         "rsleigh <binary> --classes",
