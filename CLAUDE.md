@@ -196,7 +196,7 @@ Fixture: `test-harness/fixtures/crackmev3.pyd` (PyVMProtect v4).
 - Type inference: basic + Win32 typedef + interprocedural two-pass + heuristic field names; no constraint-based
 - MBA: SiMBA handles 1-4 var linear; non-linear + 5+ var need synthesis (egg catches some)
 - Some loop conditions not recovered (`while (OF == SF)`)
-- Jump tables: x86-64 PIC and absolute 4/8-byte tables only; ARM/AArch64 tables and signed (non-guarded) indexes stay `unresolved_control_flow`. The table base is traced through up to 512 earlier contiguous instructions (a linear scan, not a reaching-definition pass); a bounds check may declare up to 4096 entries.. The structurer walks the `index == k` test chain iteratively (`jump_table_chain`) into one `switch`, so large tables do not hit `MAX_STRUCTURE_DEPTH`
+- Jump tables: x86-64 PIC, MSVC image-base-relative (`base + zext(u32)`), and absolute 4/8-byte tables only; ARM/AArch64 tables stay `unresolved_control_flow`. An unguarded sign-extended index reads entries below the table (`JumpTable.first < 0`) while they name decoded instructions. The table base is traced through up to 512 earlier contiguous instructions (a linear scan, not a reaching-definition pass); a bounds check may declare up to 4096 entries.. The structurer walks the `index == k` test chain iteratively (`jump_table_chain`) into one `switch`, so large tables do not hit `MAX_STRUCTURE_DEPTH`
 - x86-32 sequential TEST/JNZ sometimes nests wrong
 - Register-indirect calls across non-trivial CFG (e.g. multi-path conv. through a phi merge) still not resolved; same-function linear cases including cross-block IAT-into-reg now handled (resolve_callind_via_all_ops)
 - ARM32 VFP/NEON: decode OK, FP reg values not fully traced through folding

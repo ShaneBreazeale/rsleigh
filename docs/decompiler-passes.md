@@ -43,7 +43,7 @@ See [workflow and limits](agent-workflow.md#bounded-backward-ssa-query),
 - CallInd resolution: `CALL [IAT_addr]` trace Load source → Direct
 - x86-32 CALL/RET boilerplate stripping (ret addr push, stack pop)
 - `BranchInd` ends a block. Jumps that leave the body are tail calls (call + synthetic return block): direct targets outside every decoded instruction, `JMP [slot]`, `JMP [reg+disp]`, register-held pointers
-- Jump tables (`jump_table.rs`, `build_cfg_with_memory`): x86-64 PIC `table + sext(table[idx*4])` and absolute `[table + idx*4|8]`. Entry count from the `CMP idx, N` + `JA`/`JAE` guard, else entries are read while they name decoded instructions. Dispatch becomes an `idx == k` chain on a register (or load temporary) that still holds the index; the structurer folds it into `switch`. Other computed jumps stay `Indirect` with `UnrecoveredIndirectJump`
+- Jump tables (`jump_table.rs`, `build_cfg_with_memory`): x86-64 PIC `table + sext(table[idx*4])`, MSVC image-relative `base + zext([base + disp + idx*4])`, and absolute `[table + idx*4|8]`. Entry count from the `CMP idx, N` + `JA`/`JAE` guard, else entries are read while they name decoded instructions, also below the table when the index is sign-extended (`JumpTable.first < 0`). Dispatch becomes an `idx == first + k` chain on a register (or load temporary) that still holds the index; the structurer folds it into `switch`. Other computed jumps stay `Indirect` with `UnrecoveredIndirectJump`
 - The first instruction is block 0 even when detached fragments (GCC `.cold`) sit below it; a call with no decoded successor ends in a synthetic no-successor block instead of looping
 
 ## Fold passes (fold.rs)

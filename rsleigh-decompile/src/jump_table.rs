@@ -3,11 +3,14 @@
 //! Recognized shapes, traced backwards through the P-code of the dispatch
 //! instructions:
 //! - relative entries (x86-64 PIC): `jmp table + sext(*(i32 *)(table + idx * 4))`
+//! - image-relative entries (MSVC, clang-cl): `jmp base + zext(*(u32 *)(base +
+//!   disp + idx * 4))`, where `base` is the image base
 //! - absolute entries: `jmp *(table + idx * 4|8)`, directly or through a register
 //!
 //! The entry count comes from the bounds check before the dispatch
 //! (`CMP idx, N` then `JA`/`JAE`); without one, entries are read while they
-//! name decoded instructions. Every target must be a decoded instruction.
+//! name decoded instructions, also below the table when the index is
+//! sign-extended. Every target must be a decoded instruction.
 //!
 //! The table base is traced through up to `WINDOW` earlier instructions,
 //! since compilers hoist its `lea` out of the switch.
@@ -31,8 +34,12 @@ pub struct JumpTable {
     /// scales `index` and overwrites it: the caller copies `index` into a
     /// temporary just before that instruction and tests the temporary.
     pub copy_before: Option<u64>,
-    /// Case targets in table order: entry `k` is taken when the index is `k`.
+    /// Case targets in table order: entry `k` is taken when the index is
+    /// `first + k`.
     pub targets: Vec<u64>,
+    /// Index value of the first entry: negative when an unchecked,
+    /// sign-extended index reaches entries below the table address.
+    pub first: i64,
 }
 
 /// Entries read from a table with no bounds check.
@@ -52,8 +59,9 @@ struct Op<'a> {
 }
 
 enum Entries {
-    /// `table + sext(i32 entry)`.
-    Relative,
+    /// `base + sext(i32 entry)` or `base + zext(u32 entry)`. `base` is the
+    /// table itself (PIC) or the image base (MSVC).
+    Relative { base: u64, signed: bool },
     /// Absolute addresses of the given byte width.
     Absolute(usize),
 }
@@ -89,48 +97,69 @@ pub fn find(instructions: &[(u64, Instruction)], memory: Memory) -> Vec<JumpTabl
         let Some((table, entries, index_pos, index)) = dispatch(&window, end, *dest) else {
             continue;
         };
+        let floor = signed_floor(&window, index_pos, index);
         let Some((index, copy_before)) = stable_index(&window, index_pos, index, *address) else {
             continue;
         };
         let bound = guard_count(&sorted[i.saturating_sub(16)..i])
             .filter(|count| *count <= MAX_GUARDED_ENTRIES);
         let width = match entries {
-            Entries::Relative => 4,
+            Entries::Relative { .. } => 4,
             Entries::Absolute(w) => w,
         };
-        let mut targets = Vec::new();
-        for k in 0..bound.unwrap_or(MAX_ENTRIES) {
-            let Some(bytes) = memory(table + (k * width) as u64, width) else {
-                // A declared table that runs off the image is not a table.
-                if bound.is_some() {
-                    targets.clear();
-                }
-                break;
-            };
+        // Target of entry `k` (relative to the table address); `None` when
+        // it is not a decoded instruction or lies outside the image.
+        let entry = |k: i64| -> Option<u64> {
+            let bytes = memory(table.wrapping_add((k * width as i64) as u64), width)?;
             let raw = bytes
                 .iter()
                 .rev()
                 .fold(0u64, |acc, b| (acc << 8) | *b as u64);
             let target = match entries {
-                Entries::Relative => table.wrapping_add(raw as u32 as i32 as i64 as u64),
+                Entries::Relative { base, signed: true } => {
+                    base.wrapping_add(raw as u32 as i32 as i64 as u64)
+                }
+                Entries::Relative {
+                    base,
+                    signed: false,
+                } => base.wrapping_add(raw as u32 as u64),
                 Entries::Absolute(_) => raw,
             };
-            if !starts.contains(&target) {
+            starts.contains(&target).then_some(target)
+        };
+        let mut targets = Vec::new();
+        for k in 0..bound.unwrap_or(MAX_ENTRIES) {
+            let Some(target) = entry(k as i64) else {
+                // A declared table that runs off the image or names
+                // non-code is not a table.
                 if bound.is_some() {
                     targets.clear();
                 }
                 break;
-            }
+            };
             targets.push(target);
         }
         if targets.is_empty() {
             continue;
+        }
+        // An unchecked sign-extended index also reaches entries below the
+        // table: take them while they name code, down to the index's minimum.
+        let mut first = 0i64;
+        if let (None, Some(floor)) = (bound, floor) {
+            while first > floor && targets.len() < MAX_ENTRIES {
+                let Some(target) = entry(first - 1) else {
+                    break;
+                };
+                targets.insert(0, target);
+                first -= 1;
+            }
         }
         found.push(JumpTable {
             jump: *address,
             index,
             copy_before,
             targets,
+            first,
         });
     }
     found
@@ -172,6 +201,23 @@ fn stable_index(
         .any(|o| o.address == at && writes(o.op, start_vn));
     (start_vn.space == AddressSpaceId::Register && at != jump && !changed_first)
         .then_some((start_vn, Some(at)))
+}
+
+/// Lowest value of the index `vn` at `pos` when it is a sign extension of a
+/// narrower value (`movsx rax, byte [...]`), followed through copies.
+fn signed_floor(window: &[Op], pos: usize, vn: Varnode) -> Option<i64> {
+    let (mut at, mut vn) = (pos, vn);
+    for _ in 0..6 {
+        let d = def(window, at, vn)?;
+        match window[d].op {
+            PcodeOp::Copy { input, .. } => (vn, at) = (*input, d),
+            PcodeOp::IntSext { input, out } if input.size < out.size && input.size <= 4 => {
+                return Some(-(1i64 << (input.size * 8 - 1)));
+            }
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// True when `op` writes `vn`.
@@ -236,6 +282,8 @@ fn scaled(window: &[Op], end: usize, vn: Varnode, depth: u32) -> Option<(Varnode
 }
 
 /// (table, index varnode, op position, scale) for `table + idx * scale`.
+/// The table may be a sum of constants around the scaled index, as in
+/// `[r8 + rax*4 + disp]` with `r8` holding the image base.
 fn table_address(
     window: &[Op],
     end: usize,
@@ -251,8 +299,11 @@ fn table_address(
             .into_iter()
             .find_map(|(base, offset)| {
                 let table = constant(window, d, base, 6)?;
-                let (index, pos, scale) = scaled(window, d, offset, 4)?;
-                Some((table, index, pos, scale))
+                if let Some((index, pos, scale)) = scaled(window, d, offset, 4) {
+                    return Some((table, index, pos, scale));
+                }
+                let (rest, index, pos, scale) = table_address(window, d, offset, depth - 1)?;
+                Some((table.wrapping_add(rest), index, pos, scale))
             }),
         PcodeOp::Copy { input, .. } => table_address(window, d, *input, depth - 1),
         _ => None,
@@ -283,25 +334,29 @@ fn dispatch(window: &[Op], end: usize, dest: Varnode) -> Option<(u64, Entries, u
                 return (scale == width && matches!(width, 4 | 8))
                     .then(|| (table, Entries::Absolute(width as usize), pos, index));
             }
-            // `movsxd reg, [table + idx*4]; add reg, table; jmp reg`
+            // `movsxd reg, [table + idx*4]; add reg, table; jmp reg`, or
+            // `mov eax, [base + disp + idx*4]; add rax, base; jmp rax`
             PcodeOp::IntAdd { left, right, .. } => {
                 return [(*left, *right), (*right, *left)]
                     .into_iter()
                     .find_map(|(base, entry)| {
-                        let table = constant(window, d, base, 6)?;
-                        let (mut ev, mut eat) = (entry, d);
-                        for _ in 0..4 {
+                        let base = constant(window, d, base, 6)?;
+                        let (mut ev, mut eat, mut signed) = (entry, d, true);
+                        for _ in 0..6 {
                             let ed = def(window, eat, ev)?;
                             match window[ed].op {
                                 PcodeOp::IntSext { input, .. } | PcodeOp::Copy { input, .. } => {
                                     (ev, eat) = (*input, ed)
                                 }
+                                PcodeOp::IntZext { input, .. } => {
+                                    (ev, eat, signed) = (*input, ed, false)
+                                }
                                 PcodeOp::Load { ptr, out, .. } if out.size == 4 => {
-                                    let (entries_at, index, pos, scale) =
+                                    let (table, index, pos, scale) =
                                         table_address(window, ed, *ptr, 4)?;
-                                    return (entries_at == table && scale == 4).then_some((
+                                    return (scale == 4).then_some((
                                         table,
-                                        Entries::Relative,
+                                        Entries::Relative { base, signed },
                                         pos,
                                         index,
                                     ));

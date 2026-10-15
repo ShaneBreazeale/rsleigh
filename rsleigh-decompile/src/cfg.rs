@@ -313,6 +313,7 @@ pub fn build_cfg_with_memory(
                             first_synthetic,
                             last_inst_addr,
                             index,
+                            table.first,
                             &cases,
                         )
                     } else if is_stack_return || is_bx_lr {
@@ -471,9 +472,9 @@ fn copy_aside(ops: &mut Vec<(u64, PcodeOp)>, jump: u64, before: u64, index: Varn
     out
 }
 
-/// Dispatch on a recovered jump table as a chain of `index == k` tests:
-/// the jump's block tests case 0, synthetic blocks test the rest, and the
-/// last case is the remaining edge (the bounds check already ran). The
+/// Dispatch on a recovered jump table as a chain of `index == first + k`
+/// tests: the jump's block tests the first case, synthetic blocks the rest,
+/// and the last case is the remaining edge (the bounds check already ran). The
 /// structurer folds such chains into `switch`.
 fn switch_chain(
     ops: &mut Vec<(u64, PcodeOp)>,
@@ -481,6 +482,7 @@ fn switch_chain(
     first_synthetic: usize,
     at: u64,
     index: Varnode,
+    first: i64,
     cases: &[BlockId],
 ) -> Terminator {
     let Some((&last, tested)) = cases.split_last() else {
@@ -494,7 +496,10 @@ fn switch_chain(
         let op = PcodeOp::IntEq {
             out: cond,
             left: index,
-            right: Varnode::constant(k as u64, index.size),
+            right: Varnode::constant(
+                (first + k as i64) as u64 & (u64::MAX >> (64 - 8 * index.size.min(8))),
+                index.size,
+            ),
         };
         (cond, (at, op))
     };
