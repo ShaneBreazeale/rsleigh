@@ -1,6 +1,7 @@
 pub mod analysis;
 pub mod callgraph;
 pub mod cfg;
+mod binary_cache;
 // Heuristic-heavy modules whose shape may shift across patch versions.
 // `experimental` is the only fully-isolated feature today: gating cpp_class
 // and seh_static is the maximum we can do without unwinding the deeper

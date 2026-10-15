@@ -6776,54 +6776,61 @@ fn post_process(
             ),
         ];
 
-        // Scan data sections for crypto signatures
-        let mut crypto_addrs: HashMap<u64, &str> = HashMap::new();
-        if let Ok(obj) = goblin::Object::parse(binary) {
-            let scan_sections: Vec<(u64, usize, usize)> = match &obj {
-                goblin::Object::PE(pe) => {
-                    let base = pe.image_base as u64;
-                    pe.sections
+        // Scan data sections for crypto signatures, once per binary: the scan
+        // compares every pattern at every offset of every data section.
+        static CRYPTO_ADDRS: crate::binary_cache::Cache<HashMap<u64, &'static str>> =
+            crate::binary_cache::Cache::new();
+        let key = crate::binary_cache::Key::bytes(binary);
+        let crypto_addrs = crate::binary_cache::cached(&CRYPTO_ADDRS, Some(key), || {
+            let mut crypto_addrs: HashMap<u64, &'static str> = HashMap::new();
+            if let Ok(obj) = goblin::Object::parse(binary) {
+                let scan_sections: Vec<(u64, usize, usize)> = match &obj {
+                    goblin::Object::PE(pe) => {
+                        let base = pe.image_base as u64;
+                        pe.sections
+                            .iter()
+                            .filter(|s| s.characteristics & 0x20000000 == 0) // not executable
+                            .map(|s| {
+                                (
+                                    base + s.virtual_address as u64,
+                                    s.pointer_to_raw_data as usize,
+                                    s.virtual_size as usize,
+                                )
+                            })
+                            .collect()
+                    }
+                    goblin::Object::Elf(elf) => elf
+                        .section_headers
                         .iter()
-                        .filter(|s| s.characteristics & 0x20000000 == 0) // not executable
-                        .map(|s| {
-                            (
-                                base + s.virtual_address as u64,
-                                s.pointer_to_raw_data as usize,
-                                s.virtual_size as usize,
-                            )
-                        })
-                        .collect()
-                }
-                goblin::Object::Elf(elf) => elf
-                    .section_headers
-                    .iter()
-                    .filter(|s| s.sh_flags & 0x4 == 0 && s.sh_flags & 0x2 != 0 && s.sh_type != 8)
-                    .map(|s| (s.sh_addr, s.sh_offset as usize, s.sh_size as usize))
-                    .collect(),
-                _ => vec![],
-            };
+                        .filter(|s| s.sh_flags & 0x4 == 0 && s.sh_flags & 0x2 != 0 && s.sh_type != 8)
+                        .map(|s| (s.sh_addr, s.sh_offset as usize, s.sh_size as usize))
+                        .collect(),
+                    _ => vec![],
+                };
 
-            for (sec_va, sec_fo, sec_size) in &scan_sections {
-                if sec_fo + sec_size > binary.len() {
-                    continue;
-                }
-                let sec_data = &binary[*sec_fo..*sec_fo + *sec_size];
-                for (name, pattern) in crypto_sigs {
-                    if pattern.len() > sec_data.len() {
+                for (sec_va, sec_fo, sec_size) in &scan_sections {
+                    if sec_fo + sec_size > binary.len() {
                         continue;
                     }
-                    // Search for the pattern in the section data
-                    for i in 0..sec_data.len() - pattern.len() {
-                        if &sec_data[i..i + pattern.len()] == *pattern {
-                            let va = sec_va + i as u64;
-                            crypto_addrs.insert(va, name);
-                            // Also mark nearby addresses (the table may be referenced at any offset)
-                            break; // one match per section per pattern
+                    let sec_data = &binary[*sec_fo..*sec_fo + *sec_size];
+                    for (name, pattern) in crypto_sigs {
+                        if pattern.len() > sec_data.len() {
+                            continue;
+                        }
+                        // Search for the pattern in the section data
+                        for i in 0..sec_data.len() - pattern.len() {
+                            if &sec_data[i..i + pattern.len()] == *pattern {
+                                let va = sec_va + i as u64;
+                                crypto_addrs.insert(va, name);
+                                // Also mark nearby addresses (the table may be referenced at any offset)
+                                break; // one match per section per pattern
+                            }
                         }
                     }
                 }
             }
-        }
+            crypto_addrs
+        });
 
         // Annotate lines referencing crypto table addresses
         if !crypto_addrs.is_empty() {

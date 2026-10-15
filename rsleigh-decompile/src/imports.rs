@@ -371,6 +371,13 @@ fn find_matching_angle(s: &str, start: usize) -> Option<usize> {
 
 /// Build a map of address → import function name from a binary.
 pub fn resolve_imports(binary: &[u8]) -> HashMap<u64, String> {
+    static CACHE: crate::binary_cache::Cache<HashMap<u64, String>> =
+        crate::binary_cache::Cache::new();
+    let key = crate::binary_cache::Key::bytes(binary);
+    crate::binary_cache::cached(&CACHE, Some(key), || resolve_imports_uncached(binary))
+}
+
+fn resolve_imports_uncached(binary: &[u8]) -> HashMap<u64, String> {
     let mut map = HashMap::new();
     let Ok(obj) = goblin::Object::parse(binary) else {
         if binary.len() > 0x40 && &binary[0..2] == b"MZ" {
