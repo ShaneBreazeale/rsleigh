@@ -4,6 +4,15 @@ All notable user-facing changes to rsleigh are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- MSVC and clang-cl x86-64 jump tables print as `switch`. Their entries are
+  32-bit offsets from the image base (`mov eax, [base + idx*4 + disp]; add
+  rax, base`), which were not recognised, so the body stopped at the jump.
+  An unchecked sign-extended index also takes entries below the table
+  (`case -1`). On CrashLoggerSSE 1.25.0 this recovers 73 tables, against 0
+  before.
+
 ## [0.6.1] - 2026-10-12
 
 ### Fixed
