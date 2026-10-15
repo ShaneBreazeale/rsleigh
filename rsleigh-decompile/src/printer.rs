@@ -19805,15 +19805,34 @@ fn unwrap_ext(id: VarId, ssa: &SsaCfg) -> VarId {
     }
 }
 
-/// Replace `->field<hex>` with the debug-info field name at that offset.
+/// Replace `->field<hex>` with the debug-info field name at that offset. The
+/// whole hex run is the offset: `->field18` is offset 0x18, never offset 0x1
+/// followed by `8`.
 fn rename_struct_fields(line: &mut String, struct_fields: &HashMap<u64, String>) {
-    for (offset, name) in struct_fields {
-        let pattern = format!("->field{:x}", offset);
-        if line.contains(&pattern) {
-            let replacement = format!("->{}", name);
-            *line = line.replace(&pattern, &replacement);
+    const MARK: &str = "->field";
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line.as_str();
+    while let Some(at) = rest.find(MARK) {
+        let digits_at = at + MARK.len();
+        let digits = rest[digits_at..]
+            .find(|c: char| !c.is_ascii_hexdigit())
+            .unwrap_or(rest.len() - digits_at);
+        let hex = &rest[digits_at..digits_at + digits];
+        let name = u64::from_str_radix(hex, 16)
+            .ok()
+            .and_then(|offset| struct_fields.get(&offset));
+        match name {
+            Some(name) => {
+                out.push_str(&rest[..at]);
+                out.push_str("->");
+                out.push_str(name);
+            }
+            None => out.push_str(&rest[..digits_at + digits]),
         }
+        rest = &rest[digits_at + digits..];
     }
+    out.push_str(rest);
+    *line = out;
 }
 
 #[cfg(test)]
