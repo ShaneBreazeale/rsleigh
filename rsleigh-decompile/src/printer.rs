@@ -1170,13 +1170,7 @@ fn post_process(
             if !line.contains("->field") {
                 continue;
             }
-            for (offset, name) in struct_fields {
-                let pattern = format!("->field{:x}", offset);
-                if line.contains(&pattern) {
-                    let replacement = format!("->{}", name);
-                    *line = line.replace(&pattern, &replacement);
-                }
-            }
+            rename_struct_fields(line, struct_fields);
         }
     }
 
@@ -19808,6 +19802,39 @@ fn unwrap_ext(id: VarId, ssa: &SsaCfg) -> VarId {
     match &ssa.var(id).expr {
         Expr::UnaryOp(UnaryOpKind::Zext | UnaryOpKind::Sext, inner) => *inner,
         _ => id,
+    }
+}
+
+/// Replace `->field<hex>` with the debug-info field name at that offset.
+fn rename_struct_fields(line: &mut String, struct_fields: &HashMap<u64, String>) {
+    for (offset, name) in struct_fields {
+        let pattern = format!("->field{:x}", offset);
+        if line.contains(&pattern) {
+            let replacement = format!("->{}", name);
+            *line = line.replace(&pattern, &replacement);
+        }
+    }
+}
+
+#[cfg(test)]
+mod struct_field_rename_tests {
+    use super::*;
+
+    #[test]
+    fn offset_names_replace_whole_hex_tokens_only() {
+        // `->field18` contains `->field1`: the offset-1 name must not take
+        // it, whatever order the map yields its entries in (CrashLogger
+        // printed `size` or `reg8` from run to run).
+        for _ in 0..32 {
+            let fields: HashMap<u64, String> =
+                [(0x1, "reg"), (0x18, "size"), (0x180, "tail")]
+                    .into_iter()
+                    .map(|(o, n)| (o, n.to_string()))
+                    .collect();
+            let mut line = "a->field18 = b->field1 + c->field180 + d->field1f;".to_string();
+            rename_struct_fields(&mut line, &fields);
+            assert_eq!(line, "a->size = b->reg + c->tail + d->field1f;");
+        }
     }
 }
 
