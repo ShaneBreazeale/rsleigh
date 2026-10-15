@@ -1877,34 +1877,64 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
         return;
     }
 
-    // Decompile mode — two-pass for interprocedural type propagation
+    // Decompile mode — two-pass for interprocedural type propagation.
+    // Functions run on `--jobs` threads (default: one per core), each under
+    // the `--fn-timeout` limit (default 10 s with --all, 0 = none), and
+    // results print in target order as they finish.
+    let jobs: usize = args
+        .iter()
+        .position(|a| a == "--jobs")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
+    let fn_timeout: Option<std::time::Duration> = args
+        .iter()
+        .position(|a| a == "--fn-timeout")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse::<f64>().ok())
+        .or(all_mode.then_some(DEFAULT_FN_TIMEOUT_SECS))
+        .filter(|secs| *secs > 0.0)
+        .map(std::time::Duration::from_secs_f64);
+    let addresses: Vec<Option<u64>> = {
+        let mut by_name: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+        for (a, n) in &symbols {
+            by_name.entry(n.as_str()).or_insert(*a);
+        }
+        targets
+            .iter()
+            .map(
+                |name| match name.strip_prefix("0x").or_else(|| name.strip_prefix("0X")) {
+                    Some(hex) => u64::from_str_radix(hex, 16).ok(),
+                    None => by_name.get(name.as_str()).copied(),
+                },
+            )
+            .collect()
+    };
+    drop(dec);
+
     // Pass 1: quick decompile all targets to learn parameter/return types + struct params
     if all_mode && targets.len() > 1 {
         let mut learned: Vec<rsleigh_decompile::LearnedFuncType> = Vec::new();
         let mut callsite_returns: Vec<(u64, &'static str)> = Vec::new();
         let mut learned_structs: Vec<rsleigh_decompile::LearnedStructParam> = Vec::new();
 
-        for name in &targets {
-            let func_addr =
-                if let Some(hex) = name.strip_prefix("0x").or_else(|| name.strip_prefix("0X")) {
-                    u64::from_str_radix(hex, 16).ok()
-                } else {
-                    symbols.iter().find(|(_, n)| n == name).map(|(a, _)| *a)
-                };
-            if let Some(func_addr) = func_addr {
-                let insts = decode_func(func_addr, &symbols, &segs, &data, &mut dec);
-                if !insts.is_empty() {
+        for_each_ordered(
+            targets.len(),
+            jobs,
+            arch,
+            |i, dec| {
+                let func_addr = addresses[i]?;
+                let insts = decode_func(func_addr, &symbols, &segs, &data, dec);
+                if insts.is_empty() {
+                    return None;
+                }
+                within_fn_timeout(fn_timeout, || {
                     // Extract learned types from this function
-                    if let Some(lt) =
-                        rsleigh_decompile::extract_learned_types(arch, &insts, Some(&data))
-                    {
-                        learned.push(lt);
-                    }
+                    let types = rsleigh_decompile::extract_learned_types(arch, &insts, Some(&data));
                     // Infer callee return types from how this function uses call results
                     let returns =
                         rsleigh_decompile::infer_returns_from_callsites(arch, &insts, Some(&data));
-                    callsite_returns.extend(returns);
-
                     // Extract struct param identifications from decompiled output
                     let output = rsleigh_decompile::decompile_with_binary(
                         arch,
@@ -1913,10 +1943,18 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                         Some(path),
                     );
                     let structs = rsleigh_decompile::extract_learned_structs(func_addr, &output);
+                    (types, returns, structs)
+                })
+                .ok()
+            },
+            |_, found| {
+                if let Some((types, returns, structs)) = found {
+                    learned.extend(types);
+                    callsite_returns.extend(returns);
                     learned_structs.extend(structs);
                 }
-            }
-        }
+            },
+        );
 
         // Merge call-site inferred returns into learned types
         callsite_returns.sort_by_key(|(a, _)| *a);
@@ -1944,28 +1982,49 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
     }
 
     // Pass 2: full decompilation with learned types available
-    let mut results: Vec<serde_json::Value> = Vec::new();
     let mut partial_functions = 0usize;
+    let mut timed_out = 0usize;
+    let mut emitted_json = 0usize;
+    if json_mode {
+        println!("{{");
+        println!("  \"arch\": {},", serde_json::json!(format!("{:?}", arch)));
+        println!("  \"binary\": {},", serde_json::json!(binary_path));
+        print!("  \"functions\": [");
+    }
 
-    for name in &targets {
-        // Support hex addresses like 0x1400013f0
-        let func_addr =
-            if let Some(hex) = name.strip_prefix("0x").or_else(|| name.strip_prefix("0X")) {
-                u64::from_str_radix(hex, 16).ok()
-            } else {
-                symbols.iter().find(|(_, n)| n == name).map(|(a, _)| *a)
+    for_each_ordered(
+        targets.len(),
+        jobs,
+        arch,
+        |i, dec| {
+            let func_addr = addresses[i]?;
+            let decompiled = within_fn_timeout(fn_timeout, || {
+                decompile_func(func_addr, &symbols, &segs, &data, dec, arch, path)
+            });
+            Some((func_addr, decompiled))
+        },
+        |i, result| {
+            let name = &targets[i];
+            let Some((func_addr, decompiled)) = result else {
+                eprintln!("Function '{}' not found", name);
+                return;
             };
-        if let Some(func_addr) = func_addr {
-            let (output, unresolved) =
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    decompile_func(func_addr, &symbols, &segs, &data, &mut dec, arch, path)
-                })) {
-                    Ok(o) => o,
-                    Err(_) => (
-                        "// decompilation failed (stack overflow)\n".to_string(),
+            let (output, unresolved) = match decompiled {
+                Ok(done) => done,
+                Err(FnFailure::TimedOut) => {
+                    timed_out += 1;
+                    let secs = fn_timeout.map_or(0.0, |d| d.as_secs_f64());
+                    (
+                        format!("// decompilation stopped at the {secs} s per-function limit (--fn-timeout)\n"),
                         Vec::new(),
-                    ),
-                };
+                    )
+                }
+                Err(FnFailure::Panicked) => (
+                    "// decompilation failed (decompiler panic)\n".to_string(),
+                    Vec::new(),
+                ),
+            };
+            let stopped = output.starts_with("// decompilation stopped at the");
             if !unresolved.is_empty() {
                 partial_functions += 1;
             }
@@ -2022,7 +2081,7 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                     .next()
                     .map(|l| l.matches("param_").count())
                     .unwrap_or(0);
-                let diagnostics: Vec<serde_json::Value> = unresolved
+                let mut diagnostics: Vec<serde_json::Value> = unresolved
                     .iter()
                     .map(|(addr, detail)| {
                         serde_json::json!({
@@ -2032,10 +2091,17 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                         })
                     })
                     .collect();
-                results.push(serde_json::json!({
+                if stopped {
+                    diagnostics.push(serde_json::json!({
+                    "code": "deadline",
+                    "address": serde_json::Value::Null,
+                    "message": "decompilation stopped at the per-function time limit (--fn-timeout)",
+                }));
+                }
+                let entry = serde_json::json!({
                     "name": name,
                     "address": format!("0x{:x}", func_addr),
-                    "status": if unresolved.is_empty() { "ok" } else { "partial" },
+                    "status": if diagnostics.is_empty() { "ok" } else { "partial" },
                     "diagnostics": diagnostics,
                     "params": params,
                     "return_type": return_type,
@@ -2043,7 +2109,14 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                     "strings": strings,
                     "complexity": line_count,
                     "pseudocode": output.trim(),
-                }));
+                });
+                let text = serde_json::to_string_pretty(&entry).unwrap();
+                let separator = if emitted_json == 0 { "" } else { "," };
+                emitted_json += 1;
+                println!("{separator}");
+                for line in text.lines() {
+                    println!("    {line}");
+                }
             } else {
                 // Apply token-efficiency modes
                 let is_compact = args.iter().any(|a| a == "--compact");
@@ -2061,7 +2134,7 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                     .filter(|l| !l.trim().is_empty() && !l.trim().starts_with("//"))
                     .count();
                 if min_comp > 0 && line_count < min_comp {
-                    continue;
+                    return;
                 }
 
                 let display = if is_brief {
@@ -2077,8 +2150,8 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                     for (addr, detail) in &unresolved {
                         let at = addr.map_or_else(String::new, |a| format!(" at 0x{a:x}"));
                         println!(
-                            "// WARNING: unresolved control flow{at} ({detail}); code past it is missing"
-                        );
+                        "// WARNING: unresolved control flow{at} ({detail}); code past it is missing"
+                    );
                     }
                     for line in display.lines() {
                         if !line.trim().is_empty() {
@@ -2088,28 +2161,26 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                     println!();
                 }
             }
-        } else {
-            eprintln!("Function '{}' not found", name);
-        }
-    }
+        },
+    );
 
     if json_mode {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "binary": binary_path,
-                "arch": format!("{:?}", arch),
-                "functions": results,
-            }))
-            .unwrap()
-        );
+        println!("{}", if emitted_json == 0 { "]" } else { "\n  ]" });
+        println!("}}");
     }
     // Exit 2 (partial), as the agent operations do, when any printed body
-    // stops at a branch it could not follow.
-    if partial_functions > 0 {
-        eprintln!(
-            "// {partial_functions} function(s) have unresolved control flow; their bodies are incomplete"
-        );
+    // stops at a branch it could not follow or at the time limit.
+    if partial_functions > 0 || timed_out > 0 {
+        if partial_functions > 0 {
+            eprintln!(
+                "// {partial_functions} function(s) have unresolved control flow; their bodies are incomplete"
+            );
+        }
+        if timed_out > 0 {
+            eprintln!(
+                "// {timed_out} function(s) stopped at the per-function time limit (--fn-timeout)"
+            );
+        }
         use std::io::Write;
         let _ = std::io::stdout().flush();
         std::process::exit(2);
@@ -3946,6 +4017,87 @@ fn follow_detached_fragments(
         found.sort_unstable_by(|a, b| b.cmp(a));
         pending.extend(found);
     }
+}
+
+/// Per-function time limit for `--all` when `--fn-timeout` is not given.
+const DEFAULT_FN_TIMEOUT_SECS: f64 = 10.0;
+
+/// Why one function of a multi-function decompile has no result.
+enum FnFailure {
+    /// The `--fn-timeout` limit stopped it.
+    TimedOut,
+    /// The decompiler panicked.
+    Panicked,
+}
+
+/// Run one function's analysis under `limit`, catching a decompiler panic.
+/// The limit is checked at the decompiler's budget checkpoints, so a stop
+/// unwinds out of the analysis rather than killing the thread.
+fn within_fn_timeout<T>(
+    limit: Option<std::time::Duration>,
+    analysis: impl FnOnce() -> T,
+) -> Result<T, FnFailure> {
+    let _scope = limit.map(|limit| {
+        rsleigh_decompile::budget::Scope::new(rsleigh_decompile::budget::Limits {
+            deadline_ms: Some(limit.as_millis().min(u64::MAX as u128) as u64),
+            ..Default::default()
+        })
+    });
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(analysis)).map_err(|payload| {
+        if payload.is::<rsleigh_decompile::budget::Stop>() {
+            FnFailure::TimedOut
+        } else {
+            FnFailure::Panicked
+        }
+    })
+}
+
+/// Run `job` for every index in `0..count` on `jobs` threads, each with its
+/// own decoder and a decompiler-sized stack, and pass the results to `emit`
+/// in index order as soon as all earlier indices are done.
+fn for_each_ordered<T: Send>(
+    count: usize,
+    jobs: usize,
+    arch: rsleigh_api::Architecture,
+    job: impl Fn(usize, &mut rsleigh_api::Decoder) -> T + Sync,
+    mut emit: impl FnMut(usize, T),
+) {
+    if jobs <= 1 || count <= 1 {
+        let mut dec = rsleigh_api::Decoder::new(arch);
+        for i in 0..count {
+            emit(i, job(i, &mut dec));
+        }
+        return;
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let (send, receive) = std::sync::mpsc::channel::<(usize, T)>();
+    std::thread::scope(|scope| {
+        for _ in 0..jobs.min(count) {
+            let (send, next, job) = (send.clone(), &next, &job);
+            std::thread::Builder::new()
+                .stack_size(64 * 1024 * 1024)
+                .spawn_scoped(scope, move || {
+                    let mut dec = rsleigh_api::Decoder::new(arch);
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        if i >= count || send.send((i, job(i, &mut dec))).is_err() {
+                            break;
+                        }
+                    }
+                })
+                .expect("spawn decompile worker");
+        }
+        drop(send);
+        let mut pending = std::collections::BTreeMap::new();
+        let mut want = 0;
+        for (i, value) in receive {
+            pending.insert(i, value);
+            while let Some(value) = pending.remove(&want) {
+                emit(want, value);
+                want += 1;
+            }
+        }
+    });
 }
 
 fn decompile_func(

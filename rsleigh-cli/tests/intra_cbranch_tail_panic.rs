@@ -43,7 +43,7 @@ fn trailing_cbranch_does_not_panic() {
     );
     let text = String::from_utf8(out.stdout).expect("UTF-8");
     assert!(
-        !text.contains("decompilation failed (stack overflow)") && !text.contains("panicked"),
+        !text.contains("decompilation failed") && !text.contains("panicked"),
         "rsleigh reported failure in output:\n{text}"
     );
     // Body must have more than the comment + `}` — the Ghidra counterpart

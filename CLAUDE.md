@@ -33,6 +33,7 @@ Workspace also keeps `cargo install --path rsleigh-cli` working — same binary 
 rsleigh <binary>                       # list functions
 rsleigh <binary> <func> [func2..]      # decompile (name or 0xAddr)
 rsleigh <binary> --all                 # decompile all (two-pass type prop)
+rsleigh <binary> --all --jobs N --fn-timeout S  # threads (default: cores); per-fn limit (default 10 s, 0 = none)
 rsleigh <binary> --disasm <func>       # disassembly + P-code
 rsleigh <binary> --sigs extra.json     # additional signatures
 rsleigh <binary> --fid file.fidb       # additional FID database (repeatable)
