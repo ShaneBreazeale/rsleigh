@@ -29,6 +29,11 @@ rsleigh ./sample.exe 0x140001000 --card --pcode
   `rsleigh --version` prints the package version; `--version --json` adds the
   linked build identity. A first argument beginning with `-` is always an
   option, so write a file named `--help` as `./--help`.
+- Plain decompilation (`FILE FUNCTION...`, `--all`) exits 2 when any printed
+  body stops at a branch it could not follow, such as an unrecognised jump
+  table. Text output marks the function with a `// WARNING: unresolved control
+  flow at ADDR` line; `--json` sets that function's `status` to `partial` and
+  lists the branch in `diagnostics`.
 - `--features smt` is a Cargo build option, never an `rsleigh` runtime option.
 
 The tables below show the supported combinations to use. They are a task guide,

@@ -142,6 +142,23 @@ pub fn decompile_with_binary(
     decompile_with_diagnostics(arch, instructions, binary, binary_path).0
 }
 
+/// The diagnostics from [`decompile_with_diagnostics`] that mean the printed
+/// body is incomplete: a branch whose target was never resolved, so the code
+/// behind it is missing. At most one per address.
+pub fn unresolved_control_flow(diagnostics: &[ir::Diagnostic]) -> Vec<&ir::Diagnostic> {
+    let mut seen = std::collections::BTreeSet::new();
+    diagnostics
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.kind,
+                ir::DiagKind::UnresolvedBranchTarget | ir::DiagKind::UnrecoveredIndirectJump
+            ) && !matches!(d.severity, ir::Severity::Info)
+                && seen.insert(d.addr)
+        })
+        .collect()
+}
+
 /// [`decompile_with_binary`], also returning the approximations recorded by
 /// CFG construction, SSA, and folding (unresolved jumps, tail calls, ...).
 pub fn decompile_with_diagnostics(

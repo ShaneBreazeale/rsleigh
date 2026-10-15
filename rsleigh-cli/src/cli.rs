@@ -1945,6 +1945,7 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
 
     // Pass 2: full decompilation with learned types available
     let mut results: Vec<serde_json::Value> = Vec::new();
+    let mut partial_functions = 0usize;
 
     for name in &targets {
         // Support hex addresses like 0x1400013f0
@@ -1955,12 +1956,19 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                 symbols.iter().find(|(_, n)| n == name).map(|(a, _)| *a)
             };
         if let Some(func_addr) = func_addr {
-            let output = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                decompile_func(func_addr, &symbols, &segs, &data, &mut dec, arch, path)
-            })) {
-                Ok(o) => o,
-                Err(_) => "// decompilation failed (stack overflow)\n".to_string(),
-            };
+            let (output, unresolved) =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    decompile_func(func_addr, &symbols, &segs, &data, &mut dec, arch, path)
+                })) {
+                    Ok(o) => o,
+                    Err(_) => (
+                        "// decompilation failed (stack overflow)\n".to_string(),
+                        Vec::new(),
+                    ),
+                };
+            if !unresolved.is_empty() {
+                partial_functions += 1;
+            }
 
             if json_mode {
                 // Extract rich metadata from pseudocode
@@ -2014,9 +2022,21 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                     .next()
                     .map(|l| l.matches("param_").count())
                     .unwrap_or(0);
+                let diagnostics: Vec<serde_json::Value> = unresolved
+                    .iter()
+                    .map(|(addr, detail)| {
+                        serde_json::json!({
+                            "code": "unresolved_control_flow",
+                            "address": addr.map(|a| format!("0x{a:x}")),
+                            "message": detail,
+                        })
+                    })
+                    .collect();
                 results.push(serde_json::json!({
                     "name": name,
                     "address": format!("0x{:x}", func_addr),
+                    "status": if unresolved.is_empty() { "ok" } else { "partial" },
+                    "diagnostics": diagnostics,
                     "params": params,
                     "return_type": return_type,
                     "calls": calls,
@@ -2054,6 +2074,12 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
 
                 if !display.trim().is_empty() {
                     println!("// {}", name);
+                    for (addr, detail) in &unresolved {
+                        let at = addr.map_or_else(String::new, |a| format!(" at 0x{a:x}"));
+                        println!(
+                            "// WARNING: unresolved control flow{at} ({detail}); code past it is missing"
+                        );
+                    }
                     for line in display.lines() {
                         if !line.trim().is_empty() {
                             println!("{}", line);
@@ -2077,6 +2103,16 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
             }))
             .unwrap()
         );
+    }
+    // Exit 2 (partial), as the agent operations do, when any printed body
+    // stops at a branch it could not follow.
+    if partial_functions > 0 {
+        eprintln!(
+            "// {partial_functions} function(s) have unresolved control flow; their bodies are incomplete"
+        );
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        std::process::exit(2);
     }
 }
 
@@ -3920,17 +3956,18 @@ fn decompile_func(
     dec: &mut rsleigh_api::Decoder,
     arch: rsleigh_api::Architecture,
     path: &Path,
-) -> String {
+) -> (String, Vec<(Option<u64>, String)>) {
     let insts = decode_func(fa, symbols, segs, data, dec);
     if insts.is_empty() {
-        return "// no instructions\n".to_string();
+        return ("// no instructions\n".to_string(), Vec::new());
     }
-    maybe_annotate_crypto(rsleigh_decompile::decompile_with_binary(
-        arch,
-        &insts,
-        Some(data),
-        Some(path),
-    ))
+    let (text, diagnostics) =
+        rsleigh_decompile::decompile_with_diagnostics(arch, &insts, Some(data), Some(path));
+    let unresolved = rsleigh_decompile::unresolved_control_flow(&diagnostics)
+        .into_iter()
+        .map(|d| (d.addr, d.detail.clone()))
+        .collect();
+    (maybe_annotate_crypto(text), unresolved)
 }
 
 /// Diff two binaries through the structured comparison model.
