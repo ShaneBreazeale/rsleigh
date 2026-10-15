@@ -43,7 +43,10 @@ fn declared_types(output: &str) -> HashMap<String, String> {
     if let (Some(open), Some(close)) = (signature.find('('), signature.rfind(')')) {
         signature[open + 1..close].split(',').for_each(&mut declare);
     }
-    for line in output.lines().filter(|l| l.starts_with("    ") && l.trim_end().ends_with(';')) {
+    for line in output
+        .lines()
+        .filter(|l| l.starts_with("    ") && l.trim_end().ends_with(';'))
+    {
         let t = line.trim();
         if !t.contains('=') && !t.contains('(') && !t.starts_with("return") {
             declare(t);
@@ -58,7 +61,11 @@ fn arrow_on_non_pointer(output: &str) -> Vec<String> {
     let types = declared_types(output);
     let body_at = output
         .find(|c: char| c == '{')
-        .and_then(|_| output.lines().position(|l| l.contains('(') && !l.starts_with('#')))
+        .and_then(|_| {
+            output
+                .lines()
+                .position(|l| l.contains('(') && !l.starts_with('#'))
+        })
         .map_or(0, |n| output.lines().take(n + 1).map(|l| l.len() + 1).sum());
     let output = &output[body_at..];
     let mut bad = Vec::new();
@@ -85,8 +92,15 @@ fn consistent_field_accesses_get_a_struct_pointer_type() {
     let output = decompile(&[
         0x8b, 0x47, 0x48, 0x89, 0x77, 0x50, 0x0f, 0xb6, 0x4f, 0x60, 0x01, 0xc8, 0xc3,
     ]);
-    assert_eq!(arrow_on_non_pointer(&output), Vec::<String>::new(), "\n{output}");
-    assert!(output.contains("struct "), "no struct type declared:\n{output}");
+    assert_eq!(
+        arrow_on_non_pointer(&output),
+        Vec::<String>::new(),
+        "\n{output}"
+    );
+    assert!(
+        output.contains("struct "),
+        "no struct type declared:\n{output}"
+    );
     for field in ["->field_50 = param_1", "->field_60"] {
         assert!(output.contains(field), "missing `{field}`:\n{output}");
     }
@@ -97,6 +111,13 @@ fn overlapping_field_accesses_print_as_casts() {
     // mov [rdi+0x10], esi ; mov [rdi+0x12], dl ; ret
     // A 4-byte field at 0x10 overlaps a 1-byte field at 0x12.
     let output = decompile(&[0x89, 0x77, 0x10, 0x88, 0x57, 0x12, 0xc3]);
-    assert_eq!(arrow_on_non_pointer(&output), Vec::<String>::new(), "\n{output}");
-    assert!(output.contains("+ 0x12)"), "byte at 0x12 not cast-dereferenced:\n{output}");
+    assert_eq!(
+        arrow_on_non_pointer(&output),
+        Vec::<String>::new(),
+        "\n{output}"
+    );
+    assert!(
+        output.contains("+ 0x12)"),
+        "byte at 0x12 not cast-dereferenced:\n{output}"
+    );
 }

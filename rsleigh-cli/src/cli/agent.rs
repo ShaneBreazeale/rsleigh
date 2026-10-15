@@ -678,7 +678,7 @@ fn decompile_function(
 fn pseudocode_body_is_empty(text: &str) -> bool {
     !text
         .lines()
-        .skip_while(|l| !l.trim_end().ends_with('{'))
+        .skip_while(|l| !(l.trim_end().ends_with('{') && l.contains('(')))
         .skip(1)
         .map(str::trim)
         .any(|t| {

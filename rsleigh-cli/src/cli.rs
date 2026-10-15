@@ -1507,15 +1507,11 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                         }
                     }
                     // Extract return type from first line
-                    let return_type = output
-                        .lines()
-                        .next()
+                    let return_type = rsleigh_decompile::signature_line(&output)
                         .and_then(|l| l.split_whitespace().next())
                         .unwrap_or("void");
                     // Extract param count from signature
-                    let params = output
-                        .lines()
-                        .next()
+                    let params = rsleigh_decompile::signature_line(&output)
                         .map(|l| l.matches("param_").count())
                         .unwrap_or(0);
                     let size: u64 = insts.iter().map(|(_, i)| i.len).sum();
@@ -2071,14 +2067,10 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                         }
                     }
                 }
-                let return_type = output
-                    .lines()
-                    .next()
+                let return_type = rsleigh_decompile::signature_line(&output)
                     .and_then(|l| l.split_whitespace().next())
                     .unwrap_or("void");
-                let params = output
-                    .lines()
-                    .next()
+                let params = rsleigh_decompile::signature_line(&output)
                     .map(|l| l.matches("param_").count())
                     .unwrap_or(0);
                 let mut diagnostics: Vec<serde_json::Value> = unresolved
@@ -7252,9 +7244,7 @@ fn run_callgraph(binary_path: &str, data: &[u8]) {
             tags.push("input");
         }
 
-        let return_type = output
-            .lines()
-            .next()
+        let return_type = rsleigh_decompile::signature_line(&output)
             .and_then(|l| l.split_whitespace().next())
             .unwrap_or("void");
 
