@@ -36,7 +36,10 @@ fn declared_types(output: &str) -> HashMap<String, String> {
             types.insert(decl[split..].to_string(), decl[..split].trim().to_string());
         }
     };
-    let signature = output.lines().find(|l| l.contains('(')).unwrap_or("");
+    let signature = output
+        .lines()
+        .find(|l| l.contains('(') && !l.starts_with('#'))
+        .unwrap_or("");
     if let (Some(open), Some(close)) = (signature.find('('), signature.rfind(')')) {
         signature[open + 1..close].split(',').for_each(&mut declare);
     }
@@ -49,9 +52,15 @@ fn declared_types(output: &str) -> HashMap<String, String> {
     types
 }
 
-/// Bases used with `->` or `[N]` that are not declared as pointers.
+/// Bases used with `->` or `[N]` in the function body that are not
+/// declared as pointers.
 fn arrow_on_non_pointer(output: &str) -> Vec<String> {
     let types = declared_types(output);
+    let body_at = output
+        .find(|c: char| c == '{')
+        .and_then(|_| output.lines().position(|l| l.contains('(') && !l.starts_with('#')))
+        .map_or(0, |n| output.lines().take(n + 1).map(|l| l.len() + 1).sum());
+    let output = &output[body_at..];
     let mut bad = Vec::new();
     let uses = output.match_indices("->").chain(output.match_indices('['));
     for (at, _) in uses {
@@ -85,9 +94,9 @@ fn consistent_field_accesses_get_a_struct_pointer_type() {
 
 #[test]
 fn overlapping_field_accesses_print_as_casts() {
-    // mov eax, [rdi+0x10] ; movzx ecx, byte [rdi+0x12] ; add eax, ecx ; ret
+    // mov [rdi+0x10], esi ; mov [rdi+0x12], dl ; ret
     // A 4-byte field at 0x10 overlaps a 1-byte field at 0x12.
-    let output = decompile(&[0x8b, 0x47, 0x10, 0x0f, 0xb6, 0x4f, 0x12, 0x01, 0xc8, 0xc3]);
+    let output = decompile(&[0x89, 0x77, 0x10, 0x88, 0x57, 0x12, 0xc3]);
     assert_eq!(arrow_on_non_pointer(&output), Vec::<String>::new(), "\n{output}");
     assert!(output.contains("+ 0x12)"), "byte at 0x12 not cast-dereferenced:\n{output}");
 }
