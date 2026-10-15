@@ -16715,11 +16715,14 @@ fn format_condition_tracked(
             }
             if l_esp {
                 // Left is ESP-derived: show just the right operand comparison
-                let r = format_cond_operand(*right, ssa, ctx, tracker);
+                let (mut r, mut zero) =
+                    (format_cond_operand(*right, ssa, ctx, tracker), "0".into());
+                parenthesize_operands(binop_str(*kind), &mut r, &mut zero);
                 return format!("{} {} 0", r, binop_str(*kind));
             }
             if r_esp {
-                let l = format_cond_operand(*left, ssa, ctx, tracker);
+                let (mut l, mut zero) = (format_cond_operand(*left, ssa, ctx, tracker), "0".into());
+                parenthesize_operands(binop_str(*kind), &mut l, &mut zero);
                 return format!("{} {} 0", l, binop_str(*kind));
             }
 
@@ -16728,6 +16731,8 @@ fn format_condition_tracked(
             // operands to the same register name.
             let mut l = format_cond_operand(*left, ssa, ctx, tracker);
             let mut r = format_cond_operand(*right, ssa, ctx, tracker);
+            // `x & 0xf000 == 0x4000` would mean `x & (0xf000 == 0x4000)`.
+            parenthesize_operands(binop_str(*kind), &mut l, &mut r);
 
             // Add signedness casts for signed/unsigned comparisons
             let lv = ssa.var(*left);
@@ -17001,8 +17006,9 @@ fn format_cond_operand_uncached(
                 }
             }
         }
-        let ls = format_cond_operand(*l, ssa, ctx, tracker);
-        let rs = format_cond_operand(*r, ssa, ctx, tracker);
+        let mut ls = format_cond_operand(*l, ssa, ctx, tracker);
+        let mut rs = format_cond_operand(*r, ssa, ctx, tracker);
+        parenthesize_operands(binop_str(*kind), &mut ls, &mut rs);
         return format!("{} {} {}", ls, binop_str(*kind), rs);
     }
     if let Expr::FieldAccess(base, offset) = &vdef.expr {

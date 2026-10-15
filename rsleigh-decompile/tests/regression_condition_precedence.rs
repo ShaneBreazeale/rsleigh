@@ -41,7 +41,9 @@ fn masked_comparison_keeps_its_parentheses() {
     let output = rsleigh_decompile::decompile(Architecture::X86_64, &instructions);
     let condition = output
         .lines()
-        .find(|l| l.trim_start().starts_with("if (") && (l.contains("0x4000") || l.contains("16384")))
+        .find(|l| {
+            l.trim_start().starts_with("if (") && (l.contains("0x4000") || l.contains("16384"))
+        })
         .unwrap_or_else(|| panic!("no masked test in:\n{output}"));
     assert_eq!(
         condition.matches('(').count(),
@@ -52,6 +54,9 @@ fn masked_comparison_keeps_its_parentheses() {
         let unwrapped = condition
             .match_indices(cmp)
             .any(|(at, _)| condition[..at].trim_end().ends_with("0xf000"));
-        assert!(!unwrapped, "`& 0xf000{cmp}` binds as `& (0xf000{cmp}...)`: {condition}");
+        assert!(
+            !unwrapped,
+            "`& 0xf000{cmp}` binds as `& (0xf000{cmp}...)`: {condition}"
+        );
     }
 }
