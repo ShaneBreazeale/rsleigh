@@ -222,16 +222,17 @@ pub fn print_c_with_try(
         }
     }
 
-    // Close the function body brace (opened in generate_function_signature)
-    if out.starts_with("void ")
-        || out.starts_with("int ")
-        || out.starts_with("long ")
-        || out.starts_with("float ")
-        || out.starts_with("double ")
-        || out.starts_with("char ")
-        || out.starts_with("uint8_t ")
-        || out.starts_with("bool ")
-    {
+    // Close the function body brace (opened in generate_function_signature).
+    // Struct definitions may precede the signature, so test the signature
+    // line rather than the start of the text.
+    let declares_function = crate::signature_line(&out).is_some_and(|sig| {
+        [
+            "void ", "int ", "long ", "float ", "double ", "char ", "uint8_t ", "bool ",
+        ]
+        .iter()
+        .any(|ty| sig.starts_with(ty))
+    });
+    if declares_function {
         out.push_str("}\n");
     }
     out
