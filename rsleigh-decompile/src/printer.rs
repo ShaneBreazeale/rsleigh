@@ -20667,6 +20667,44 @@ fn type_field_accesses(
     }
 }
 
+/// C++ qualified names (`std::exception::vftable`, `std::_Lockit::~_Lockit`)
+/// spelled as C identifiers.
+fn c_identifiers(line: &str) -> String {
+    line.to_string()
+}
+
+#[cfg(test)]
+mod c_identifier_tests {
+    use super::c_identifiers;
+
+    #[test]
+    fn qualified_names_become_c_identifiers() {
+        assert_eq!(
+            c_identifiers("*(uint64_t*)local_40 = std::exception::vftable;"),
+            "*(uint64_t*)local_40 = std__exception__vftable;"
+        );
+        assert_eq!(
+            c_identifiers("std::_Lockit::~_Lockit(local_28);"),
+            "std___Lockit__dtor__Lockit(local_28);"
+        );
+        assert_eq!(
+            c_identifiers("return std::ctype<char>::tolower(c);"),
+            "return std__ctype_char___tolower(c);"
+        );
+    }
+
+    #[test]
+    fn strings_comments_and_comparisons_are_left_alone() {
+        for line in [
+            "puts(\"a::b\"); // std::x",
+            "if (a < b && c > d) {",
+            "x = a ? b : c;",
+        ] {
+            assert_eq!(c_identifiers(line), line);
+        }
+    }
+}
+
 #[cfg(test)]
 mod field_access_typing_tests {
     use super::*;
