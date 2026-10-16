@@ -20848,6 +20848,61 @@ mod c_identifier_tests {
     }
 }
 
+/// Declare the decompiler-generated names the body uses but nothing declares.
+fn declare_leftover_names(lines: &mut Vec<String>) {
+    let _ = lines;
+}
+
+#[cfg(test)]
+mod leftover_name_tests {
+    use super::declare_leftover_names;
+
+    #[test]
+    fn generated_names_used_without_a_declaration_are_declared() {
+        let mut lines: Vec<String> = [
+            "long f(long param_0) {",
+            "    long lVar1;",
+            "",
+            "*(uint64_t*)(RSP - 40) = param_0;",
+            "lVar2 = param_1 + var_10 + tmp_3 + RAX + EDX + lVar1;",
+            "func_1000(puVar3, fparam_0);",
+            "x->RCX = 1;",
+            "puts(\"R8 RDX\"); // R9",
+            "return lVar2;",
+            "}",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        declare_leftover_names(&mut lines);
+        let decls: Vec<&str> = lines[1..]
+            .iter()
+            .take_while(|l| l.starts_with("    "))
+            .map(|l| l.trim())
+            .collect();
+        for expected in [
+            "long lVar1;",
+            "long RSP;",
+            "long RAX;",
+            "int EDX;",
+            "long lVar2;",
+            "long param_1;",
+            "long var_10;",
+            "long tmp_3;",
+            "long puVar3;",
+            "double fparam_0;",
+        ] {
+            assert!(decls.contains(&expected), "missing `{expected}` in {decls:?}");
+        }
+        for unexpected in ["RCX", "R8", "RDX", "R9", "func_1000", "param_0"] {
+            assert!(
+                !decls.iter().any(|d| d.trim_end_matches(';').ends_with(&format!(" {unexpected}"))),
+                "`{unexpected}` declared: {decls:?}"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod field_access_typing_tests {
     use super::*;
