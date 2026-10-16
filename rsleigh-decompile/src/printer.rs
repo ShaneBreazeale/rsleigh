@@ -20480,7 +20480,10 @@ fn type_field_accesses(
             continue;
         }
         if let Some(fields) = layout(set) {
-            structs.push((base.clone(), format!("{func_name}_{base}"), fields));
+            // `s_<function>_<base>`, without the `func_` prefix that reads as a
+            // call target to anything scanning for `func_<addr>`.
+            let tag = func_name.strip_prefix("func_").unwrap_or(&func_name);
+            structs.push((base.clone(), format!("s_{tag}_{base}"), fields));
         }
     }
     structs.sort();
