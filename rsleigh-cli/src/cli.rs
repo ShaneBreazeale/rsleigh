@@ -8944,12 +8944,22 @@ fn parse_binary(
                 0xF3 => rsleigh_api::Architecture::RiscV64,
                 _ => return None,
             };
-            let segs = elf
+            let mut segs: Vec<(u64, u64, u64)> = elf
                 .section_headers
                 .iter()
                 .filter(|sh| sh.sh_flags & 0x4 != 0)
                 .map(|sh| (sh.sh_addr, sh.sh_size, sh.sh_offset))
                 .collect();
+            // Sectionless executables carry no section table to walk; fall
+            // back to executable PT_LOAD program headers so code segments
+            // stay visible to analysis and signature matching.
+            if segs.is_empty() {
+                for ph in elf.program_headers.iter() {
+                    if ph.p_type == goblin::elf::program_header::PT_LOAD && ph.p_flags & 0x1 != 0 {
+                        segs.push((ph.p_vaddr, ph.p_filesz, ph.p_offset));
+                    }
+                }
+            }
             let mut syms = Vec::new();
             for sym in elf.syms.iter() {
                 if sym.st_type() == goblin::elf::sym::STT_FUNC && sym.st_value != 0 {
@@ -9803,16 +9813,47 @@ fn discover_elf_functions(
         }
     }
 
-    // 4. Find .text section bounds for CALL scanning
-    let text_section = elf
+    // 4. Find .text section bounds for CALL scanning. Images without a
+    // section table (sectionless executables) fall back to the union of
+    // executable PT_LOAD segments, provided vaddr/offset deltas agree so a
+    // single linear scan cannot go out of sync with the mapping.
+    let text_bounds: Option<(u64, u64, usize)> = elf
         .section_headers
         .iter()
-        .find(|sh| elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("") == ".text");
+        .find(|sh| elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("") == ".text")
+        .map(|sh| (sh.sh_addr, sh.sh_size, sh.sh_offset as usize))
+        .or_else(|| {
+            let exec_loads: Vec<_> = elf
+                .program_headers
+                .iter()
+                .filter(|ph| {
+                    ph.p_type == goblin::elf::program_header::PT_LOAD && ph.p_flags & 0x1 != 0
+                })
+                .collect();
+            if exec_loads.is_empty() {
+                return None;
+            }
+            let start = exec_loads.iter().map(|ph| ph.p_vaddr).min().unwrap();
+            let end = exec_loads
+                .iter()
+                .map(|ph| ph.p_vaddr + ph.p_filesz)
+                .max()
+                .unwrap();
+            let fo = exec_loads
+                .iter()
+                .find(|ph| ph.p_vaddr == start)
+                .map(|ph| ph.p_offset)
+                .unwrap();
+            let linear = exec_loads
+                .iter()
+                .all(|ph| ph.p_vaddr.wrapping_sub(ph.p_offset) == start.wrapping_sub(fo));
+            if !linear || end <= start {
+                return None;
+            }
+            Some((start, end - start, fo as usize))
+        });
 
-    if let Some(text) = text_section {
-        let text_addr = text.sh_addr;
-        let text_size = text.sh_size;
-        let text_fo = text.sh_offset as usize;
+    if let Some((text_addr, text_size, text_fo)) = text_bounds {
         let text_end = text_addr + text_size;
 
         // 4b. Architecture-specific raw CALL scanning for initial seeds.
