@@ -279,11 +279,11 @@ fn primitive_type_name(idx: u32) -> &'static str {
 
 /// Extract struct/class field information: byte_offset → field_name.
 fn extract_struct_fields(pdb: &mut pdb::PDB<'_, std::fs::File>) -> StructFieldMap {
-    let mut fields = HashMap::new();
+    let mut fields = crate::dwarf::FieldNames::default();
 
     let type_info = match pdb.type_information() {
         Ok(ti) => ti,
-        Err(_) => return fields,
+        Err(_) => return StructFieldMap::new(),
     };
 
     let mut finder = type_info.finder();
@@ -310,14 +310,14 @@ fn extract_struct_fields(pdb: &mut pdb::PDB<'_, std::fs::File>) -> StructFieldMa
         }
     }
 
-    fields
+    fields.finish()
 }
 
 /// Extract fields from a FieldList type index.
 fn extract_field_list(
     finder: &pdb::TypeFinder<'_>,
     field_list_index: pdb::TypeIndex,
-    fields: &mut StructFieldMap,
+    fields: &mut crate::dwarf::FieldNames,
 ) {
     let item = match finder.find(field_list_index) {
         Ok(i) => i,
@@ -329,7 +329,7 @@ fn extract_field_list(
             if let pdb::TypeData::Member(member) = field {
                 let name = member.name.to_string().to_string();
                 if !name.is_empty() {
-                    fields.insert(member.offset, name);
+                    fields.add(member.offset, name);
                 }
             }
         }
