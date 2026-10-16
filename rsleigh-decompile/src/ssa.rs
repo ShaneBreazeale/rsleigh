@@ -906,6 +906,36 @@ fn caller_saved_offsets(cc: CallingConv) -> &'static [u64] {
     }
 }
 
+/// True when the call about to be made is MSVC's `__security_check_cookie`:
+/// its argument register (RCX, or ECX on x86-32) holds a value XORed with
+/// the stack or frame pointer, which is how /GS passes the cookie back.
+fn is_stack_cookie_check(ssa: &SsaCfg, current: &HashMap<Varnode, VarId>, cc: CallingConv) -> bool {
+    // (argument register, size, stack/frame pointer offsets)
+    let (arg, size, frame): (u64, u32, &[u64]) = match cc {
+        CallingConv::Win64 | CallingConv::SysV | CallingConv::GoAmd64 => (8, 8, &[0x20, 0x28]),
+        CallingConv::Cdecl32
+        | CallingConv::Stdcall32
+        | CallingConv::Thiscall32
+        | CallingConv::Fastcall32 => (4, 4, &[0x10, 0x14]),
+        CallingConv::AArch64 | CallingConv::Arm32 => return false,
+    };
+    let Some(mut id) = current.get(&Varnode::register(arg, size)).copied() else {
+        return false;
+    };
+    let is_frame = |v: VarId| {
+        let vn = ssa.vars[v.0 as usize].varnode;
+        vn.space == AddressSpaceId::Register && frame.contains(&vn.offset)
+    };
+    for _ in 0..4 {
+        match &ssa.vars[id.0 as usize].expr {
+            Expr::Var(inner) => id = *inner,
+            Expr::BinOp(BinOpKind::Xor, l, r) => return is_frame(*l) || is_frame(*r),
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// Invalidate caller-saved registers in `current` after a Call.
 /// Emits one `Stmt::Assign(ret_var)` for the return register with `call_return=true`.
 /// Other caller-saved registers receive unknown definitions attributed to the
@@ -1151,6 +1181,25 @@ fn convert_terminator(
             target,
             fallthrough,
         } => {
+            // MSVC /GS: `xor rcx, rsp; call __security_check_cookie`. The
+            // check returns nothing and preserves the return register, so
+            // the value the function returns survives the call.
+            let preserved: Vec<(Varnode, VarId)> = if is_stack_cookie_check(ssa, current, cc) {
+                if let CallTarget::Direct(callee) = target {
+                    ssa.diagnostics.push(Diagnostic {
+                        severity: Severity::Info,
+                        kind: DiagKind::StackCookieCheck,
+                        addr: None,
+                        detail: format!("{callee:#x}"),
+                    });
+                }
+                [Varnode::register(0, 8), Varnode::register(0, 4)]
+                    .into_iter()
+                    .filter_map(|vn| Some((vn, *current.get(&vn)?)))
+                    .collect()
+            } else {
+                Vec::new()
+            };
             if return_register == crate::fold::abi(cc).return_reg_int {
                 clobber_caller_saved(ssa, current, cc, stmts);
             } else {
@@ -1179,6 +1228,7 @@ fn convert_terminator(
                     stmts.push(Stmt::Assign(result));
                 }
             }
+            current.extend(preserved);
             SsaTerminator::Call {
                 target: target.clone(),
                 args: vec![],

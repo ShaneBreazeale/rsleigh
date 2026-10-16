@@ -58,6 +58,10 @@ pub enum DiagKind {
     /// and no successor could be recovered; code reached only through it is
     /// missing from the output.
     UnrecoveredIndirectJump,
+    /// The call to the address in `detail` is MSVC's /GS
+    /// `__security_check_cookie`: it returns nothing and preserves the
+    /// return register.
+    StackCookieCheck,
 }
 
 /// One observation surfaced from the decode/lift/SSA pipeline.

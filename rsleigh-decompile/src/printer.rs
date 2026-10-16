@@ -62,7 +62,15 @@ pub fn print_c_with_try(
             })
             .collect(),
         field_types: field_access_types(ssa),
+        cookie_checks: std::collections::HashSet::new(),
     };
+    ctx.cookie_checks = ssa
+        .diagnostics
+        .iter()
+        .filter(|d| d.kind == crate::ir::DiagKind::StackCookieCheck)
+        .filter_map(|d| u64::from_str_radix(d.detail.trim_start_matches("0x"), 16).ok())
+        .map(|callee| format_call_target(&CallTarget::Direct(callee), ssa, &ctx))
+        .collect();
     for v in &ssa.vars {
         let Some(name) = v.param_name.as_ref().filter(|n| n.starts_with("param_")) else {
             continue;
@@ -7266,6 +7274,47 @@ fn post_process(
         }
     }
 
+    // MSVC /GS: name the check and drop the cookie store, whose only
+    // operand is the raw stack pointer (`slot = cookie ^ RSP - N`). The
+    // check's argument already folds back to the cookie itself.
+    if !ctx.cookie_checks.is_empty() {
+        lines.retain(|line| {
+            let t = line.trim();
+            let stores_cookie = t.contains(" = ")
+                && ["^ RSP", "^ RBP", "^ ESP", "^ EBP"]
+                    .iter()
+                    .any(|p| t.contains(p));
+            !stores_cookie
+        });
+        for line in &mut lines {
+            for name in &ctx.cookie_checks {
+                let call = format!("{name}(");
+                let t = line.trim_start();
+                if t.starts_with(&call) || t.starts_with(&format!("return {call}")) {
+                    *line = line.replacen(&call, "__security_check_cookie(", 1);
+                    // An unfolded argument still reads `slot ^ RSP - N`; the
+                    // stack pointer only re-derives the cookie, so keep the slot.
+                    for reg in [" ^ RSP", " ^ RBP", " ^ ESP", " ^ EBP"] {
+                        if let Some(at) = line.find(reg) {
+                            let rest = &line[at + reg.len()..];
+                            let offset = [" - ", " + "]
+                                .iter()
+                                .find(|op| rest.starts_with(**op))
+                                .map_or(0, |op| {
+                                    let digits = rest[op.len()..]
+                                        .bytes()
+                                        .take_while(|b| b.is_ascii_alphanumeric())
+                                        .count();
+                                    op.len() + digits
+                                });
+                            line.replace_range(at..at + reg.len() + offset, "");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // #STACK_COOKIE: Annotate XOR with RSP/RBP as security cookie check.
     for line in &mut lines {
         let t = line.trim();
@@ -14095,6 +14144,8 @@ struct PrintCtx<'a> {
     /// (`RAX = zext(EAX)` after `EAX = expr`): the narrow value is the one
     /// that prints, even with that single use.
     zext_widened: std::collections::HashSet<VarId>,
+    /// Names the /GS cookie-check callee prints under in this function.
+    cookie_checks: std::collections::HashSet<String>,
     /// C types of the loads printed as `base->field_N`, by offset N. The
     /// final pass declares a struct or prints casts from them.
     field_types: std::collections::BTreeMap<u64, std::collections::BTreeSet<String>>,
@@ -20657,6 +20708,7 @@ mod dependency_render_tests {
             live: std::collections::HashSet::new(),
             zext_widened: std::collections::HashSet::new(),
             field_types: Default::default(),
+            cookie_checks: Default::default(),
         };
         post_process(
             &mut output,
