@@ -649,16 +649,19 @@ fn post_process(
                     && lhs.len() >= 2
                     && lhs.len() <= 3;
                 if is_reg && lt.ends_with(';') {
-                    // Remove: REG = simple_value (var, param, DWARF name, another REG, constant 0)
-                    let is_simple = (rhs.starts_with("var_") && !rhs.contains(' '))
-                        || (rhs.starts_with("param_") && !rhs.contains(' '))
+                    // Remove: REG = simple_value (var, param, DWARF name, another REG, constant 0).
+                    // Only a plain name is a copy: `param_0->field_48`, `*puVar1`
+                    // or `lVar2[3]` is a load, and dropping it leaves REG unset.
+                    let is_name = !rhs.is_empty()
+                        && rhs.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                    let is_simple = (rhs.starts_with("var_") && is_name)
+                        || (rhs.starts_with("param_") && is_name)
                         || rhs == "0"
                         || (rhs
                             .chars()
                             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
                             && rhs.len() <= 3)
-                        || (!rhs.contains(' ')
-                            && !rhs.contains('(')
+                        || (is_name
                             && rhs.chars().next().map_or(false, |c| c.is_ascii_lowercase()));
                     if is_simple {
                         lines.remove(i);
@@ -1919,15 +1922,21 @@ fn post_process(
     // "RBP[0x1f0]" → "local_1f0"
     // "RBP + 0" → suppress (frame pointer itself)
     for line in &mut lines {
-        // RBP + decimal_offset
+        // RBP + decimal or 0x-hex offset
         while let Some(pos) = line.find("RBP + ") {
             crate::budget::work("render", 0);
             let after = &line[pos + 6..];
-            let end = after
-                .find(|c: char| !c.is_ascii_digit())
-                .unwrap_or(after.len());
-            if end > 0 {
-                if let Ok(offset) = after[..end].parse::<u64>() {
+            // `RBP + 0x2e0` must not parse as `RBP + 0` followed by `x2e0`.
+            let (digits_at, radix) = match after.starts_with("0x") {
+                true => (2, 16),
+                false => (0, 10),
+            };
+            let end = digits_at
+                + after[digits_at..]
+                    .find(|c: char| !c.is_digit(radix))
+                    .unwrap_or(after.len() - digits_at);
+            if end > digits_at {
+                if let Ok(offset) = u64::from_str_radix(&after[digits_at..end], radix) {
                     if offset == 0 {
                         // RBP + 0 → just RBP (or skip)
                         let replacement = "RBP".to_string();
@@ -6542,12 +6551,12 @@ fn post_process(
             *line = line.replace("(0x80000003)", "(HKEY_USERS)");
             *line = line.replace("(0x80000005)", "(HKEY_CURRENT_CONFIG)");
             // Registry access rights
-            *line = line.replace("0x20019", "KEY_READ");
-            *line = line.replace("0x20006", "KEY_WRITE");
-            *line = line.replace("0xf003f", "KEY_ALL_ACCESS");
+            *line = replace_literal(line, "0x20019", "KEY_READ");
+            *line = replace_literal(line, "0x20006", "KEY_WRITE");
+            *line = replace_literal(line, "0xf003f", "KEY_ALL_ACCESS");
             // Process access rights
-            *line = line.replace("0x1fffff", "PROCESS_ALL_ACCESS");
-            *line = line.replace("0x001f0fff", "PROCESS_ALL_ACCESS");
+            *line = replace_literal(line, "0x1fffff", "PROCESS_ALL_ACCESS");
+            *line = replace_literal(line, "0x001f0fff", "PROCESS_ALL_ACCESS");
             // Window messages
             if line.contains("SendMessage") || line.contains("PostMessage") {
                 *line = line.replace(", 0x10,", ", WM_CLOSE,");
@@ -13983,8 +13992,15 @@ fn post_process(
     }
 
     // Last, once every rename is done: make `base->field_N` valid C.
-    let mut final_lines: Vec<String> = result.lines().map(str::to_string).collect();
+    let mut final_lines: Vec<String> = result
+        .lines()
+        .map(|line| match line.contains("::") {
+            true => c_identifiers(line),
+            false => line.to_string(),
+        })
+        .collect();
     declare_stack_slots(&mut final_lines);
+    declare_leftover_names(&mut final_lines);
     type_field_accesses(&mut final_lines, &field_types);
     result = final_lines.join("\n");
     result.push('\n');
@@ -14729,11 +14745,29 @@ fn registers_read(id: VarId, ssa: &SsaCfg, out: &mut Vec<u64>, depth: u32) {
 /// indirect targets, call arguments, stores, user ops, and named variables.
 fn live_values(ssa: &SsaCfg) -> std::collections::HashSet<VarId> {
     let mut stack: Vec<VarId> = Vec::new();
+    // The value an indirect call jumps through (`call [rax+8]` reads RAX):
+    // its latest definition in the block, else any definition of it.
+    let call_target = |target: &CallTarget, stmts: &[Stmt]| -> Option<VarId> {
+        let CallTarget::Indirect(vn) = target else {
+            return None;
+        };
+        stmts
+            .iter()
+            .rev()
+            .find_map(|s| match s {
+                Stmt::Assign(v) if ssa.var(*v).varnode == *vn => Some(*v),
+                _ => None,
+            })
+            .or_else(|| ssa.vars.iter().find(|d| d.varnode == *vn).map(|d| d.id))
+    };
     for block in &ssa.blocks {
         for stmt in &block.stmts {
             match stmt {
                 Stmt::Store { addr, val } => stack.extend([*addr, *val]),
-                Stmt::Call { args, .. } => stack.extend(args.iter().copied()),
+                Stmt::Call { args, target, .. } => {
+                    stack.extend(args.iter().copied());
+                    stack.extend(call_target(target, &block.stmts));
+                }
                 Stmt::Assign(v) => {
                     let def = ssa.var(*v);
                     if def.param_name.is_some() || matches!(def.expr, Expr::UserOp { .. }) {
@@ -14745,7 +14779,10 @@ fn live_values(ssa: &SsaCfg) -> std::collections::HashSet<VarId> {
         match &block.terminator {
             SsaTerminator::CBranch { cond, .. } => stack.push(*cond),
             SsaTerminator::Return(Some(v)) | SsaTerminator::Indirect(v) => stack.push(*v),
-            SsaTerminator::Call { args, .. } => stack.extend(args.iter().copied()),
+            SsaTerminator::Call { args, target, .. } => {
+                stack.extend(args.iter().copied());
+                stack.extend(call_target(target, &block.stmts));
+            }
             _ => {}
         }
     }
@@ -20384,6 +20421,24 @@ fn declare_stack_slots(lines: &mut Vec<String>) {
     }
 }
 
+/// `line` with each whole occurrence of the numeric `literal` replaced by
+/// `name`; a literal inside a longer number or identifier is left alone.
+fn replace_literal(line: &str, literal: &str, name: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(at) = rest.find(literal) {
+        let end = at + literal.len();
+        let before = rest[..at].bytes().last();
+        let after = rest.as_bytes().get(end).copied();
+        let whole = !before.is_some_and(is_ident_byte) && !after.is_some_and(is_ident_byte);
+        out.push_str(&rest[..at]);
+        out.push_str(if whole { name } else { literal });
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The function's signature and declaration block in printed lines.
 struct Declarations {
     /// Index of the signature line.
@@ -20644,6 +20699,335 @@ fn type_field_accesses(
     }
 }
 
+/// C++ qualified names (`std::exception::vftable`, `std::_Lockit::~_Lockit`)
+/// spelled as C identifiers: `::` becomes `__`, a destructor's `~` becomes
+/// `dtor_`, and template arguments in a qualifier (`ctype<char>::`) become
+/// `_char_`. String literals and comments are left as they are.
+fn c_identifiers(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            quote @ (b'"' | b'\'') => {
+                let mut end = i + 1;
+                while end < bytes.len() && bytes[end] != quote {
+                    end += if bytes[end] == b'\\' { 2 } else { 1 };
+                }
+                let end = (end + 1).min(bytes.len());
+                out.push_str(&line[i..end]);
+                i = end;
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                out.push_str(&line[i..]);
+                break;
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                let end = line[i..].find("*/").map_or(bytes.len(), |e| i + e + 2);
+                out.push_str(&line[i..end]);
+                i = end;
+            }
+            b if (b.is_ascii_alphabetic() || b == b'_' || b == b'~')
+                && (i == 0 || !is_ident_byte(bytes[i - 1])) =>
+            {
+                if let Some((end, name)) = qualified_name(line, i) {
+                    out.push_str(&name);
+                    i = end;
+                } else {
+                    let end = i
+                        + 1
+                        + bytes[i + 1..]
+                            .iter()
+                            .take_while(|b| is_ident_byte(**b))
+                            .count();
+                    out.push_str(&line[i..end]);
+                    i = end;
+                }
+            }
+            _ => {
+                let c = line[i..].chars().next().unwrap_or(' ');
+                out.push(c);
+                i += c.len_utf8();
+            }
+        }
+    }
+    out
+}
+
+/// The C spelling of the `a::b::c` name starting at `start`, and where it
+/// ends; `None` unless it has at least two segments.
+fn qualified_name(line: &str, start: usize) -> Option<(usize, String)> {
+    let bytes = line.as_bytes();
+    let mut parts: Vec<String> = Vec::new();
+    let mut i = start;
+    let mut end = start;
+    loop {
+        let tilde = bytes.get(i) == Some(&b'~');
+        let ident_start = i + tilde as usize;
+        let first = bytes.get(ident_start)?;
+        if !(first.is_ascii_alphabetic() || *first == b'_') {
+            break;
+        }
+        let ident_end = ident_start
+            + bytes[ident_start..]
+                .iter()
+                .take_while(|b| is_ident_byte(**b))
+                .count();
+        let mut segment = String::new();
+        if tilde {
+            segment.push_str("dtor_");
+        }
+        segment.push_str(&line[ident_start..ident_end]);
+        i = ident_end;
+        // Template arguments, only in a qualifier: `ctype<char>::`.
+        if bytes.get(i) == Some(&b'<') {
+            let mut depth = 0;
+            let mut close = None;
+            for (k, b) in bytes[i..].iter().enumerate() {
+                match b {
+                    b'<' => depth += 1,
+                    b'>' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(i + k);
+                            break;
+                        }
+                    }
+                    b';' | b'(' | b')' | b'{' | b'"' => break,
+                    _ => {}
+                }
+            }
+            if let Some(close) = close.filter(|c| line[c + 1..].starts_with("::")) {
+                segment.push('_');
+                for c in line[i + 1..close].chars() {
+                    segment.push(if c.is_ascii_alphanumeric() { c } else { '_' });
+                }
+                segment.push('_');
+                i = close + 1;
+            }
+        }
+        parts.push(segment);
+        end = i;
+        if line[i..].starts_with("::") {
+            i += 2;
+        } else {
+            break;
+        }
+    }
+    (parts.len() >= 2).then(|| (end, parts.join("__")))
+}
+
+#[cfg(test)]
+mod c_identifier_tests {
+    use super::c_identifiers;
+
+    #[test]
+    fn qualified_names_become_c_identifiers() {
+        assert_eq!(
+            c_identifiers("*(uint64_t*)local_40 = std::exception::vftable;"),
+            "*(uint64_t*)local_40 = std__exception__vftable;"
+        );
+        assert_eq!(
+            c_identifiers("std::_Lockit::~_Lockit(local_28);"),
+            "std___Lockit__dtor__Lockit(local_28);"
+        );
+        assert_eq!(
+            c_identifiers("return std::ctype<char>::tolower(c);"),
+            "return std__ctype_char___tolower(c);"
+        );
+    }
+
+    #[test]
+    fn strings_comments_and_comparisons_are_left_alone() {
+        for line in [
+            "puts(\"a::b\"); // std::x",
+            "if (a < b && c > d) {",
+            "x = a ? b : c;",
+        ] {
+            assert_eq!(c_identifiers(line), line);
+        }
+    }
+}
+
+/// C type for a decompiler-generated name, or `None` for any other name.
+fn generated_name_type(name: &str) -> Option<&'static str> {
+    const R64: &[&str] = &["RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP", "RSP"];
+    const R32: &[&str] = &["EAX", "EBX", "ECX", "EDX", "ESI", "EDI", "EBP", "ESP"];
+    const R16: &[&str] = &["AX", "BX", "CX", "DX", "SI", "DI", "BP", "SP"];
+    const R8: &[&str] = &[
+        "AL", "BL", "CL", "DL", "AH", "BH", "CH", "DH", "SIL", "DIL", "BPL", "SPL",
+    ];
+    let numbered = |prefix: &str, suffix: &str| {
+        name.strip_prefix(prefix)
+            .and_then(|n| n.strip_suffix(suffix))
+            .and_then(|n| n.parse::<u32>().ok())
+            .is_some_and(|n| (8..=15).contains(&n))
+    };
+    let tail_is = |prefix: &str, hex: bool| {
+        name.strip_prefix(prefix).is_some_and(|t| {
+            !t.is_empty()
+                && t.bytes().all(|b| match hex {
+                    true => b.is_ascii_hexdigit(),
+                    false => b.is_ascii_digit(),
+                })
+        })
+    };
+    if R64.contains(&name) || numbered("R", "") {
+        return Some("long");
+    }
+    if R32.contains(&name) || numbered("R", "D") {
+        return Some("int");
+    }
+    if R16.contains(&name) || numbered("R", "W") {
+        return Some("short");
+    }
+    if R8.contains(&name) || numbered("R", "B") {
+        return Some("char");
+    }
+    if tail_is("fparam_", false) {
+        return Some("double");
+    }
+    if tail_is("param_", false) || tail_is("var_", true) || tail_is("tmp_", true) {
+        return Some("long");
+    }
+    // `iVar1`, `puVar2`: a lowercase prefix, `Var`, digits.
+    let at = name.find("Var")?;
+    let prefix = &name[..at];
+    let digits = &name[at + 3..];
+    if prefix.is_empty()
+        || !prefix.bytes().all(|b| b.is_ascii_lowercase())
+        || digits.is_empty()
+        || !digits.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(match prefix {
+        "i" => "int",
+        "u" => "unsigned int",
+        "b" => "uint8_t",
+        "c" => "char",
+        "s" => "short",
+        "w" => "uint16_t",
+        "f" => "float",
+        "d" => "double",
+        _ => "long",
+    })
+}
+
+/// Declare the decompiler-generated names (registers left unresolved,
+/// `xVarN`, `param_N`, `var_N`, `tmp_N`) that the body uses but neither the
+/// signature nor the declaration block introduces. Members (`p->RCX`),
+/// callees, string literals, and comments are not names.
+fn declare_leftover_names(lines: &mut Vec<String>) {
+    let Some(decls) = declarations(lines) else {
+        return;
+    };
+    let mut missing: std::collections::BTreeMap<String, &'static str> = Default::default();
+    for line in &lines[decls.body_start..] {
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                quote @ (b'"' | b'\'') => {
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != quote {
+                        i += if bytes[i] == b'\\' { 2 } else { 1 };
+                    }
+                    i += 1;
+                }
+                b'/' if matches!(bytes.get(i + 1), Some(b'/') | Some(b'*')) => break,
+                b if (b.is_ascii_alphabetic() || b == b'_')
+                    && (i == 0 || !is_ident_byte(bytes[i - 1])) =>
+                {
+                    let end = i + bytes[i..].iter().take_while(|b| is_ident_byte(**b)).count();
+                    let name = &line[i..end];
+                    let member = line[..i].ends_with("->") || line[..i].ends_with('.');
+                    let call = line[end..].trim_start().starts_with('(');
+                    if !member && !call && !decls.names.contains_key(name) {
+                        if let Some(ty) = generated_name_type(name) {
+                            missing.entry(name.to_string()).or_insert(ty);
+                        }
+                    }
+                    i = end;
+                }
+                _ => i += 1,
+            }
+        }
+    }
+    if missing.is_empty() {
+        return;
+    }
+    let new_decls: Vec<String> = missing
+        .iter()
+        .map(|(name, ty)| format!("    {ty} {name};"))
+        .collect();
+    match decls.last_decl {
+        Some(last) => {
+            lines.splice(last + 1..last + 1, new_decls);
+        }
+        None => {
+            let mut block = new_decls;
+            block.push(String::new());
+            lines.splice(decls.sig + 1..decls.sig + 1, block);
+        }
+    }
+}
+
+#[cfg(test)]
+mod leftover_name_tests {
+    use super::declare_leftover_names;
+
+    #[test]
+    fn generated_names_used_without_a_declaration_are_declared() {
+        let mut lines: Vec<String> = [
+            "long f(long param_0) {",
+            "    long lVar1;",
+            "",
+            "*(uint64_t*)(RSP - 40) = param_0;",
+            "lVar2 = param_1 + var_10 + tmp_3 + RAX + EDX + lVar1;",
+            "func_1000(puVar3, fparam_0);",
+            "x->RCX = 1;",
+            "puts(\"R8 RDX\"); // R9",
+            "return lVar2;",
+            "}",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        declare_leftover_names(&mut lines);
+        let decls: Vec<&str> = lines[1..]
+            .iter()
+            .take_while(|l| l.starts_with("    "))
+            .map(|l| l.trim())
+            .collect();
+        for expected in [
+            "long lVar1;",
+            "long RSP;",
+            "long RAX;",
+            "int EDX;",
+            "long lVar2;",
+            "long param_1;",
+            "long var_10;",
+            "long tmp_3;",
+            "long puVar3;",
+            "double fparam_0;",
+        ] {
+            assert!(
+                decls.contains(&expected),
+                "missing `{expected}` in {decls:?}"
+            );
+        }
+        for unexpected in ["RCX", "R8", "RDX", "R9", "func_1000", "param_0"] {
+            assert!(
+                !decls
+                    .iter()
+                    .any(|d| d.trim_end_matches(';').ends_with(&format!(" {unexpected}"))),
+                "`{unexpected}` declared: {decls:?}"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod field_access_typing_tests {
     use super::*;
@@ -20719,6 +21103,65 @@ mod dependency_render_tests {
             &context,
         );
         assert_eq!(output.matches("helper(n - 1)").count(), 1, "{output}");
+    }
+
+    #[test]
+    fn hex_rbp_offsets_name_their_slot() {
+        // `RBP + 0x2e0` was read as `RBP + 0` followed by `x2e0`, leaving an
+        // undeclared `RBPx2e0` (CrashLoggerSSE 0x180001610).
+        let mut output = "long f(long n) {\nfunc_1000(RBP + 0x2e0, n);\nreturn n;\n".to_string();
+        let imports = HashMap::new();
+        let context = PrintCtx {
+            arch: Architecture::X86_64,
+            binary: None,
+            imports: &imports,
+            try_regions: &[],
+            register_params: Vec::new(),
+            live: std::collections::HashSet::new(),
+            zext_widened: std::collections::HashSet::new(),
+            field_types: Default::default(),
+            cookie_checks: Default::default(),
+        };
+        post_process(
+            &mut output,
+            &HashMap::new(),
+            &["n".into()],
+            &HashMap::new(),
+            &context,
+        );
+        assert!(!output.contains("RBPx"), "{output}");
+        assert!(output.contains("local_2e0"), "{output}");
+    }
+
+    #[test]
+    fn win32_constant_names_replace_whole_literals_only() {
+        // `0x1fffffffffffffff` became `PROCESS_ALL_ACCESSffffffffff`.
+        let mut output = "long f(long n) {\nn = n & 0x1fffffffffffffff;\nOpenProcess(0x1fffff, 0, n);\nreturn n;\n".to_string();
+        let imports = HashMap::new();
+        let image = b"MZ\0\0";
+        let context = PrintCtx {
+            arch: Architecture::X86_64,
+            binary: Some(image),
+            imports: &imports,
+            try_regions: &[],
+            register_params: Vec::new(),
+            live: std::collections::HashSet::new(),
+            zext_widened: std::collections::HashSet::new(),
+            field_types: Default::default(),
+            cookie_checks: Default::default(),
+        };
+        post_process(
+            &mut output,
+            &HashMap::new(),
+            &["n".into()],
+            &HashMap::new(),
+            &context,
+        );
+        assert!(output.contains("0x1fffffffffffffff"), "{output}");
+        assert!(
+            output.contains("OpenProcess(PROCESS_ALL_ACCESS, 0, n)"),
+            "{output}"
+        );
     }
 
     #[test]
