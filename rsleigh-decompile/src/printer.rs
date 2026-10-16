@@ -8453,7 +8453,12 @@ fn post_process(
 
                 let mut best_match: Option<(&str, usize)> = None;
                 for (struct_name, struct_fields) in known_structs {
-                    if !is_pe && win32_only_structs.contains(struct_name) {
+                    // Win32 structs need evidence from an API that takes them
+                    // (`api_type_hints` above). Their offsets (0, 8, 0x10,
+                    // 0x18, ...) are shared by nearly every 8-byte-aligned
+                    // struct, so overlap alone put STARTUPINFOW names on a
+                    // `std::string` in CrashLoggerSSE.
+                    if win32_only_structs.contains(struct_name) {
                         continue;
                     }
                     if is_pe && posix_structs.contains(struct_name) {
