@@ -648,16 +648,19 @@ fn post_process(
                     && lhs.len() >= 2
                     && lhs.len() <= 3;
                 if is_reg && lt.ends_with(';') {
-                    // Remove: REG = simple_value (var, param, DWARF name, another REG, constant 0)
-                    let is_simple = (rhs.starts_with("var_") && !rhs.contains(' '))
-                        || (rhs.starts_with("param_") && !rhs.contains(' '))
+                    // Remove: REG = simple_value (var, param, DWARF name, another REG, constant 0).
+                    // Only a plain name is a copy: `param_0->field_48`, `*puVar1`
+                    // or `lVar2[3]` is a load, and dropping it leaves REG unset.
+                    let is_name = !rhs.is_empty()
+                        && rhs.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                    let is_simple = (rhs.starts_with("var_") && is_name)
+                        || (rhs.starts_with("param_") && is_name)
                         || rhs == "0"
                         || (rhs
                             .chars()
                             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
                             && rhs.len() <= 3)
-                        || (!rhs.contains(' ')
-                            && !rhs.contains('(')
+                        || (is_name
                             && rhs.chars().next().map_or(false, |c| c.is_ascii_lowercase()));
                     if is_simple {
                         lines.remove(i);
@@ -14728,11 +14731,29 @@ fn registers_read(id: VarId, ssa: &SsaCfg, out: &mut Vec<u64>, depth: u32) {
 /// indirect targets, call arguments, stores, user ops, and named variables.
 fn live_values(ssa: &SsaCfg) -> std::collections::HashSet<VarId> {
     let mut stack: Vec<VarId> = Vec::new();
+    // The value an indirect call jumps through (`call [rax+8]` reads RAX):
+    // its latest definition in the block, else any definition of it.
+    let call_target = |target: &CallTarget, stmts: &[Stmt]| -> Option<VarId> {
+        let CallTarget::Indirect(vn) = target else {
+            return None;
+        };
+        stmts
+            .iter()
+            .rev()
+            .find_map(|s| match s {
+                Stmt::Assign(v) if ssa.var(*v).varnode == *vn => Some(*v),
+                _ => None,
+            })
+            .or_else(|| ssa.vars.iter().find(|d| d.varnode == *vn).map(|d| d.id))
+    };
     for block in &ssa.blocks {
         for stmt in &block.stmts {
             match stmt {
                 Stmt::Store { addr, val } => stack.extend([*addr, *val]),
-                Stmt::Call { args, .. } => stack.extend(args.iter().copied()),
+                Stmt::Call { args, target, .. } => {
+                    stack.extend(args.iter().copied());
+                    stack.extend(call_target(target, &block.stmts));
+                }
                 Stmt::Assign(v) => {
                     let def = ssa.var(*v);
                     if def.param_name.is_some() || matches!(def.expr, Expr::UserOp { .. }) {
@@ -14744,7 +14765,10 @@ fn live_values(ssa: &SsaCfg) -> std::collections::HashSet<VarId> {
         match &block.terminator {
             SsaTerminator::CBranch { cond, .. } => stack.push(*cond),
             SsaTerminator::Return(Some(v)) | SsaTerminator::Indirect(v) => stack.push(*v),
-            SsaTerminator::Call { args, .. } => stack.extend(args.iter().copied()),
+            SsaTerminator::Call { args, target, .. } => {
+                stack.extend(args.iter().copied());
+                stack.extend(call_target(target, &block.stmts));
+            }
             _ => {}
         }
     }

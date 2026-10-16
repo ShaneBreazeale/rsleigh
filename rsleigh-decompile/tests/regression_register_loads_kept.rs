@@ -45,7 +45,10 @@ fn load_through_a_parameter_keeps_its_assignment() {
     let output = decompile(&[
         0x8b, 0x47, 0x48, 0x89, 0x77, 0x50, 0x0f, 0xb6, 0x4f, 0x60, 0x01, 0xc8, 0xc3,
     ]);
-    assert!(output.contains("field_48"), "load of +0x48 dropped:\n{output}");
+    assert!(
+        output.contains("field_48"),
+        "load of +0x48 dropped:\n{output}"
+    );
     assert_eq!(read_before_set(&output), Vec::<String>::new(), "\n{output}");
 }
 
