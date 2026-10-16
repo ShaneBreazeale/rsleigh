@@ -6811,7 +6811,9 @@ fn post_process(
                     goblin::Object::Elf(elf) => elf
                         .section_headers
                         .iter()
-                        .filter(|s| s.sh_flags & 0x4 == 0 && s.sh_flags & 0x2 != 0 && s.sh_type != 8)
+                        .filter(|s| {
+                            s.sh_flags & 0x4 == 0 && s.sh_flags & 0x2 != 0 && s.sh_type != 8
+                        })
                         .map(|s| (s.sh_addr, s.sh_offset as usize, s.sh_size as usize))
                         .collect(),
                     _ => vec![],
@@ -13932,6 +13934,7 @@ fn post_process(
 
     // Last, once every rename is done: make `base->field_N` valid C.
     let mut final_lines: Vec<String> = result.lines().map(str::to_string).collect();
+    declare_stack_slots(&mut final_lines);
     type_field_accesses(&mut final_lines, &field_types);
     result = final_lines.join("\n");
     result.push('\n');
@@ -20015,11 +20018,10 @@ mod struct_field_rename_tests {
         // it, whatever order the map yields its entries in (CrashLogger
         // printed `size` or `reg8` from run to run).
         for _ in 0..32 {
-            let fields: HashMap<u64, String> =
-                [(0x1, "reg"), (0x18, "size"), (0x180, "tail")]
-                    .into_iter()
-                    .map(|(o, n)| (o, n.to_string()))
-                    .collect();
+            let fields: HashMap<u64, String> = [(0x1, "reg"), (0x18, "size"), (0x180, "tail")]
+                .into_iter()
+                .map(|(o, n)| (o, n.to_string()))
+                .collect();
             let mut line = "a->field18 = b->field1 + c->field180 + d->field1f;".to_string();
             rename_struct_fields(&mut line, &fields);
             assert_eq!(line, "a->size = b->reg + c->tail + d->field1f;");
@@ -20198,38 +20200,128 @@ fn postfix_base_start(text: &str, mut end: usize) -> usize {
     }
 }
 
-/// `base->field_N` is valid C only when `base` points to a struct with that
-/// field. A variable used only through `->field_N`, whose fields have one
-/// size each and do not overlap, gets a packed struct declared before the
-/// function and its declaration retyped. Every other access prints as
-/// `*(T *)(base + 0xN)`, which is what the load computes.
-fn type_field_accesses(
-    lines: &mut Vec<String>,
-    field_types: &std::collections::BTreeMap<u64, std::collections::BTreeSet<String>>,
-) {
-    const MARK: &str = "->field_";
-    const KEPT: &str = "->\u{1}field_";
-    if !lines.iter().any(|l| l.contains(MARK)) {
-        return;
+/// `T` of a typed dereference `*(T*)` / `*(T *)` that `text` ends with.
+fn trailing_deref_type(text: &str) -> Option<&str> {
+    let head = text.strip_suffix(")")?.trim_end().strip_suffix('*')?;
+    let open = head.rfind("*(")?;
+    let ty = head[open + 2..].trim();
+    (!ty.is_empty() && ty.bytes().all(|b| is_ident_byte(b) || b == b' ')).then_some(ty)
+}
+
+/// Declare the `local_N` stack slots that the stack-pointer rewrites name
+/// after the declaration block was built. Most stand for the slot's address
+/// (`*(void **)local_50 = x`, `f(local_50 - 8)`), so a slot used through a
+/// dereference or address arithmetic becomes a byte array as wide as its
+/// widest access, which decays to that address; assignments to it store
+/// through it. A slot only ever assigned and read is a plain `long`.
+fn declare_stack_slots(lines: &mut Vec<String>) {
+    #[derive(Default)]
+    struct Use {
+        width: u64,
+        types: std::collections::BTreeSet<String>,
+        address: bool,
     }
-    let Some(sig) = lines.iter().position(|l| {
-        !l.starts_with(char::is_whitespace) && l.contains('(') && l.trim_end().ends_with('{')
-    }) else {
+    let Some(decls) = declarations(lines) else {
         return;
     };
+    // Each undeclared `local_N` with its byte span in `line`.
+    let slots = |line: &str| -> Vec<(usize, usize)> {
+        line.match_indices("local_")
+            .filter_map(|(at, _)| {
+                if line[..at].bytes().last().is_some_and(is_ident_byte) {
+                    return None;
+                }
+                let len = line[at + 6..]
+                    .bytes()
+                    .take_while(|b| b.is_ascii_hexdigit())
+                    .count();
+                let end = at + 6 + len;
+                (len > 0 && !line.as_bytes().get(end).is_some_and(|b| is_ident_byte(*b)))
+                    .then_some((at, end))
+            })
+            .filter(|(at, end)| !decls.names.contains_key(&line[*at..*end]))
+            .collect()
+    };
+    let mut uses: std::collections::BTreeMap<String, Use> = Default::default();
+    for line in &lines[decls.body_start..] {
+        for (at, end) in slots(line) {
+            let slot = uses.entry(line[at..end].to_string()).or_default();
+            if let Some(ty) = trailing_deref_type(&line[..at]) {
+                slot.width = slot.width.max(c_type_size(ty).unwrap_or(8));
+                slot.types.insert(ty.to_string());
+            }
+            let after = &line[end..];
+            if after.starts_with(" - ") || after.starts_with(" + ") || !slot.types.is_empty() {
+                slot.address = true;
+            }
+        }
+    }
+    if uses.is_empty() {
+        return;
+    }
+    // Plain assignments to an address-like slot store through it.
+    for line in &mut lines[decls.body_start..] {
+        for (at, end) in slots(line).into_iter().rev() {
+            let Some(slot) = uses.get(&line[at..end]).filter(|u| u.address) else {
+                continue;
+            };
+            let assigned = line[end..].starts_with(" = ");
+            if assigned && trailing_deref_type(&line[..at]).is_none() {
+                let ty = match slot.types.len() {
+                    1 => slot.types.iter().next().unwrap().clone(),
+                    _ => "int64_t".to_string(),
+                };
+                line.insert_str(at, &format!("*({ty} *)"));
+            }
+        }
+    }
+    let new_decls: Vec<String> = uses
+        .iter()
+        .map(|(name, slot)| match slot.address {
+            true => format!("    uint8_t {name}[{}];", slot.width.max(8)),
+            false => format!("    long {name};"),
+        })
+        .collect();
+    match decls.last_decl {
+        Some(last) => {
+            lines.splice(last + 1..last + 1, new_decls);
+        }
+        None => {
+            let mut block = new_decls;
+            block.push(String::new());
+            lines.splice(decls.sig + 1..decls.sig + 1, block);
+        }
+    }
+}
+
+/// The function's signature and declaration block in printed lines.
+struct Declarations {
+    /// Index of the signature line.
+    sig: usize,
+    /// First body line after the declarations.
+    body_start: usize,
+    /// Last declaration line, if any.
+    last_decl: Option<usize>,
+    /// Declared name -> (line, type, is array); parameters are on `sig`.
+    names: HashMap<String, (usize, String, bool)>,
+}
+
+fn declarations(lines: &[String]) -> Option<Declarations> {
+    let sig = lines.iter().position(|l| {
+        !l.starts_with(char::is_whitespace) && l.contains('(') && l.trim_end().ends_with('{')
+    })?;
     let ident_end = |t: &str| {
         t.rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
             .map_or(0, |i| i + 1)
     };
-    // name -> (line, declared type, is array)
-    let mut declared: HashMap<String, (usize, String, bool)> = HashMap::new();
-    let signature = lines[sig].clone();
+    let mut names: HashMap<String, (usize, String, bool)> = HashMap::new();
+    let signature = &lines[sig];
     if let (Some(open), Some(close)) = (signature.find('('), signature.rfind(')')) {
         for param in signature[open + 1..close].split(',') {
             let param = param.trim();
             let at = ident_end(param);
             if at > 0 && at < param.len() {
-                declared.insert(
+                names.insert(
                     param[at..].to_string(),
                     (sig, param[..at].trim().to_string(), false),
                 );
@@ -20237,6 +20329,7 @@ fn type_field_accesses(
         }
     }
     let mut body_start = sig + 1;
+    let mut last_decl = None;
     let mut in_comment = false;
     while body_start < lines.len() {
         let t = lines[body_start].trim();
@@ -20265,13 +20358,50 @@ fn type_field_accesses(
         };
         let at = ident_end(decl);
         if at > 0 {
-            declared.insert(
+            names.insert(
                 decl[at..].to_string(),
                 (body_start, decl[..at].trim().to_string(), array),
             );
         }
+        last_decl = Some(body_start);
         body_start += 1;
     }
+    Some(Declarations {
+        sig,
+        body_start,
+        last_decl,
+        names,
+    })
+}
+
+/// `base->field_N` is valid C only when `base` points to a struct with that
+/// field. A variable used only through `->field_N`, whose fields have one
+/// size each and do not overlap, gets a packed struct declared before the
+/// function and its declaration retyped. Every other access prints as
+/// `*(T *)(base + 0xN)`, which is what the load computes.
+fn type_field_accesses(
+    lines: &mut Vec<String>,
+    field_types: &std::collections::BTreeMap<u64, std::collections::BTreeSet<String>>,
+) {
+    const MARK: &str = "->field_";
+    const KEPT: &str = "->\u{1}field_";
+    if !lines.iter().any(|l| l.contains(MARK)) {
+        return;
+    }
+    let Some(Declarations {
+        sig,
+        body_start,
+        names: declared,
+        ..
+    }) = declarations(lines)
+    else {
+        return;
+    };
+    let signature = lines[sig].clone();
+    let ident_end = |t: &str| {
+        t.rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .map_or(0, |i| i + 1)
+    };
 
     // Offsets used through each plain-identifier base, and whether the base
     // is ever used other than as `base->field_N`.

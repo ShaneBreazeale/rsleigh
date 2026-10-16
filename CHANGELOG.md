@@ -25,6 +25,12 @@ All notable user-facing changes to rsleigh are documented here.
   CrashLoggerSSE, member-reference compile errors halve and none remain on
   `field_N` names.
 
+- Stack slots named `local_N` by the stack-pointer rewrites are declared.
+  They were never declared, the most common compile error on CrashLoggerSSE.
+  A slot used through a dereference or address arithmetic is declared as a
+  byte array (it stands for the slot's address); one used only as a value is
+  a `long`.
+
 ## [0.6.1] - 2026-10-12
 
 ### Fixed
