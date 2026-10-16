@@ -1170,13 +1170,7 @@ fn post_process(
             if !line.contains("->field") {
                 continue;
             }
-            for (offset, name) in struct_fields {
-                let pattern = format!("->field{:x}", offset);
-                if line.contains(&pattern) {
-                    let replacement = format!("->{}", name);
-                    *line = line.replace(&pattern, &replacement);
-                }
-            }
+            rename_struct_fields(line, struct_fields);
         }
     }
 
@@ -6777,54 +6771,61 @@ fn post_process(
             ),
         ];
 
-        // Scan data sections for crypto signatures
-        let mut crypto_addrs: HashMap<u64, &str> = HashMap::new();
-        if let Ok(obj) = goblin::Object::parse(binary) {
-            let scan_sections: Vec<(u64, usize, usize)> = match &obj {
-                goblin::Object::PE(pe) => {
-                    let base = pe.image_base as u64;
-                    pe.sections
+        // Scan data sections for crypto signatures, once per binary: the scan
+        // compares every pattern at every offset of every data section.
+        static CRYPTO_ADDRS: crate::binary_cache::Cache<HashMap<u64, &'static str>> =
+            crate::binary_cache::Cache::new();
+        let key = crate::binary_cache::Key::bytes(binary);
+        let crypto_addrs = crate::binary_cache::cached(&CRYPTO_ADDRS, Some(key), || {
+            let mut crypto_addrs: HashMap<u64, &'static str> = HashMap::new();
+            if let Ok(obj) = goblin::Object::parse(binary) {
+                let scan_sections: Vec<(u64, usize, usize)> = match &obj {
+                    goblin::Object::PE(pe) => {
+                        let base = pe.image_base as u64;
+                        pe.sections
+                            .iter()
+                            .filter(|s| s.characteristics & 0x20000000 == 0) // not executable
+                            .map(|s| {
+                                (
+                                    base + s.virtual_address as u64,
+                                    s.pointer_to_raw_data as usize,
+                                    s.virtual_size as usize,
+                                )
+                            })
+                            .collect()
+                    }
+                    goblin::Object::Elf(elf) => elf
+                        .section_headers
                         .iter()
-                        .filter(|s| s.characteristics & 0x20000000 == 0) // not executable
-                        .map(|s| {
-                            (
-                                base + s.virtual_address as u64,
-                                s.pointer_to_raw_data as usize,
-                                s.virtual_size as usize,
-                            )
-                        })
-                        .collect()
-                }
-                goblin::Object::Elf(elf) => elf
-                    .section_headers
-                    .iter()
-                    .filter(|s| s.sh_flags & 0x4 == 0 && s.sh_flags & 0x2 != 0 && s.sh_type != 8)
-                    .map(|s| (s.sh_addr, s.sh_offset as usize, s.sh_size as usize))
-                    .collect(),
-                _ => vec![],
-            };
+                        .filter(|s| s.sh_flags & 0x4 == 0 && s.sh_flags & 0x2 != 0 && s.sh_type != 8)
+                        .map(|s| (s.sh_addr, s.sh_offset as usize, s.sh_size as usize))
+                        .collect(),
+                    _ => vec![],
+                };
 
-            for (sec_va, sec_fo, sec_size) in &scan_sections {
-                if sec_fo + sec_size > binary.len() {
-                    continue;
-                }
-                let sec_data = &binary[*sec_fo..*sec_fo + *sec_size];
-                for (name, pattern) in crypto_sigs {
-                    if pattern.len() > sec_data.len() {
+                for (sec_va, sec_fo, sec_size) in &scan_sections {
+                    if sec_fo + sec_size > binary.len() {
                         continue;
                     }
-                    // Search for the pattern in the section data
-                    for i in 0..sec_data.len() - pattern.len() {
-                        if &sec_data[i..i + pattern.len()] == *pattern {
-                            let va = sec_va + i as u64;
-                            crypto_addrs.insert(va, name);
-                            // Also mark nearby addresses (the table may be referenced at any offset)
-                            break; // one match per section per pattern
+                    let sec_data = &binary[*sec_fo..*sec_fo + *sec_size];
+                    for (name, pattern) in crypto_sigs {
+                        if pattern.len() > sec_data.len() {
+                            continue;
+                        }
+                        // Search for the pattern in the section data
+                        for i in 0..sec_data.len() - pattern.len() {
+                            if &sec_data[i..i + pattern.len()] == *pattern {
+                                let va = sec_va + i as u64;
+                                crypto_addrs.insert(va, name);
+                                // Also mark nearby addresses (the table may be referenced at any offset)
+                                break; // one match per section per pattern
+                            }
                         }
                     }
                 }
             }
-        }
+            crypto_addrs
+        });
 
         // Annotate lines referencing crypto table addresses
         if !crypto_addrs.is_empty() {
@@ -19946,6 +19947,58 @@ fn unwrap_ext(id: VarId, ssa: &SsaCfg) -> VarId {
     match &ssa.var(id).expr {
         Expr::UnaryOp(UnaryOpKind::Zext | UnaryOpKind::Sext, inner) => *inner,
         _ => id,
+    }
+}
+
+/// Replace `->field<hex>` with the debug-info field name at that offset. The
+/// whole hex run is the offset: `->field18` is offset 0x18, never offset 0x1
+/// followed by `8`.
+fn rename_struct_fields(line: &mut String, struct_fields: &HashMap<u64, String>) {
+    const MARK: &str = "->field";
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line.as_str();
+    while let Some(at) = rest.find(MARK) {
+        let digits_at = at + MARK.len();
+        let digits = rest[digits_at..]
+            .find(|c: char| !c.is_ascii_hexdigit())
+            .unwrap_or(rest.len() - digits_at);
+        let hex = &rest[digits_at..digits_at + digits];
+        let name = u64::from_str_radix(hex, 16)
+            .ok()
+            .and_then(|offset| struct_fields.get(&offset));
+        match name {
+            Some(name) => {
+                out.push_str(&rest[..at]);
+                out.push_str("->");
+                out.push_str(name);
+            }
+            None => out.push_str(&rest[..digits_at + digits]),
+        }
+        rest = &rest[digits_at + digits..];
+    }
+    out.push_str(rest);
+    *line = out;
+}
+
+#[cfg(test)]
+mod struct_field_rename_tests {
+    use super::*;
+
+    #[test]
+    fn offset_names_replace_whole_hex_tokens_only() {
+        // `->field18` contains `->field1`: the offset-1 name must not take
+        // it, whatever order the map yields its entries in (CrashLogger
+        // printed `size` or `reg8` from run to run).
+        for _ in 0..32 {
+            let fields: HashMap<u64, String> =
+                [(0x1, "reg"), (0x18, "size"), (0x180, "tail")]
+                    .into_iter()
+                    .map(|(o, n)| (o, n.to_string()))
+                    .collect();
+            let mut line = "a->field18 = b->field1 + c->field180 + d->field1f;".to_string();
+            rename_struct_fields(&mut line, &fields);
+            assert_eq!(line, "a->size = b->reg + c->tail + d->field1f;");
+        }
     }
 }
 

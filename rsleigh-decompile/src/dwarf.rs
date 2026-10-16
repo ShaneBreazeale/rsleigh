@@ -17,6 +17,13 @@ pub type StructFieldMap = HashMap<u64, String>;
 /// Extract DWARF debug info from a binary file path.
 /// On macOS, automatically searches for companion .dSYM bundle.
 pub fn parse_dwarf_from_path(binary_path: &Path) -> HashMap<u64, FunctionDebugInfo> {
+    static CACHE: crate::binary_cache::Cache<HashMap<u64, FunctionDebugInfo>> =
+        crate::binary_cache::Cache::new();
+    let key = crate::binary_cache::Key::file(binary_path);
+    crate::binary_cache::cached(&CACHE, key, || parse_dwarf_from_path_uncached(binary_path))
+}
+
+fn parse_dwarf_from_path_uncached(binary_path: &Path) -> HashMap<u64, FunctionDebugInfo> {
     // Try the binary itself first (works for Linux ELF with embedded DWARF)
     if let Ok(data) = std::fs::read(binary_path) {
         let result = parse_dwarf(&data);
@@ -49,6 +56,13 @@ pub fn parse_dwarf_from_path(binary_path: &Path) -> HashMap<u64, FunctionDebugIn
 
 /// Extract DWARF debug info for functions from raw binary bytes.
 pub fn parse_dwarf(binary: &[u8]) -> HashMap<u64, FunctionDebugInfo> {
+    static CACHE: crate::binary_cache::Cache<HashMap<u64, FunctionDebugInfo>> =
+        crate::binary_cache::Cache::new();
+    let key = crate::binary_cache::Key::bytes(binary);
+    crate::binary_cache::cached(&CACHE, Some(key), || parse_dwarf_uncached(binary))
+}
+
+fn parse_dwarf_uncached(binary: &[u8]) -> HashMap<u64, FunctionDebugInfo> {
     let mut result = HashMap::new();
     let Ok(obj) = object::File::parse(binary) else {
         return result;
@@ -186,6 +200,12 @@ fn get_member_offset(unit: &UnitSlice<'_>, entry: &EntrySlice<'_>) -> Option<u64
 /// Parse all struct definitions from DWARF, returning a merged map of
 /// field_byte_offset → field_name across all structs in the binary.
 pub fn parse_struct_fields(binary: &[u8]) -> StructFieldMap {
+    static CACHE: crate::binary_cache::Cache<StructFieldMap> = crate::binary_cache::Cache::new();
+    let key = crate::binary_cache::Key::bytes(binary);
+    crate::binary_cache::cached(&CACHE, Some(key), || parse_struct_fields_uncached(binary))
+}
+
+fn parse_struct_fields_uncached(binary: &[u8]) -> StructFieldMap {
     let mut fields = HashMap::new();
     let Ok(obj) = object::File::parse(binary) else {
         return fields;
@@ -265,6 +285,14 @@ pub fn parse_struct_fields(binary: &[u8]) -> StructFieldMap {
 
 /// Parse struct fields from a binary file path (with dSYM support).
 pub fn parse_struct_fields_from_path(binary_path: &Path) -> StructFieldMap {
+    static CACHE: crate::binary_cache::Cache<StructFieldMap> = crate::binary_cache::Cache::new();
+    let key = crate::binary_cache::Key::file(binary_path);
+    crate::binary_cache::cached(&CACHE, key, || {
+        parse_struct_fields_from_path_uncached(binary_path)
+    })
+}
+
+fn parse_struct_fields_from_path_uncached(binary_path: &Path) -> StructFieldMap {
     if let Ok(data) = std::fs::read(binary_path) {
         let result = parse_struct_fields(&data);
         if !result.is_empty() {

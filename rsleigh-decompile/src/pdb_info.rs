@@ -30,6 +30,13 @@ pub fn parse_pdb_from_path(
 
 /// Parse a PDB file, extracting function debug info and struct field maps.
 fn parse_pdb_file(pdb_path: &Path) -> (HashMap<u64, FunctionDebugInfo>, StructFieldMap) {
+    static CACHE: crate::binary_cache::Cache<(HashMap<u64, FunctionDebugInfo>, StructFieldMap)> =
+        crate::binary_cache::Cache::new();
+    let key = crate::binary_cache::Key::file(pdb_path);
+    crate::binary_cache::cached(&CACHE, key, || parse_pdb_file_uncached(pdb_path))
+}
+
+fn parse_pdb_file_uncached(pdb_path: &Path) -> (HashMap<u64, FunctionDebugInfo>, StructFieldMap) {
     let file = match std::fs::File::open(pdb_path) {
         Ok(f) => f,
         Err(_) => return (HashMap::new(), HashMap::new()),
