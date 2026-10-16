@@ -104,6 +104,14 @@ fn consistent_field_accesses_get_a_struct_pointer_type() {
     for field in ["->field_50 = param_1", "->field_60"] {
         assert!(output.contains(field), "missing `{field}`:\n{output}");
     }
+    // The function is closed even though a struct definition now precedes
+    // its signature.
+    assert_eq!(
+        output.matches('{').count(),
+        output.matches('}').count(),
+        "unbalanced braces:\n{output}"
+    );
+    assert_eq!(output.trim_end().lines().last(), Some("}"), "\n{output}");
 }
 
 #[test]
