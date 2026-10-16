@@ -30,7 +30,10 @@ fn undeclared_locals(output: &str) -> BTreeSet<String> {
             if before.is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_') {
                 continue;
             }
-            let len = text[at + 6..].bytes().take_while(|b| b.is_ascii_hexdigit()).count();
+            let len = text[at + 6..]
+                .bytes()
+                .take_while(|b| b.is_ascii_hexdigit())
+                .count();
             if len > 0 {
                 found.insert(text[at..at + 6 + len].to_string());
             }
@@ -39,12 +42,21 @@ fn undeclared_locals(output: &str) -> BTreeSet<String> {
     };
     let is_decl = |l: &str| {
         let t = l.trim();
-        l.starts_with("    ") && t.ends_with(';') && !t.contains(['=', '(', '+', '-']) && !t.starts_with("return")
+        l.starts_with("    ")
+            && t.ends_with(';')
+            && !t.contains(['=', '(', '+', '-'])
+            && !t.starts_with("return")
     };
-    let declared: BTreeSet<String> =
-        output.lines().filter(|l| is_decl(l)).flat_map(|l| names(l)).collect();
-    let used: BTreeSet<String> =
-        output.lines().filter(|l| !is_decl(l)).flat_map(|l| names(l)).collect();
+    let declared: BTreeSet<String> = output
+        .lines()
+        .filter(|l| is_decl(l))
+        .flat_map(|l| names(l))
+        .collect();
+    let used: BTreeSet<String> = output
+        .lines()
+        .filter(|l| !is_decl(l))
+        .flat_map(|l| names(l))
+        .collect();
     used.difference(&declared).cloned().collect()
 }
 
