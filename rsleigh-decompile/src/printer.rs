@@ -14855,11 +14855,28 @@ fn print_stmt_tracked(
                     if is_elidable_pcodeop(ctx.arch, *func_id) {
                         return;
                     }
-                    let name = pcodeop_name(ctx.arch, *func_id);
-                    let args: Vec<String> = inputs
+                    let mut name = pcodeop_name(ctx.arch, *func_id);
+                    let mut args: Vec<String> = inputs
                         .iter()
                         .map(|v| format_var_tracked(*v, ssa, ctx, tracker))
                         .collect();
+                    // `int 0x29` / `int 3` are MSVC's `__fastfail(code)` and
+                    // `__debugbreak()`; `cfg` passes the fail code after N.
+                    if name == "swi"
+                        && matches!(ctx.arch, Architecture::X86_64 | Architecture::X86_32)
+                    {
+                        match inputs.first().and_then(|v| resolve_to_const(*v, ssa)) {
+                            Some((0x29, _)) => {
+                                name = "__fastfail".to_string();
+                                args.remove(0);
+                            }
+                            Some((0x3, _)) => {
+                                name = "__debugbreak".to_string();
+                                args.clear();
+                            }
+                            _ => {}
+                        }
+                    }
                     // x86-64 `syscall` annotation: when preceded by a constant
                     // load into EAX/RAX, look up the syscall number against the
                     // Win11 24H2 ntdll table and annotate. Windows build-specific
@@ -18029,7 +18046,7 @@ fn format_rbp_offset(val: u64) -> String {
 
 // ---- Call target formatting ----
 
-fn format_call_target(target: &CallTarget, _ssa: &SsaCfg, ctx: &PrintCtx) -> String {
+fn format_call_target(target: &CallTarget, ssa: &SsaCfg, ctx: &PrintCtx) -> String {
     match target {
         CallTarget::Direct(addr) => {
             // Try import map first
@@ -18043,10 +18060,31 @@ fn format_call_target(target: &CallTarget, _ssa: &SsaCfg, ctx: &PrintCtx) -> Str
             }
             format!("func_{:x}", addr)
         }
-        CallTarget::Indirect(vn) => {
-            format!("(*{})", var_name(vn, ctx))
+        CallTarget::Indirect(vn) => indirect_call_through_temporary(vn, ssa, ctx)
+            .unwrap_or_else(|| format!("(*{})", var_name(vn, ctx))),
+    }
+}
+
+/// A call whose target is a P-code temporary would print as `(*tmp_N)`, a
+/// name that is never declared or assigned. Print the temporary's defining
+/// expression cast to a function pointer instead, such as the loaded slot
+/// of a virtual call. (`int N` targets become user-op statements in `cfg`.)
+fn indirect_call_through_temporary(vn: &Varnode, ssa: &SsaCfg, ctx: &PrintCtx) -> Option<String> {
+    if vn.space != AddressSpaceId::Unique {
+        return None;
+    }
+    let mut id = ssa.vars.iter().find(|v| v.varnode == *vn)?.id;
+    for _ in 0..8 {
+        match &ssa.var(id).expr {
+            Expr::Var(inner) => id = *inner,
+            Expr::UserOp { .. } | Expr::Unknown | Expr::Phi(_) => return None,
+            _ => {
+                let target = format_var(id, ssa, ctx);
+                return (!target.contains("tmp_")).then(|| format!("((long (*)())({target}))"));
+            }
         }
     }
+    None
 }
 
 // ---- Variable formatting ----

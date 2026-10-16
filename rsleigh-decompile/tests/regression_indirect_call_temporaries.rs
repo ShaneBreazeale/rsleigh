@@ -33,5 +33,11 @@ fn call_through_a_loaded_pointer_prints_the_load() {
     // mov rax, [rcx] ; call qword ptr [rax+8] ; ret
     let output = decompile(&[0x48, 0x8b, 0x01, 0xff, 0x50, 0x08, 0xc3]);
     assert!(!output.contains("tmp_"), "\n{output}");
-    assert!(output.contains("+ 8") || output.contains("+ 0x8"), "\n{output}");
+    // Offset 8 of the loaded vtable, as `+ 0x8` or a typed `->field_8`.
+    assert!(
+        ["+ 8", "+ 0x8", "->field_8"]
+            .iter()
+            .any(|t| output.contains(t)),
+        "\n{output}"
+    );
 }

@@ -31,6 +31,10 @@ All notable user-facing changes to rsleigh are documented here.
   byte array (it stands for the slot's address); one used only as a value is
   a `long`.
 
+- `int 0x29` prints as `__fastfail(code)` and `int 3` as `__debugbreak()`
+  instead of a call through an undeclared `tmp_N`; other calls through a
+  temporary print the pointer they load.
+
 ## [0.6.1] - 2026-10-12
 
 ### Fixed
