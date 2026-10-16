@@ -4,6 +4,44 @@ All notable user-facing changes to rsleigh are documented here.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-16
+
+### Added
+
+- `--jobs N` (default: one per core) for `--all` and multi-function
+  decompiles. Output is printed in target order as functions finish and is
+  identical for any thread count.
+- `--fn-timeout SECS` (default 10 with `--all`, `0` for none) stops one
+  function's analysis after that long instead of stalling the run.
+- Plain decompile `--json` gives each function `status` (`ok`/`partial`)
+  and `diagnostics` (`unresolved_control_flow`, `deadline`).
+- `rsleigh_decompile::signature_line()` finds a function's signature in
+  printed pseudocode, past any struct definitions above it.
+
+### Changed
+
+- Plain decompile and `--all` exit 2 when any function is partial
+  (unresolved control flow or the time limit), matching the agent
+  operations, and print a `// WARNING: unresolved control flow at ADDR`
+  line in text output. They exited 0 before.
+- `--all --json` streams one document as functions finish instead of
+  printing it at the end.
+- Pseudocode can begin with packed `struct` definitions used by the
+  function (see Fixed), and C++ qualified names print as C identifiers
+  (`std__exception__vftable`).
+- The scratch-leak heuristic (a Python-extension packer check) only runs on
+  PEs that import the Python C API; it printed "possible scratch leak"
+  warnings for ordinary DLLs.
+
+### Performance
+
+- Whole-binary data (imports, DWARF, PDB, unwind tables, the crypto-table
+  scan) is computed once per binary instead of once per function, and the
+  CRT-wrapper scan no longer rescans every offset. 300 CrashLoggerSSE
+  functions: 55.9 s -> 5.3 s.
+- CrashLoggerSSE 1.25.0 `--all --json` finishes in 41 s on 10 threads
+  (239 s on one); it did not finish in 40 minutes before.
+
 ### Fixed
 
 - MSVC and clang-cl x86-64 jump tables print as `switch`. Their entries are
@@ -17,28 +55,23 @@ All notable user-facing changes to rsleigh are documented here.
   which stalled `--all` for the whole binary; it now takes 0.12 s.
 - Operands in `if`/`while` conditions are parenthesized by C precedence:
   `x & 0xf000 != 0x4000` printed as written means `x & (0xf000 != 0x4000)`.
-
 - Field accesses on untyped values print as valid C. A variable used only
   through `->field_N` with a consistent layout gets a packed struct type;
   any other access prints as `*(T *)(base + 0xN)`. Constant-offset stores
   no longer print as `param_0[80]`, which dropped the access width. On
   CrashLoggerSSE, member-reference compile errors halve and none remain on
   `field_N` names.
-
 - Stack slots named `local_N` by the stack-pointer rewrites are declared.
   They were never declared, the most common compile error on CrashLoggerSSE.
   A slot used through a dereference or address arithmetic is declared as a
   byte array (it stands for the slot's address); one used only as a value is
   a `long`.
-
 - `int 0x29` prints as `__fastfail(code)` and `int 3` as `__debugbreak()`
   instead of a call through an undeclared `tmp_N`; other calls through a
   temporary print the pointer they load.
-
 - MSVC /GS functions return their own value instead of the cookie check's.
   The check prints as `__security_check_cookie(cookie);`, and the cookie
   store, whose only operand was the raw stack pointer, is dropped.
-
 - Registers loaded through a pointer keep their assignment. A copy-hiding
   rule deleted lines such as `EAX = param_0->field_48;`, so the register
   was read without being set; indirect-call targets also count as uses now.
@@ -47,6 +80,13 @@ All notable user-facing changes to rsleigh are documented here.
   `RBPx2e0`, and Win32 constant names replace whole literals only.
 - Registers, `xVarN`, `param_N`, `var_N` and `tmp_N` names that the body
   uses without a declaration are declared.
+- A function whose conditions print a shared subexpression many times no
+  longer runs without bound (CrashLoggerSSE `0x18012e350` took over two
+  minutes; now 0.12 s).
+- Struct field renaming from debug info matches whole `->field<hex>` tokens;
+  `->field18` could take the name for offset 0x1, differently from run to run.
+- The `S_ISDIR`/`S_ISREG` rewrite no longer leaves an unmatched `)`.
+- A function preceded by struct definitions keeps its closing brace.
 
 ## [0.6.1] - 2026-10-12
 

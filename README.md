@@ -28,29 +28,29 @@ in your own Rust tools.
 
 ## Installation
 
-Download a prebuilt **v0.6.1** CLI for your platform—no Rust toolchain needed:
+Download a prebuilt **v0.7.0** CLI for your platform—no Rust toolchain needed:
 
 | Platform | Download |
 |---|---|
-| macOS · Apple Silicon | [ARM64 `.tar.gz`](https://github.com/ShaneBreazeale/rsleigh/releases/download/v0.6.1/rsleigh-v0.6.1-aarch64-apple-darwin.tar.gz) |
-| macOS · Intel | [x86-64 `.tar.gz`](https://github.com/ShaneBreazeale/rsleigh/releases/download/v0.6.1/rsleigh-v0.6.1-x86_64-apple-darwin.tar.gz) |
-| Linux · x86-64 (glibc) | [x86-64 `.tar.gz`](https://github.com/ShaneBreazeale/rsleigh/releases/download/v0.6.1/rsleigh-v0.6.1-x86_64-unknown-linux-gnu.tar.gz) |
-| Linux · ARM64 (glibc) | [ARM64 `.tar.gz`](https://github.com/ShaneBreazeale/rsleigh/releases/download/v0.6.1/rsleigh-v0.6.1-aarch64-unknown-linux-gnu.tar.gz) |
-| Windows · x86-64 | [x86-64 `.zip`](https://github.com/ShaneBreazeale/rsleigh/releases/download/v0.6.1/rsleigh-v0.6.1-x86_64-pc-windows-msvc.zip) |
+| macOS · Apple Silicon | [ARM64 `.tar.gz`](https://github.com/ShaneBreazeale/rsleigh/releases/download/v0.7.0/rsleigh-v0.7.0-aarch64-apple-darwin.tar.gz) |
+| macOS · Intel | [x86-64 `.tar.gz`](https://github.com/ShaneBreazeale/rsleigh/releases/download/v0.7.0/rsleigh-v0.7.0-x86_64-apple-darwin.tar.gz) |
+| Linux · x86-64 (glibc) | [x86-64 `.tar.gz`](https://github.com/ShaneBreazeale/rsleigh/releases/download/v0.7.0/rsleigh-v0.7.0-x86_64-unknown-linux-gnu.tar.gz) |
+| Linux · ARM64 (glibc) | [ARM64 `.tar.gz`](https://github.com/ShaneBreazeale/rsleigh/releases/download/v0.7.0/rsleigh-v0.7.0-aarch64-unknown-linux-gnu.tar.gz) |
+| Windows · x86-64 | [x86-64 `.zip`](https://github.com/ShaneBreazeale/rsleigh/releases/download/v0.7.0/rsleigh-v0.7.0-x86_64-pc-windows-msvc.zip) |
 
 Extract the archive and put `rsleigh` (Windows: `rsleigh.exe`) in a directory
 on your `PATH`. You can also run it directly from the extracted directory as
 `./rsleigh` on macOS/Linux or `.\rsleigh.exe` in PowerShell. Running it without
 arguments prints usage. [All releases and SHA-256 checksums](https://github.com/ShaneBreazeale/rsleigh/releases).
 
-**Install v0.6.1 with Cargo.** With a Rust toolchain, installation is one command:
+**Install v0.7.0 with Cargo.** With a Rust toolchain, installation is one command:
 
 ```bash
-cargo install rsleigh --version 0.6.1 --locked
+cargo install rsleigh --version 0.7.0 --locked
 ```
 
 The semantic slice selectors, analysis cache, and typed evidence described here
-ship in v0.6.1 through both the prebuilt archives and Cargo. To build the
+ship in v0.7.0 through both the prebuilt archives and Cargo. To build the
 current source checkout instead:
 
 ```bash

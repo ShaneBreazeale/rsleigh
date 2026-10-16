@@ -12,7 +12,7 @@ the shared intermediate representation; use
 lift it into P-code.
 
 [crates.io](https://crates.io/crates/pcode-ir) ·
-[API documentation](https://docs.rs/pcode-ir/0.6.1/pcode_ir/) ·
+[API documentation](https://docs.rs/pcode-ir/0.7.0/pcode_ir/) ·
 [Source](https://github.com/ShaneBreazeale/rsleigh/tree/master/pcode-ir)
 
 ## Features
@@ -29,7 +29,7 @@ Add this to your project's `Cargo.toml`:
 
 ```toml
 [dependencies]
-pcode-ir = "0.6.1"
+pcode-ir = "0.7.0"
 ```
 
 The crate uses Rust 2021. It requires allocation support (`alloc`) even when
@@ -130,13 +130,13 @@ Enable `serde` to derive `Serialize` and `Deserialize` for `AddressSpaceId`,
 
 ```toml
 [dependencies]
-pcode-ir = { version = "0.6.1", features = ["serde"] }
+pcode-ir = { version = "0.7.0", features = ["serde"] }
 ```
 
 Operations use an internally tagged representation with an `opcode` field and
 snake-case variant names, such as `"int_add"`. Add a format crate such as
 `serde_json` separately if needed. `Instruction`, `ConstructorSpan`, and
-`DecodeError` do not implement Serde serialization in 0.6.1.
+`DecodeError` do not implement Serde serialization in 0.7.0.
 
 ## Contributing
 
