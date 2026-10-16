@@ -119,6 +119,7 @@ pub static WIN32_SIGNATURES: &[FuncSig] = crate::define_signatures! {
     // MSVC intrinsics the printer names for `int 0x29` / `int 3`.
     fn __fastfail(code: UInt);
     fn __debugbreak();
+    fn __security_check_cookie(cookie: SizeT);
     fn ReadProcessMemory(hProcess: Handle, lpBaseAddress: VoidPtr, lpBuffer: VoidPtr, nSize: SizeT, lpNumberOfBytesRead: VoidPtr) -> Int;
     fn RegCloseKey(hKey: HKey) -> LStatus;
     fn RegCreateKeyExA(hKey: HKey, lpSubKey: LpCStr, Reserved: DWord, lpClass: CharPtr, dwOptions: DWord, samDesired: RegSam, lpSecurityAttributes: VoidPtr, phkResult: PhKey, lpdwDisposition: LpDWord) -> LStatus;

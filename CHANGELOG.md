@@ -35,6 +35,10 @@ All notable user-facing changes to rsleigh are documented here.
   instead of a call through an undeclared `tmp_N`; other calls through a
   temporary print the pointer they load.
 
+- MSVC /GS functions return their own value instead of the cookie check's.
+  The check prints as `__security_check_cookie(cookie);`, and the cookie
+  store, whose only operand was the raw stack pointer, is dropped.
+
 ## [0.6.1] - 2026-10-12
 
 ### Fixed
