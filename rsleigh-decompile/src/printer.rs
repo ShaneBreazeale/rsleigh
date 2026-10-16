@@ -20936,6 +20936,28 @@ mod dependency_render_tests {
     }
 
     #[test]
+    fn win32_constant_names_replace_whole_literals_only() {
+        // `0x1fffffffffffffff` became `PROCESS_ALL_ACCESSffffffffff`.
+        let mut output = "long f(long n) {\nn = n & 0x1fffffffffffffff;\nOpenProcess(0x1fffff, 0, n);\nreturn n;\n".to_string();
+        let imports = HashMap::new();
+        let image = b"MZ\0\0";
+        let context = PrintCtx {
+            arch: Architecture::X86_64,
+            binary: Some(image),
+            imports: &imports,
+            try_regions: &[],
+            register_params: Vec::new(),
+            live: std::collections::HashSet::new(),
+            zext_widened: std::collections::HashSet::new(),
+            field_types: Default::default(),
+            cookie_checks: Default::default(),
+        };
+        post_process(&mut output, &HashMap::new(), &["n".into()], &HashMap::new(), &context);
+        assert!(output.contains("0x1fffffffffffffff"), "{output}");
+        assert!(output.contains("OpenProcess(PROCESS_ALL_ACCESS, 0, n)"), "{output}");
+    }
+
+    #[test]
     fn parameter_spills_keep_names_through_store_evidence_copies() {
         // push rbp; mov rbp,rsp; spill edi/esi; reload eax; add second spill;
         // pop rbp; ret. Store proxies must not render an unassigned EAX local.
