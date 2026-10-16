@@ -13986,7 +13986,13 @@ fn post_process(
     }
 
     // Last, once every rename is done: make `base->field_N` valid C.
-    let mut final_lines: Vec<String> = result.lines().map(str::to_string).collect();
+    let mut final_lines: Vec<String> = result
+        .lines()
+        .map(|line| match line.contains("::") {
+            true => c_identifiers(line),
+            false => line.to_string(),
+        })
+        .collect();
     declare_stack_slots(&mut final_lines);
     type_field_accesses(&mut final_lines, &field_types);
     result = final_lines.join("\n");
@@ -20669,9 +20675,121 @@ fn type_field_accesses(
 }
 
 /// C++ qualified names (`std::exception::vftable`, `std::_Lockit::~_Lockit`)
-/// spelled as C identifiers.
+/// spelled as C identifiers: `::` becomes `__`, a destructor's `~` becomes
+/// `dtor_`, and template arguments in a qualifier (`ctype<char>::`) become
+/// `_char_`. String literals and comments are left as they are.
 fn c_identifiers(line: &str) -> String {
-    line.to_string()
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            quote @ (b'"' | b'\'') => {
+                let mut end = i + 1;
+                while end < bytes.len() && bytes[end] != quote {
+                    end += if bytes[end] == b'\\' { 2 } else { 1 };
+                }
+                let end = (end + 1).min(bytes.len());
+                out.push_str(&line[i..end]);
+                i = end;
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                out.push_str(&line[i..]);
+                break;
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                let end = line[i..].find("*/").map_or(bytes.len(), |e| i + e + 2);
+                out.push_str(&line[i..end]);
+                i = end;
+            }
+            b if (b.is_ascii_alphabetic() || b == b'_' || b == b'~')
+                && (i == 0 || !is_ident_byte(bytes[i - 1])) =>
+            {
+                if let Some((end, name)) = qualified_name(line, i) {
+                    out.push_str(&name);
+                    i = end;
+                } else {
+                    let end = i
+                        + 1
+                        + bytes[i + 1..]
+                            .iter()
+                            .take_while(|b| is_ident_byte(**b))
+                            .count();
+                    out.push_str(&line[i..end]);
+                    i = end;
+                }
+            }
+            _ => {
+                let c = line[i..].chars().next().unwrap_or(' ');
+                out.push(c);
+                i += c.len_utf8();
+            }
+        }
+    }
+    out
+}
+
+/// The C spelling of the `a::b::c` name starting at `start`, and where it
+/// ends; `None` unless it has at least two segments.
+fn qualified_name(line: &str, start: usize) -> Option<(usize, String)> {
+    let bytes = line.as_bytes();
+    let mut parts: Vec<String> = Vec::new();
+    let mut i = start;
+    let mut end = start;
+    loop {
+        let tilde = bytes.get(i) == Some(&b'~');
+        let ident_start = i + tilde as usize;
+        let first = bytes.get(ident_start)?;
+        if !(first.is_ascii_alphabetic() || *first == b'_') {
+            break;
+        }
+        let ident_end = ident_start
+            + bytes[ident_start..]
+                .iter()
+                .take_while(|b| is_ident_byte(**b))
+                .count();
+        let mut segment = String::new();
+        if tilde {
+            segment.push_str("dtor_");
+        }
+        segment.push_str(&line[ident_start..ident_end]);
+        i = ident_end;
+        // Template arguments, only in a qualifier: `ctype<char>::`.
+        if bytes.get(i) == Some(&b'<') {
+            let mut depth = 0;
+            let mut close = None;
+            for (k, b) in bytes[i..].iter().enumerate() {
+                match b {
+                    b'<' => depth += 1,
+                    b'>' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(i + k);
+                            break;
+                        }
+                    }
+                    b';' | b'(' | b')' | b'{' | b'"' => break,
+                    _ => {}
+                }
+            }
+            if let Some(close) = close.filter(|c| line[c + 1..].starts_with("::")) {
+                segment.push('_');
+                for c in line[i + 1..close].chars() {
+                    segment.push(if c.is_ascii_alphanumeric() { c } else { '_' });
+                }
+                segment.push('_');
+                i = close + 1;
+            }
+        }
+        parts.push(segment);
+        end = i;
+        if line[i..].starts_with("::") {
+            i += 2;
+        } else {
+            break;
+        }
+    }
+    (parts.len() >= 2).then(|| (end, parts.join("__")))
 }
 
 #[cfg(test)]
