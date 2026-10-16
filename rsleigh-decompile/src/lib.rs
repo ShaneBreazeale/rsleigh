@@ -131,6 +131,14 @@ pub fn decompile(arch: Architecture, instructions: &[(u64, Instruction)]) -> Str
     decompile_with_binary(arch, instructions, None, None)
 }
 
+/// The signature line of decompiled text: the first line declaring the
+/// function, after any struct definitions printed above it.
+pub fn signature_line(pseudocode: &str) -> Option<&str> {
+    pseudocode
+        .lines()
+        .find(|l| l.contains('(') && !l.starts_with(['#', ' ', '\t', '/']))
+}
+
 /// Decompile with optional binary data for string literals and import resolution.
 /// If `binary_path` is provided, DWARF debug info will be extracted (including from
 /// macOS .dSYM bundles) to recover parameter and local variable names.

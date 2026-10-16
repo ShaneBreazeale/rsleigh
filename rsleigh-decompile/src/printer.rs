@@ -61,6 +61,7 @@ pub fn print_c_with_try(
                 _ => None,
             })
             .collect(),
+        field_types: field_access_types(ssa),
     };
     for v in &ssa.vars {
         let Some(name) = v.param_name.as_ref().filter(|n| n.starts_with("param_")) else {
@@ -376,6 +377,9 @@ fn post_process(
     ctx: &PrintCtx,
 ) {
     let mut lines: Vec<String> = out.lines().map(|l| l.to_string()).collect();
+    // Field types seen in the SSA, plus those of typed dereferences the text
+    // rules below turn into `base->field_N`.
+    let mut field_types = ctx.field_types.clone();
 
     fold_if_else_assignment_returns(&mut lines);
 
@@ -959,12 +963,22 @@ fn post_process(
                         if base == "sp" {
                             break;
                         }
-                        *line = format!(
-                            "{}{}{}",
-                            &line[..star_pos],
-                            format!("{}[{}]", base, idx),
-                            &line[close + 1..]
-                        );
+                        // A constant byte offset from a pointer-sized value is
+                        // a field, not an element: `*(uint32_t*)(p + 80)` is
+                        // `p->field_50`, while `p[80]` would scale by the
+                        // element size and is invalid on an integer base.
+                        let access = match constant_offset(idx) {
+                            Some(offset) if is_field_base(base) => {
+                                let ty = line[star_pos + 2..star_pos + type_end].trim();
+                                field_types
+                                    .entry(offset)
+                                    .or_default()
+                                    .insert(ty.to_string());
+                                format!("{}->field_{:x}", base, offset)
+                            }
+                            _ => format!("{}[{}]", base, idx),
+                        };
+                        *line = format!("{}{}{}", &line[..star_pos], access, &line[close + 1..]);
                         continue;
                     }
                 }
@@ -11337,6 +11351,8 @@ fn post_process(
                 search_from = close + 1;
                 continue;
             }
+            let ty = line[star_pos + 2..star_pos + close_rel].trim().to_string();
+            field_types.entry(off).or_default().insert(ty);
             let replacement = format!("{}->field_{:x}", base, off);
             *line = format!("{}{}{}", &line[..star_pos], replacement, &line[close + 1..]);
             search_from = star_pos + replacement.len();
@@ -13914,6 +13930,12 @@ fn post_process(
         }
     }
 
+    // Last, once every rename is done: make `base->field_N` valid C.
+    let mut final_lines: Vec<String> = result.lines().map(str::to_string).collect();
+    type_field_accesses(&mut final_lines, &field_types);
+    result = final_lines.join("\n");
+    result.push('\n');
+
     *out = result;
 }
 
@@ -14070,6 +14092,9 @@ struct PrintCtx<'a> {
     /// (`RAX = zext(EAX)` after `EAX = expr`): the narrow value is the one
     /// that prints, even with that single use.
     zext_widened: std::collections::HashSet<VarId>,
+    /// C types of the loads printed as `base->field_N`, by offset N. The
+    /// final pass declares a struct or prints casts from them.
+    field_types: std::collections::BTreeMap<u64, std::collections::BTreeSet<String>>,
 }
 
 /// Remove prologue/epilogue boilerplate from the top level.
@@ -20054,6 +20079,396 @@ mod posix_mode_rewrite_tests {
     }
 }
 
+/// C type for a field load of `size` bytes. Unknown signedness prints
+/// signed, so a `movsx`-loaded byte compared with `case -1` keeps its meaning.
+fn c_field_type(size: u32, ty: InferredType) -> Option<&'static str> {
+    Some(match (ty, size) {
+        (InferredType::Float, 4) => "float",
+        (InferredType::Float, 8) => "double",
+        (InferredType::Unsigned | InferredType::Pointer, 1) => "uint8_t",
+        (InferredType::Unsigned | InferredType::Pointer, 2) => "uint16_t",
+        (InferredType::Unsigned | InferredType::Pointer, 4) => "uint32_t",
+        (InferredType::Unsigned | InferredType::Pointer, 8) => "uint64_t",
+        (_, 1) => "int8_t",
+        (_, 2) => "int16_t",
+        (_, 4) => "int32_t",
+        (_, 8) => "int64_t",
+        _ => return None,
+    })
+}
+
+/// Byte size of a C type `c_field_type` or a typed dereference names.
+fn c_type_size(ty: &str) -> Option<u64> {
+    Some(match ty {
+        "int8_t" | "uint8_t" | "char" => 1,
+        "int16_t" | "uint16_t" | "short" => 2,
+        "int32_t" | "uint32_t" | "int" | "uint" | "float" => 4,
+        "int64_t" | "uint64_t" | "long" | "double" => 8,
+        _ => return None,
+    })
+}
+
+/// C types of every `FieldAccess` load in `ssa`, by offset.
+fn field_access_types(
+    ssa: &SsaCfg,
+) -> std::collections::BTreeMap<u64, std::collections::BTreeSet<String>> {
+    let mut types: std::collections::BTreeMap<u64, std::collections::BTreeSet<String>> =
+        Default::default();
+    for v in &ssa.vars {
+        if let Expr::FieldAccess(_, offset) = v.expr {
+            if let Some(ty) = c_field_type(v.size, v.inferred_type) {
+                types.entry(offset).or_default().insert(ty.to_string());
+            }
+        }
+    }
+    types
+}
+
+/// `80`, `0x50` → 80; anything else (including 0) → None.
+fn constant_offset(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let value = match text.strip_prefix("0x") {
+        Some(hex) => u64::from_str_radix(hex, 16).ok()?,
+        None if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) => {
+            text.parse().ok()?
+        }
+        None => return None,
+    };
+    (value > 0).then_some(value)
+}
+
+/// A plain variable that can carry fields: not a stack slot, whose
+/// constant-index form names an element of a local array.
+fn is_field_base(base: &str) -> bool {
+    base.bytes()
+        .next()
+        .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+        && base.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        && !["local_", "var_", "stack", "sp"]
+            .iter()
+            .any(|p| base.starts_with(p))
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Start of the postfix expression that ends at `end`: an identifier, a
+/// call or parenthesized group, and any `->`/`.` member chain before them.
+fn postfix_base_start(text: &str, mut end: usize) -> usize {
+    let bytes = text.as_bytes();
+    loop {
+        if end > 0 && is_ident_byte(bytes[end - 1]) {
+            let mut start = end;
+            while start > 0 && is_ident_byte(bytes[start - 1]) {
+                start -= 1;
+            }
+            if text[..start].ends_with("->") {
+                end = start - 2;
+            } else if text[..start].ends_with('.') {
+                end = start - 1;
+            } else {
+                return start;
+            }
+        } else if end > 0 && matches!(bytes[end - 1], b')' | b']') {
+            let mut depth = 0i32;
+            let mut at = end;
+            while at > 0 {
+                at -= 1;
+                match bytes[at] {
+                    b')' | b']' => depth += 1,
+                    b'(' | b'[' => depth -= 1,
+                    _ => {}
+                }
+                if depth == 0 {
+                    break;
+                }
+            }
+            if depth != 0 {
+                return end;
+            }
+            end = at;
+            // `f(x)` and `a[i]` take the callee or array too.
+            if !(end > 0 && (is_ident_byte(bytes[end - 1]) || bytes[end - 1] == b')')) {
+                return end;
+            }
+        } else {
+            return end;
+        }
+    }
+}
+
+/// `base->field_N` is valid C only when `base` points to a struct with that
+/// field. A variable used only through `->field_N`, whose fields have one
+/// size each and do not overlap, gets a packed struct declared before the
+/// function and its declaration retyped. Every other access prints as
+/// `*(T *)(base + 0xN)`, which is what the load computes.
+fn type_field_accesses(
+    lines: &mut Vec<String>,
+    field_types: &std::collections::BTreeMap<u64, std::collections::BTreeSet<String>>,
+) {
+    const MARK: &str = "->field_";
+    const KEPT: &str = "->\u{1}field_";
+    if !lines.iter().any(|l| l.contains(MARK)) {
+        return;
+    }
+    let Some(sig) = lines.iter().position(|l| {
+        !l.starts_with(char::is_whitespace) && l.contains('(') && l.trim_end().ends_with('{')
+    }) else {
+        return;
+    };
+    let ident_end = |t: &str| {
+        t.rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .map_or(0, |i| i + 1)
+    };
+    // name -> (line, declared type, is array)
+    let mut declared: HashMap<String, (usize, String, bool)> = HashMap::new();
+    let signature = lines[sig].clone();
+    if let (Some(open), Some(close)) = (signature.find('('), signature.rfind(')')) {
+        for param in signature[open + 1..close].split(',') {
+            let param = param.trim();
+            let at = ident_end(param);
+            if at > 0 && at < param.len() {
+                declared.insert(
+                    param[at..].to_string(),
+                    (sig, param[..at].trim().to_string(), false),
+                );
+            }
+        }
+    }
+    let mut body_start = sig + 1;
+    let mut in_comment = false;
+    while body_start < lines.len() {
+        let t = lines[body_start].trim();
+        // Skip blank lines and the try/catch summary comment; a line that
+        // merely starts with `*` is a dereference, not a comment.
+        if in_comment || t.starts_with("/*") {
+            in_comment = !t.contains("*/");
+            body_start += 1;
+            continue;
+        }
+        if t.is_empty() {
+            body_start += 1;
+            continue;
+        }
+        let is_decl = lines[body_start].starts_with("    ")
+            && t.ends_with(';')
+            && !t.contains(['=', '(', '-', '+'])
+            && !t.starts_with("return");
+        if !is_decl {
+            break;
+        }
+        let decl = t.trim_end_matches(';');
+        let (decl, array) = match decl.find('[') {
+            Some(b) => (&decl[..b], true),
+            None => (decl, false),
+        };
+        let at = ident_end(decl);
+        if at > 0 {
+            declared.insert(
+                decl[at..].to_string(),
+                (body_start, decl[..at].trim().to_string(), array),
+            );
+        }
+        body_start += 1;
+    }
+
+    // Offsets used through each plain-identifier base, and whether the base
+    // is ever used other than as `base->field_N`.
+    let field_at = |line: &str, mark: usize| -> Option<(u64, usize)> {
+        let digits = &line[mark + MARK.len()..];
+        let len = digits.bytes().take_while(|b| b.is_ascii_hexdigit()).count();
+        if len == 0
+            || digits
+                .as_bytes()
+                .get(len)
+                .is_some_and(|b| is_ident_byte(*b))
+        {
+            return None;
+        }
+        Some((
+            u64::from_str_radix(&digits[..len], 16).ok()?,
+            mark + MARK.len() + len,
+        ))
+    };
+    let mut offsets: HashMap<String, std::collections::BTreeSet<u64>> = HashMap::new();
+    for line in &lines[body_start..] {
+        for (mark, _) in line.match_indices(MARK) {
+            let start = postfix_base_start(line, mark);
+            let base = &line[start..mark];
+            if !base.is_empty() && base.bytes().all(is_ident_byte) {
+                if let Some((offset, _)) = field_at(line, mark) {
+                    offsets.entry(base.to_string()).or_default().insert(offset);
+                }
+            }
+        }
+    }
+    let only_field_uses = |base: &str| {
+        lines[body_start..].iter().all(|line| {
+            line.match_indices(base).all(|(at, _)| {
+                let bounded_before = at == 0 || !is_ident_byte(line.as_bytes()[at - 1]);
+                let after = at + base.len();
+                let bounded_after = line
+                    .as_bytes()
+                    .get(after)
+                    .is_none_or(|b| !is_ident_byte(*b));
+                !(bounded_before && bounded_after)
+                    || (line[after..].starts_with(MARK) && field_at(line, after).is_some())
+            })
+        })
+    };
+    let layout = |set: &std::collections::BTreeSet<u64>| -> Option<Vec<(u64, String)>> {
+        let mut fields = Vec::new();
+        let mut end = 0u64;
+        for &offset in set {
+            let types = field_types.get(&offset)?;
+            let sizes: std::collections::BTreeSet<u64> = types
+                .iter()
+                .map(|t| c_type_size(t))
+                .collect::<Option<_>>()?;
+            if sizes.len() != 1 || offset < end {
+                return None;
+            }
+            let ty = types.iter().next()?.clone();
+            end = offset + sizes.into_iter().next()?;
+            fields.push((offset, ty));
+        }
+        Some(fields)
+    };
+    let func_name = {
+        let open = signature.find('(').unwrap_or(0);
+        let at = ident_end(&signature[..open]);
+        signature[at..open].to_string()
+    };
+
+    let mut structs: Vec<(String, String, Vec<(u64, String)>)> = Vec::new();
+    for (base, set) in &offsets {
+        let Some((_, ty, array)) = declared.get(base) else {
+            continue;
+        };
+        if *array || ty.starts_with("struct ") || !only_field_uses(base) {
+            continue;
+        }
+        if let Some(fields) = layout(set) {
+            structs.push((base.clone(), format!("{func_name}_{base}"), fields));
+        }
+    }
+    structs.sort();
+    let struct_bases: std::collections::HashSet<&str> =
+        structs.iter().map(|(b, _, _)| b.as_str()).collect();
+
+    for line in &mut lines[body_start..] {
+        while let Some(mark) = line.rfind(MARK) {
+            let start = postfix_base_start(line, mark);
+            let Some((offset, end)) = field_at(line, mark).filter(|_| start < mark) else {
+                line.replace_range(mark..mark + MARK.len(), KEPT);
+                continue;
+            };
+            let base = line[start..mark].to_string();
+            if struct_bases.contains(base.as_str()) {
+                line.replace_range(mark..mark + MARK.len(), KEPT);
+                continue;
+            }
+            let ty = field_types
+                .get(&offset)
+                .and_then(|types| types.iter().next())
+                .map_or("int64_t", String::as_str);
+            let integer_base = base.bytes().all(is_ident_byte)
+                && declared
+                    .get(&base)
+                    .is_none_or(|(_, t, array)| !array && !t.contains('*'));
+            let address = if integer_base {
+                format!("{base} + 0x{offset:x}")
+            } else {
+                format!("(char *){base} + 0x{offset:x}")
+            };
+            line.replace_range(start..end, &format!("*({ty} *)({address})"));
+        }
+        *line = line.replace(KEPT, MARK);
+    }
+
+    for (base, name, _) in &structs {
+        let (at, ty, _) = &declared[base];
+        let retyped = format!("struct {name} *{base}");
+        let line = &mut lines[*at];
+        if *at == sig {
+            let old = format!("{ty} {base}");
+            if let Some(pos) = line.find(&old) {
+                line.replace_range(pos..pos + old.len(), &retyped);
+            }
+        } else {
+            *line = format!("    {retyped};");
+        }
+    }
+    let mut definitions = Vec::new();
+    for (_, name, fields) in &structs {
+        definitions.push("#pragma pack(push, 1)".to_string());
+        definitions.push(format!("struct {name} {{"));
+        let mut end = 0u64;
+        for (offset, ty) in fields {
+            if *offset > end {
+                definitions.push(format!("    uint8_t _pad_{end:x}[0x{:x}];", offset - end));
+            }
+            definitions.push(format!("    {ty} field_{offset:x};"));
+            end = offset + c_type_size(ty).unwrap_or(0);
+        }
+        definitions.push("};".to_string());
+        definitions.push("#pragma pack(pop)".to_string());
+    }
+    if !definitions.is_empty() {
+        definitions.push(String::new());
+        lines.splice(sig..sig, definitions);
+    }
+}
+
+#[cfg(test)]
+mod field_access_typing_tests {
+    use super::*;
+
+    fn typed(lines: &[&str]) -> Vec<String> {
+        let mut lines: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+        type_field_accesses(&mut lines, &Default::default());
+        lines
+    }
+
+    #[test]
+    fn a_body_that_starts_with_a_dereference_is_still_rewritten() {
+        // CrashLogger 0x18004e270: the first statements begin with `*(`,
+        // which the declaration scan took for block-comment lines.
+        let out = typed(&[
+            "long f(long param_0, long param_1) {",
+            "    long lVar1;",
+            "",
+            "*(uint64_t*)local_68 = DAT_1802f76c0->field_0 ^ RSP - 120;",
+            "*(uint64_t*)(RSP - 32) = param_1->field_0;",
+            "}",
+        ]);
+        assert_eq!(
+            out[3],
+            "*(uint64_t*)local_68 = *(int64_t *)(DAT_1802f76c0 + 0x0) ^ RSP - 120;"
+        );
+        assert_eq!(
+            out[4],
+            "*(uint64_t*)(RSP - 32) = *(int64_t *)(param_1 + 0x0);"
+        );
+    }
+
+    #[test]
+    fn member_chains_and_expression_bases_print_as_casts() {
+        let out = typed(&[
+            "long f(long param_0) {",
+            "",
+            "return param_0->field_8->field_10 + (param_0 + 8)->field_4;",
+            "}",
+        ]);
+        assert_eq!(
+            out[2],
+            "return *(int64_t *)((char *)*(int64_t *)(param_0 + 0x8) + 0x10) \
+             + *(int64_t *)((char *)(param_0 + 8) + 0x4);"
+        );
+    }
+}
+
 #[cfg(test)]
 mod dependency_render_tests {
     use super::*;
@@ -20070,6 +20485,7 @@ mod dependency_render_tests {
             register_params: Vec::new(),
             live: std::collections::HashSet::new(),
             zext_widened: std::collections::HashSet::new(),
+            field_types: Default::default(),
         };
         post_process(
             &mut output,
