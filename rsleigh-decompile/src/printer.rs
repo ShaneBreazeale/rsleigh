@@ -214,16 +214,17 @@ pub fn print_c_with_try(
         }
     }
 
-    // Close the function body brace (opened in generate_function_signature)
-    if out.starts_with("void ")
-        || out.starts_with("int ")
-        || out.starts_with("long ")
-        || out.starts_with("float ")
-        || out.starts_with("double ")
-        || out.starts_with("char ")
-        || out.starts_with("uint8_t ")
-        || out.starts_with("bool ")
-    {
+    // Close the function body brace (opened in generate_function_signature).
+    // Struct definitions may precede the signature, so test the signature
+    // line rather than the start of the text.
+    let declares_function = crate::signature_line(&out).is_some_and(|sig| {
+        [
+            "void ", "int ", "long ", "float ", "double ", "char ", "uint8_t ", "bool ",
+        ]
+        .iter()
+        .any(|ty| sig.starts_with(ty))
+    });
+    if declares_function {
         out.push_str("}\n");
     }
     out
@@ -6811,7 +6812,9 @@ fn post_process(
                     goblin::Object::Elf(elf) => elf
                         .section_headers
                         .iter()
-                        .filter(|s| s.sh_flags & 0x4 == 0 && s.sh_flags & 0x2 != 0 && s.sh_type != 8)
+                        .filter(|s| {
+                            s.sh_flags & 0x4 == 0 && s.sh_flags & 0x2 != 0 && s.sh_type != 8
+                        })
                         .map(|s| (s.sh_addr, s.sh_offset as usize, s.sh_size as usize))
                         .collect(),
                     _ => vec![],
@@ -20015,11 +20018,10 @@ mod struct_field_rename_tests {
         // it, whatever order the map yields its entries in (CrashLogger
         // printed `size` or `reg8` from run to run).
         for _ in 0..32 {
-            let fields: HashMap<u64, String> =
-                [(0x1, "reg"), (0x18, "size"), (0x180, "tail")]
-                    .into_iter()
-                    .map(|(o, n)| (o, n.to_string()))
-                    .collect();
+            let fields: HashMap<u64, String> = [(0x1, "reg"), (0x18, "size"), (0x180, "tail")]
+                .into_iter()
+                .map(|(o, n)| (o, n.to_string()))
+                .collect();
             let mut line = "a->field18 = b->field1 + c->field180 + d->field1f;".to_string();
             rename_struct_fields(&mut line, &fields);
             assert_eq!(line, "a->size = b->reg + c->tail + d->field1f;");
