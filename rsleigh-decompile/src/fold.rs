@@ -5611,7 +5611,10 @@ fn name_parameters_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
     }
 
     // Pass 5: Float parameters from XMM registers (x86-64 SysV / Win64).
+    // Only an entry value that reaches something observable is an argument:
+    // `xorps xmm0, xmm0` reads XMM0, but its result is the constant 0.
     let float_offsets = float_arg_reg_offsets();
+    let observable = observable_values(ssa);
     if !float_offsets.is_empty() {
         let mut fparam_idx = 0u32;
         let mut fnamed_offsets = std::collections::HashSet::new();
@@ -5627,6 +5630,7 @@ fn name_parameters_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
                         && vdef.varnode.space == AddressSpaceId::Register
                         && float_offsets.contains(&vdef.varnode.offset)
                         && !fnamed_offsets.contains(&vdef.varnode.offset)
+                        && observable.contains(var_id)
                 };
                 if is_float_param {
                     let offset = ssa.vars[idx].varnode.offset;
@@ -5647,6 +5651,7 @@ fn name_parameters_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
                     if vdef.varnode.space == AddressSpaceId::Register
                         && vdef.varnode.offset == offset
                         && vdef.param_name.is_none()
+                        && observable.contains(&vdef.id)
                     {
                         if matches!(&vdef.expr, Expr::Unknown | Expr::Phi(_)) {
                             ssa.vars[v].param_name = Some(format!("fparam_{}", fparam_idx));
@@ -5660,6 +5665,63 @@ fn name_parameters_with_cc(ssa: &mut SsaCfg, cc: CallingConv) {
             }
         }
     }
+}
+
+/// Values that reach something observable: a store, a call argument, a
+/// branch condition, a returned value, an indirect jump, or a user-op
+/// statement, through the expressions that compute them.
+fn observable_values(ssa: &SsaCfg) -> std::collections::HashSet<VarId> {
+    let mut stack: Vec<VarId> = Vec::new();
+    for block in &ssa.blocks {
+        for stmt in &block.stmts {
+            match stmt {
+                Stmt::Store { addr, val } => stack.extend([*addr, *val]),
+                Stmt::Call { args, .. } => stack.extend(args.iter().copied()),
+                Stmt::Assign(v) => {
+                    if matches!(safe_var(&ssa.vars, *v).expr, Expr::UserOp { .. }) {
+                        stack.push(*v);
+                    }
+                }
+            }
+        }
+        match &block.terminator {
+            SsaTerminator::CBranch { cond, .. } => stack.push(*cond),
+            SsaTerminator::Return(Some(v)) | SsaTerminator::Indirect(v) => stack.push(*v),
+            SsaTerminator::Call { args, .. } => stack.extend(args.iter().copied()),
+            _ => {}
+        }
+    }
+    let mut live = std::collections::HashSet::new();
+    while let Some(v) = stack.pop() {
+        if (v.0 as usize) >= ssa.vars.len() || !live.insert(v) {
+            continue;
+        }
+        match &ssa.vars[v.0 as usize].expr {
+            Expr::Var(a) | Expr::UnaryOp(_, a) | Expr::Load(a) | Expr::FieldAccess(a, _) => {
+                stack.push(*a)
+            }
+            // `x ^ x` and `x - x` are zero whatever x is: the zeroing idiom
+            // (`xorps xmm0, xmm0`, `xor eax, eax`) does not use x.
+            Expr::BinOp(BinOpKind::Xor | BinOpKind::Sub, a, b)
+                if copy_source(ssa, *a) == copy_source(ssa, *b) => {}
+            Expr::BinOp(_, a, b) => stack.extend([*a, *b]),
+            Expr::Ternary(c, a, b) => stack.extend([*c, *a, *b]),
+            Expr::Phi(inputs) | Expr::UserOp { inputs, .. } => stack.extend(inputs.iter().copied()),
+            Expr::Const(..) | Expr::Unknown => {}
+        }
+    }
+    live
+}
+
+/// The value `v` copies, following `Var` copies.
+fn copy_source(ssa: &SsaCfg, mut v: VarId) -> VarId {
+    for _ in 0..8 {
+        match safe_var(&ssa.vars, v).expr {
+            Expr::Var(inner) => v = inner,
+            _ => break,
+        }
+    }
+    v
 }
 
 /// Recognize struct field access patterns.

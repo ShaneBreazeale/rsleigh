@@ -36,5 +36,8 @@ fn real_float_parameters_are_kept() {
     // addss xmm0, xmm1 ; ret
     let output = decompile(&[0xf3, 0x0f, 0x58, 0xc1, 0xc3]);
     let sig = signature(&output);
-    assert!(sig.contains("fparam_0") && sig.contains("fparam_1"), "\n{output}");
+    assert!(
+        sig.contains("fparam_0") && sig.contains("fparam_1"),
+        "\n{output}"
+    );
 }
