@@ -1922,15 +1922,21 @@ fn post_process(
     // "RBP[0x1f0]" → "local_1f0"
     // "RBP + 0" → suppress (frame pointer itself)
     for line in &mut lines {
-        // RBP + decimal_offset
+        // RBP + decimal or 0x-hex offset
         while let Some(pos) = line.find("RBP + ") {
             crate::budget::work("render", 0);
             let after = &line[pos + 6..];
-            let end = after
-                .find(|c: char| !c.is_ascii_digit())
-                .unwrap_or(after.len());
-            if end > 0 {
-                if let Ok(offset) = after[..end].parse::<u64>() {
+            // `RBP + 0x2e0` must not parse as `RBP + 0` followed by `x2e0`.
+            let (digits_at, radix) = match after.starts_with("0x") {
+                true => (2, 16),
+                false => (0, 10),
+            };
+            let end = digits_at
+                + after[digits_at..]
+                    .find(|c: char| !c.is_digit(radix))
+                    .unwrap_or(after.len() - digits_at);
+            if end > digits_at {
+                if let Ok(offset) = u64::from_str_radix(&after[digits_at..end], radix) {
                     if offset == 0 {
                         // RBP + 0 → just RBP (or skip)
                         let replacement = "RBP".to_string();
@@ -20905,8 +20911,7 @@ mod dependency_render_tests {
     fn hex_rbp_offsets_name_their_slot() {
         // `RBP + 0x2e0` was read as `RBP + 0` followed by `x2e0`, leaving an
         // undeclared `RBPx2e0` (CrashLoggerSSE 0x180001610).
-        let mut output =
-            "long f(long n) {\nRCX = *(uint64_t*)(RBP + 0x2e0);\nreturn RCX + n;\n".to_string();
+        let mut output = "long f(long n) {\nfunc_1000(RBP + 0x2e0, n);\nreturn n;\n".to_string();
         let imports = HashMap::new();
         let context = PrintCtx {
             arch: Architecture::X86_64,
@@ -20919,7 +20924,13 @@ mod dependency_render_tests {
             field_types: Default::default(),
             cookie_checks: Default::default(),
         };
-        post_process(&mut output, &HashMap::new(), &["n".into()], &HashMap::new(), &context);
+        post_process(
+            &mut output,
+            &HashMap::new(),
+            &["n".into()],
+            &HashMap::new(),
+            &context,
+        );
         assert!(!output.contains("RBPx"), "{output}");
         assert!(output.contains("local_2e0"), "{output}");
     }
