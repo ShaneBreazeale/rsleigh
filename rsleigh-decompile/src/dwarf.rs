@@ -14,6 +14,39 @@ pub struct FunctionDebugInfo {
 /// The key is the byte offset within the struct, the value is the field name.
 pub type StructFieldMap = HashMap<u64, String>;
 
+/// Field names by offset, collected from every struct in the debug info.
+#[derive(Default)]
+pub(crate) struct FieldNames(HashMap<u64, String>);
+
+impl FieldNames {
+    pub(crate) fn add(&mut self, offset: u64, name: String) {
+        self.0.insert(offset, name);
+    }
+
+    pub(crate) fn finish(self) -> StructFieldMap {
+        self.0
+    }
+}
+
+#[cfg(test)]
+mod field_name_tests {
+    use super::FieldNames;
+
+    #[test]
+    fn an_offset_named_differently_by_two_structs_has_no_name() {
+        // CrashLoggerSSE's PDB gave `->field8` whichever struct came last
+        // (`next`); offsets mean nothing without knowing the struct.
+        let mut names = FieldNames::default();
+        names.add(0x8, "next".into());
+        names.add(0x8, "size".into());
+        names.add(0x10, "count".into());
+        names.add(0x10, "count".into());
+        let map = names.finish();
+        assert_eq!(map.get(&0x8), None);
+        assert_eq!(map.get(&0x10).map(String::as_str), Some("count"));
+    }
+}
+
 /// Extract DWARF debug info from a binary file path.
 /// On macOS, automatically searches for companion .dSYM bundle.
 pub fn parse_dwarf_from_path(binary_path: &Path) -> HashMap<u64, FunctionDebugInfo> {
