@@ -14000,6 +14000,7 @@ fn post_process(
         })
         .collect();
     declare_stack_slots(&mut final_lines);
+    declare_leftover_names(&mut final_lines);
     type_field_accesses(&mut final_lines, &field_types);
     result = final_lines.join("\n");
     result.push('\n');
@@ -20848,9 +20849,128 @@ mod c_identifier_tests {
     }
 }
 
-/// Declare the decompiler-generated names the body uses but nothing declares.
+/// C type for a decompiler-generated name, or `None` for any other name.
+fn generated_name_type(name: &str) -> Option<&'static str> {
+    const R64: &[&str] = &["RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP", "RSP"];
+    const R32: &[&str] = &["EAX", "EBX", "ECX", "EDX", "ESI", "EDI", "EBP", "ESP"];
+    const R16: &[&str] = &["AX", "BX", "CX", "DX", "SI", "DI", "BP", "SP"];
+    const R8: &[&str] = &[
+        "AL", "BL", "CL", "DL", "AH", "BH", "CH", "DH", "SIL", "DIL", "BPL", "SPL",
+    ];
+    let numbered = |prefix: &str, suffix: &str| {
+        name.strip_prefix(prefix)
+            .and_then(|n| n.strip_suffix(suffix))
+            .and_then(|n| n.parse::<u32>().ok())
+            .is_some_and(|n| (8..=15).contains(&n))
+    };
+    let tail_is = |prefix: &str, hex: bool| {
+        name.strip_prefix(prefix).is_some_and(|t| {
+            !t.is_empty()
+                && t.bytes().all(|b| match hex {
+                    true => b.is_ascii_hexdigit(),
+                    false => b.is_ascii_digit(),
+                })
+        })
+    };
+    if R64.contains(&name) || numbered("R", "") {
+        return Some("long");
+    }
+    if R32.contains(&name) || numbered("R", "D") {
+        return Some("int");
+    }
+    if R16.contains(&name) || numbered("R", "W") {
+        return Some("short");
+    }
+    if R8.contains(&name) || numbered("R", "B") {
+        return Some("char");
+    }
+    if tail_is("fparam_", false) {
+        return Some("double");
+    }
+    if tail_is("param_", false) || tail_is("var_", true) || tail_is("tmp_", true) {
+        return Some("long");
+    }
+    // `iVar1`, `puVar2`: a lowercase prefix, `Var`, digits.
+    let at = name.find("Var")?;
+    let prefix = &name[..at];
+    let digits = &name[at + 3..];
+    if prefix.is_empty()
+        || !prefix.bytes().all(|b| b.is_ascii_lowercase())
+        || digits.is_empty()
+        || !digits.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(match prefix {
+        "i" => "int",
+        "u" => "unsigned int",
+        "b" => "uint8_t",
+        "c" => "char",
+        "s" => "short",
+        "w" => "uint16_t",
+        "f" => "float",
+        "d" => "double",
+        _ => "long",
+    })
+}
+
+/// Declare the decompiler-generated names (registers left unresolved,
+/// `xVarN`, `param_N`, `var_N`, `tmp_N`) that the body uses but neither the
+/// signature nor the declaration block introduces. Members (`p->RCX`),
+/// callees, string literals, and comments are not names.
 fn declare_leftover_names(lines: &mut Vec<String>) {
-    let _ = lines;
+    let Some(decls) = declarations(lines) else {
+        return;
+    };
+    let mut missing: std::collections::BTreeMap<String, &'static str> = Default::default();
+    for line in &lines[decls.body_start..] {
+        let bytes = line.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                quote @ (b'"' | b'\'') => {
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != quote {
+                        i += if bytes[i] == b'\\' { 2 } else { 1 };
+                    }
+                    i += 1;
+                }
+                b'/' if matches!(bytes.get(i + 1), Some(b'/') | Some(b'*')) => break,
+                b if (b.is_ascii_alphabetic() || b == b'_')
+                    && (i == 0 || !is_ident_byte(bytes[i - 1])) =>
+                {
+                    let end = i + bytes[i..].iter().take_while(|b| is_ident_byte(**b)).count();
+                    let name = &line[i..end];
+                    let member = line[..i].ends_with("->") || line[..i].ends_with('.');
+                    let call = line[end..].trim_start().starts_with('(');
+                    if !member && !call && !decls.names.contains_key(name) {
+                        if let Some(ty) = generated_name_type(name) {
+                            missing.entry(name.to_string()).or_insert(ty);
+                        }
+                    }
+                    i = end;
+                }
+                _ => i += 1,
+            }
+        }
+    }
+    if missing.is_empty() {
+        return;
+    }
+    let new_decls: Vec<String> = missing
+        .iter()
+        .map(|(name, ty)| format!("    {ty} {name};"))
+        .collect();
+    match decls.last_decl {
+        Some(last) => {
+            lines.splice(last + 1..last + 1, new_decls);
+        }
+        None => {
+            let mut block = new_decls;
+            block.push(String::new());
+            lines.splice(decls.sig + 1..decls.sig + 1, block);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -20892,11 +21012,16 @@ mod leftover_name_tests {
             "long puVar3;",
             "double fparam_0;",
         ] {
-            assert!(decls.contains(&expected), "missing `{expected}` in {decls:?}");
+            assert!(
+                decls.contains(&expected),
+                "missing `{expected}` in {decls:?}"
+            );
         }
         for unexpected in ["RCX", "R8", "RDX", "R9", "func_1000", "param_0"] {
             assert!(
-                !decls.iter().any(|d| d.trim_end_matches(';').ends_with(&format!(" {unexpected}"))),
+                !decls
+                    .iter()
+                    .any(|d| d.trim_end_matches(';').ends_with(&format!(" {unexpected}"))),
                 "`{unexpected}` declared: {decls:?}"
             );
         }

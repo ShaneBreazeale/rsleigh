@@ -39,6 +39,15 @@ All notable user-facing changes to rsleigh are documented here.
   The check prints as `__security_check_cookie(cookie);`, and the cookie
   store, whose only operand was the raw stack pointer, is dropped.
 
+- Registers loaded through a pointer keep their assignment. A copy-hiding
+  rule deleted lines such as `EAX = param_0->field_48;`, so the register
+  was read without being set; indirect-call targets also count as uses now.
+- C++ qualified names print as C identifiers (`std__exception__vftable`).
+- `RBP + 0x2e0` names its slot `local_2e0` instead of an undeclared
+  `RBPx2e0`, and Win32 constant names replace whole literals only.
+- Registers, `xVarN`, `param_N`, `var_N` and `tmp_N` names that the body
+  uses without a declaration are declared.
+
 ## [0.6.1] - 2026-10-12
 
 ### Fixed
