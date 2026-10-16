@@ -6551,12 +6551,12 @@ fn post_process(
             *line = line.replace("(0x80000003)", "(HKEY_USERS)");
             *line = line.replace("(0x80000005)", "(HKEY_CURRENT_CONFIG)");
             // Registry access rights
-            *line = line.replace("0x20019", "KEY_READ");
-            *line = line.replace("0x20006", "KEY_WRITE");
-            *line = line.replace("0xf003f", "KEY_ALL_ACCESS");
+            *line = replace_literal(line, "0x20019", "KEY_READ");
+            *line = replace_literal(line, "0x20006", "KEY_WRITE");
+            *line = replace_literal(line, "0xf003f", "KEY_ALL_ACCESS");
             // Process access rights
-            *line = line.replace("0x1fffff", "PROCESS_ALL_ACCESS");
-            *line = line.replace("0x001f0fff", "PROCESS_ALL_ACCESS");
+            *line = replace_literal(line, "0x1fffff", "PROCESS_ALL_ACCESS");
+            *line = replace_literal(line, "0x001f0fff", "PROCESS_ALL_ACCESS");
             // Window messages
             if line.contains("SendMessage") || line.contains("PostMessage") {
                 *line = line.replace(", 0x10,", ", WM_CLOSE,");
@@ -20420,6 +20420,24 @@ fn declare_stack_slots(lines: &mut Vec<String>) {
     }
 }
 
+/// `line` with each whole occurrence of the numeric `literal` replaced by
+/// `name`; a literal inside a longer number or identifier is left alone.
+fn replace_literal(line: &str, literal: &str, name: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(at) = rest.find(literal) {
+        let end = at + literal.len();
+        let before = rest[..at].bytes().last();
+        let after = rest.as_bytes().get(end).copied();
+        let whole = !before.is_some_and(is_ident_byte) && !after.is_some_and(is_ident_byte);
+        out.push_str(&rest[..at]);
+        out.push_str(if whole { name } else { literal });
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The function's signature and declaration block in printed lines.
 struct Declarations {
     /// Index of the signature line.
@@ -20952,9 +20970,18 @@ mod dependency_render_tests {
             field_types: Default::default(),
             cookie_checks: Default::default(),
         };
-        post_process(&mut output, &HashMap::new(), &["n".into()], &HashMap::new(), &context);
+        post_process(
+            &mut output,
+            &HashMap::new(),
+            &["n".into()],
+            &HashMap::new(),
+            &context,
+        );
         assert!(output.contains("0x1fffffffffffffff"), "{output}");
-        assert!(output.contains("OpenProcess(PROCESS_ALL_ACCESS, 0, n)"), "{output}");
+        assert!(
+            output.contains("OpenProcess(PROCESS_ALL_ACCESS, 0, n)"),
+            "{output}"
+        );
     }
 
     #[test]
