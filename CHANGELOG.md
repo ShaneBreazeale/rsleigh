@@ -18,6 +18,13 @@ All notable user-facing changes to rsleigh are documented here.
 - Operands in `if`/`while` conditions are parenthesized by C precedence:
   `x & 0xf000 != 0x4000` printed as written means `x & (0xf000 != 0x4000)`.
 
+- Field accesses on untyped values print as valid C. A variable used only
+  through `->field_N` with a consistent layout gets a packed struct type;
+  any other access prints as `*(T *)(base + 0xN)`. Constant-offset stores
+  no longer print as `param_0[80]`, which dropped the access width. On
+  CrashLoggerSSE, member-reference compile errors halve and none remain on
+  `field_N` names.
+
 ## [0.6.1] - 2026-10-12
 
 ### Fixed
