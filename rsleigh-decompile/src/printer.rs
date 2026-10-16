@@ -20902,6 +20902,29 @@ mod dependency_render_tests {
     }
 
     #[test]
+    fn hex_rbp_offsets_name_their_slot() {
+        // `RBP + 0x2e0` was read as `RBP + 0` followed by `x2e0`, leaving an
+        // undeclared `RBPx2e0` (CrashLoggerSSE 0x180001610).
+        let mut output =
+            "long f(long n) {\nRCX = *(uint64_t*)(RBP + 0x2e0);\nreturn RCX + n;\n".to_string();
+        let imports = HashMap::new();
+        let context = PrintCtx {
+            arch: Architecture::X86_64,
+            binary: None,
+            imports: &imports,
+            try_regions: &[],
+            register_params: Vec::new(),
+            live: std::collections::HashSet::new(),
+            zext_widened: std::collections::HashSet::new(),
+            field_types: Default::default(),
+            cookie_checks: Default::default(),
+        };
+        post_process(&mut output, &HashMap::new(), &["n".into()], &HashMap::new(), &context);
+        assert!(!output.contains("RBPx"), "{output}");
+        assert!(output.contains("local_2e0"), "{output}");
+    }
+
+    #[test]
     fn parameter_spills_keep_names_through_store_evidence_copies() {
         // push rbp; mov rbp,rsp; spill edi/esi; reload eax; add second spill;
         // pop rbp; ret. Store proxies must not render an unassigned EAX local.
