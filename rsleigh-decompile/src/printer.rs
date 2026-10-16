@@ -16715,11 +16715,14 @@ fn format_condition_tracked(
             }
             if l_esp {
                 // Left is ESP-derived: show just the right operand comparison
-                let r = format_cond_operand(*right, ssa, ctx, tracker);
+                let (mut r, mut zero) =
+                    (format_cond_operand(*right, ssa, ctx, tracker), "0".into());
+                parenthesize_operands(binop_str(*kind), &mut r, &mut zero);
                 return format!("{} {} 0", r, binop_str(*kind));
             }
             if r_esp {
-                let l = format_cond_operand(*left, ssa, ctx, tracker);
+                let (mut l, mut zero) = (format_cond_operand(*left, ssa, ctx, tracker), "0".into());
+                parenthesize_operands(binop_str(*kind), &mut l, &mut zero);
                 return format!("{} {} 0", l, binop_str(*kind));
             }
 
@@ -16728,6 +16731,8 @@ fn format_condition_tracked(
             // operands to the same register name.
             let mut l = format_cond_operand(*left, ssa, ctx, tracker);
             let mut r = format_cond_operand(*right, ssa, ctx, tracker);
+            // `x & 0xf000 == 0x4000` would mean `x & (0xf000 == 0x4000)`.
+            parenthesize_operands(binop_str(*kind), &mut l, &mut r);
 
             // Add signedness casts for signed/unsigned comparisons
             let lv = ssa.var(*left);
@@ -16852,9 +16857,83 @@ fn is_comparison(kind: BinOpKind) -> bool {
     )
 }
 
+thread_local! {
+    static COND_OPERAND_STATE: std::cell::RefCell<CondOperandState> =
+        std::cell::RefCell::new(CondOperandState::default());
+}
+
+/// Per-root rendering state for [`format_cond_operand`], kept apart from
+/// `FORMAT_VARDEF_STATE` because the two render the same VarId differently.
+#[derive(Default)]
+struct CondOperandState {
+    depth: u32,
+    expanded: u32,
+    active: std::collections::HashSet<u32>,
+    cache: HashMap<u32, String>,
+}
+
 /// Format a condition operand, preferring the SSA expression over the tracker.
 /// This avoids cases where both operands alias to the same register name.
+///
+/// Condition operands are SSA DAGs: printed as trees, every shared subterm
+/// is printed again (CrashLogger `0x18012e350` never finished). Render each
+/// VarId once per root, and fall back to the variable's name past the same
+/// depth, expansion, and size limits `format_vardef_expr` uses.
 fn format_cond_operand(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTracker) -> String {
+    let entered = COND_OPERAND_STATE.with(|state| {
+        let mut state = state.borrow_mut();
+        if state.depth == 0 {
+            state.expanded = 0;
+            state.active.clear();
+            state.cache.clear();
+        }
+        if let Some(rendered) = state.cache.get(&id.0) {
+            return Err(Some(rendered.clone()));
+        }
+        if state.depth >= FORMAT_VAR_MAX_DEPTH
+            || state.expanded >= FORMAT_VAR_MAX_DEPTH
+            || !state.active.insert(id.0)
+        {
+            return Err(None);
+        }
+        state.depth += 1;
+        state.expanded += 1;
+        Ok(())
+    });
+    match entered {
+        Err(Some(rendered)) => return rendered,
+        Err(None) => return vardef_reference(ssa.var(id), ctx),
+        Ok(()) => {}
+    }
+    struct Leave(u32);
+    impl Drop for Leave {
+        fn drop(&mut self) {
+            COND_OPERAND_STATE.with(|state| {
+                let mut state = state.borrow_mut();
+                state.active.remove(&self.0);
+                state.depth = state.depth.saturating_sub(1);
+            });
+        }
+    }
+    let _leave = Leave(id.0);
+    let rendered = format_cond_operand_uncached(id, ssa, ctx, tracker);
+    let rendered = if rendered.len() > FORMAT_VAR_MAX_RENDERED_BYTES {
+        vardef_reference(ssa.var(id), ctx)
+    } else {
+        rendered
+    };
+    COND_OPERAND_STATE.with(|state| {
+        state.borrow_mut().cache.insert(id.0, rendered.clone());
+    });
+    rendered
+}
+
+fn format_cond_operand_uncached(
+    id: VarId,
+    ssa: &SsaCfg,
+    ctx: &PrintCtx,
+    tracker: &RegTracker,
+) -> String {
     if let Some(name) = emitted_name(id, ssa, ctx, tracker) {
         return name;
     }
@@ -16927,8 +17006,9 @@ fn format_cond_operand(id: VarId, ssa: &SsaCfg, ctx: &PrintCtx, tracker: &RegTra
                 }
             }
         }
-        let ls = format_cond_operand(*l, ssa, ctx, tracker);
-        let rs = format_cond_operand(*r, ssa, ctx, tracker);
+        let mut ls = format_cond_operand(*l, ssa, ctx, tracker);
+        let mut rs = format_cond_operand(*r, ssa, ctx, tracker);
+        parenthesize_operands(binop_str(*kind), &mut ls, &mut rs);
         return format!("{} {} {}", ls, binop_str(*kind), rs);
     }
     if let Expr::FieldAccess(base, offset) = &vdef.expr {

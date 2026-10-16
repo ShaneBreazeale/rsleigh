@@ -12,6 +12,11 @@ All notable user-facing changes to rsleigh are documented here.
   An unchecked sign-extended index also takes entries below the table
   (`case -1`). On CrashLoggerSSE 1.25.0 this recovers 73 tables, against 0
   before.
+- Conditions whose operands share subexpressions print in linear time. A
+  double-to-decimal routine in CrashLoggerSSE never finished decompiling,
+  which stalled `--all` for the whole binary; it now takes 0.12 s.
+- Operands in `if`/`while` conditions are parenthesized by C precedence:
+  `x & 0xf000 != 0x4000` printed as written means `x & (0xf000 != 0x4000)`.
 
 ## [0.6.1] - 2026-10-12
 
