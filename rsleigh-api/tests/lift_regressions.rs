@@ -151,3 +151,34 @@ fn issue_24_jump_through_computed_operand_loads_its_target() {
         }
     });
 }
+
+/// #25: `jmp [rax]` / `jmp [rsp]` must load the target from the cell the
+/// register points at, as `call [rax]` does.
+#[test]
+fn issue_25_jump_through_register_cell_loads_its_target() {
+    with_decoder_stack(|| {
+        for (arch, bytes, reg) in [
+            (Architecture::X86_64, &[0xffu8, 0x20][..], 0x00), // jmp [rax]
+            (Architecture::X86_64, &[0xff, 0x10][..], 0x00),   // call [rax]
+            (Architecture::X86_64, &[0xff, 0x24, 0x24][..], 0x20), // jmp [rsp]
+            (Architecture::X86_64, &[0x48, 0xff, 0x20][..], 0x00), // rex.W jmp [rax]
+            (Architecture::X86_32, &[0xff, 0x20][..], 0x00),   // jmp [eax]
+            (Architecture::X86_32, &[0xff, 0x24, 0x24][..], 0x10), // jmp [esp]
+        ] {
+            let inst = Decoder::new(arch).decode(bytes, 0x1000).unwrap();
+            let (loaded, ptr, dest) = indirect_target(&inst.ops);
+            assert_eq!(
+                dest, loaded,
+                "{arch:?} {}: {:?}",
+                inst.disassembly, inst.ops
+            );
+            assert_eq!(
+                (ptr.space, ptr.offset),
+                (AddressSpaceId::Register, reg),
+                "{arch:?} {}: {:?}",
+                inst.disassembly,
+                inst.ops
+            );
+        }
+    });
+}
