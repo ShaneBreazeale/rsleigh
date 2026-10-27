@@ -113,6 +113,7 @@ bytes + addr → Decoder::decode() → Instruction { disasm, ops: Vec<PcodeOp> }
 - Const-space refs: `export *[const]:4 simm8` → `Varnode::constant()` (no Load)
 - MixOperations: mixed AND/OR pattern blocks default to AND (VFP/NEON)
 - Optional table lift: OR-pattern subtables lifted via `.as_ref().unwrap()`
+- Context packing (`ContextMemoryMapping::map_all`): overlap is judged against the furthest bit any earlier field of the varnode reached. Comparing with the previous field only put x86 `instrPhase` on `suffix3D`'s last bit (3DNow! decode recursed forever, #26)
 
 ### Decompiler
 

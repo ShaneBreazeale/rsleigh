@@ -105,41 +105,39 @@ impl ContextMemoryMapping {
         }
 
         // 3. map all the bits into a single memory block, one varnode after the
-        // other, removing empty spaces in between.
+        // other, removing empty spaces in between. Overlap is decided against
+        // the furthest bit any earlier field of the varnode reaches, not just
+        // the previous field: a wide field (x86 `suffix3D=(22,29)`) can be
+        // followed by narrower ones it covers, and the next field after them
+        // (`instrPhase=(30,30)`) must still land after the wide field's end.
+        let mut varnodes: Vec<_> = context_mapping.into_iter().collect();
+        varnodes.sort_unstable_by_key(|(varnode_id, _)| varnode_id.0);
         let mut mem_mapping: Vec<(ContextId, FieldBits)> =
             Vec::with_capacity(sleigh.contexts.len());
-        for (_varnode_id, contexts) in context_mapping.into_iter() {
+        let mut memory_bits = 0;
+        for (_varnode_id, contexts) in varnodes {
+            // (original start, mapped start, original end) of the run of
+            // overlapping fields the current field may join
+            let mut run: Option<(NumberUnsigned, NumberUnsigned, NumberUnsigned)> = None;
             for current_context_id in contexts.into_iter() {
                 let current_context = &sleigh.context(current_context_id).bitrange.bits;
-                let Some((last_context_id, last_bits)) = mem_mapping.last() else {
-                    // first mapping is just added at bit 0
-                    mem_mapping.push((
-                        current_context_id,
-                        FieldBits::new(0, current_context.len().get()),
-                    ));
-                    continue;
+                let start = current_context.start();
+                let end = current_context.end().get();
+                let new_start = match &mut run {
+                    Some((run_start, run_mapped, run_end)) if *run_end > start => {
+                        *run_end = (*run_end).max(end);
+                        *run_mapped + (start - *run_start)
+                    }
+                    _ => {
+                        run = Some((start, memory_bits, end));
+                        memory_bits
+                    }
                 };
-                let last_context = &sleigh.context(*last_context_id).bitrange.bits;
-                let current_context_start_bit = current_context.start();
-                //if the last entry intersect with the current, add using
-                //the last position as offset, otherwise add from the end of the
-                //last context
-                let new_start = if last_context.end().get() > current_context_start_bit {
-                    let offset = current_context_start_bit - last_context.start();
-                    last_bits.start() + offset
-                } else {
-                    last_bits.end().get()
-                };
-                mem_mapping.push((
-                    current_context_id,
-                    FieldBits::new(new_start, new_start + current_context.len().get()),
-                ));
+                let new_end = new_start + current_context.len().get();
+                memory_bits = memory_bits.max(new_end);
+                mem_mapping.push((current_context_id, FieldBits::new(new_start, new_end)));
             }
         }
-        let memory_bits = mem_mapping
-            .last()
-            .map(|(_, last)| last.end().get())
-            .unwrap_or(0);
         Self {
             mapping: mem_mapping.into_iter().collect(),
             memory_bits,
