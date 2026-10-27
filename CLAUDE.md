@@ -115,6 +115,7 @@ bytes + addr → Decoder::decode() → Instruction { disasm, ops: Vec<PcodeOp> }
 - Optional table lift: OR-pattern subtables lifted via `.as_ref().unwrap()`
 - Context packing (`ContextMemoryMapping::map_all`): overlap is judged against the furthest bit any earlier field of the varnode reached. Comparing with the previous field only put x86 `instrPhase` on `suffix3D`'s last bit (3DNow! decode recursed forever, #26)
 - `goto [x]` / `call [x]` / `return [x]` lower `x` as a value (memory refs are LOADed); only direct `goto x` uses the reference address (`gen_branch`, #24/#25)
+- Disassembly actions placed after a later pattern block read earlier blocks' token fields from their locals, not `tokens_current` (`DisassemblyPattern::produced_token_fields`, Thumb-2 MOVW/BL, #21/#22)
 
 ### Decompiler
 

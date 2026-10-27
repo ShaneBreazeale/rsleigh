@@ -182,3 +182,51 @@ fn issue_25_jump_through_register_cell_loads_its_target() {
         }
     });
 }
+
+fn thumb_decoder() -> Decoder {
+    let mut decoder = Decoder::new(Architecture::ARM32);
+    decoder.set_arm_thumb(true);
+    decoder
+}
+
+/// #21: MOVW (T3) / MOVT (T1) build `imm16 = imm4:i:imm3:imm8` from both
+/// halfwords. The parse-time value used to read `imm4` from the second
+/// halfword, so the p-code moved a different constant than it displayed.
+#[test]
+fn issue_21_thumb2_movw_movt_immediate() {
+    with_decoder_stack(|| {
+        let mut decoder = thumb_decoder();
+        for (bytes, addr, imm) in [
+            ([0x40u8, 0xf2, 0x28, 0x70], 0x0800_01a0u64, 0x728u64), // movw r0,#0x728
+            ([0x45, 0xf2, 0x00, 0x40], 0x0800_057c, 0x5400),        // movw r0,#0x5400
+            ([0xc4, 0xf2, 0x00, 0x00], 0x0800_0580, 0x4000),        // movt r0,#0x4000
+            ([0x4f, 0xf6, 0xff, 0x71], 0x0800_0000, 0xffff),        // movw r1,#0xffff
+        ] {
+            let inst = decoder.decode_unoptimized(&bytes, addr).unwrap();
+            let consts: Vec<u64> = inst
+                .ops
+                .iter()
+                .filter_map(|op| match op {
+                    PcodeOp::Subpiece { input, .. } | PcodeOp::Copy { input, .. }
+                        if input.space == AddressSpaceId::Const =>
+                    {
+                        Some(input.offset)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                consts.first(),
+                Some(&imm),
+                "{}: {:?}",
+                inst.disassembly,
+                inst.ops
+            );
+            assert!(
+                inst.disassembly.contains(&format!("{imm:#x}")),
+                "{}",
+                inst.disassembly
+            );
+        }
+    });
+}

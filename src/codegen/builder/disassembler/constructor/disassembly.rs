@@ -186,6 +186,10 @@ pub struct DisassemblyPattern<'a> {
     pub root_tables: &'a IndexMap<crate::TableId, Ident>,
     pub root_token_fields: &'a IndexMap<crate::TokenFieldId, Ident>,
     pub vars: &'a mut IndexMap<VariableId, Ident>,
+    /// Token fields already read into locals by earlier blocks (and by this
+    /// block, once its fields are declared). An action placed after a later
+    /// block must read these locals: `tokens` has moved past their token.
+    pub produced_token_fields: Option<&'a IndexMap<crate::TokenFieldId, Ident>>,
 }
 
 impl DisassemblyPattern<'_> {
@@ -195,28 +199,37 @@ impl DisassemblyPattern<'_> {
     }
     //get var name on that contains the this assembly field value
     fn ass_field(&self, ass: &crate::TokenFieldId) -> TokenStream {
-        let tokens = self.tokens;
-        let token_field_new = &self.disassembler.token_field_function(*ass).read;
+        let raw = match self
+            .produced_token_fields
+            .and_then(|fields| fields.get(ass))
+        {
+            Some(local) => local.to_token_stream(),
+            None => {
+                let tokens = self.tokens;
+                let read = &self.disassembler.token_field_function(*ass).read;
+                quote! { #read(#tokens) }
+            }
+        };
         // Check if the token field is signed — if so, sign-extend from its bit width
         let token_field = self.disassembler.sleigh.token_field(*ass);
         if token_field.raw_value_is_signed() {
             let bits = token_field.bits.len().get();
             match bits {
-                8 => quote! { #DISASSEMBLY_WORK_TYPE::from(#token_field_new(#tokens) as i8) },
-                16 => quote! { #DISASSEMBLY_WORK_TYPE::from(#token_field_new(#tokens) as i16) },
-                32 => quote! { #DISASSEMBLY_WORK_TYPE::from(#token_field_new(#tokens) as i32) },
+                8 => quote! { #DISASSEMBLY_WORK_TYPE::from(#raw as i8) },
+                16 => quote! { #DISASSEMBLY_WORK_TYPE::from(#raw as i16) },
+                32 => quote! { #DISASSEMBLY_WORK_TYPE::from(#raw as i32) },
                 _ => {
                     // Arbitrary bit width: sign-extend from the exact bit position
                     let sign_bit = 1u64 << (bits - 1);
                     let sign_ext_mask = !((1i128 << bits) - 1);
                     quote! {{
-                        let val = #DISASSEMBLY_WORK_TYPE::from(#token_field_new(#tokens));
+                        let val = #DISASSEMBLY_WORK_TYPE::from(#raw);
                         if val & #sign_bit as i128 != 0 { val | #sign_ext_mask } else { val }
                     }}
                 }
             }
         } else {
-            quote! { #DISASSEMBLY_WORK_TYPE::from(#token_field_new(#tokens)) }
+            quote! { #DISASSEMBLY_WORK_TYPE::from(#raw) }
         }
     }
     //get var name on that contains the this context value
