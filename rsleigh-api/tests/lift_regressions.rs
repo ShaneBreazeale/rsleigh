@@ -230,3 +230,38 @@ fn issue_21_thumb2_movw_movt_immediate() {
         }
     });
 }
+
+/// #22: BL (T1) and B.W (T4) targets come from `S:I1:I2:imm10:imm11`, the
+/// first two from the first halfword. The p-code read them from the second.
+#[test]
+fn issue_22_thumb2_bl_and_wide_branch_targets() {
+    with_decoder_stack(|| {
+        let mut decoder = thumb_decoder();
+        for (bytes, addr, target) in [
+            ([0x00u8, 0xf0, 0x08, 0xf8], 0x0800_01dcu64, 0x0800_01f0u64), // bl 0x80001f0
+            ([0xff, 0xf7, 0x62, 0xbf], 0x0800_04fe, 0x0800_03c6),         // b.w 0x80003c6
+            ([0xff, 0xf7, 0xfe, 0xff], 0x0800_1000, 0x0800_1000),         // bl . (self)
+            ([0x00, 0xf4, 0x00, 0xd0], 0x0800_0000, 0x0700_0004),         // bl, S=1, J1=J2=0
+        ] {
+            let inst = decoder.decode_unoptimized(&bytes, addr).unwrap();
+            let dest = inst
+                .ops
+                .iter()
+                .find_map(|op| match op {
+                    PcodeOp::Call { dest } | PcodeOp::Branch { dest }
+                        if dest.space == AddressSpaceId::Ram =>
+                    {
+                        Some(dest.offset)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{}: {:?}", inst.disassembly, inst.ops));
+            assert_eq!(dest, target, "{}: {:?}", inst.disassembly, inst.ops);
+            assert!(
+                inst.disassembly.contains(&format!("{target:#x}")),
+                "{}",
+                inst.disassembly
+            );
+        }
+    });
+}
