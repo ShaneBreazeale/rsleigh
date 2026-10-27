@@ -210,30 +210,45 @@ impl GlobalSet {
                     pub fn #new_fun(_: #context_name) -> Self {
                         Self(())
                     }
-                    pub fn #set_fun(&mut self, _: Option<#addr_type>, _: impl FnOnce(&mut #context_name)) {
+                    pub fn #set_fun(&mut self, _: Option<#addr_type>, _: impl Fn(&mut #context_name)) {
                         unreachable!()
                     }
+                    pub fn apply(&self, _: #addr_type, _: &mut #context_name) {}
                 }
             }
         } else {
             quote! {
-                #[derive(Clone)]
+                /// Context values `globalset` directives assign to later
+                /// addresses. Each entry keeps only the fields that were set
+                /// (value, mask); [`Self::apply`] merges them into the context
+                /// an instruction at that address is decoded with.
+                #[derive(Clone, Default)]
                 pub struct #name {
-                    default: #context_name,
-                    branches: std::collections::HashMap<#addr_type, #context_name>,
+                    branches: std::collections::HashMap<#addr_type, (#context_name, #context_name)>,
                 }
                 impl #name {
-                    pub fn #new_fun(default: #context_name) -> Self {
-                        Self {
-                            default,
-                            branches: std::collections::HashMap::new(),
-                        }
+                    pub fn #new_fun(_default: #context_name) -> Self {
+                        Self::default()
                     }
-                    pub fn #set_fun(&mut self, address: Option<#addr_type>, set: impl FnOnce(&mut #context_name)) {
+                    pub fn #set_fun(&mut self, address: Option<#addr_type>, set: impl Fn(&mut #context_name)) {
                         let Some(address) = address else { return };
-                        //TODO use the noflow clone instead of simple clone.
-                        let entry = self.branches.entry(address).or_insert_with(|| self.default.clone());
-                        set(entry);
+                        // Writing the field into all-zero and all-one contexts
+                        // leaves the field's bits equal and every other bit
+                        // different, which gives the field's mask.
+                        let mut zeros = #context_name(0);
+                        set(&mut zeros);
+                        let mut ones = #context_name(!0);
+                        set(&mut ones);
+                        let mask = !(zeros.0 ^ ones.0);
+                        let entry = self.branches.entry(address).or_default();
+                        entry.0 .0 = (entry.0 .0 & !mask) | (zeros.0 & mask);
+                        entry.1 .0 |= mask;
+                    }
+                    /// Overlay the fields set for `address` onto `context`.
+                    pub fn apply(&self, address: #addr_type, context: &mut #context_name) {
+                        if let Some((value, mask)) = self.branches.get(&address) {
+                            context.0 = (context.0 & !mask.0) | (value.0 & mask.0);
+                        }
                     }
                 }
             }

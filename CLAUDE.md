@@ -116,6 +116,7 @@ bytes + addr → Decoder::decode() → Instruction { disasm, ops: Vec<PcodeOp> }
 - Context packing (`ContextMemoryMapping::map_all`): overlap is judged against the furthest bit any earlier field of the varnode reached. Comparing with the previous field only put x86 `instrPhase` on `suffix3D`'s last bit (3DNow! decode recursed forever, #26)
 - `goto [x]` / `call [x]` / `return [x]` lower `x` as a value (memory refs are LOADed); only direct `goto x` uses the reference address (`gen_branch`, #24/#25)
 - Disassembly actions placed after a later pattern block read earlier blocks' token fields from their locals, not `tokens_current` (`DisassemblyPattern::produced_token_fields`, Thumb-2 MOVW/BL, #21/#22)
+- `globalset` entries are (value, mask) per address and are applied at the top of `parse_instruction_with_constructor`; the set closure must not read its own parameter (ARM IT blocks, `mov lr,pc`/`bx` → call, #23). `Decoder::set_arm_thumb` clears them only when the mode changes
 
 ### Decompiler
 

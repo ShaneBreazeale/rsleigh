@@ -265,3 +265,83 @@ fn issue_22_thumb2_bl_and_wide_branch_targets() {
         }
     });
 }
+
+fn has_cbranch(ops: &[PcodeOp]) -> bool {
+    ops.iter().any(|op| matches!(op, PcodeOp::CBranch { .. }))
+}
+
+/// #23: IT hands its condition to the instructions it governs through
+/// `globalset(inst_next, condit)`. That state used to be dropped between
+/// decodes, so `it pl; bx lr` lifted `bx lr` as an unconditional return.
+#[test]
+fn issue_23_thumb_it_block_lifts_governed_instructions_as_conditional() {
+    with_decoder_stack(|| {
+        let mut decoder = thumb_decoder();
+        let it = decoder
+            .decode_unoptimized(&[0x58, 0xbf], 0x0800_04f6)
+            .unwrap(); // it pl
+        assert_eq!(it.len, 2, "{}", it.disassembly);
+        let bx = decoder
+            .decode_unoptimized(&[0x70, 0x47], 0x0800_04f8)
+            .unwrap(); // bx lr
+        assert!(has_cbranch(&bx.ops), "{}: {:?}", bx.disassembly, bx.ops);
+        assert!(bx.disassembly.contains("pl"), "{}", bx.disassembly);
+        // Decoding the same bytes again gives the same answer.
+        let again = decoder
+            .decode_unoptimized(&[0x70, 0x47], 0x0800_04f8)
+            .unwrap();
+        assert_eq!(again.disassembly, bx.disassembly);
+        // Re-asserting the mode the decoder is already in keeps the state.
+        decoder.set_arm_thumb(true);
+        let kept = decoder.decode(&[0x70, 0x47], 0x0800_04f8).unwrap();
+        assert!(
+            has_cbranch(&kept.ops),
+            "{}: {:?}",
+            kept.disassembly,
+            kept.ops
+        );
+
+        // Outside an IT block the same instruction is unconditional.
+        let plain = thumb_decoder()
+            .decode_unoptimized(&[0x70, 0x47], 0x0800_04f8)
+            .unwrap();
+        assert!(
+            !has_cbranch(&plain.ops),
+            "{}: {:?}",
+            plain.disassembly,
+            plain.ops
+        );
+
+        // ite eq; mov r0,#1 (eq); mov r0,#0 (ne); bx lr (after the block).
+        let mut decoder = thumb_decoder();
+        let base = 0x0800_1000u64;
+        let code: [[u8; 2]; 4] = [[0x0c, 0xbf], [0x01, 0x20], [0x00, 0x20], [0x70, 0x47]];
+        let insts: Vec<_> = code
+            .iter()
+            .enumerate()
+            .map(|(i, bytes)| {
+                decoder
+                    .decode_unoptimized(bytes, base + 2 * i as u64)
+                    .unwrap()
+            })
+            .collect();
+        assert!(has_cbranch(&insts[1].ops), "{}", insts[1].disassembly);
+        assert!(
+            insts[1].disassembly.contains("eq"),
+            "{}",
+            insts[1].disassembly
+        );
+        assert!(has_cbranch(&insts[2].ops), "{}", insts[2].disassembly);
+        assert!(
+            insts[2].disassembly.contains("ne"),
+            "{}",
+            insts[2].disassembly
+        );
+        assert!(
+            !has_cbranch(&insts[3].ops),
+            "{}: {:?}",
+            insts[3].disassembly,
+            insts[3].ops
+        );
+    });
+}

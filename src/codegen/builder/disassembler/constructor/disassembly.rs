@@ -126,16 +126,21 @@ impl<'a> DisassemblyGenerator for DisassemblyDisplay<'a> {
         let global_set_param = self.global_set_param;
         let context = &self.disassembler.context;
         let set_fun = &context.globalset.set_fun;
-        let context_param = format_ident!("context");
+        // Read the value from this instruction's context before the closure:
+        // the closure's parameter is the stored context being written.
+        let target_param = format_ident!("global_context");
         let value = self.context_field(&global_set.context);
         let write_call = context.write_call(
             self.disassembler,
-            &context_param,
+            &target_param,
             global_set.context,
-            &value,
+            quote! { global_value },
         );
         quote! {
-            #global_set_param.#set_fun(#address, |#context_param| #write_call);
+            {
+                let global_value = #value;
+                #global_set_param.#set_fun(#address, |#target_param| #write_call);
+            }
         }
     }
 

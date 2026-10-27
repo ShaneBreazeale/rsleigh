@@ -228,6 +228,9 @@ impl Disassembler {
                 Vec<pcode_ir::PcodeOp>,
                 pcode_ir::ConstructorSpan,
             )> {
+                // Context an earlier instruction's `globalset` assigned to
+                // this address (e.g. the ARM IT block's condition state).
+                global_set.apply(inst_start, context);
                 let (inst_len, instruction) =
                     #instr_mod_name::#instruction_table_name::#instruction_table_parse(
                         tokens,
@@ -308,6 +311,9 @@ impl ToTokens for Disassembler {
                 Vec<pcode_ir::PcodeOp>,
                 pcode_ir::ConstructorSpan,
             )> {
+                // Context an earlier instruction's `globalset` assigned to
+                // this address (e.g. the ARM IT block's condition state).
+                global_set.apply(inst_start, context);
                 let (inst_len, instruction) =
                     #instruction_table_name::#instruction_table_parse(
                         tokens,
