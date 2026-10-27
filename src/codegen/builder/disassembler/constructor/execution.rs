@@ -737,9 +737,7 @@ impl<'a> ExecutionGenerator<'a> {
     // ── Branch / LocalGoto / Build / UserCall / Export ────────────────
 
     fn gen_branch(&self, branch: &CpuBranch, execution: &Execution) -> TokenStream {
-        // For branch destinations from table references, use the reference address
-        // (not the loaded value) since branches target addresses, not memory contents
-        let (dst, dst_code) = self.lower_branch_dest(&branch.dst, execution);
+        let (dst, dst_code) = self.lower_branch_dest(&branch.dst, branch.direct, execution);
         let mut tokens = dst_code;
 
         match (&branch.cond, &branch.call) {
@@ -921,7 +919,16 @@ impl<'a> ExecutionGenerator<'a> {
 
     /// Lower a branch destination — for table references that export a reference,
     /// use the address directly instead of loading the value at that address.
-    fn lower_branch_dest(&self, expr: &Expr, execution: &Execution) -> (TokenStream, TokenStream) {
+    /// A direct branch (`goto rel32`) targets a table reference's address,
+    /// not the memory it names. An indirect one (`goto [rm64]`) targets the
+    /// value: a cell at a constant address is that RAM varnode (as Ghidra
+    /// emits it), and one at a computed address is loaded.
+    fn lower_branch_dest(
+        &self,
+        expr: &Expr,
+        direct: bool,
+        execution: &Execution,
+    ) -> (TokenStream, TokenStream) {
         // Check if the expression is a simple table reference
         if let Expr::Value(ExprElement::Value {
             value: ExprValue::Table(table_id),
@@ -941,14 +948,20 @@ impl<'a> ExecutionGenerator<'a> {
                     quote! { #var_name },
                     quote! {
                         let #var_name = if let Some((ref_space, ref_ptr, ref_size)) = #cache_ref {
-                            pcode_ir::Varnode { space: ref_space, offset: ref_ptr.offset, size: ref_size }
+                            if #direct || ref_ptr.space == pcode_ir::AddressSpaceId::Const {
+                                pcode_ir::Varnode { space: ref_space, offset: ref_ptr.offset, size: ref_size }
+                            } else {
+                                let loaded = pcode_ir::Varnode::unique(unique_base + (ops.len() as u64 + 0x8000), ref_size);
+                                ops.push(pcode_ir::PcodeOp::Load { out: loaded, space: ref_space, ptr: ref_ptr });
+                                loaded
+                            }
                         } else if let Some(exp) = #cache_exp {
                             // Value export (no reference) — used for export *[const]:N patterns
                             // (e.g., ARM64 branch address computation via const-space).
                             // If the export varnode is in Unique space, the actual address
                             // was written there by a preceding Subpiece/Copy from a constant.
                             // Scan ops backward to extract the constant address value.
-                            if exp.space == pcode_ir::AddressSpaceId::Unique {
+                            if #direct && exp.space == pcode_ir::AddressSpaceId::Unique {
                                 let mut addr = 0u64;
                                 for op in ops.iter().rev() {
                                     match op {
