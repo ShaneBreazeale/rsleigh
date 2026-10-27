@@ -635,7 +635,6 @@ fn decompile_function(
     path: &Path,
     diagnostics: &mut Vec<Value>,
 ) -> String {
-    use rsleigh_decompile::ir::{DiagKind, Severity};
     let mut pipeline = Vec::new();
     let text = recover_decompile(
         || {
@@ -650,17 +649,7 @@ fn decompile_function(
         },
         diagnostics,
     );
-    let mut seen = std::collections::BTreeSet::new();
-    for d in &pipeline {
-        let unresolved = matches!(
-            d.kind,
-            DiagKind::UnresolvedBranchTarget | DiagKind::UnrecoveredIndirectJump
-        );
-        if unresolved && !matches!(d.severity, Severity::Info) && seen.insert(d.addr) {
-            diagnostics.push(json!({"stage":"decompile","code":"unresolved_control_flow",
-                "address":d.addr.map(|a| format!("0x{a:x}")),"message":d.detail}));
-        }
-    }
+    diagnostics.extend(unresolved_control_flow(&pipeline));
     let does_work = instructions.iter().flat_map(|(_, i)| &i.ops).any(|op| {
         matches!(
             op,
@@ -683,6 +672,28 @@ fn decompile_function(
 
 /// True when the function body holds nothing but declarations, comments,
 /// braces, and a bare `return;`.
+/// `unresolved_control_flow` diagnostics for the decompiler's unresolved
+/// branches and unrecovered indirect jumps, one per address. The card and
+/// the plain `--json` decompile output report them the same way.
+pub(crate) fn unresolved_control_flow(found: &[rsleigh_decompile::ir::Diagnostic]) -> Vec<Value> {
+    use rsleigh_decompile::ir::{DiagKind, Severity};
+    let mut seen = std::collections::BTreeSet::new();
+    found
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.kind,
+                DiagKind::UnresolvedBranchTarget | DiagKind::UnrecoveredIndirectJump
+            ) && !matches!(d.severity, Severity::Info)
+                && seen.insert(d.addr)
+        })
+        .map(|d| {
+            json!({"stage":"decompile","code":"unresolved_control_flow",
+                "address":d.addr.map(|a| format!("0x{a:x}")),"message":d.detail})
+        })
+        .collect()
+}
+
 fn pseudocode_body_is_empty(text: &str) -> bool {
     !text
         .lines()

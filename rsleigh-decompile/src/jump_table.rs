@@ -3,6 +3,8 @@
 //! Recognized shapes, traced backwards through the P-code of the dispatch
 //! instructions:
 //! - relative entries (x86-64 PIC): `jmp table + sext(*(i32 *)(table + idx * 4))`
+//! - image-relative entries (MSVC x64): `jmp base + *(u32 *)(base + rva + idx * 4)`,
+//!   `base` being the image base a `lea` loads
 //! - absolute entries: `jmp *(table + idx * 4|8)`, directly or through a register
 //!
 //! The entry count comes from the bounds check before the dispatch
@@ -54,6 +56,8 @@ struct Op<'a> {
 enum Entries {
     /// `table + sext(i32 entry)`.
     Relative,
+    /// `base + u32 entry`: MSVC x64 tables of image-relative offsets.
+    ImageRelative(u64),
     /// Absolute addresses of the given byte width.
     Absolute(usize),
 }
@@ -95,7 +99,7 @@ pub fn find(instructions: &[(u64, Instruction)], memory: Memory) -> Vec<JumpTabl
         let bound = guard_count(&sorted[i.saturating_sub(16)..i])
             .filter(|count| *count <= MAX_GUARDED_ENTRIES);
         let width = match entries {
-            Entries::Relative => 4,
+            Entries::Relative | Entries::ImageRelative(_) => 4,
             Entries::Absolute(w) => w,
         };
         let mut targets = Vec::new();
@@ -113,6 +117,7 @@ pub fn find(instructions: &[(u64, Instruction)], memory: Memory) -> Vec<JumpTabl
                 .fold(0u64, |acc, b| (acc << 8) | *b as u64);
             let target = match entries {
                 Entries::Relative => table.wrapping_add(raw as u32 as i32 as i64 as u64),
+                Entries::ImageRelative(base) => base.wrapping_add(raw),
                 Entries::Absolute(_) => raw,
             };
             if !starts.contains(&target) {
@@ -251,8 +256,15 @@ fn table_address(
             .into_iter()
             .find_map(|(base, offset)| {
                 let table = constant(window, d, base, 6)?;
-                let (index, pos, scale) = scaled(window, d, offset, 4)?;
-                Some((table, index, pos, scale))
+                match scaled(window, d, offset, 4) {
+                    Some((index, pos, scale)) => Some((table, index, pos, scale)),
+                    // `base + idx*4 + disp`: x86 adds the displacement last.
+                    None => {
+                        let (inner, index, pos, scale) =
+                            table_address(window, d, offset, depth - 1)?;
+                        Some((table.wrapping_add(inner), index, pos, scale))
+                    }
+                }
             }),
         PcodeOp::Copy { input, .. } => table_address(window, d, *input, depth - 1),
         _ => None,
@@ -284,27 +296,42 @@ fn dispatch(window: &[Op], end: usize, dest: Varnode) -> Option<(u64, Entries, u
                     .then(|| (table, Entries::Absolute(width as usize), pos, index));
             }
             // `movsxd reg, [table + idx*4]; add reg, table; jmp reg`
+            // `mov eax, [base + rva + idx*4]; add rax, base; jmp rax` (MSVC)
             PcodeOp::IntAdd { left, right, .. } => {
                 return [(*left, *right), (*right, *left)]
                     .into_iter()
                     .find_map(|(base, entry)| {
                         let table = constant(window, d, base, 6)?;
                         let (mut ev, mut eat) = (entry, d);
+                        let mut zero_extended = false;
                         for _ in 0..4 {
                             let ed = def(window, eat, ev)?;
                             match window[ed].op {
                                 PcodeOp::IntSext { input, .. } | PcodeOp::Copy { input, .. } => {
                                     (ev, eat) = (*input, ed)
                                 }
+                                PcodeOp::IntZext { input, .. } => {
+                                    zero_extended = true;
+                                    (ev, eat) = (*input, ed)
+                                }
                                 PcodeOp::Load { ptr, out, .. } if out.size == 4 => {
                                     let (entries_at, index, pos, scale) =
                                         table_address(window, ed, *ptr, 4)?;
-                                    return (entries_at == table && scale == 4).then_some((
-                                        table,
-                                        Entries::Relative,
-                                        pos,
-                                        index,
-                                    ));
+                                    if scale != 4 {
+                                        return None;
+                                    }
+                                    return if entries_at == table && !zero_extended {
+                                        Some((table, Entries::Relative, pos, index))
+                                    } else if zero_extended && entries_at > table {
+                                        Some((
+                                            entries_at,
+                                            Entries::ImageRelative(table),
+                                            pos,
+                                            index,
+                                        ))
+                                    } else {
+                                        None
+                                    };
                                 }
                                 _ => return None,
                             }

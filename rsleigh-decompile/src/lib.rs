@@ -352,7 +352,39 @@ pub fn decompile_with_diagnostics(
         .collect();
     let mut diagnostics = ssa.diagnostics;
     diagnostics.retain(|d| d.addr.is_none_or(|a| live.contains(&a)));
+    let text = annotate_unrecovered_jumps(text, &diagnostics);
     (text, diagnostics)
+}
+
+/// Say in the pseudocode where the body stops at an indirect jump whose
+/// targets were not recovered; without it the output just ends there.
+fn annotate_unrecovered_jumps(text: String, diagnostics: &[ir::Diagnostic]) -> String {
+    let mut jumps: Vec<u64> = diagnostics
+        .iter()
+        .filter(|d| {
+            d.kind == ir::DiagKind::UnrecoveredIndirectJump
+                && !matches!(d.severity, ir::Severity::Info)
+        })
+        .filter_map(|d| d.addr)
+        .collect();
+    jumps.sort_unstable();
+    jumps.dedup();
+    if jumps.is_empty() {
+        return text;
+    }
+    // Before the function's closing brace, or at the end without one.
+    let close = text.trim_end().rfind('\n').map_or(0, |i| i + 1);
+    let has_close = text[close..].trim() == "}";
+    let indent = if has_close { "    " } else { "" };
+    let notes: String = jumps
+        .iter()
+        .map(|a| format!("{indent}// indirect jump at {a:#x}: targets not recovered\n"))
+        .collect();
+    if has_close {
+        format!("{}{notes}{}", &text[..close], &text[close..])
+    } else {
+        format!("{text}{notes}")
+    }
 }
 
 /// Learned type information for a function, extracted after decompilation.

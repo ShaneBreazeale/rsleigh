@@ -1449,16 +1449,17 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                             "size": 0, "calls": [], "strings": [], "return_type": "void"
                         });
                     }
-                    let output = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        rsleigh_decompile::decompile_with_binary(
-                            arch,
-                            &insts,
-                            Some(&data),
-                            Some(path),
-                        )
-                    }))
-                    .map(maybe_annotate_crypto)
-                    .unwrap_or_default();
+                    let (output, found) =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            rsleigh_decompile::decompile_with_diagnostics(
+                                arch,
+                                &insts,
+                                Some(&data),
+                                Some(path),
+                            )
+                        }))
+                        .map(|(text, found)| (maybe_annotate_crypto(text), found))
+                        .unwrap_or_default();
 
                     // Extract metadata from decompiled output
                     let mut calls = Vec::new();
@@ -1530,6 +1531,7 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                         "strings": strings,
                         "complexity": line_count,
                         "pseudocode": output,
+                        "diagnostics": agent::unresolved_control_flow(&found),
                     })
                 })
                 .collect();
@@ -1955,12 +1957,18 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                 symbols.iter().find(|(_, n)| n == name).map(|(a, _)| *a)
             };
         if let Some(func_addr) = func_addr {
-            let output = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                decompile_func(func_addr, &symbols, &segs, &data, &mut dec, arch, path)
-            })) {
-                Ok(o) => o,
-                Err(_) => "// decompilation failed (stack overflow)\n".to_string(),
-            };
+            let (output, found) =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    decompile_func_with_diagnostics(
+                        func_addr, &symbols, &segs, &data, &mut dec, arch, path,
+                    )
+                })) {
+                    Ok(o) => o,
+                    Err(_) => (
+                        "// decompilation failed (stack overflow)\n".to_string(),
+                        Vec::new(),
+                    ),
+                };
 
             if json_mode {
                 // Extract rich metadata from pseudocode
@@ -2023,6 +2031,7 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                     "strings": strings,
                     "complexity": line_count,
                     "pseudocode": output.trim(),
+                    "diagnostics": agent::unresolved_control_flow(&found),
                 }));
             } else {
                 // Apply token-efficiency modes
@@ -3912,7 +3921,8 @@ fn follow_detached_fragments(
     }
 }
 
-fn decompile_func(
+/// Decompile the function at `fa`, also returning the decompiler's diagnostics.
+fn decompile_func_with_diagnostics(
     fa: u64,
     symbols: &[(u64, String)],
     segs: &[(u64, u64, u64)],
@@ -3920,17 +3930,14 @@ fn decompile_func(
     dec: &mut rsleigh_api::Decoder,
     arch: rsleigh_api::Architecture,
     path: &Path,
-) -> String {
+) -> (String, Vec<rsleigh_decompile::ir::Diagnostic>) {
     let insts = decode_func(fa, symbols, segs, data, dec);
     if insts.is_empty() {
-        return "// no instructions\n".to_string();
+        return ("// no instructions\n".to_string(), Vec::new());
     }
-    maybe_annotate_crypto(rsleigh_decompile::decompile_with_binary(
-        arch,
-        &insts,
-        Some(data),
-        Some(path),
-    ))
+    let (text, diagnostics) =
+        rsleigh_decompile::decompile_with_diagnostics(arch, &insts, Some(data), Some(path));
+    (maybe_annotate_crypto(text), diagnostics)
 }
 
 /// Diff two binaries through the structured comparison model.
