@@ -649,10 +649,7 @@ fn decompile_function(
         },
         diagnostics,
     );
-    for d in rsleigh_decompile::unresolved_control_flow(&pipeline) {
-        diagnostics.push(json!({"stage":"decompile","code":"unresolved_control_flow",
-            "address":d.addr.map(|a| format!("0x{a:x}")),"message":d.detail}));
-    }
+    diagnostics.extend(unresolved_control_flow(&pipeline));
     let does_work = instructions.iter().flat_map(|(_, i)| &i.ops).any(|op| {
         matches!(
             op,
@@ -671,6 +668,19 @@ fn decompile_function(
         ));
     }
     text
+}
+
+/// `unresolved_control_flow` diagnostics for the decompiler's unresolved
+/// branches and unrecovered indirect jumps, one per address. The card and
+/// the plain `--json` decompile output report them the same way.
+pub(crate) fn unresolved_control_flow(found: &[rsleigh_decompile::ir::Diagnostic]) -> Vec<Value> {
+    rsleigh_decompile::unresolved_control_flow(found)
+        .into_iter()
+        .map(|d| {
+            json!({"stage":"decompile","code":"unresolved_control_flow",
+                "address":d.addr.map(|a| format!("0x{a:x}")),"message":d.detail})
+        })
+        .collect()
 }
 
 /// True when the function body holds nothing but declarations, comments,

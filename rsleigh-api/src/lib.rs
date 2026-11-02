@@ -190,14 +190,21 @@ impl Decoder {
     /// Cortex-M is Thumb-only; classic ARM uses LSB of branch target to
     /// indicate Thumb. Caller passes `addr & 1 == 1` to switch to Thumb.
     /// No-op for non-ARM32 decoders.
+    ///
+    /// Context earlier decodes assigned to later addresses (an IT block's
+    /// condition state, for one) is kept while the mode stays the same, and
+    /// cleared when it changes.
     pub fn set_arm_thumb(&mut self, thumb: bool) {
         if let DecoderInner::ARM32 {
             context,
             global_set,
         } = &mut self.inner
         {
-            context.write_TMode(if thumb { 1 } else { 0 });
-            *global_set = arm32_root::GlobalSet::new(*context);
+            let mode = if thumb { 1 } else { 0 };
+            if context.read_TMode() != mode {
+                context.write_TMode(mode);
+                *global_set = arm32_root::GlobalSet::new(*context);
+            }
         }
     }
 
