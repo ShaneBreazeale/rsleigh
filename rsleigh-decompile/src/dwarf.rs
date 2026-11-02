@@ -14,9 +14,63 @@ pub struct FunctionDebugInfo {
 /// The key is the byte offset within the struct, the value is the field name.
 pub type StructFieldMap = HashMap<u64, String>;
 
+/// Field names by offset, collected from every struct in the debug info.
+/// The printer only knows an access's offset, not its struct, so an offset
+/// that two structs name differently (`next`, `size`) has no usable name.
+#[derive(Default)]
+pub(crate) struct FieldNames(HashMap<u64, Option<String>>);
+
+impl FieldNames {
+    pub(crate) fn add(&mut self, offset: u64, name: String) {
+        match self.0.entry(offset) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(Some(name));
+            }
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                if slot.get().as_deref() != Some(name.as_str()) {
+                    slot.insert(None);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn finish(self) -> StructFieldMap {
+        self.0
+            .into_iter()
+            .filter_map(|(offset, name)| Some((offset, name?)))
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod field_name_tests {
+    use super::FieldNames;
+
+    #[test]
+    fn an_offset_named_differently_by_two_structs_has_no_name() {
+        // CrashLoggerSSE's PDB gave `->field8` whichever struct came last
+        // (`next`); offsets mean nothing without knowing the struct.
+        let mut names = FieldNames::default();
+        names.add(0x8, "next".into());
+        names.add(0x8, "size".into());
+        names.add(0x10, "count".into());
+        names.add(0x10, "count".into());
+        let map = names.finish();
+        assert_eq!(map.get(&0x8), None);
+        assert_eq!(map.get(&0x10).map(String::as_str), Some("count"));
+    }
+}
+
 /// Extract DWARF debug info from a binary file path.
 /// On macOS, automatically searches for companion .dSYM bundle.
 pub fn parse_dwarf_from_path(binary_path: &Path) -> HashMap<u64, FunctionDebugInfo> {
+    static CACHE: crate::binary_cache::Cache<HashMap<u64, FunctionDebugInfo>> =
+        crate::binary_cache::Cache::new();
+    let key = crate::binary_cache::Key::file(binary_path);
+    crate::binary_cache::cached(&CACHE, key, || parse_dwarf_from_path_uncached(binary_path))
+}
+
+fn parse_dwarf_from_path_uncached(binary_path: &Path) -> HashMap<u64, FunctionDebugInfo> {
     // Try the binary itself first (works for Linux ELF with embedded DWARF)
     if let Ok(data) = std::fs::read(binary_path) {
         let result = parse_dwarf(&data);
@@ -49,6 +103,13 @@ pub fn parse_dwarf_from_path(binary_path: &Path) -> HashMap<u64, FunctionDebugIn
 
 /// Extract DWARF debug info for functions from raw binary bytes.
 pub fn parse_dwarf(binary: &[u8]) -> HashMap<u64, FunctionDebugInfo> {
+    static CACHE: crate::binary_cache::Cache<HashMap<u64, FunctionDebugInfo>> =
+        crate::binary_cache::Cache::new();
+    let key = crate::binary_cache::Key::bytes(binary);
+    crate::binary_cache::cached(&CACHE, Some(key), || parse_dwarf_uncached(binary))
+}
+
+fn parse_dwarf_uncached(binary: &[u8]) -> HashMap<u64, FunctionDebugInfo> {
     let mut result = HashMap::new();
     let Ok(obj) = object::File::parse(binary) else {
         return result;
@@ -186,9 +247,15 @@ fn get_member_offset(unit: &UnitSlice<'_>, entry: &EntrySlice<'_>) -> Option<u64
 /// Parse all struct definitions from DWARF, returning a merged map of
 /// field_byte_offset → field_name across all structs in the binary.
 pub fn parse_struct_fields(binary: &[u8]) -> StructFieldMap {
-    let mut fields = HashMap::new();
+    static CACHE: crate::binary_cache::Cache<StructFieldMap> = crate::binary_cache::Cache::new();
+    let key = crate::binary_cache::Key::bytes(binary);
+    crate::binary_cache::cached(&CACHE, Some(key), || parse_struct_fields_uncached(binary))
+}
+
+fn parse_struct_fields_uncached(binary: &[u8]) -> StructFieldMap {
+    let mut fields = FieldNames::default();
     let Ok(obj) = object::File::parse(binary) else {
-        return fields;
+        return StructFieldMap::new();
     };
 
     let endian = if obj.endianness() == object::Endianness::Little {
@@ -206,7 +273,7 @@ pub fn parse_struct_fields(binary: &[u8]) -> StructFieldMap {
 
     let dwarf = match gimli::Dwarf::load(&load_section) {
         Ok(d) => d,
-        Err(_) => return fields,
+        Err(_) => return StructFieldMap::new(),
     };
 
     let mut units = dwarf.units();
@@ -247,10 +314,10 @@ pub fn parse_struct_fields(binary: &[u8]) -> StructFieldMap {
                         if let Some(name) = get_die_name(&dwarf, &unit, entry) {
                             // Insert at both the raw offset AND the accumulated offset
                             // This handles both flat structs and nested ones
-                            fields.insert(offset, name.clone());
+                            fields.add(offset, name.clone());
                             let accumulated: u64 = parent_offsets.iter().sum();
                             if accumulated != offset {
-                                fields.insert(accumulated, name);
+                                fields.add(accumulated, name);
                             }
                         }
                     }
@@ -260,11 +327,19 @@ pub fn parse_struct_fields(binary: &[u8]) -> StructFieldMap {
         }
     }
 
-    fields
+    fields.finish()
 }
 
 /// Parse struct fields from a binary file path (with dSYM support).
 pub fn parse_struct_fields_from_path(binary_path: &Path) -> StructFieldMap {
+    static CACHE: crate::binary_cache::Cache<StructFieldMap> = crate::binary_cache::Cache::new();
+    let key = crate::binary_cache::Key::file(binary_path);
+    crate::binary_cache::cached(&CACHE, key, || {
+        parse_struct_fields_from_path_uncached(binary_path)
+    })
+}
+
+fn parse_struct_fields_from_path_uncached(binary_path: &Path) -> StructFieldMap {
     if let Ok(data) = std::fs::read(binary_path) {
         let result = parse_struct_fields(&data);
         if !result.is_empty() {

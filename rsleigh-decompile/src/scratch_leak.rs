@@ -151,8 +151,17 @@ pub fn check_function(
     }
 }
 
+/// True when the import table pulls in the Python C API. A return of
+/// `Py_None` is only possible in a Python extension, so the heuristic is
+/// meaningless (and noisy) on any other PE.
+pub fn imports_python(iat: &HashMap<u64, String>) -> bool {
+    iat.values()
+        .any(|n| n.starts_with("Py") || n.starts_with("_Py"))
+}
+
 /// Scan a list of candidate function VAs. Caller supplies them
-/// (typically the full discovered-function list).
+/// (typically the full discovered-function list). Returns nothing for
+/// binaries that do not import the Python C API.
 pub fn scan_functions(
     obj: &Object<'_>,
     data: &[u8],
@@ -160,6 +169,9 @@ pub fn scan_functions(
     func_vas: &[u64],
     body_max: usize,
 ) -> Vec<ScratchLeakHit> {
+    if !imports_python(iat) {
+        return Vec::new();
+    }
     func_vas
         .iter()
         .filter_map(|&va| check_function(obj, data, iat, va, body_max))
@@ -201,6 +213,22 @@ mod tests {
             );
         }
         assert!(NONE_STRUCT_NAMES.iter().any(|a| *a == "_Py_NoneStruct"));
+    }
+
+    #[test]
+    fn python_gate_requires_python_c_api_import() {
+        let mut iat: HashMap<u64, String> = HashMap::new();
+        iat.insert(0x1000, "HeapAlloc".to_string());
+        iat.insert(0x1008, "malloc".to_string());
+        assert!(
+            !imports_python(&iat),
+            "plain Win32/CRT imports are not Python"
+        );
+        iat.insert(0x1010, "_Py_NoneStruct".to_string());
+        assert!(imports_python(&iat));
+        let mut api_only: HashMap<u64, String> = HashMap::new();
+        api_only.insert(0x2000, "PyTuple_New".to_string());
+        assert!(imports_python(&api_only));
     }
 
     #[test]

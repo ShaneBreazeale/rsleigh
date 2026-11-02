@@ -89,15 +89,11 @@ pub fn extract_function_meta(name: &str, addr: u64, pseudocode: &str) -> Functio
     }
 
     // Extract return type and params from first line
-    let return_type = pseudocode
-        .lines()
-        .next()
+    let return_type = crate::signature_line(pseudocode)
         .and_then(|l| l.split_whitespace().next())
         .unwrap_or("void")
         .to_string();
-    let params = pseudocode
-        .lines()
-        .next()
+    let params = crate::signature_line(pseudocode)
         .map(|l| l.matches("param_").count())
         .unwrap_or(0);
 

@@ -67,7 +67,8 @@ fn jump_through_a_loaded_pointer_calls_through_it() {
     // must not be printed as a direct call target (morluto/rea#1389).
     static BYTES: [u8; 6] = [0x48, 0x8b, 0x17, 0xff, 0x62, 0x28];
     for text in decompile_x64(&BYTES, 0x1000) {
-        let body = text.split_once('{').map_or("", |(_, b)| b);
+        // The body follows the signature, after any struct definitions.
+        let body = text.split_once(") {").map_or("", |(_, b)| b);
         assert!(!body.contains("func_"), "{text}");
         assert!(body.contains("(*"), "{text}");
     }

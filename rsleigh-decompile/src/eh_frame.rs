@@ -35,6 +35,13 @@ pub struct TryRegion {
 
 /// Parse `.eh_frame` + LSDAs and return a map from FDE initial_address → try regions.
 pub fn parse_eh_frame(binary: &[u8]) -> HashMap<u64, Vec<TryRegion>> {
+    static CACHE: crate::binary_cache::Cache<HashMap<u64, Vec<TryRegion>>> =
+        crate::binary_cache::Cache::new();
+    let key = crate::binary_cache::Key::bytes(binary);
+    crate::binary_cache::cached(&CACHE, Some(key), || parse_eh_frame_uncached(binary))
+}
+
+fn parse_eh_frame_uncached(binary: &[u8]) -> HashMap<u64, Vec<TryRegion>> {
     let mut out: HashMap<u64, Vec<TryRegion>> = HashMap::new();
     let Ok(obj) = goblin::Object::parse(binary) else {
         return out;

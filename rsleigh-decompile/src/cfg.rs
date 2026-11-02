@@ -317,6 +317,7 @@ pub fn build_cfg_with_memory(
                             first_synthetic,
                             last_inst_addr,
                             index,
+                            table.first,
                             &cases,
                         )
                     } else if is_stack_return || is_bx_lr {
@@ -372,6 +373,18 @@ pub fn build_cfg_with_memory(
                     Terminator::Call {
                         target,
                         fallthrough,
+                    }
+                }
+                // `int N` lifts to `t = swi(N); CALLIND t`. Where that call
+                // goes is the user-op's business; print the user-op itself
+                // rather than a call through an unnamed temporary.
+                PcodeOp::CallInd { dest } if user_op_call_target(&ops, &dest).is_some() => {
+                    let at = user_op_call_target(&ops, &dest).unwrap_or(0);
+                    ops.pop();
+                    make_user_op_statement(&mut ops, at, dest.size);
+                    match leader_to_block.get(&next_inst_addr) {
+                        Some(&next) => Terminator::Fallthrough(next),
+                        None => Terminator::Return,
                     }
                 }
                 PcodeOp::CallInd { dest } => {
@@ -475,9 +488,61 @@ fn copy_aside(ops: &mut Vec<(u64, PcodeOp)>, jump: u64, before: u64, index: Varn
     out
 }
 
-/// Dispatch on a recovered jump table as a chain of `index == k` tests:
-/// the jump's block tests case 0, synthetic blocks test the rest, and the
-/// last case is the remaining edge (the bounds check already ran). The
+/// Index of the `CallOther` whose output (through copies) is the target of
+/// the `CallInd` that ends `ops`.
+fn user_op_call_target(ops: &[(u64, PcodeOp)], dest: &Varnode) -> Option<usize> {
+    if dest.space != AddressSpaceId::Unique {
+        return None;
+    }
+    let mut want = *dest;
+    let end = ops.len().checked_sub(1)?;
+    for at in (0..end).rev() {
+        match &ops[at].1 {
+            PcodeOp::Copy { out, input } if *out == want => want = *input,
+            PcodeOp::CallOther { out: Some(out), .. } if *out == want => return Some(at),
+            op if pcode_ir::get_output(op).is_some_and(|o| o == want) => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// x86 `swi` user-op (INT n).
+const X86_SWI: u64 = 16;
+
+/// Turn the `CallOther` at `at` into a statement. `int 0x29` is MSVC's
+/// `__fastfail`, whose code is in ECX: pass it along so the call can show it.
+fn make_user_op_statement(ops: &mut [(u64, PcodeOp)], at: usize, pointer_size: u32) {
+    let constant = |vn: Varnode| -> Option<u64> {
+        if vn.space == AddressSpaceId::Const {
+            return Some(vn.offset);
+        }
+        ops[..at].iter().rev().find_map(|(_, op)| match op {
+            PcodeOp::Copy { out, input } if *out == vn && input.space == AddressSpaceId::Const => {
+                Some(input.offset)
+            }
+            _ => None,
+        })
+    };
+    let fastfail = match &ops[at].1 {
+        PcodeOp::CallOther {
+            func_id, inputs, ..
+        } => *func_id == X86_SWI && inputs.first().copied().and_then(constant) == Some(0x29),
+        _ => false,
+    };
+    if let PcodeOp::CallOther { out, inputs, .. } = &mut ops[at].1 {
+        *out = None;
+        if fastfail {
+            // ECX: offset 8 under RAX on x86-64, offset 4 on x86-32.
+            let ecx = if pointer_size == 8 { 8 } else { 4 };
+            inputs.push(Varnode::register(ecx, 4));
+        }
+    }
+}
+
+/// Dispatch on a recovered jump table as a chain of `index == first + k`
+/// tests: the jump's block tests the first case, synthetic blocks the rest,
+/// and the last case is the remaining edge (the bounds check already ran). The
 /// structurer folds such chains into `switch`.
 fn switch_chain(
     ops: &mut Vec<(u64, PcodeOp)>,
@@ -485,6 +550,7 @@ fn switch_chain(
     first_synthetic: usize,
     at: u64,
     index: Varnode,
+    first: i64,
     cases: &[BlockId],
 ) -> Terminator {
     let Some((&last, tested)) = cases.split_last() else {
@@ -498,7 +564,10 @@ fn switch_chain(
         let op = PcodeOp::IntEq {
             out: cond,
             left: index,
-            right: Varnode::constant(k as u64, index.size),
+            right: Varnode::constant(
+                (first + k as i64) as u64 & (u64::MAX >> (64 - 8 * index.size.min(8))),
+                index.size,
+            ),
         };
         (cond, (at, op))
     };

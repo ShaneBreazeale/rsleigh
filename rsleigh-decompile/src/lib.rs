@@ -1,6 +1,7 @@
 pub mod analysis;
 pub mod callgraph;
 pub mod cfg;
+mod binary_cache;
 // Heuristic-heavy modules whose shape may shift across patch versions.
 // `experimental` is the only fully-isolated feature today: gating cpp_class
 // and seh_static is the maximum we can do without unwinding the deeper
@@ -130,6 +131,14 @@ pub fn decompile(arch: Architecture, instructions: &[(u64, Instruction)]) -> Str
     decompile_with_binary(arch, instructions, None, None)
 }
 
+/// The signature line of decompiled text: the first line declaring the
+/// function, after any struct definitions printed above it.
+pub fn signature_line(pseudocode: &str) -> Option<&str> {
+    pseudocode
+        .lines()
+        .find(|l| l.contains('(') && !l.starts_with(['#', ' ', '\t', '/']))
+}
+
 /// Decompile with optional binary data for string literals and import resolution.
 /// If `binary_path` is provided, DWARF debug info will be extracted (including from
 /// macOS .dSYM bundles) to recover parameter and local variable names.
@@ -140,6 +149,23 @@ pub fn decompile_with_binary(
     binary_path: Option<&Path>,
 ) -> String {
     decompile_with_diagnostics(arch, instructions, binary, binary_path).0
+}
+
+/// The diagnostics from [`decompile_with_diagnostics`] that mean the printed
+/// body is incomplete: a branch whose target was never resolved, so the code
+/// behind it is missing. At most one per address.
+pub fn unresolved_control_flow(diagnostics: &[ir::Diagnostic]) -> Vec<&ir::Diagnostic> {
+    let mut seen = std::collections::BTreeSet::new();
+    diagnostics
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.kind,
+                ir::DiagKind::UnresolvedBranchTarget | ir::DiagKind::UnrecoveredIndirectJump
+            ) && !matches!(d.severity, ir::Severity::Info)
+                && seen.insert(d.addr)
+        })
+        .collect()
 }
 
 /// [`decompile_with_binary`], also returning the approximations recorded by

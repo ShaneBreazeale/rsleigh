@@ -670,23 +670,12 @@ fn decompile_function(
     text
 }
 
-/// True when the function body holds nothing but declarations, comments,
-/// braces, and a bare `return;`.
 /// `unresolved_control_flow` diagnostics for the decompiler's unresolved
 /// branches and unrecovered indirect jumps, one per address. The card and
 /// the plain `--json` decompile output report them the same way.
 pub(crate) fn unresolved_control_flow(found: &[rsleigh_decompile::ir::Diagnostic]) -> Vec<Value> {
-    use rsleigh_decompile::ir::{DiagKind, Severity};
-    let mut seen = std::collections::BTreeSet::new();
-    found
-        .iter()
-        .filter(|d| {
-            matches!(
-                d.kind,
-                DiagKind::UnresolvedBranchTarget | DiagKind::UnrecoveredIndirectJump
-            ) && !matches!(d.severity, Severity::Info)
-                && seen.insert(d.addr)
-        })
+    rsleigh_decompile::unresolved_control_flow(found)
+        .into_iter()
         .map(|d| {
             json!({"stage":"decompile","code":"unresolved_control_flow",
                 "address":d.addr.map(|a| format!("0x{a:x}")),"message":d.detail})
@@ -694,10 +683,12 @@ pub(crate) fn unresolved_control_flow(found: &[rsleigh_decompile::ir::Diagnostic
         .collect()
 }
 
+/// True when the function body holds nothing but declarations, comments,
+/// braces, and a bare `return;`.
 fn pseudocode_body_is_empty(text: &str) -> bool {
     !text
         .lines()
-        .skip_while(|l| !l.trim_end().ends_with('{'))
+        .skip_while(|l| !(l.trim_end().ends_with('{') && l.contains('(')))
         .skip(1)
         .map(str::trim)
         .any(|t| {

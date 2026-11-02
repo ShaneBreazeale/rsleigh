@@ -28,6 +28,7 @@ legacy modes do not.
 | `--pcode-json FUNCTION` | One JSON object per requested function | `rsleigh.pcode/v2`; `function`, `address`, `instructions`, typed raw operations |
 | `--ssa-json FUNCTION` | One JSON object per requested function | `function`, `address`, `blocks`, `vars` |
 | `--disasm FUNCTION --json` | One JSON object per requested function | `function`, `instructions`; `pcode_ops` is a count |
+| `FUNCTION... --json` / `--all --json` | One JSON object | `binary`, `arch`, `functions` with per-function `status` (`ok`/`partial`), `diagnostics`, and `pseudocode`; exits 2 when any function is `partial` |
 | `--ioc --json` | One JSON object | Category arrays such as `urls`, `ips`, `domains` |
 | `--sigcheck --json` / `--resources --json` | One JSON object | Producer-specific fields; see [triage](cli-triage.md) |
 | `--ioc --findings-ndjson`, `--vulnscan --findings-ndjson`, supported VM helpers with `--findings-ndjson` | One compact JSON object per line | `schema: rsleigh.finding/v1` |

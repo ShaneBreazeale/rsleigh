@@ -41,6 +41,7 @@ links for details instead of loading all documentation into every model turn.
 | How do I embed the decoder? | [Rust API example](../README.md#embed-in-rust) |
 | How do the decompiler and tests work? | [Decompiler passes](decompiler-passes.md) · [Testing](TESTING.md) |
 | What validates the completed agent RE roadmap? | [18-task evaluation](agent-re-evaluation.md) · [Completion audit](llm-re-completion-audit.md) |
+| What shipped in v0.7.0? | [v0.7.0 release notes](releases/v0.7.0.md) |
 | What shipped in v0.6.1? | [v0.6.1 release notes](releases/v0.6.1.md) |
 | What shipped in v0.6.0? | [v0.6.0 release notes](releases/v0.6.0.md) |
 | What shipped in v0.5.0, and how was it validated? | [Real-binary workflow checks](agent-re-real-binaries.md) · [v0.5.0 release notes](releases/v0.5.0.md) |
