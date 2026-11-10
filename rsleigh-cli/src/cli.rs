@@ -1449,16 +1449,17 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                             "size": 0, "calls": [], "strings": [], "return_type": "void"
                         });
                     }
-                    let output = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        rsleigh_decompile::decompile_with_binary(
-                            arch,
-                            &insts,
-                            Some(&data),
-                            Some(path),
-                        )
-                    }))
-                    .map(maybe_annotate_crypto)
-                    .unwrap_or_default();
+                    let (output, found) =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            rsleigh_decompile::decompile_with_diagnostics(
+                                arch,
+                                &insts,
+                                Some(&data),
+                                Some(path),
+                            )
+                        }))
+                        .map(|(text, found)| (maybe_annotate_crypto(text), found))
+                        .unwrap_or_default();
 
                     // Extract metadata from decompiled output
                     let mut calls = Vec::new();
@@ -1526,6 +1527,7 @@ fn run(binary_path: &str, args: &[String], json_mode: bool, all_mode: bool, disa
                         "strings": strings,
                         "complexity": line_count,
                         "pseudocode": output,
+                        "diagnostics": agent::unresolved_control_flow(&found),
                     })
                 })
                 .collect();
@@ -4092,6 +4094,8 @@ fn for_each_ordered<T: Send>(
     });
 }
 
+/// Decompile the function at `fa`, also returning its unresolved control
+/// flow as (address, detail) pairs.
 fn decompile_func(
     fa: u64,
     symbols: &[(u64, String)],

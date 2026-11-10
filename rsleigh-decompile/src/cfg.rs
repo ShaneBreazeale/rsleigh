@@ -280,15 +280,19 @@ pub fn build_cfg_with_memory(
                     // ARM32: POP {PC} generates BranchInd where dest is loaded from stack.
                     // Detect this as a Return: if the dest was loaded from SP-relative address
                     // (the preceding ops include a Load from mult_addr/sp), treat as Return.
-                    let is_stack_return = ops.iter().rev().take(10).any(|(_, op)| {
-                        match op {
-                            PcodeOp::Load { out, .. } => {
-                                // Load dest matches the BranchInd target (POP {PC} pattern)
-                                out.offset == dest_vn.offset && out.space == dest_vn.space
+                    // Only a register target: x86 `jmp [mem]` loads its
+                    // target into a temporary, and is a tail call or a
+                    // table dispatch, not a return.
+                    let is_stack_return = dest_vn.space == AddressSpaceId::Register
+                        && ops.iter().rev().take(10).any(|(_, op)| {
+                            match op {
+                                PcodeOp::Load { out, .. } => {
+                                    // Load dest matches the BranchInd target (POP {PC} pattern)
+                                    out.offset == dest_vn.offset && out.space == dest_vn.space
+                                }
+                                _ => false,
                             }
-                            _ => false,
-                        }
-                    });
+                        });
                     // Also detect BX LR pattern: BranchInd where dest is the LR register
                     // ARM32 LR = register offset 0x58=88 (r14), AArch64 x30 = 0xF0=240
                     let is_bx_lr = dest_vn.space == AddressSpaceId::Register

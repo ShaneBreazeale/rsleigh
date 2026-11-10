@@ -114,6 +114,10 @@ bytes + addr → Decoder::decode() → Instruction { disasm, ops: Vec<PcodeOp> }
 - Const-space refs: `export *[const]:4 simm8` → `Varnode::constant()` (no Load)
 - MixOperations: mixed AND/OR pattern blocks default to AND (VFP/NEON)
 - Optional table lift: OR-pattern subtables lifted via `.as_ref().unwrap()`
+- Context packing (`ContextMemoryMapping::map_all`): overlap is judged against the furthest bit any earlier field of the varnode reached. Comparing with the previous field only put x86 `instrPhase` on `suffix3D`'s last bit (3DNow! decode recursed forever, #26)
+- `goto [x]` / `call [x]` / `return [x]` lower `x` as a value (memory refs are LOADed); only direct `goto x` uses the reference address (`gen_branch`, #24/#25)
+- Disassembly actions placed after a later pattern block read earlier blocks' token fields from their locals, not `tokens_current` (`DisassemblyPattern::produced_token_fields`, Thumb-2 MOVW/BL, #21/#22)
+- `globalset` entries are (value, mask) per address and are applied at the top of `parse_instruction_with_constructor`; the set closure must not read its own parameter (ARM IT blocks, `mov lr,pc`/`bx` → call, #23). `Decoder::set_arm_thumb` clears them only when the mode changes
 
 ### Decompiler
 
@@ -197,7 +201,7 @@ Fixture: `test-harness/fixtures/crackmev3.pyd` (PyVMProtect v4).
 - Type inference: basic + Win32 typedef + interprocedural two-pass + heuristic field names; no constraint-based
 - MBA: SiMBA handles 1-4 var linear; non-linear + 5+ var need synthesis (egg catches some)
 - Some loop conditions not recovered (`while (OF == SF)`)
-- Jump tables: x86-64 PIC, MSVC image-base-relative (`base + zext(u32)`), and absolute 4/8-byte tables only; ARM/AArch64 tables stay `unresolved_control_flow`. An unguarded sign-extended index reads entries below the table (`JumpTable.first < 0`) while they name decoded instructions. The table base is traced through up to 512 earlier contiguous instructions (a linear scan, not a reaching-definition pass); a bounds check may declare up to 4096 entries.. The structurer walks the `index == k` test chain iteratively (`jump_table_chain`) into one `switch`, so large tables do not hit `MAX_STRUCTURE_DEPTH`
+- Jump tables: x86-64 PIC, MSVC image-base-relative (`base + zext(u32)`), and absolute 4/8-byte tables only; ARM/AArch64 tables stay `unresolved_control_flow`. An unguarded sign-extended index reads entries below the table (`JumpTable.first < 0`) while they name decoded instructions. Unresolved jumps print `// indirect jump at 0x…: targets not recovered` and appear in `--json` `diagnostics`. The table base is traced through up to 512 earlier contiguous instructions (a linear scan, not a reaching-definition pass); a bounds check may declare up to 4096 entries.. The structurer walks the `index == k` test chain iteratively (`jump_table_chain`) into one `switch`, so large tables do not hit `MAX_STRUCTURE_DEPTH`
 - x86-32 sequential TEST/JNZ sometimes nests wrong
 - Register-indirect calls across non-trivial CFG (e.g. multi-path conv. through a phi merge) still not resolved; same-function linear cases including cross-block IAT-into-reg now handled (resolve_callind_via_all_ops)
 - ARM32 VFP/NEON: decode OK, FP reg values not fully traced through folding

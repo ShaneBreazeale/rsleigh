@@ -35,6 +35,7 @@ pub fn root_pattern_function(
         root_token_fields: &root_token_fields,
         vars: &mut disassembly_vars,
         tokens: &tokens_current,
+        produced_token_fields: None,
     };
     let constructor = disassembler
         .sleigh
@@ -381,15 +382,19 @@ fn body_block(
                 disassembler,
             );
             //create the fields produced by this closure
-            let fields = block.token_fields().iter().map(|field| {
-                let token_field = disassembler.sleigh.token_field(field.field);
-                let name = format_ident!("{}", from_sleigh(token_field.name()));
-                produced_fields
-                    .entry(field.field)
-                    .and_modify(|_| unreachable!())
-                    .or_insert_with(|| name.clone());
-                name
-            });
+            let fields: Vec<_> = block
+                .token_fields()
+                .iter()
+                .map(|field| {
+                    let token_field = disassembler.sleigh.token_field(field.field);
+                    let name = format_ident!("{}", from_sleigh(token_field.name()));
+                    produced_fields
+                        .entry(field.field)
+                        .and_modify(|_| unreachable!())
+                        .or_insert_with(|| name.clone());
+                    name
+                })
+                .collect();
             let tables = block.tables().iter().map(|field| {
                 let table = disassembler.sleigh.table(field.table);
                 let name = format_ident!("{}", from_sleigh(table.name()));
@@ -409,6 +414,7 @@ fn body_block(
                 root_token_fields,
                 vars: disassembly_vars,
                 tokens,
+                produced_token_fields: Some(produced_fields),
             };
             let disassembly = disassembly.disassembly(&mut pos.iter());
             quote! {
@@ -464,6 +470,7 @@ fn body_block_and(
         disassembly_vars,
         tokens,
         context,
+        produced_token_fields,
         disassembler,
     );
     let code_pos = body_block_and_pos(
@@ -509,6 +516,7 @@ fn body_block_and_pre(
     vars: &mut IndexMap<disassembly::VariableId, Ident>,
     tokens: &Ident,
     context_instance: &Ident,
+    produced_token_fields: &IndexMap<crate::TokenFieldId, Ident>,
     disassembler: &Disassembler,
 ) -> TokenStream {
     //verify all the values and build all the tables
@@ -568,6 +576,7 @@ fn body_block_and_pre(
         root_token_fields,
         vars,
         tokens,
+        produced_token_fields: Some(produced_token_fields),
     };
     let disassembly = disassembly.disassembly(&mut pre.iter());
 
@@ -704,7 +713,8 @@ fn body_block_and_pos(
                 .and_modify(|_| unreachable!())
                 .or_insert_with(|| token_field_name.clone());
             quote! { let #token_field_name = #token_field(#tokens); }
-        });
+        })
+        .collect::<Vec<_>>();
 
     let disassembly = DisassemblyPattern {
         disassembler,
@@ -714,6 +724,7 @@ fn body_block_and_pos(
         root_token_fields,
         vars,
         tokens,
+        produced_token_fields: Some(produced_token_fields),
     };
     let disassembly = disassembly.disassembly(&mut pos.iter());
 
