@@ -85,13 +85,9 @@ fn build_arm_thumb_blob() -> Vec<u8> {
 }
 
 fn cli_binary() -> std::path::PathBuf {
-    let mut p = std::env::current_exe().unwrap();
-    p.pop();
-    if p.ends_with("deps") {
-        p.pop();
-    }
-    p.push("rsleigh");
-    p
+    // Cargo sets this for integration tests; guessing target/<profile>/rsleigh
+    // only works when an earlier build happened to leave the binary there.
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rsleigh"))
 }
 
 #[test]
