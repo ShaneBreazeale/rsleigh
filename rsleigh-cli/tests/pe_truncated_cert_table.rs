@@ -124,14 +124,9 @@ fn build_pe_with_truncated_cert_table() -> Vec<u8> {
 }
 
 fn cli_binary() -> std::path::PathBuf {
-    // tests/ binaries live alongside the `rsleigh` bin built by cargo.
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // drop test binary name
-    if path.ends_with("deps") {
-        path.pop();
-    }
-    path.push("rsleigh");
-    path
+    // Cargo sets this for integration tests; guessing target/<profile>/rsleigh
+    // only works when an earlier build happened to leave the binary there.
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_rsleigh"))
 }
 
 #[test]

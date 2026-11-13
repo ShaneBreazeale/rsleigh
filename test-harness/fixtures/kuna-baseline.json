@@ -1,0 +1,8 @@
+{
+  "kuna_commit": "e40ee008d5afafb9ff7123abb7e0a40596c7b948",
+  "normalization": "strict-v1",
+  "passing": [
+    "stages/gh8017-stackprobeloop",
+    "stages/kuna-fastfailnoreturn"
+  ]
+}
