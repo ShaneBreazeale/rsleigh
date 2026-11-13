@@ -140,6 +140,36 @@ Compiles a C source file with known functions (`add`, `factorial`, `reverse_stri
 
 Uses the host `cc` compiler; skips gracefully on systems without a C toolchain.
 
+### External decompiled-C corpus (`kuna_datatests`)
+
+```bash
+scripts/fetch-kuna-tests.sh   # corpus at the commit pinned in the baseline
+cargo test --release -p test-harness --test kuna_datatests -- --nocapture
+```
+
+Runs the XML decompiler tests shipped by [Kuna](https://github.com/Noelo-Lab/kuna)
+(Apache-2.0): `tests/datatests/` are Ghidra's own regression tests and
+`tests/stages/` are Kuna's issue testcases. Each case is raw bytes, a Ghidra
+language id, a script (`lo fu f` / `decompile` / `print C`) and regex
+assertions over the decompiled C, matched per line as Ghidra's
+`FunctionTestProperty` does.
+
+- **Normalization is strict (`strict-v1`): names only.** Callees `func_<addr>`
+  become the XML symbol name, `param_N` becomes `param_{N+1}` (Ghidra) or `aN`
+  (Kuna), `DAT_0052` becomes `dat_52`, exact-width C types become `int4`-style
+  names, and an expected `iVar1` matches any `xVarN`. Structure, operators,
+  whitespace and type widths are compared as written.
+- **Skips are not failures.** Cases for architectures rsleigh lacks, or whose
+  scripts need decompiler options, C declarations, symbol edits or external
+  ELF fixtures (`option`, `parse`, `map`, `rename`, `load file`), are skipped
+  and counted by reason.
+- **Gate:** `test-harness/fixtures/kuna-baseline.json` pins the Kuna commit and
+  lists the passing cases. The test fails if one of them stops passing. After
+  a fix makes new cases pass, record them with `RSLEIGH_KUNA_BLESS=1`.
+- Per-case output and failing assertions go to `target/kuna-datatests.json`;
+  `RSLEIGH_KUNA_FILTER=<substr>` runs a subset. The test skips when the corpus
+  is absent unless `RSLEIGH_REQUIRE_KUNA_TESTS=1`.
+
 ---
 
 ## Layer 4: Pseudocode Quality Regression Tests

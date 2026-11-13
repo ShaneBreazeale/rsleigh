@@ -12,3 +12,5 @@ results/
 # Reproducible agent RE measurements are versioned source artifacts.
 !/test-harness/fixtures/agent-re/results/
 scripts/__pycache__/
+# Kuna decompiler-output corpus (scripts/fetch-kuna-tests.sh)
+/test-harness/fixtures/kuna-tests/
