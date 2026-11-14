@@ -8837,15 +8837,45 @@ fn parse_binary(
             // Parse ObjC method lists for implementation addresses.
             // __objc_methlist contains relative method lists with IMP pointers.
             // __objc_const in __DATA contains class_ro_t with baseMethods pointers.
+            let mut stub_imports: Option<std::collections::HashMap<u64, String>> = None;
             for seg in &m.segments {
                 if let Ok(secs) = seg.sections() {
                     for (sec, _sec_data) in secs {
                         let sname = std::str::from_utf8(&sec.sectname)
                             .unwrap_or("")
                             .trim_end_matches('\0');
+                        // __stubs: one stub per imported function (ADRP+LDR+BR = 12 bytes
+                        // on ARM64, `jmp *disp32(%rip)` = 6 bytes on x86_64). Name each
+                        // after its import via the indirect symbol table, which
+                        // resolve_imports already walks for the decompiler.
+                        if sname == "__stubs" {
+                            let stub_size: u64 =
+                                if matches!(arch, rsleigh_api::Architecture::AArch64) {
+                                    12
+                                } else {
+                                    6
+                                };
+                            let imports = stub_imports.get_or_insert_with(|| {
+                                rsleigh_decompile::imports::resolve_imports(_data)
+                            });
+                            let mut addr = sec.addr;
+                            while addr + stub_size <= sec.addr + sec.size {
+                                let name = imports
+                                    .get(&addr)
+                                    .cloned()
+                                    .unwrap_or_else(|| format!("stub_{:x}", addr));
+                                match syms.iter_mut().find(|(a, _)| *a == addr) {
+                                    // LC_FUNCTION_STARTS may already have a FUN_ placeholder.
+                                    Some((_, n)) if n.starts_with("FUN_") => *n = name,
+                                    Some(_) => {}
+                                    None => syms.push((addr, name)),
+                                }
+                                addr += stub_size;
+                            }
+                        }
                         // __objc_stubs: each entry is a small stub (ADRP+LDR+BR on ARM64,
                         // JMP on x86_64). Every stub_size-aligned address is a function.
-                        if sname == "__objc_stubs" || sname == "__stubs" {
+                        if sname == "__objc_stubs" {
                             let _soff = sec.offset as usize;
                             let ssize = sec.size as usize;
                             let saddr = sec.addr;
