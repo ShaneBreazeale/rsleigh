@@ -52,7 +52,7 @@ jobs:
         run: cargo test --release -p rsleigh-decompile --lib
 
       - name: Test — provenance and bounded dependency traversal
-        run: cargo test --release -p rsleigh-decompile --test instruction_provenance --test memory_dependencies --test interprocedural_dependencies --test return_value_validation --test native_return_registers --test control_flow_exits --test jump_table_recovery
+        run: cargo test --release -p rsleigh-decompile --test instruction_provenance --test memory_dependencies --test interprocedural_dependencies --test return_value_validation --test native_return_registers --test control_flow_exits --test jump_table_recovery --test compressed_dwarf
 
       - name: Test — PE64 SEH-SMC fixtures
         run: cargo test --release -p rsleigh-decompile --test seh_smc_fixture
