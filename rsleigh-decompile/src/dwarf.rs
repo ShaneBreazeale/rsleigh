@@ -1,4 +1,6 @@
 use object::{Object, ObjectSection};
+use std::borrow::Cow;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -58,6 +60,50 @@ mod field_name_tests {
         let map = names.finish();
         assert_eq!(map.get(&0x8), None);
         assert_eq!(map.get(&0x10).map(String::as_str), Some("count"));
+    }
+}
+
+const MAX_DWARF_UNPACK_RATIO: u64 = 16;
+
+fn load_dwarf_sections<'data>(
+    obj: &object::File<'data>,
+    file_len: usize,
+) -> Option<gimli::DwarfSections<Cow<'data, [u8]>>> {
+    let budget = Cell::new((file_len as u64).saturating_mul(MAX_DWARF_UNPACK_RATIO));
+    let load_section = |id: gimli::SectionId| -> Result<Cow<'data, [u8]>, gimli::Error> {
+        let data = obj
+            .section_by_name(id.name())
+            .and_then(|s| s.compressed_data().ok())
+            .filter(|c| take_unpack_budget(&budget, c.uncompressed_size))
+            .and_then(|c| c.decompress().ok());
+        Ok(data.unwrap_or(Cow::Borrowed(&[])))
+    };
+    gimli::DwarfSections::load(load_section).ok()
+}
+
+fn take_unpack_budget(budget: &Cell<u64>, size: u64) -> bool {
+    match budget.get().checked_sub(size) {
+        Some(rest) => {
+            budget.set(rest);
+            true
+        }
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod unpack_budget_tests {
+    use super::take_unpack_budget;
+    use std::cell::Cell;
+
+    #[test]
+    fn a_section_past_the_budget_is_refused_and_costs_nothing() {
+        let budget = Cell::new(100);
+        assert!(take_unpack_budget(&budget, 60));
+        assert!(!take_unpack_budget(&budget, 50));
+        assert!(take_unpack_budget(&budget, 40));
+        assert!(!take_unpack_budget(&budget, 1));
+        assert!(!take_unpack_budget(&Cell::new(u64::MAX - 1), u64::MAX));
     }
 }
 
@@ -121,17 +167,10 @@ fn parse_dwarf_uncached(binary: &[u8]) -> HashMap<u64, FunctionDebugInfo> {
         gimli::RunTimeEndian::Big
     };
 
-    let load_section = |id: gimli::SectionId| -> Result<gimli::EndianSlice<'_, gimli::RunTimeEndian>, gimli::Error> {
-        let data = obj.section_by_name(id.name())
-            .and_then(|s| s.data().ok())
-            .unwrap_or(&[]);
-        Ok(gimli::EndianSlice::new(data, endian))
+    let Some(sections) = load_dwarf_sections(&obj, binary.len()) else {
+        return result;
     };
-
-    let dwarf = match gimli::Dwarf::load(&load_section) {
-        Ok(d) => d,
-        Err(_) => return result,
-    };
+    let dwarf = sections.borrow(|section| gimli::EndianSlice::new(section, endian));
 
     let mut units = dwarf.units();
     while let Ok(Some(header)) = units.next() {
@@ -264,17 +303,10 @@ fn parse_struct_fields_uncached(binary: &[u8]) -> StructFieldMap {
         gimli::RunTimeEndian::Big
     };
 
-    let load_section = |id: gimli::SectionId| -> Result<gimli::EndianSlice<'_, gimli::RunTimeEndian>, gimli::Error> {
-        let data = obj.section_by_name(id.name())
-            .and_then(|s| s.data().ok())
-            .unwrap_or(&[]);
-        Ok(gimli::EndianSlice::new(data, endian))
+    let Some(sections) = load_dwarf_sections(&obj, binary.len()) else {
+        return StructFieldMap::new();
     };
-
-    let dwarf = match gimli::Dwarf::load(&load_section) {
-        Ok(d) => d,
-        Err(_) => return StructFieldMap::new(),
-    };
+    let dwarf = sections.borrow(|section| gimli::EndianSlice::new(section, endian));
 
     let mut units = dwarf.units();
     while let Ok(Some(header)) = units.next() {
