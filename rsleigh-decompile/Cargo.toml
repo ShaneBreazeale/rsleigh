@@ -28,7 +28,7 @@ pcode-ir = { path = "../pcode-ir", version = "0.7.0", features = ["serde"] }
 rsleigh-api = { path = "../rsleigh-api", version = "0.7.0" }
 goblin = "0.9"
 gimli = "0.31"
-object = "0.36"
+object = "0.40"
 cpp_demangle = "0.5"
 pdb = "0.8"
 fallible-iterator = "0.2"
